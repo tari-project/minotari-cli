@@ -12,6 +12,7 @@ use std::env::current_dir;
 use crate::db::{AccountRow, get_accounts, init_db};
 
 mod db;
+mod models;
 
 #[derive(Parser)]
 #[command(name = "tari")]
@@ -142,10 +143,91 @@ async fn scan(
         let mut scanner =
             HttpBlockchainScanner::new(base_url.to_string(), key_manager.clone()).await?;
 
-        let scan_config = ScanConfig::default().with_start_end_heights(0, 100);
-        let outputs = scanner.scan_blocks(scan_config).await?;
+        // Get last scanned blocks.
+        let last_blocks = db::get_scanned_tip_blocks_by_account(&db, account.id).await?;
 
-        dbg!(outputs);
+        // Run the scanner for the last blocks to make sure it hasn't reorged.
+        let start_height = if let Some(last_block) = last_blocks.first() {
+            last_block.height as u64
+        } else {
+            0
+        };
+        // let end_height = if let Some(last_block) = last_blocks.last() {
+        //     last_block.height
+        // } else {
+        //     0
+        // };
+        // println!("Scanning from height: {}", start_height);
+
+        let scan_config = ScanConfig::default()
+            .with_start_height(start_height)
+            .with_end_height(start_height + 10);
+
+        let scanned_blocks = scanner.scan_blocks(scan_config).await?;
+
+        for scanned_block in &scanned_blocks {
+            println!(
+                "Scanned block at height: {}, hash: {:x?}",
+                scanned_block.height, scanned_block.block_hash
+            );
+
+            let matching_block = last_blocks
+                .iter()
+                .find(|b| b.height == scanned_block.height);
+
+            if let Some(matching_block) = matching_block {
+                if matching_block.hash == scanned_block.block_hash {
+                    println!(
+                        "Block at height {} already scanned, skipping insert.",
+                        scanned_block.height
+                    );
+                    continue;
+                } else {
+                    println!(
+                        "REORG DETECTED at height {}, updating record.",
+                        scanned_block.height
+                    );
+                    //     println!(
+                    //         "Block at height {} has changed, updating record.",
+                    //         scanned_block.height
+                    //     );
+                    //     // If the block hash has changed, delete the old record.
+                    //     sqlx::query!(
+                    //         r#"
+                    //         DELETE FROM scanned_tip_blocks
+                    //         WHERE id = ?
+                    //         "#,
+                    //         matching_block.id
+                    //     )
+                    //     .execute(&db)
+                    //     .await?;
+                    // }
+                }
+            } else {
+                println!(
+                    "Inserting new scanned block at height {}",
+                    scanned_block.height
+                );
+                db::insert_scanned_tip_block(
+                    &db,
+                    account.id,
+                    scanned_block.height as i64,
+                    &scanned_block.block_hash,
+                )
+                .await?;
+            }
+
+            // db::insert_scanned_tip_block(
+            //     &db,
+            //     account.id,
+            //     scanned_block.height,
+            //     &scanned_block.hash,
+            // )
+            // .await?;
+        }
+        todo!();
+        // Keep only the last 100 scanned blocks to avoid the database growing indefinitely.
+
         // let mut scanner = ScannerBuilder::default()
         // .with_key_manager(key_manager)
         // .with_base_node_client(base_url)
