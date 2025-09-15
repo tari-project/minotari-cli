@@ -12,7 +12,7 @@
         CREATE TABLE IF NOT EXISTS scanned_tip_blocks (
             id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
             account_id INTEGER NOT NULL,
-            hash TEXT NOT NULL,
+            hash Blob NOT NULL,
             height INTEGER NOT NULL,
             created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
             FOREIGN KEY (account_id) REFERENCES accounts(id)

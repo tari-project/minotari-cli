@@ -1,6 +1,7 @@
 // Change depending on sql type.
 pub type Id = i64;
 
+#[derive(Debug, Clone)]
 pub struct ScannedTipBlock {
     pub id: Id,
     pub account_id: Id,
