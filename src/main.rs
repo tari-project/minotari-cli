@@ -2,7 +2,10 @@ use chacha20poly1305::aead::Aead;
 use chacha20poly1305::{AeadCore, ChaCha20Poly1305, ChaChaPoly1305, KeyInit, aead::OsRng};
 use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
 use clap::{Parser, Subcommand};
-use lightweight_wallet_libs::ScannerBuilder;
+use lightweight_wallet_libs::BlockchainScanner;
+use lightweight_wallet_libs::{
+    HttpBlockchainScanner, KeyManagerBuilder, ScanConfig, ScannerBuilder,
+};
 
 #[derive(Parser)]
 #[command(name = "tari")]
@@ -18,6 +21,13 @@ enum Commands {
     Scan {
         #[arg(short, long, help = "Password to decrypt the wallet file")]
         password: String,
+        #[arg(
+            short,
+            long,
+            default_value = "https://rpc.tari.com",
+            help = "The base URL of the Tari HTTP API"
+        )]
+        base_url: String,
     },
     /// Show wallet balance
     Balance,
@@ -53,9 +63,9 @@ async fn main() -> Result<(), anyhow::Error> {
             );
             init_with_view_key(&view_private_key, &spend_public_key, &password).await
         }
-        Commands::Scan { password } => {
+        Commands::Scan { password, base_url } => {
             println!("Scanning blockchain...");
-            scan(&password).await
+            scan(&password, &base_url).await
             // Add scanning logic here
         }
         Commands::Balance => {
@@ -66,15 +76,26 @@ async fn main() -> Result<(), anyhow::Error> {
     }
 }
 
-async fn scan(password: &str) -> Result<(), anyhow::Error> {
+async fn scan(password: &str, base_url: &str) -> Result<(), anyhow::Error> {
     let (view_key, spend_key) = decrypt_keys("data/wallet.json", password)?;
 
     println!("Decrypted view key: {:x?}", view_key);
     println!("Decrypted spend key: {:x?}", spend_key);
 
-    let scanner = ScannerBuilder::default().build()?;
+    // let scanner = ScannerBuilder::default().build()?;
+    let key_manager = KeyManagerBuilder::default().try_build().await?;
+    let mut scanner = HttpBlockchainScanner::new(base_url.to_string(), key_manager.clone()).await?;
+
+    let scan_config = ScanConfig::default().with_start_end_heights(0, 100);
+    let outputs = scanner.scan_blocks(scan_config).await?;
+
+    dbg!(outputs);
+    // let mut scanner = ScannerBuilder::default()
+    // .with_key_manager(key_manager)
+    // .with_base_node_client(base_url)
+    // .build()
+    // .await?;
     // scanner.scan().await?;
-    todo!();
     println!("Scan complete.");
 
     Ok(())

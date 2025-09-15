@@ -1496,6 +1496,7 @@ dependencies = [
 name = "lightweight_wallet_libs"
 version = "0.2.0"
 dependencies = [
+ "anyhow",
  "argon2 0.5.3",
  "async-trait",
  "blake2",
