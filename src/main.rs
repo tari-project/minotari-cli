@@ -11,6 +11,7 @@ use lightweight_wallet_libs::{
 use std::env::current_dir;
 
 use crate::db::{AccountRow, get_accounts, init_db};
+use crate::models::WalletEvent;
 
 mod db;
 mod models;
@@ -105,13 +106,15 @@ async fn main() -> Result<(), anyhow::Error> {
             account_name,
         } => {
             println!("Scanning blockchain...");
-            scan(
+            let events = scan(
                 &password,
                 &base_url,
                 &database_file,
                 account_name.as_deref(),
             )
-            .await
+            .await?;
+            println!("Scan complete. Events: {:?}", events);
+            Ok(())
             // Add scanning logic here
         }
         Commands::Balance => {
@@ -127,8 +130,9 @@ async fn scan(
     base_url: &str,
     database_file: &str,
     account_name: Option<&str>,
-) -> Result<(), anyhow::Error> {
+) -> Result<Vec<WalletEvent>, anyhow::Error> {
     let db = init_db(database_file).await?;
+    let mut result = vec![];
     for account in get_accounts(&db, account_name).await? {
         println!("Found account: {:?}", account);
 
@@ -150,6 +154,7 @@ async fn scan(
 
         let mut last_blocks = db::get_scanned_tip_blocks_by_account(&db, account.id).await?;
 
+        let mut start_height = 0;
         if last_blocks.is_empty() {
             println!(
                 "No previously scanned blocks found for account {}, starting from genesis.",
@@ -173,105 +178,38 @@ async fn scan(
                     "Removed {} reorged blocks from the database.",
                     reorged_blocks.len()
                 );
+                start_height = (reorged_blocks.iter().map(|b| b.height).min().unwrap_or(0) as u64)
+                    .saturating_sub(1);
             } else {
                 println!("No reorgs detected.");
+                start_height = last_blocks[0].height as u64 + 1;
             }
-            // for block in &last_blocks {
-            //     println!(" - Height: {}, Hash: {:x?}", block.height, block.hash);
-            // }
         }
-        // Run the scanner for the last blocks to make sure it hasn't reorged.
-        // let start_height = if let Some(last_block) = last_blocks.first() {
-        //     last_block.height as u64
-        // } else {
-        //     0
-        // };
-        // let end_height = if let Some(last_block) = last_blocks.last() {
-        //     last_block.height
-        // } else {
-        //     0
-        // };
-        // println!("Scanning from height: {}", start_height);
+        let scan_config = ScanConfig::default()
+            .with_start_height(start_height)
+            .with_end_height(start_height.saturating_add(10));
+        let (view_key, spend_key) = decrypt_keys(&account, password)?;
+        let key_manager = KeyManagerBuilder::default().try_build().await?;
+        let mut scanner =
+            HttpBlockchainScanner::new(base_url.to_string(), key_manager.clone()).await?;
+        let scanned_blocks = scanner.scan_blocks(scan_config).await?;
+        for scanned_block in &scanned_blocks {
+            println!(
+                "Scanned block at height: {}, hash: {:x?}",
+                scanned_block.height, scanned_block.block_hash
+            );
+            db::insert_scanned_tip_block(
+                &db,
+                account.id,
+                scanned_block.height as i64,
+                &scanned_block.block_hash,
+            )
+            .await?;
+        }
 
-        // let scan_config = ScanConfig::default()
-        //     .with_start_height(start_height)
-        //     .with_end_height(end_height + 1);
-
-        // let scanned_blocks = scanner.
-
-        // let mut matching_blocks = 0;
-        // for scanned_block in &scanned_blocks {
-        //     println!(
-        //         "Scanned block at height: {}, hash: {:x?}",
-        //         scanned_block.height, scanned_block.block_hash
-        //     );
-
-        //     let matching_block = last_blocks
-        //         .iter()
-        //         .find(|b| b.height == scanned_block.height);
-
-        //     if let Some(matching_block) = matching_block {
-        //         if matching_block.hash == scanned_block.block_hash {
-        //             println!(
-        //                 "Block at height {} already scanned, skipping insert.",
-        //                 scanned_block.height
-        //             );
-        //             continue;
-        //         } else {
-        //             println!(
-        //                 "REORG DETECTED at height {}, updating record.",
-        //                 scanned_block.height
-        //             );
-        //             //     println!(
-        //             //         "Block at height {} has changed, updating record.",
-        //             //         scanned_block.height
-        //             //     );
-        //             //     // If the block hash has changed, delete the old record.
-        //             //     sqlx::query!(
-        //             //         r#"
-        //             //         DELETE FROM scanned_tip_blocks
-        //             //         WHERE id = ?
-        //             //         "#,
-        //             //         matching_block.id
-        //             //     )
-        //             //     .execute(&db)
-        //             //     .await?;
-        //             // }
-        //         }
-        //     } else {
-        //         println!(
-        //             "Inserting new scanned block at height {}",
-        //             scanned_block.height
-        //         );
-        //         db::insert_scanned_tip_block(
-        //             &db,
-        //             account.id,
-        //             scanned_block.height as i64,
-        //             &scanned_block.block_hash,
-        //         )
-        //         .await?;
-        //     }
-
-        //     // db::insert_scanned_tip_block(
-        //     //     &db,
-        //     //     account.id,
-        //     //     scanned_block.height,
-        //     //     &scanned_block.hash,
-        //     // )
-        //     // .await?;
-        // }
-        // todo!();
-        // Keep only the last 100 scanned blocks to avoid the database growing indefinitely.
-
-        // let mut scanner = ScannerBuilder::default()
-        // .with_key_manager(key_manager)
-        // .with_base_node_client(base_url)
-        // .build()
-        // .await?;
-        // scanner.scan().await?;
         println!("Scan complete.");
     }
-    Ok(())
+    Ok(result)
 }
 
 /// Returns (removed_blocks, added_blocks   )
@@ -304,7 +242,8 @@ async fn check_for_reorgs(
 
     let mut removed_blocks = vec![];
     for block in last_blocks_in_desc {
-        let chain_block = scanner.get_block_by_height(block.height).await?;
+        let chain_block = scanner.get_header_by_height(block.height).await?;
+        dbg!(&chain_block);
         if let Some(chain_block) = chain_block {
             if chain_block.hash == block.hash {
                 // Block matches, no reorg at this height.
