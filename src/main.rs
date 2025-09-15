@@ -1,3 +1,4 @@
+use blake2::{Blake2s256, Digest};
 use chacha20poly1305::aead::Aead;
 use chacha20poly1305::{AeadCore, ChaCha20Poly1305, ChaChaPoly1305, KeyInit, aead::OsRng};
 use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
@@ -6,6 +7,11 @@ use lightweight_wallet_libs::BlockchainScanner;
 use lightweight_wallet_libs::{
     HttpBlockchainScanner, KeyManagerBuilder, ScanConfig, ScannerBuilder,
 };
+use std::env::current_dir;
+
+use crate::db::init_db;
+
+mod db;
 
 #[derive(Parser)]
 #[command(name = "tari")]
@@ -44,6 +50,13 @@ enum Commands {
         spend_public_key: String,
         #[arg(short, long, help = "Password to encrypt the wallet file")]
         password: String,
+        #[arg(
+            short,
+            long,
+            help = "Path to the database file",
+            default_value = "data/wallet.db"
+        )]
+        database_file: String,
     },
 }
 
@@ -56,12 +69,19 @@ async fn main() -> Result<(), anyhow::Error> {
             view_private_key,
             spend_public_key,
             password,
+            database_file,
         } => {
             println!(
                 "Importing wallet with view key: {} and spend key: {}",
                 view_private_key, spend_public_key
             );
-            init_with_view_key(&view_private_key, &spend_public_key, &password).await
+            init_with_view_key(
+                &view_private_key,
+                &spend_public_key,
+                &password,
+                &database_file,
+            )
+            .await
         }
         Commands::Scan { password, base_url } => {
             println!("Scanning blockchain...");
@@ -138,12 +158,13 @@ async fn init_with_view_key(
     view_private_key: &str,
     spend_public_key: &str,
     password: &str,
+    database_file: &str,
 ) -> Result<(), anyhow::Error> {
-    if std::fs::metadata("data/wallet.json").is_ok() {
-        return Err(anyhow::anyhow!(
-            "Wallet already exists. Aborting import to avoid overwriting existing wallet."
-        ));
-    }
+    // if std::fs::metadata(database_file).is_ok() {
+    //     return Err(anyhow::anyhow!(
+    //         "Wallet already exists. Aborting import to avoid overwriting existing wallet."
+    //     ));
+    // }
     let view_key_bytes = hex::decode(view_private_key)?;
     let spend_key_bytes = hex::decode(spend_public_key)?;
 
@@ -159,18 +180,45 @@ async fn init_with_view_key(
     let encrypted_view_key = cipher.encrypt(&nonce, view_key_bytes.as_ref())?;
     let encrypted_spend_key = cipher.encrypt(&nonce, spend_key_bytes.as_ref())?;
 
-    let wallet_data = serde_json::json!({
-        "encrypted_view_key": hex::encode(encrypted_view_key),
-        "encrypted_spend_key": hex::encode(encrypted_spend_key),
-        "nonce": hex::encode(nonce),
-    });
+    // let wallet_data = serde_json::json!({
+    //     "encrypted_view_key": hex::encode(encrypted_view_key),
+    //     "encrypted_spend_key": hex::encode(encrypted_spend_key),
+    //     "nonce": hex::encode(nonce),
+    // };
 
-    std::fs::create_dir_all("data")?;
+    let mut path = std::path::Path::new(database_file).to_path_buf();
+    if path.is_relative() {
+        path = current_dir()?.to_path_buf().join(path);
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("Invalid database file path"))?;
+    std::fs::create_dir_all(parent)?;
 
-    std::fs::write(
-        "data/wallet.json",
-        serde_json::to_string_pretty(&wallet_data)?,
-    )?;
+    // create a hash of the viewkey to determine duplicate wallets
+    let view_key_hash = hash_view_key(&view_key_bytes);
+    let db = init_db(&path).await?;
+    db::create_account(
+        &db,
+        "default",
+        &encrypted_view_key,
+        &encrypted_spend_key,
+        &nonce,
+        &view_key_hash,
+    )
+    .await?;
+
+    // std::fs::write(
+    //     "data/wallet.json",
+    //     serde_json::to_string_pretty(&wallet_data)?,
+    // )?;
 
     Ok(())
+}
+
+fn hash_view_key(view_key: &[u8]) -> Vec<u8> {
+    let mut hasher = Blake2s256::new();
+    hasher.update(b"view_key_hash");
+    hasher.update(view_key);
+    hasher.finalize().to_vec()
 }
