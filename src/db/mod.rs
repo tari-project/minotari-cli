@@ -1,4 +1,5 @@
 use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
+use std::env::current_dir;
 use std::fs;
 use std::path::Path;
 
@@ -6,18 +7,19 @@ mod accounts;
 pub use accounts::AccountRow;
 pub use accounts::create_account;
 pub use accounts::get_account_by_name;
+pub use accounts::get_accounts;
 
-pub async fn init_db(db_path: &Path) -> Result<SqlitePool, sqlx::Error> {
-    if fs::metadata(db_path).is_err() {
-        if let Some(parent) = db_path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| {
-                sqlx::Error::Io(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    format!("Failed to create parent directories: {}", e),
-                ))
-            })?;
-        }
-        fs::File::create(db_path).map_err(|e| {
+pub async fn init_db(db_path: &str) -> Result<SqlitePool, anyhow::Error> {
+    let mut path = std::path::Path::new(db_path).to_path_buf();
+    if path.is_relative() {
+        path = current_dir()?.to_path_buf().join(path);
+    }
+    let parent = path
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("Invalid database file path"))?;
+    std::fs::create_dir_all(parent)?;
+    if fs::metadata(&path).is_err() {
+        fs::File::create(&path).map_err(|e| {
             sqlx::Error::Io(std::io::Error::new(
                 std::io::ErrorKind::Other,
                 format!("Failed to create database file: {}", e),
@@ -26,7 +28,7 @@ pub async fn init_db(db_path: &Path) -> Result<SqlitePool, sqlx::Error> {
     }
     let db_url = format!(
         "sqlite:///{}",
-        db_path.display().to_string().replace("\\", "/")
+        path.display().to_string().replace("\\", "/")
     );
     dbg!(&db_url);
     let pool = SqlitePoolOptions::new()

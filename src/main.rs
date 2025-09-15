@@ -9,7 +9,7 @@ use lightweight_wallet_libs::{
 };
 use std::env::current_dir;
 
-use crate::db::init_db;
+use crate::db::{AccountRow, get_accounts, init_db};
 
 mod db;
 
@@ -34,6 +34,19 @@ enum Commands {
             help = "The base URL of the Tari HTTP API"
         )]
         base_url: String,
+        #[arg(
+            short,
+            long,
+            help = "Path to the database file",
+            default_value = "data/wallet.db"
+        )]
+        database_file: String,
+        #[arg(
+            short,
+            long,
+            help = "Optional account name to scan. If not provided, all accounts will be used"
+        )]
+        account_name: Option<String>,
     },
     /// Show wallet balance
     Balance,
@@ -83,9 +96,20 @@ async fn main() -> Result<(), anyhow::Error> {
             )
             .await
         }
-        Commands::Scan { password, base_url } => {
+        Commands::Scan {
+            password,
+            base_url,
+            database_file,
+            account_name,
+        } => {
             println!("Scanning blockchain...");
-            scan(&password, &base_url).await
+            scan(
+                &password,
+                &base_url,
+                &database_file,
+                account_name.as_deref(),
+            )
+            .await
             // Add scanning logic here
         }
         Commands::Balance => {
@@ -96,48 +120,47 @@ async fn main() -> Result<(), anyhow::Error> {
     }
 }
 
-async fn scan(password: &str, base_url: &str) -> Result<(), anyhow::Error> {
-    let (view_key, spend_key) = decrypt_keys("data/wallet.json", password)?;
+async fn scan(
+    password: &str,
+    base_url: &str,
+    database_file: &str,
+    account_name: Option<&str>,
+) -> Result<(), anyhow::Error> {
+    let db = init_db(database_file).await?;
+    for account in get_accounts(&db, account_name).await? {
+        println!("Found account: {:?}", account);
 
-    println!("Decrypted view key: {:x?}", view_key);
-    println!("Decrypted spend key: {:x?}", spend_key);
+        // load wallet file
+        // let (view_key, spend_key) = decrypt_keys("data/wallet.json", password)?;
+        let (view_key, spend_key) = decrypt_keys(&account, password)?;
 
-    // let scanner = ScannerBuilder::default().build()?;
-    let key_manager = KeyManagerBuilder::default().try_build().await?;
-    let mut scanner = HttpBlockchainScanner::new(base_url.to_string(), key_manager.clone()).await?;
+        println!("Decrypted view key: {:x?}", view_key);
+        println!("Decrypted spend key: {:x?}", spend_key);
 
-    let scan_config = ScanConfig::default().with_start_end_heights(0, 100);
-    let outputs = scanner.scan_blocks(scan_config).await?;
+        // let scanner = ScannerBuilder::default().build()?;
+        let key_manager = KeyManagerBuilder::default().try_build().await?;
+        let mut scanner =
+            HttpBlockchainScanner::new(base_url.to_string(), key_manager.clone()).await?;
 
-    dbg!(outputs);
-    // let mut scanner = ScannerBuilder::default()
-    // .with_key_manager(key_manager)
-    // .with_base_node_client(base_url)
-    // .build()
-    // .await?;
-    // scanner.scan().await?;
-    println!("Scan complete.");
+        let scan_config = ScanConfig::default().with_start_end_heights(0, 100);
+        let outputs = scanner.scan_blocks(scan_config).await?;
 
+        dbg!(outputs);
+        // let mut scanner = ScannerBuilder::default()
+        // .with_key_manager(key_manager)
+        // .with_base_node_client(base_url)
+        // .build()
+        // .await?;
+        // scanner.scan().await?;
+        println!("Scan complete.");
+    }
     Ok(())
 }
 
-fn decrypt_keys(wallet_path: &str, password: &str) -> Result<(Vec<u8>, Vec<u8>), anyhow::Error> {
-    let wallet_data: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(wallet_path)?)?;
-
-    let encrypted_view_key_hex = wallet_data["encrypted_view_key"]
-        .as_str()
-        .ok_or_else(|| anyhow::anyhow!("Missing encrypted_view_key in wallet file"))?;
-    let encrypted_spend_key_hex = wallet_data["encrypted_spend_key"]
-        .as_str()
-        .ok_or_else(|| anyhow::anyhow!("Missing encrypted_spend_key in wallet file"))?;
-    let nonce = wallet_data["nonce"]
-        .as_str()
-        .ok_or_else(|| anyhow::anyhow!("Missing nonce in wallet file"))?;
-
-    let encrypted_view_key = hex::decode(encrypted_view_key_hex)?;
-    let encrypted_spend_key = hex::decode(encrypted_spend_key_hex)?;
-
+fn decrypt_keys(
+    account_row: &AccountRow,
+    password: &str,
+) -> Result<(Vec<u8>, Vec<u8>), anyhow::Error> {
     let password = if password.len() < 32 {
         format!("{:0<32}", password)
     } else {
@@ -146,10 +169,10 @@ fn decrypt_keys(wallet_path: &str, password: &str) -> Result<(Vec<u8>, Vec<u8>),
     let key = Key::from_slice(password.as_bytes());
     let cipher = XChaCha20Poly1305::new(key);
 
-    let nonce = XNonce::clone_from_slice(&hex::decode(nonce)?);
+    let nonce = XNonce::clone_from_slice(account_row.cipher_nonce.as_ref());
 
-    let view_key = cipher.decrypt(&nonce, encrypted_view_key.as_ref())?;
-    let spend_key = cipher.decrypt(&nonce, encrypted_spend_key.as_ref())?;
+    let view_key = cipher.decrypt(&nonce, account_row.encrypted_view_private_key.as_ref())?;
+    let spend_key = cipher.decrypt(&nonce, account_row.encrypted_spend_public_key.as_ref())?;
 
     Ok((view_key, spend_key))
 }
@@ -186,18 +209,9 @@ async fn init_with_view_key(
     //     "nonce": hex::encode(nonce),
     // };
 
-    let mut path = std::path::Path::new(database_file).to_path_buf();
-    if path.is_relative() {
-        path = current_dir()?.to_path_buf().join(path);
-    }
-    let parent = path
-        .parent()
-        .ok_or_else(|| anyhow::anyhow!("Invalid database file path"))?;
-    std::fs::create_dir_all(parent)?;
-
     // create a hash of the viewkey to determine duplicate wallets
     let view_key_hash = hash_view_key(&view_key_bytes);
-    let db = init_db(&path).await?;
+    let db = init_db(database_file).await?;
     db::create_account(
         &db,
         "default",

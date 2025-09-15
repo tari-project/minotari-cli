@@ -40,6 +40,39 @@ pub async fn get_account_by_name(
     Ok(row)
 }
 
+pub async fn get_accounts(
+    pool: &SqlitePool,
+    friendly_name: Option<&str>,
+) -> Result<Vec<AccountRow>, sqlx::Error> {
+    let rows = if let Some(name) = friendly_name {
+        sqlx::query_as!(
+            AccountRow,
+            r#"
+            SELECT id, friendly_name, encrypted_view_private_key, encrypted_spend_public_key, cipher_nonce, unencrypted_view_key_hash
+            FROM accounts
+            WHERE friendly_name = ?
+            ORDER BY friendly_name
+            "#,
+            name
+        )
+        .fetch_all(pool)
+        .await?
+    } else {
+        sqlx::query_as!(
+            AccountRow,
+            r#"
+            SELECT id, friendly_name, encrypted_view_private_key, encrypted_spend_public_key, cipher_nonce, unencrypted_view_key_hash
+            FROM accounts
+            ORDER BY friendly_name
+            "#
+        )
+        .fetch_all(pool)
+        .await?
+    };
+
+    Ok(rows)
+}
+
 #[derive(sqlx::FromRow, Debug)]
 pub struct AccountRow {
     pub id: i64,
