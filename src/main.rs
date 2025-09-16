@@ -9,10 +9,12 @@ use lightweight_wallet_libs::{
     HttpBlockchainScanner, KeyManagerBuilder, ScanConfig, ScannerBuilder,
 };
 use std::env::current_dir;
+use tari_crypto::compressed_key::CompressedKey;
+use tari_crypto::ristretto::{RistrettoPublicKey, RistrettoSecretKey};
 
 use crate::db::{AccountRow, get_accounts, init_db};
 use crate::models::WalletEvent;
-
+use tari_utilities::byte_array::ByteArray;
 mod db;
 mod models;
 
@@ -73,6 +75,13 @@ enum Commands {
             default_value = "data/wallet.db"
         )]
         database_file: String,
+        #[arg(
+            short,
+            long,
+            help = "The wallet birthday (block height)",
+            default_value = "0"
+        )]
+        birthday: u16,
     },
 }
 
@@ -86,6 +95,7 @@ async fn main() -> Result<(), anyhow::Error> {
             spend_public_key,
             password,
             database_file,
+            birthday,
         } => {
             println!(
                 "Importing wallet with view key: {} and spend key: {}",
@@ -96,6 +106,7 @@ async fn main() -> Result<(), anyhow::Error> {
                 &spend_public_key,
                 &password,
                 &database_file,
+                birthday,
             )
             .await
         }
@@ -189,7 +200,10 @@ async fn scan(
             .with_start_height(start_height)
             .with_end_height(start_height.saturating_add(10));
         let (view_key, spend_key) = decrypt_keys(&account, password)?;
-        let key_manager = KeyManagerBuilder::default().try_build().await?;
+        let key_manager = KeyManagerBuilder::default()
+            .with_view_key_and_spend_key(view_key, spend_key, account.birthday as u16)
+            .try_build()
+            .await?;
         let mut scanner =
             HttpBlockchainScanner::new(base_url.to_string(), key_manager.clone()).await?;
         let scanned_blocks = scanner.scan_blocks(scan_config).await?;
@@ -221,6 +235,7 @@ async fn check_for_reorgs(
     db: &sqlx::SqlitePool,
 ) -> Result<Vec<models::ScannedTipBlock>, anyhow::Error> {
     let (view_key, spend_key) = decrypt_keys(&account, password)?;
+    let birthday = account.birthday;
     let start_height = if let Some(last_block) = last_blocks_in_desc.last() {
         last_block.height as u64
     } else {
@@ -233,7 +248,10 @@ async fn check_for_reorgs(
         0
     };
 
-    let key_manager = KeyManagerBuilder::default().try_build().await?;
+    let key_manager = KeyManagerBuilder::default()
+        .with_view_key_and_spend_key(view_key, spend_key, birthday as u16)
+        .try_build()
+        .await?;
     let mut scanner = HttpBlockchainScanner::new(base_url.to_string(), key_manager).await?;
     // let scan_config = ScanConfig::default()
     // .with_start_height(start_height)
@@ -299,7 +317,7 @@ async fn check_for_reorgs(
 fn decrypt_keys(
     account_row: &AccountRow,
     password: &str,
-) -> Result<(Vec<u8>, Vec<u8>), anyhow::Error> {
+) -> Result<(RistrettoSecretKey, CompressedKey<RistrettoPublicKey>), anyhow::Error> {
     let password = if password.len() < 32 {
         format!("{:0<32}", password)
     } else {
@@ -313,6 +331,10 @@ fn decrypt_keys(
     let view_key = cipher.decrypt(&nonce, account_row.encrypted_view_private_key.as_ref())?;
     let spend_key = cipher.decrypt(&nonce, account_row.encrypted_spend_public_key.as_ref())?;
 
+    let view_key =
+        RistrettoSecretKey::from_canonical_bytes(&view_key).map_err(|e| anyhow::anyhow!(e))?;
+    let spend_key = CompressedKey::<RistrettoPublicKey>::from_canonical_bytes(&spend_key)
+        .map_err(|e| anyhow::anyhow!(e))?;
     Ok((view_key, spend_key))
 }
 
@@ -321,6 +343,7 @@ async fn init_with_view_key(
     spend_public_key: &str,
     password: &str,
     database_file: &str,
+    birthday: u16,
 ) -> Result<(), anyhow::Error> {
     // if std::fs::metadata(database_file).is_ok() {
     //     return Err(anyhow::anyhow!(
@@ -358,6 +381,7 @@ async fn init_with_view_key(
         &encrypted_spend_key,
         &nonce,
         &view_key_hash,
+        birthday as i64,
     )
     .await?;
 

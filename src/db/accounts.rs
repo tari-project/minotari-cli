@@ -7,13 +7,24 @@ pub async fn create_account(
     encrypted_spend_public_key: &[u8],
     cipher_nonce: &[u8],
     unencrypted_view_key_hash: &[u8],
+    birthday: i64,
 ) -> Result<(), sqlx::Error> {
     sqlx::query!(
         r#"
-        INSERT INTO accounts (friendly_name, encrypted_view_private_key, encrypted_spend_public_key, cipher_nonce, unencrypted_view_key_hash)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO accounts (friendly_name, 
+          encrypted_view_private_key, 
+          encrypted_spend_public_key, 
+          cipher_nonce, 
+          unencrypted_view_key_hash,
+          birthday)
+        VALUES (?, ?, ?, ?, ?, ?)
         "#,
-friendly_name, encryptd_view_private_key, encrypted_spend_public_key, cipher_nonce, unencrypted_view_key_hash
+        friendly_name,
+        encryptd_view_private_key,
+        encrypted_spend_public_key,
+        cipher_nonce,
+        unencrypted_view_key_hash,
+        birthday
     )
     .execute(pool)
     .await?;
@@ -28,7 +39,13 @@ pub async fn get_account_by_name(
     let row = sqlx::query_as!(
         AccountRow,
         r#"
-        SELECT id, friendly_name, encrypted_view_private_key, encrypted_spend_public_key, cipher_nonce, unencrypted_view_key_hash
+        SELECT id, 
+            friendly_name, 
+            encrypted_view_private_key, 
+            encrypted_spend_public_key, 
+            cipher_nonce, 
+            unencrypted_view_key_hash,
+            birthday
         FROM accounts
         WHERE friendly_name = ?
         "#,
@@ -48,7 +65,13 @@ pub async fn get_accounts(
         sqlx::query_as!(
             AccountRow,
             r#"
-            SELECT id, friendly_name, encrypted_view_private_key, encrypted_spend_public_key, cipher_nonce, unencrypted_view_key_hash
+            SELECT id, 
+              friendly_name, 
+              encrypted_view_private_key, 
+              encrypted_spend_public_key, 
+              cipher_nonce, 
+              unencrypted_view_key_hash,
+              birthday
             FROM accounts
             WHERE friendly_name = ?
             ORDER BY friendly_name
@@ -61,7 +84,13 @@ pub async fn get_accounts(
         sqlx::query_as!(
             AccountRow,
             r#"
-            SELECT id, friendly_name, encrypted_view_private_key, encrypted_spend_public_key, cipher_nonce, unencrypted_view_key_hash
+            SELECT id, 
+              friendly_name, 
+              encrypted_view_private_key, 
+              encrypted_spend_public_key, 
+              cipher_nonce, 
+              unencrypted_view_key_hash,
+              birthday
             FROM accounts
             ORDER BY friendly_name
             "#
@@ -81,4 +110,5 @@ pub struct AccountRow {
     pub encrypted_spend_public_key: Vec<u8>,
     pub cipher_nonce: Vec<u8>,
     pub unencrypted_view_key_hash: Option<Vec<u8>>,
+    pub birthday: i64,
 }

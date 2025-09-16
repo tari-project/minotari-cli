@@ -6,6 +6,7 @@
             encrypted_view_private_key blob NOT NULL,
             encrypted_spend_public_key blob NOT NULL,
             cipher_nonce blob NOT NULL,
+            birthday INTEGER NOT NULL,
             created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
         );
 
