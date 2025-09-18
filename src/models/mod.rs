@@ -1,3 +1,5 @@
+use lightweight_wallet_libs::transaction_components::WalletOutput;
+
 // Change depending on sql type.
 pub type Id = i64;
 
@@ -20,6 +22,6 @@ pub struct WalletEvent {
 #[derive(Debug, Clone)]
 pub enum WalletEventType {
     BlockRolledBack,
-    OutputDetected,
+    OutputDetected { output: WalletOutput },
     OutputRolledBack,
 }

@@ -9,14 +9,18 @@ use lightweight_wallet_libs::{
     HttpBlockchainScanner, KeyManagerBuilder, ScanConfig, ScannerBuilder,
 };
 use std::env::current_dir;
+use std::time::Instant;
 use tari_crypto::compressed_key::CompressedKey;
 use tari_crypto::ristretto::{RistrettoPublicKey, RistrettoSecretKey};
 
-use crate::db::{AccountRow, get_accounts, init_db};
+use crate::db::{AccountRow, delete_old_scanned_tip_blocks, get_accounts, init_db};
 use crate::models::WalletEvent;
 use tari_utilities::byte_array::ByteArray;
 mod db;
 mod models;
+
+pub const BIRTHDAY_GENESIS_FROM_UNIX_EPOCH: u64 = 1640995200;
+pub const MAINNET_GENESIS_DATE: u64 = 1746940800;
 
 #[derive(Parser)]
 #[command(name = "tari")]
@@ -52,6 +56,15 @@ enum Commands {
             help = "Optional account name to scan. If not provided, all accounts will be used"
         )]
         account_name: Option<String>,
+        #[arg(
+            short = 'n',
+            long,
+            help = "Maximum number of blocks to scan",
+            default_value_t = 50
+        )]
+        max_blocks_to_scan: u64,
+        #[arg(long, help = "Batch size for scanning", default_value_t = 1)]
+        batch_size: u64,
     },
     /// Show wallet balance
     Balance,
@@ -115,6 +128,8 @@ async fn main() -> Result<(), anyhow::Error> {
             base_url,
             database_file,
             account_name,
+            max_blocks_to_scan,
+            batch_size,
         } => {
             println!("Scanning blockchain...");
             let events = scan(
@@ -122,6 +137,8 @@ async fn main() -> Result<(), anyhow::Error> {
                 &base_url,
                 &database_file,
                 account_name.as_deref(),
+                max_blocks_to_scan,
+                batch_size,
             )
             .await?;
             println!("Scan complete. Events: {:?}", events);
@@ -141,6 +158,8 @@ async fn scan(
     base_url: &str,
     database_file: &str,
     account_name: Option<&str>,
+    max_blocks: u64,
+    batch_size: u64,
 ) -> Result<Vec<WalletEvent>, anyhow::Error> {
     let db = init_db(database_file).await?;
     let mut result = vec![];
@@ -196,29 +215,96 @@ async fn scan(
                 start_height = last_blocks[0].height as u64 + 1;
             }
         }
-        let scan_config = ScanConfig::default()
-            .with_start_height(start_height)
-            .with_end_height(start_height.saturating_add(10));
-        let (view_key, spend_key) = decrypt_keys(&account, password)?;
-        let key_manager = KeyManagerBuilder::default()
-            .with_view_key_and_spend_key(view_key, spend_key, account.birthday as u16)
-            .try_build()
-            .await?;
-        let mut scanner =
-            HttpBlockchainScanner::new(base_url.to_string(), key_manager.clone()).await?;
-        let scanned_blocks = scanner.scan_blocks(scan_config).await?;
-        for scanned_block in &scanned_blocks {
+        if start_height == 0 {
+            let birthday_day =
+                (account.birthday as u64) * 24 * 60 * 60 + BIRTHDAY_GENESIS_FROM_UNIX_EPOCH;
             println!(
-                "Scanned block at height: {}, hash: {:x?}",
-                scanned_block.height, scanned_block.block_hash
+                "Calculating birthday day from birthday {} to be {} (unix epoch)",
+                account.birthday, birthday_day
             );
-            db::insert_scanned_tip_block(
-                &db,
-                account.id,
-                scanned_block.height as i64,
-                &scanned_block.block_hash,
-            )
-            .await?;
+            let estimate_birthday_block = (birthday_day - MAINNET_GENESIS_DATE) / 120; // 2 minute blocks
+            println!(
+                "Estimating birthday block height from birthday {} to be {}",
+                account.birthday, estimate_birthday_block
+            );
+            start_height = estimate_birthday_block;
+        }
+        let mut total_scanned = 0;
+        loop {
+            if total_scanned >= max_blocks {
+                break;
+            }
+            let scan_config = ScanConfig::default()
+                .with_start_height(start_height)
+                .with_end_height(start_height.saturating_add(max_blocks.min(batch_size)));
+            let (view_key, spend_key) = decrypt_keys(&account, password)?;
+            let key_manager = KeyManagerBuilder::default()
+                .with_view_key_and_spend_key(view_key, spend_key, account.birthday as u16)
+                .try_build()
+                .await?;
+            let mut scanner =
+                HttpBlockchainScanner::new(base_url.to_string(), key_manager.clone()).await?;
+            println!(
+                "Scanning blocks {} to {:?}...",
+                scan_config.start_height, scan_config.end_height
+            );
+            let timer = Instant::now();
+            let scanned_blocks = scanner.scan_blocks(scan_config).await?;
+            println!(
+                "Scan took {:?}, on average: {} per second. Total outputs found: {}",
+                timer.elapsed(),
+                scanned_blocks.len() as f64 / timer.elapsed().as_secs_f64(),
+                scanned_blocks
+                    .iter()
+                    .map(|b| b.wallet_outputs.len())
+                    .sum::<usize>()
+            );
+
+            total_scanned += scanned_blocks.len() as u64;
+            if scanned_blocks.is_empty() {
+                println!("No more blocks to scan.");
+                break;
+            }
+            start_height = scanned_blocks.last().unwrap().height + 1;
+            println!(
+                "Scanned {} blocks, total scanned: {}",
+                scanned_blocks.len(),
+                total_scanned
+            );
+            for scanned_block in &scanned_blocks {
+                // println!(
+                //     "Scanned block at height: {}, hash: {:x?}",
+                //     scanned_block.height, scanned_block.block_hash
+                // );
+                // dbg!(&scanned_block);
+                for output in &scanned_block.wallet_outputs {
+                    println!(
+                        "Detected output with amount {} at height {}",
+                        output.value, scanned_block.height
+                    );
+                    result.push(WalletEvent {
+                        id: 0,
+                        account_id: account.id,
+                        event_type: models::WalletEventType::OutputDetected {
+                            output: output.clone(),
+                        },
+                        details: format!(
+                            "Detected output with amount {} at height {}",
+                            output.value, scanned_block.height
+                        ),
+                    });
+                }
+                db::insert_scanned_tip_block(
+                    &db,
+                    account.id,
+                    scanned_block.height as i64,
+                    &scanned_block.block_hash,
+                )
+                .await?;
+            }
+
+            println!("deleting old scanned tip blocks...");
+            delete_old_scanned_tip_blocks(&db, account.id, 50).await?;
         }
 
         println!("Scan complete.");
