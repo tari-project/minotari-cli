@@ -1,4 +1,6 @@
+use chrono::{NaiveDate, NaiveDateTime};
 use lightweight_wallet_libs::transaction_components::WalletOutput;
+use serde::{Deserialize, Serialize};
 
 // Change depending on sql type.
 pub type Id = i64;
@@ -16,12 +18,35 @@ pub struct WalletEvent {
     pub id: Id,
     pub account_id: Id,
     pub event_type: WalletEventType,
-    pub details: String,
+    pub description: String,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WalletEventType {
     BlockRolledBack,
-    OutputDetected { hash: Vec<u8>, output: WalletOutput },
+    OutputDetected {
+        hash: Vec<u8>,
+        block_height: u64,
+        block_hash: Vec<u8>,
+    },
     OutputRolledBack,
+}
+
+impl WalletEventType {
+    pub fn to_key_string(&self) -> String {
+        match &self {
+            WalletEventType::BlockRolledBack => "BlockRolledBack".to_string(),
+            WalletEventType::OutputDetected { .. } => "OutputDetected".to_string(),
+            WalletEventType::OutputRolledBack => "OutputRolledBack".to_string(),
+        }
+    }
+}
+
+pub struct BalanceChange {
+    pub account_id: Id,
+    pub caused_by_output_id: Id,
+    pub description: String,
+    pub balance_credit: u64,
+    pub balance_debit: u64,
+    pub effective_date: NaiveDateTime,
 }

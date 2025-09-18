@@ -9,7 +9,7 @@ pub async fn insert_output(
     block_height: u64,
     block_hash: &[u8],
     mined_timestamp: u64,
-) -> Result<(), sqlx::Error> {
+) -> Result<i64, sqlx::Error> {
     let output_json = serde_json::to_string(&output).map_err(|e| {
         sqlx::Error::Io(std::io::Error::new(
             std::io::ErrorKind::Other,
@@ -26,10 +26,11 @@ pub async fn insert_output(
         .to_string();
     let block_height = block_height as i64;
     let value = output.value.as_u64() as i64;
-    sqlx::query!(
+    let output_id = sqlx::query!(
         r#"
        INSERT INTO outputs (account_id, output_hash, mined_in_block_height, mined_in_block_hash, value, mined_timestamp, wallet_output_json)
-       VALUES (?, ?, ?, ?, ?, ?, ?)
+       VALUES (?, ?, ?, ?, ?, ?, ?) 
+         RETURNING id
         "#,
         account_id,
         output_hash,
@@ -39,8 +40,8 @@ pub async fn insert_output(
         mined_timestamp,
         output_json
            )
-    .execute(pool)
-    .await?;
+    .fetch_one(pool)
+    .await?.id;
 
-    Ok(())
+    Ok(output_id)
 }

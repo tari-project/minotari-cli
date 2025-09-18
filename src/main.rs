@@ -141,7 +141,7 @@ async fn main() -> Result<(), anyhow::Error> {
                 batch_size,
             )
             .await?;
-            println!("Scan complete. Events: {:?}", events);
+            println!("Scan complete. Events: {}", events.len());
             Ok(())
             // Add scanning logic here
         }
@@ -282,19 +282,21 @@ async fn scan(
                         "Detected output with amount {} at height {}",
                         output.value, scanned_block.height
                     );
-                    result.push(WalletEvent {
+                    let event = models::WalletEvent {
                         id: 0,
                         account_id: account.id,
                         event_type: models::WalletEventType::OutputDetected {
                             hash: hash.clone(),
-                            output: output.clone(),
+                            block_height: scanned_block.height,
+                            block_hash: scanned_block.block_hash.clone(),
                         },
-                        details: format!(
+                        description: format!(
                             "Detected output with amount {} at height {}",
                             output.value, scanned_block.height
                         ),
-                    });
-                    db::insert_output(
+                    };
+                    result.push(event.clone());
+                    let output_id = db::insert_output(
                         &db,
                         account.id,
                         hash.clone(),
@@ -304,6 +306,18 @@ async fn scan(
                         scanned_block.mined_timestamp,
                     )
                     .await?;
+                    db::insert_wallet_event(&db, account.id, &event).await?;
+
+                    // parse balance changes.
+                    let balance_changes = parse_balance_changes(
+                        account.id,
+                        output_id,
+                        scanned_block.mined_timestamp,
+                        &output,
+                    );
+                    for change in balance_changes {
+                        db::insert_balance_change(&db, &change).await?;
+                    }
                 }
                 db::insert_scanned_tip_block(
                     &db,
@@ -321,6 +335,27 @@ async fn scan(
         println!("Scan complete.");
     }
     Ok(result)
+}
+
+fn parse_balance_changes(
+    account_id: i64,
+    output_id: i64,
+    chain_timestamp: u64,
+    output: &lightweight_wallet_libs::transaction_components::WalletOutput,
+) -> Vec<models::BalanceChange> {
+    let mut changes = vec![];
+    let effective_date = chrono::NaiveDateTime::from_timestamp(chain_timestamp as i64, 0);
+    let balance_change = models::BalanceChange {
+        account_id,
+        caused_by_output_id: output_id,
+        description: "Output found in blockchain scan".to_string(),
+        balance_credit: output.value.as_u64(),
+        balance_debit: 0,
+        effective_date,
+    };
+    changes.push(balance_change);
+
+    changes
 }
 
 /// Returns (removed_blocks, added_blocks   )
