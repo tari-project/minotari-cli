@@ -22,6 +22,6 @@ pub struct WalletEvent {
 #[derive(Debug, Clone)]
 pub enum WalletEventType {
     BlockRolledBack,
-    OutputDetected { output: WalletOutput },
+    OutputDetected { hash: Vec<u8>, output: WalletOutput },
     OutputRolledBack,
 }

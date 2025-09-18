@@ -277,7 +277,7 @@ async fn scan(
                 //     scanned_block.height, scanned_block.block_hash
                 // );
                 // dbg!(&scanned_block);
-                for output in &scanned_block.wallet_outputs {
+                for (hash, output) in &scanned_block.wallet_outputs {
                     println!(
                         "Detected output with amount {} at height {}",
                         output.value, scanned_block.height
@@ -286,6 +286,7 @@ async fn scan(
                         id: 0,
                         account_id: account.id,
                         event_type: models::WalletEventType::OutputDetected {
+                            hash: hash.clone(),
                             output: output.clone(),
                         },
                         details: format!(
@@ -293,6 +294,16 @@ async fn scan(
                             output.value, scanned_block.height
                         ),
                     });
+                    db::insert_output(
+                        &db,
+                        account.id,
+                        hash.clone(),
+                        output,
+                        scanned_block.height,
+                        &scanned_block.block_hash,
+                        scanned_block.mined_timestamp,
+                    )
+                    .await?;
                 }
                 db::insert_scanned_tip_block(
                     &db,

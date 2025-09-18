@@ -20,3 +20,4 @@ sqlx = { version = "0.8.6", features = [
 blake2 = "0.10.6"
 tari_crypto = { version = "0.22.1", features = ["borsh"] }
 tari_utilities = { version = "0.8", features = ["std"] }
+chrono = "0.4.42"

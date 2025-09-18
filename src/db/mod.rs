@@ -14,6 +14,9 @@ pub use scanned_tip_blocks::delete_old_scanned_tip_blocks;
 pub use scanned_tip_blocks::get_scanned_tip_blocks_by_account;
 pub use scanned_tip_blocks::insert_scanned_tip_block;
 
+mod outputs;
+pub use outputs::insert_output;
+
 pub async fn init_db(db_path: &str) -> Result<SqlitePool, anyhow::Error> {
     let mut path = std::path::Path::new(db_path).to_path_buf();
     if path.is_relative() {
