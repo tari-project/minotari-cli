@@ -14,13 +14,13 @@ use tari_crypto::compressed_key::CompressedKey;
 use tari_crypto::ristretto::{RistrettoPublicKey, RistrettoSecretKey};
 
 use crate::db::{AccountRow, delete_old_scanned_tip_blocks, get_accounts, init_db};
-use crate::models::WalletEvent;
+use crate::models::{BalanceChange, WalletEvent};
 use tari_utilities::byte_array::ByteArray;
 mod db;
 mod models;
 
 pub const BIRTHDAY_GENESIS_FROM_UNIX_EPOCH: u64 = 1640995200;
-pub const MAINNET_GENESIS_DATE: u64 = 1746940800;
+pub const MAINNET_GENESIS_DATE: u64 = 1746489644; // 6 May 2025
 
 #[derive(Parser)]
 #[command(name = "tari")]
@@ -37,7 +37,7 @@ enum Commands {
         #[arg(short, long, help = "Password to decrypt the wallet file")]
         password: String,
         #[arg(
-            short,
+            short = 'u',
             long,
             default_value = "https://rpc.tari.com",
             help = "The base URL of the Tari HTTP API"
@@ -222,7 +222,7 @@ async fn scan(
                 "Calculating birthday day from birthday {} to be {} (unix epoch)",
                 account.birthday, birthday_day
             );
-            let estimate_birthday_block = (birthday_day - MAINNET_GENESIS_DATE) / 120; // 2 minute blocks
+            let estimate_birthday_block = (birthday_day.saturating_sub(MAINNET_GENESIS_DATE)) / 120; // 2 minute blocks
             println!(
                 "Estimating birthday block height from birthday {} to be {}",
                 account.birthday, estimate_birthday_block
@@ -272,6 +272,36 @@ async fn scan(
                 total_scanned
             );
             for scanned_block in &scanned_blocks {
+                // Deleted inputs
+                for input in &scanned_block.inputs {
+                    if let Some((output_id, value)) =
+                        db::get_output_info_by_hash(&db, input).await?
+                    {
+                        let input_id = db::insert_input(
+                            &db,
+                            account.id,
+                            output_id,
+                            scanned_block.height as u64,
+                            &scanned_block.block_hash,
+                            scanned_block.mined_timestamp,
+                        )
+                        .await?;
+                        let balance_change = BalanceChange {
+                            account_id: account.id,
+                            caused_by_output_id: None,
+                            caused_by_input_id: Some(input_id),
+                            description: format!("Output spent as input"),
+                            balance_credit: 0,
+                            balance_debit: value,
+                            effective_date: chrono::NaiveDateTime::from_timestamp(
+                                scanned_block.mined_timestamp as i64,
+                                0,
+                            ),
+                        };
+                        db::insert_balance_change(&db, &balance_change).await?;
+                    }
+                }
+
                 // println!(
                 //     "Scanned block at height: {}, hash: {:x?}",
                 //     scanned_block.height, scanned_block.block_hash
@@ -328,8 +358,11 @@ async fn scan(
                 .await?;
             }
 
+            println!("Batch took {:?}.", timer.elapsed());
             println!("deleting old scanned tip blocks...");
             delete_old_scanned_tip_blocks(&db, account.id, 50).await?;
+
+            println!("Cleanup took {:?}.", timer.elapsed());
         }
 
         println!("Scan complete.");
@@ -343,11 +376,27 @@ fn parse_balance_changes(
     chain_timestamp: u64,
     output: &lightweight_wallet_libs::transaction_components::WalletOutput,
 ) -> Vec<models::BalanceChange> {
+    // Coinbases.
+    if output.features.is_coinbase() {
+        let effective_date = chrono::NaiveDateTime::from_timestamp(chain_timestamp as i64, 0);
+        let balance_change = models::BalanceChange {
+            account_id,
+            caused_by_output_id: Some(output_id),
+            caused_by_input_id: None,
+            description: "Coinbase output found in blockchain scan".to_string(),
+            balance_credit: output.value.as_u64(),
+            balance_debit: 0,
+            effective_date,
+        };
+        return vec![balance_change];
+    }
+
     let mut changes = vec![];
     let effective_date = chrono::NaiveDateTime::from_timestamp(chain_timestamp as i64, 0);
     let balance_change = models::BalanceChange {
         account_id,
-        caused_by_output_id: output_id,
+        caused_by_output_id: Some(output_id),
+        caused_by_input_id: None,
         description: "Output found in blockchain scan".to_string(),
         balance_credit: output.value.as_u64(),
         balance_debit: 0,

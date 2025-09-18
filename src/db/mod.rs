@@ -15,6 +15,7 @@ pub use scanned_tip_blocks::get_scanned_tip_blocks_by_account;
 pub use scanned_tip_blocks::insert_scanned_tip_block;
 
 mod outputs;
+pub use outputs::get_output_info_by_hash;
 pub use outputs::insert_output;
 
 mod events;
@@ -22,6 +23,9 @@ pub use events::insert_wallet_event;
 
 mod balance_changes;
 pub use balance_changes::insert_balance_change;
+
+mod inputs;
+pub use inputs::insert_input;
 
 pub async fn init_db(db_path: &str) -> Result<SqlitePool, anyhow::Error> {
     let mut path = std::path::Path::new(db_path).to_path_buf();

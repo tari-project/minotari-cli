@@ -44,7 +44,8 @@ impl WalletEventType {
 
 pub struct BalanceChange {
     pub account_id: Id,
-    pub caused_by_output_id: Id,
+    pub caused_by_output_id: Option<Id>,
+    pub caused_by_input_id: Option<Id>,
     pub description: String,
     pub balance_credit: u64,
     pub balance_debit: u64,

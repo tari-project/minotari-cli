@@ -15,11 +15,12 @@ pub async fn insert_balance_change(
     let description = &change.description;
     sqlx::query!(
         r#"
-       INSERT INTO balance_changes (account_id, caused_by_output_id, description, balance_credit, balance_debit, effective_date)
-         VALUES (?, ?, ?, ?, ?, ?)
+       INSERT INTO balance_changes (account_id, caused_by_output_id, caused_by_input_id, description, balance_credit, balance_debit, effective_date)
+         VALUES (?, ?, ?, ?, ?, ?, ?)
         "#,
         change.account_id,
         change.caused_by_output_id,
+        change.caused_by_input_id,
         description,
         balance_credit ,
         balance_debit ,

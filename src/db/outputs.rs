@@ -45,3 +45,26 @@ pub async fn insert_output(
 
     Ok(output_id)
 }
+
+pub async fn get_output_info_by_hash(
+    pool: &SqlitePool,
+    output_hash: &[u8],
+) -> Result<Option<(i64, u64)>, sqlx::Error> {
+    let row = sqlx::query!(
+        r#"
+        SELECT id, value
+        FROM outputs
+        WHERE output_hash = ?
+        "#,
+        output_hash
+    )
+    .fetch_optional(pool)
+    .await?;
+
+    Ok(row.map(|r| (r.id, r.value as u64)))
+}
+
+pub struct OutputInfo {
+    pub id: i64,
+    pub value: u64,
+}
