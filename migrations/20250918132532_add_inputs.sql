@@ -9,3 +9,4 @@ create table if not exists inputs (
     FOREIGN KEY (output_id) REFERENCES outputs(id),
     FOREIGN KEY (account_id) REFERENCES accounts(id)
 )
+

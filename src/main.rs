@@ -275,14 +275,14 @@ async fn scan(
                 // Deleted inputs
                 for input in &scanned_block.inputs {
                     if let Some((output_id, value)) =
-                        db::get_output_info_by_hash(&db, input).await?
+                        db::get_output_info_by_hash(&db, input.as_slice()).await?
                     {
                         let input_id = db::insert_input(
                             &db,
                             account.id,
                             output_id,
                             scanned_block.height as u64,
-                            &scanned_block.block_hash,
+                            scanned_block.block_hash.as_slice(),
                             scanned_block.mined_timestamp,
                         )
                         .await?;
@@ -297,6 +297,13 @@ async fn scan(
                                 scanned_block.mined_timestamp as i64,
                                 0,
                             ),
+                            effective_height: scanned_block.height as u64,
+                            claimed_recipient_address: None,
+                            claimed_sender_address: None,
+                            memo_hex: None,
+                            memo_parsed: None,
+                            claimed_fee: None,
+                            claimed_amount: None,
                         };
                         db::insert_balance_change(&db, &balance_change).await?;
                     }
@@ -310,7 +317,8 @@ async fn scan(
                 for (hash, output) in &scanned_block.wallet_outputs {
                     println!(
                         "Detected output with amount {} at height {}",
-                        output.value, scanned_block.height
+                        output.value(),
+                        scanned_block.height
                     );
                     let event = models::WalletEvent {
                         id: 0,
@@ -318,11 +326,12 @@ async fn scan(
                         event_type: models::WalletEventType::OutputDetected {
                             hash: hash.clone(),
                             block_height: scanned_block.height,
-                            block_hash: scanned_block.block_hash.clone(),
+                            block_hash: scanned_block.block_hash.to_vec(),
                         },
                         description: format!(
                             "Detected output with amount {} at height {}",
-                            output.value, scanned_block.height
+                            output.value(),
+                            scanned_block.height
                         ),
                     };
                     result.push(event.clone());
@@ -332,7 +341,7 @@ async fn scan(
                         hash.clone(),
                         output,
                         scanned_block.height,
-                        &scanned_block.block_hash,
+                        scanned_block.block_hash.as_slice(),
                         scanned_block.mined_timestamp,
                     )
                     .await?;
@@ -343,6 +352,7 @@ async fn scan(
                         account.id,
                         output_id,
                         scanned_block.mined_timestamp,
+                        scanned_block.height,
                         &output,
                     );
                     for change in balance_changes {
@@ -353,7 +363,7 @@ async fn scan(
                     &db,
                     account.id,
                     scanned_block.height as i64,
-                    &scanned_block.block_hash,
+                    scanned_block.block_hash.as_slice(),
                 )
                 .await?;
             }
@@ -374,36 +384,59 @@ fn parse_balance_changes(
     account_id: i64,
     output_id: i64,
     chain_timestamp: u64,
+    chain_height: u64,
     output: &lightweight_wallet_libs::transaction_components::WalletOutput,
 ) -> Vec<models::BalanceChange> {
     // Coinbases.
-    if output.features.is_coinbase() {
+    if output.features().is_coinbase() {
         let effective_date = chrono::NaiveDateTime::from_timestamp(chain_timestamp as i64, 0);
         let balance_change = models::BalanceChange {
             account_id,
             caused_by_output_id: Some(output_id),
             caused_by_input_id: None,
             description: "Coinbase output found in blockchain scan".to_string(),
-            balance_credit: output.value.as_u64(),
+            balance_credit: output.value().as_u64(),
             balance_debit: 0,
             effective_date,
+            effective_height: chain_height,
+            claimed_recipient_address: None,
+            memo_hex: None,
+            memo_parsed: None,
+            claimed_sender_address: None,
+            claimed_fee: None,
+            claimed_amount: None,
         };
         return vec![balance_change];
     }
 
     let mut changes = vec![];
     let effective_date = chrono::NaiveDateTime::from_timestamp(chain_timestamp as i64, 0);
+    let payment_info = output.payment_id();
+    let memo_bytes = payment_info.get_payment_id();
+    let memo = String::from_utf8_lossy(&memo_bytes);
+    let memo_hex = hex::encode(payment_info.get_payment_id());
+    let claimed_recipient_address = payment_info.get_recipient_address().map(|s| s.to_base58());
+    let claimed_sender_address = payment_info.get_sender_address().map(|s| s.to_base58());
+    let claimed_fee = payment_info.get_fee().map(|v| v.0);
+    let claimed_amount = payment_info.get_amount().map(|v| v.0);
+
     let balance_change = models::BalanceChange {
         account_id,
         caused_by_output_id: Some(output_id),
         caused_by_input_id: None,
         description: "Output found in blockchain scan".to_string(),
-        balance_credit: output.value.as_u64(),
+        balance_credit: output.value().as_u64(),
         balance_debit: 0,
         effective_date,
+        effective_height: chain_height,
+        claimed_recipient_address: claimed_recipient_address,
+        claimed_sender_address: claimed_sender_address,
+        memo_parsed: Some(memo.to_string()),
+        memo_hex: Some(memo_hex),
+        claimed_fee,
+        claimed_amount,
     };
     changes.push(balance_change);
-
     changes
 }
 

@@ -50,4 +50,11 @@ pub struct BalanceChange {
     pub balance_credit: u64,
     pub balance_debit: u64,
     pub effective_date: NaiveDateTime,
+    pub effective_height: u64,
+    pub claimed_recipient_address: Option<String>,
+    pub claimed_sender_address: Option<String>,
+    pub memo_parsed: Option<String>,
+    pub memo_hex: Option<String>,
+    pub claimed_fee: Option<u64>,
+    pub claimed_amount: Option<u64>,
 }

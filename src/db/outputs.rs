@@ -25,7 +25,7 @@ pub async fn insert_output(
         })?
         .to_string();
     let block_height = block_height as i64;
-    let value = output.value.as_u64() as i64;
+    let value = output.value().as_u64() as i64;
     let output_id = sqlx::query!(
         r#"
        INSERT INTO outputs (account_id, output_hash, mined_in_block_height, mined_in_block_hash, value, mined_timestamp, wallet_output_json)
