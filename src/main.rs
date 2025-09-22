@@ -3,6 +3,7 @@ use chacha20poly1305::aead::Aead;
 use chacha20poly1305::aead::rand_core::le;
 use chacha20poly1305::{AeadCore, ChaCha20Poly1305, ChaChaPoly1305, KeyInit, aead::OsRng};
 use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
+use chrono::{NaiveDate, NaiveDateTime};
 use clap::{Parser, Subcommand};
 use lightweight_wallet_libs::{BlockScanResult, BlockchainScanner};
 use lightweight_wallet_libs::{
@@ -67,7 +68,21 @@ enum Commands {
         batch_size: u64,
     },
     /// Show wallet balance
-    Balance,
+    Balance {
+        #[arg(
+            short,
+            long,
+            help = "Path to the database file",
+            default_value = "data/wallet.db"
+        )]
+        database_file: String,
+        #[arg(
+            short,
+            long,
+            help = "Optional account name to show balance for. If not provided, all accounts will be used"
+        )]
+        account_name: Option<String>,
+    },
     /// Import a wallet from a view key
     ImportViewKey {
         #[arg(short, long, alias = "view_key", help = "The view key in hex format")]
@@ -145,12 +160,60 @@ async fn main() -> Result<(), anyhow::Error> {
             Ok(())
             // Add scanning logic here
         }
-        Commands::Balance => {
+        Commands::Balance {
+            database_file,
+            account_name,
+        } => {
             println!("Fetching balance...");
-            // Add balance checking logic here
+            handle_balance(&database_file, account_name.as_deref()).await;
             Ok(())
         }
     }
+}
+
+async fn handle_balance(
+    database_file: &str,
+    account_name: Option<&str>,
+) -> Result<(), anyhow::Error> {
+    let db = init_db(database_file).await?;
+    let accounts = get_accounts(&db, account_name).await?;
+    for account in accounts {
+        struct AccountBalance {
+            total_credits: Option<i64>,
+            total_debits: Option<i64>,
+            max_height: Option<i64>,
+            max_date: Option<String>,
+        }
+        println!("Account: {}", account.friendly_name);
+        let agg_result = sqlx::query_as!(
+            AccountBalance,
+            r#"
+            SELECT 
+              SUM(balance_credit) as total_credits, 
+              Sum(balance_debit) as total_debits, 
+              max(effective_height) as max_height,
+              strftime('%Y-%m-%d %H:%M:%S', max(effective_date))  as max_date
+            FROM balance_changes
+            WHERE account_id = ?
+            "#,
+            account.id
+        )
+        .fetch_one(&db)
+        .await?;
+
+        // if let Some(agg) = agg_result {
+        let micro_tari_balance =
+            (agg_result.total_credits.unwrap_or(0) - agg_result.total_debits.unwrap_or(0)) as f64;
+        let tari_balance = micro_tari_balance / 1_000_000.0;
+        println!(
+            "Balance at height {}({}): {} microTari ({} Tari)",
+            agg_result.max_height.unwrap_or(0),
+            agg_result.max_date.unwrap_or_else(|| "N/A".to_string()),
+            micro_tari_balance,
+            tari_balance
+        );
+    }
+    Ok(())
 }
 
 async fn scan(
