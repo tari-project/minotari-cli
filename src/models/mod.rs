@@ -28,6 +28,8 @@ pub enum WalletEventType {
         hash: Vec<u8>,
         block_height: u64,
         block_hash: Vec<u8>,
+        memo_parsed: Option<String>,
+        memo_hex: Option<String>,
     },
     OutputRolledBack,
 }

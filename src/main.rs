@@ -383,6 +383,21 @@ async fn scan(
                         output.value(),
                         scanned_block.height
                     );
+
+                    // Extract memo information
+                    let payment_info = output.payment_id();
+                    let memo_bytes = payment_info.get_payment_id();
+                    let memo_parsed = if memo_bytes.is_empty() {
+                        None
+                    } else {
+                        Some(String::from_utf8_lossy(&memo_bytes).to_string())
+                    };
+                    let memo_hex = if memo_bytes.is_empty() {
+                        None
+                    } else {
+                        Some(hex::encode(&memo_bytes))
+                    };
+
                     let event = models::WalletEvent {
                         id: 0,
                         account_id: account.id,
@@ -390,6 +405,8 @@ async fn scan(
                             hash: hash.clone(),
                             block_height: scanned_block.height,
                             block_hash: scanned_block.block_hash.to_vec(),
+                            memo_parsed,
+                            memo_hex,
                         },
                         description: format!(
                             "Detected output with amount {} at height {}",
