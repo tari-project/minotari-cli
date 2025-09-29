@@ -16,6 +16,7 @@ pub use scanned_tip_blocks::insert_scanned_tip_block;
 
 mod outputs;
 pub use outputs::get_output_info_by_hash;
+pub use outputs::get_unconfirmed_outputs;
 pub use outputs::insert_output;
 
 mod events;

@@ -31,6 +31,11 @@ pub enum WalletEventType {
         memo_parsed: Option<String>,
         memo_hex: Option<String>,
     },
+    OutputConfirmed {
+        hash: Vec<u8>,
+        block_height: u64,
+        confirmation_height: u64,
+    },
     OutputRolledBack,
 }
 
@@ -39,6 +44,7 @@ impl WalletEventType {
         match &self {
             WalletEventType::BlockRolledBack => "BlockRolledBack".to_string(),
             WalletEventType::OutputDetected { .. } => "OutputDetected".to_string(),
+            WalletEventType::OutputConfirmed { .. } => "OutputConfirmed".to_string(),
             WalletEventType::OutputRolledBack => "OutputRolledBack".to_string(),
         }
     }

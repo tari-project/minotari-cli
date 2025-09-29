@@ -68,3 +68,42 @@ pub struct OutputInfo {
     pub id: i64,
     pub value: u64,
 }
+
+pub async fn get_unconfirmed_outputs(
+    pool: &SqlitePool,
+    account_id: i64,
+    current_height: u64,
+    confirmation_blocks: u64,
+) -> Result<Vec<(Vec<u8>, u64)>, sqlx::Error> {
+    let min_height_to_confirm = if current_height >= confirmation_blocks {
+        current_height - confirmation_blocks
+    } else {
+        0
+    };
+    let min_height = min_height_to_confirm as i64;
+
+    let rows = sqlx::query!(
+        r#"
+        SELECT output_hash, mined_in_block_height
+        FROM outputs o
+        WHERE o.account_id = ?
+          AND o.mined_in_block_height <= ?
+          AND NOT EXISTS (
+            SELECT 1 FROM events e
+            WHERE e.account_id = ?
+              AND e.event_type = 'OutputConfirmed'
+              AND json_extract(e.data_json, '$.hash') = hex(o.output_hash)
+          )
+        "#,
+        account_id,
+        min_height,
+        account_id
+    )
+    .fetch_all(pool)
+    .await?;
+
+    Ok(rows
+        .into_iter()
+        .map(|row| (row.output_hash, row.mined_in_block_height as u64))
+        .collect())
+}

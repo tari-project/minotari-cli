@@ -446,6 +446,41 @@ async fn scan(
                     scanned_block.block_hash.as_slice(),
                 )
                 .await?;
+
+                // Check for outputs that should be confirmed (6 block confirmations)
+                let unconfirmed_outputs = db::get_unconfirmed_outputs(
+                    &db,
+                    account.id,
+                    scanned_block.height,
+                    6, // 6 block confirmations required
+                ).await?;
+
+                for (output_hash, original_height) in unconfirmed_outputs {
+                    let confirmation_event = models::WalletEvent {
+                        id: 0,
+                        account_id: account.id,
+                        event_type: models::WalletEventType::OutputConfirmed {
+                            hash: output_hash.clone(),
+                            block_height: original_height,
+                            confirmation_height: scanned_block.height,
+                        },
+                        description: format!(
+                            "Output confirmed at height {} (originally at height {})",
+                            scanned_block.height,
+                            original_height
+                        ),
+                    };
+
+                    result.push(confirmation_event.clone());
+                    db::insert_wallet_event(&db, account.id, &confirmation_event).await?;
+
+                    println!(
+                        "Output {:?} confirmed at height {} (originally at height {})",
+                        hex::encode(&output_hash),
+                        scanned_block.height,
+                        original_height
+                    );
+                }
             }
 
             println!("Batch took {:?}.", timer.elapsed());
