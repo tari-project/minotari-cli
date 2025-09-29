@@ -9,6 +9,8 @@ pub async fn insert_output(
     block_height: u64,
     block_hash: &[u8],
     mined_timestamp: u64,
+    memo_parsed: Option<String>,
+    memo_hex: Option<String>,
 ) -> Result<i64, sqlx::Error> {
     let output_json = serde_json::to_string(&output).map_err(|e| {
         sqlx::Error::Io(std::io::Error::new(
@@ -28,8 +30,8 @@ pub async fn insert_output(
     let value = output.value().as_u64() as i64;
     let output_id = sqlx::query!(
         r#"
-       INSERT INTO outputs (account_id, output_hash, mined_in_block_height, mined_in_block_hash, value, mined_timestamp, wallet_output_json)
-       VALUES (?, ?, ?, ?, ?, ?, ?) 
+       INSERT INTO outputs (account_id, output_hash, mined_in_block_height, mined_in_block_hash, value, mined_timestamp, wallet_output_json, memo_parsed, memo_hex)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
          RETURNING id
         "#,
         account_id,
@@ -38,7 +40,9 @@ pub async fn insert_output(
         block_hash,
         value,
         mined_timestamp,
-        output_json
+        output_json,
+        memo_parsed,
+        memo_hex
            )
     .fetch_one(pool)
     .await?.id;
@@ -74,7 +78,7 @@ pub async fn get_unconfirmed_outputs(
     account_id: i64,
     current_height: u64,
     confirmation_blocks: u64,
-) -> Result<Vec<(Vec<u8>, u64)>, sqlx::Error> {
+) -> Result<Vec<(Vec<u8>, u64, Option<String>, Option<String>)>, sqlx::Error> {
     let min_height_to_confirm = if current_height >= confirmation_blocks {
         current_height - confirmation_blocks
     } else {
@@ -84,26 +88,50 @@ pub async fn get_unconfirmed_outputs(
 
     let rows = sqlx::query!(
         r#"
-        SELECT output_hash, mined_in_block_height
+        SELECT output_hash, mined_in_block_height, memo_parsed, memo_hex
         FROM outputs o
         WHERE o.account_id = ?
           AND o.mined_in_block_height <= ?
-          AND NOT EXISTS (
-            SELECT 1 FROM events e
-            WHERE e.account_id = ?
-              AND e.event_type = 'OutputConfirmed'
-              AND json_extract(e.data_json, '$.hash') = hex(o.output_hash)
-          )
+          AND o.confirmed_height IS NULL
         "#,
         account_id,
-        min_height,
-        account_id
+        min_height
     )
     .fetch_all(pool)
     .await?;
 
     Ok(rows
         .into_iter()
-        .map(|row| (row.output_hash, row.mined_in_block_height as u64))
+        .map(|row| {
+            (
+                row.output_hash,
+                row.mined_in_block_height as u64,
+                row.memo_parsed,
+                row.memo_hex,
+            )
+        })
         .collect())
+}
+
+pub async fn mark_output_confirmed(
+    pool: &SqlitePool,
+    output_hash: &[u8],
+    confirmed_height: u64,
+    confirmed_hash: &[u8],
+) -> Result<(), sqlx::Error> {
+    let confirmed_height = confirmed_height as i64;
+    sqlx::query!(
+        r#"
+        UPDATE outputs
+        SET confirmed_height = ?, confirmed_hash = ?
+        WHERE output_hash = ?
+        "#,
+        confirmed_height,
+        confirmed_hash,
+        output_hash
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(())
 }

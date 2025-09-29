@@ -405,8 +405,8 @@ async fn scan(
                             hash: hash.clone(),
                             block_height: scanned_block.height,
                             block_hash: scanned_block.block_hash.to_vec(),
-                            memo_parsed,
-                            memo_hex,
+                            memo_parsed: memo_parsed.clone(),
+                            memo_hex: memo_hex.clone(),
                         },
                         description: format!(
                             "Detected output with amount {} at height {}",
@@ -423,6 +423,8 @@ async fn scan(
                         scanned_block.height,
                         scanned_block.block_hash.as_slice(),
                         scanned_block.mined_timestamp,
+                        memo_parsed.clone(),
+                        memo_hex.clone(),
                     )
                     .await?;
                     db::insert_wallet_event(&db, account.id, &event).await?;
@@ -453,9 +455,10 @@ async fn scan(
                     account.id,
                     scanned_block.height,
                     6, // 6 block confirmations required
-                ).await?;
+                )
+                .await?;
 
-                for (output_hash, original_height) in unconfirmed_outputs {
+                for (output_hash, original_height, memo_parsed, memo_hex) in unconfirmed_outputs {
                     let confirmation_event = models::WalletEvent {
                         id: 0,
                         account_id: account.id,
@@ -463,11 +466,12 @@ async fn scan(
                             hash: output_hash.clone(),
                             block_height: original_height,
                             confirmation_height: scanned_block.height,
+                            memo_parsed,
+                            memo_hex,
                         },
                         description: format!(
                             "Output confirmed at height {} (originally at height {})",
-                            scanned_block.height,
-                            original_height
+                            scanned_block.height, original_height
                         ),
                     };
 

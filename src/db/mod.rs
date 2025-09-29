@@ -18,6 +18,7 @@ mod outputs;
 pub use outputs::get_output_info_by_hash;
 pub use outputs::get_unconfirmed_outputs;
 pub use outputs::insert_output;
+pub use outputs::mark_output_confirmed;
 
 mod events;
 pub use events::insert_wallet_event;
