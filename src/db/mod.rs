@@ -1,12 +1,10 @@
 use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
 use std::env::current_dir;
 use std::fs;
-use std::path::Path;
 
 mod accounts;
 pub use accounts::AccountRow;
 pub use accounts::create_account;
-pub use accounts::get_account_by_name;
 pub use accounts::get_accounts;
 
 mod scanned_tip_blocks;

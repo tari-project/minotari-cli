@@ -1,15 +1,10 @@
 use blake2::{Blake2s256, Digest};
 use chacha20poly1305::aead::Aead;
-use chacha20poly1305::aead::rand_core::le;
-use chacha20poly1305::{AeadCore, ChaCha20Poly1305, ChaChaPoly1305, KeyInit, aead::OsRng};
+use chacha20poly1305::{AeadCore, KeyInit, aead::OsRng};
 use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
-use chrono::{NaiveDate, NaiveDateTime};
 use clap::{Parser, Subcommand};
-use lightweight_wallet_libs::{BlockScanResult, BlockchainScanner};
-use lightweight_wallet_libs::{
-    HttpBlockchainScanner, KeyManagerBuilder, ScanConfig, ScannerBuilder,
-};
-use std::env::current_dir;
+use lightweight_wallet_libs::BlockchainScanner;
+use lightweight_wallet_libs::{HttpBlockchainScanner, KeyManagerBuilder, ScanConfig};
 use std::time::Instant;
 use tari_crypto::compressed_key::CompressedKey;
 use tari_crypto::ristretto::{RistrettoPublicKey, RistrettoSecretKey};

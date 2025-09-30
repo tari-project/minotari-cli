@@ -1,5 +1,4 @@
-use chrono::{NaiveDate, NaiveDateTime};
-use lightweight_wallet_libs::transaction_components::WalletOutput;
+use chrono::NaiveDateTime;
 use serde::{Deserialize, Serialize};
 
 // Change depending on sql type.
