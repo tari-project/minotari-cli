@@ -1,4 +1,4 @@
-# Minotari Lightweight Wallet
+# Minotari CLI Wallet Example
 
 A command-line lightweight wallet implementation for the Tari blockchain network. This wallet uses view-only keys to scan the blockchain for transactions without requiring a full node.
 
@@ -13,16 +13,7 @@ A command-line lightweight wallet implementation for the Tari blockchain network
 - **Memo Support**: Parse and display payment memos attached to transactions
 - **Multi-Account**: Support for multiple wallet accounts in a single database
 
-## Installation
 
-### Prerequisites
-
-- Rust toolchain (2024 edition)
-- SQLx CLI for database migrations
-
-```bash
-cargo install sqlx-cli --no-default-features --features sqlite
-```
 
 ### Build
 
@@ -154,14 +145,13 @@ sqlx migrate run
 - **clap**: Command-line argument parsing
 - **tokio**: Async runtime
 
-## License
-
-[Specify your license here]
-
 ## Contributing
 
-[Contribution guidelines here]
+### Prerequisites
 
-## Support
+- Rust toolchain (2024 edition)
+- SQLx CLI for database migrations
 
-For issues and questions, please refer to the [Tari documentation](https://docs.tari.com/) or open an issue in this repository.
+```bash
+cargo install sqlx-cli --no-default-features --features sqlite
+```
