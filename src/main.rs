@@ -478,6 +478,15 @@ async fn scan(
                     result.push(confirmation_event.clone());
                     db::insert_wallet_event(&db, account.id, &confirmation_event).await?;
 
+                    // Mark the output as confirmed in the database
+                    db::mark_output_confirmed(
+                        &db,
+                        &output_hash,
+                        scanned_block.height,
+                        scanned_block.block_hash.as_slice(),
+                    )
+                    .await?;
+
                     println!(
                         "Output {:?} confirmed at height {} (originally at height {})",
                         hex::encode(&output_hash),
