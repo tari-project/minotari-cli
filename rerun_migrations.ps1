@@ -1,3 +1,3 @@
-rm migrations/example_schema.sqlite
+rm data/wallet.db*
 sqlx database create
 sqlx migrate run
