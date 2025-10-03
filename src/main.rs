@@ -408,7 +408,7 @@ async fn scan(
                     if let Some((output_id, value)) =
                         db::get_output_info_by_hash(&db, input.as_slice()).await?
                     {
-                        let input_id = db::insert_input(
+                        let (input_id, inserted_new_input) = db::insert_input(
                             &db,
                             account.id,
                             output_id,
@@ -417,26 +417,29 @@ async fn scan(
                             scanned_block.mined_timestamp,
                         )
                         .await?;
-                        let balance_change = BalanceChange {
-                            account_id: account.id,
-                            caused_by_output_id: None,
-                            caused_by_input_id: Some(input_id),
-                            description: format!("Output spent as input"),
-                            balance_credit: 0,
-                            balance_debit: value,
-                            effective_date: chrono::NaiveDateTime::from_timestamp(
-                                scanned_block.mined_timestamp as i64,
-                                0,
-                            ),
-                            effective_height: scanned_block.height as u64,
-                            claimed_recipient_address: None,
-                            claimed_sender_address: None,
-                            memo_hex: None,
-                            memo_parsed: None,
-                            claimed_fee: None,
-                            claimed_amount: None,
-                        };
-                        db::insert_balance_change(&db, &balance_change).await?;
+
+                        if inserted_new_input {
+                            let balance_change = BalanceChange {
+                                account_id: account.id,
+                                caused_by_output_id: None,
+                                caused_by_input_id: Some(input_id),
+                                description: format!("Output spent as input"),
+                                balance_credit: 0,
+                                balance_debit: value,
+                                effective_date: chrono::NaiveDateTime::from_timestamp(
+                                    scanned_block.mined_timestamp as i64,
+                                    0,
+                                ),
+                                effective_height: scanned_block.height as u64,
+                                claimed_recipient_address: None,
+                                claimed_sender_address: None,
+                                memo_hex: None,
+                                memo_parsed: None,
+                                claimed_fee: None,
+                                claimed_amount: None,
+                            };
+                            db::insert_balance_change(&db, &balance_change).await?;
+                        }
                     }
                 }
 
@@ -483,7 +486,7 @@ async fn scan(
                         ),
                     };
                     result.push(event.clone());
-                    let output_id = db::insert_output(
+                    let (output_id, inserted_new_output) = db::insert_output(
                         &db,
                         account.id,
                         hash.to_vec().clone(),
@@ -495,18 +498,21 @@ async fn scan(
                         memo_hex.clone(),
                     )
                     .await?;
-                    db::insert_wallet_event(&db, account.id, &event).await?;
 
-                    // parse balance changes.
-                    let balance_changes = parse_balance_changes(
-                        account.id,
-                        output_id,
-                        scanned_block.mined_timestamp,
-                        scanned_block.height,
-                        &output,
-                    );
-                    for change in balance_changes {
-                        db::insert_balance_change(&db, &change).await?;
+                    if inserted_new_output {
+                        db::insert_wallet_event(&db, account.id, &event).await?;
+
+                        // parse balance changes.
+                        let balance_changes = parse_balance_changes(
+                            account.id,
+                            output_id,
+                            scanned_block.mined_timestamp,
+                            scanned_block.height,
+                            &output,
+                        );
+                        for change in balance_changes {
+                            db::insert_balance_change(&db, &change).await?;
+                        }
                     }
                 }
                 db::insert_scanned_tip_block(

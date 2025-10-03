@@ -42,10 +42,10 @@ pub async fn insert_scanned_tip_block(
     account_id: i64,
     height: i64,
     hash: &[u8],
-) -> Result<i64, sqlx::Error> {
-    let result = sqlx::query!(
+) -> Result<(), sqlx::Error> {
+    sqlx::query!(
         r#"
-        INSERT INTO scanned_tip_blocks (account_id, height, hash)
+        INSERT OR IGNORE INTO scanned_tip_blocks (account_id, height, hash)
         VALUES (?, ?, ?)
         "#,
         account_id,
@@ -55,7 +55,7 @@ pub async fn insert_scanned_tip_block(
     .execute(pool)
     .await?;
 
-    Ok(result.last_insert_rowid())
+    Ok(())
 }
 
 pub async fn delete_old_scanned_tip_blocks(

@@ -11,7 +11,7 @@ pub async fn insert_output(
     mined_timestamp: u64,
     memo_parsed: Option<String>,
     memo_hex: Option<String>,
-) -> Result<i64, sqlx::Error> {
+) -> Result<(i64, bool), sqlx::Error> {
     let output_json = serde_json::to_string(&output).map_err(|e| {
         sqlx::Error::Io(std::io::Error::new(
             std::io::ErrorKind::Other,
@@ -28,11 +28,10 @@ pub async fn insert_output(
         .to_string();
     let block_height = block_height as i64;
     let value = output.value().as_u64() as i64;
-    let output_id = sqlx::query!(
+    let insert_result = sqlx::query!(
         r#"
-       INSERT INTO outputs (account_id, output_hash, mined_in_block_height, mined_in_block_hash, value, mined_timestamp, wallet_output_json, memo_parsed, memo_hex)
+       INSERT OR IGNORE INTO outputs (account_id, output_hash, mined_in_block_height, mined_in_block_hash, value, mined_timestamp, wallet_output_json, memo_parsed, memo_hex)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
-         RETURNING id
         "#,
         account_id,
         output_hash,
@@ -44,10 +43,23 @@ pub async fn insert_output(
         memo_parsed,
         memo_hex
            )
-    .fetch_one(pool)
-    .await?.id;
+    .execute(pool)
+    .await?;
 
-    Ok(output_id)
+    let rows_affected = insert_result.rows_affected();
+
+    // Now fetch the ID, which is guaranteed to exist
+    let output_id = sqlx::query!(
+        r#"
+        SELECT id FROM outputs WHERE output_hash = ?
+        "#,
+        output_hash
+    )
+    .fetch_one(pool)
+    .await?
+    .id;
+
+    Ok((output_id, rows_affected > 0))
 }
 
 pub async fn get_output_info_by_hash(

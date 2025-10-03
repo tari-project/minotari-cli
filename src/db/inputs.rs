@@ -7,7 +7,7 @@ pub async fn insert_input(
     mined_in_block_height: u64,
     mined_in_block_hash: &[u8],
     mined_timestamp: u64,
-) -> Result<i64, sqlx::Error> {
+) -> Result<(i64, bool), sqlx::Error> {
     let timestamp = chrono::NaiveDateTime::from_timestamp_opt(mined_timestamp as i64, 0)
         .ok_or_else(|| {
             sqlx::Error::Io(std::io::Error::new(
@@ -17,11 +17,10 @@ pub async fn insert_input(
         })?
         .to_string();
     let mined_in_block_height = mined_in_block_height as i64;
-    let id = sqlx::query!(
+    let insert_result = sqlx::query!(
         r#"
-       INSERT INTO inputs (account_id, output_id, mined_in_block_height, mined_in_block_hash, mined_timestamp)
+       INSERT OR IGNORE INTO inputs (account_id, output_id, mined_in_block_height, mined_in_block_hash, mined_timestamp)
        VALUES (?, ?, ?, ?, ?) 
-            RETURNING id
         "#,
         account_id,
         output_id,
@@ -29,8 +28,21 @@ pub async fn insert_input(
         mined_in_block_hash,
         timestamp
     )
-    .fetch_one(pool)
-    .await?.id;
+    .execute(pool)
+    .await?;
 
-    Ok(id)
+    let rows_affected = insert_result.rows_affected();
+
+    // Now fetch the ID, which is guaranteed to exist
+    let input_id = sqlx::query!(
+        r#"
+        SELECT id FROM inputs WHERE output_id = ?
+        "#,
+        output_id
+    )
+    .fetch_one(pool)
+    .await?
+    .id;
+
+    Ok((input_id, rows_affected > 0))
 }
