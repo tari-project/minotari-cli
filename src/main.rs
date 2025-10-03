@@ -4,9 +4,15 @@ use chacha20poly1305::{AeadCore, KeyInit, aead::OsRng};
 use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
 use clap::{Parser, Subcommand};
 use lightweight_wallet_libs::BlockchainScanner;
+use lightweight_wallet_libs::transaction_components::{Network, TransactionKeyManagerInterface};
 use lightweight_wallet_libs::{HttpBlockchainScanner, KeyManagerBuilder, ScanConfig};
 use std::time::Instant;
+use tari_common_types::seeds::cipher_seed::CipherSeed;
+use tari_common_types::seeds::mnemonic::{Mnemonic, MnemonicLanguage};
+use tari_common_types::seeds::seed_words;
+use tari_common_types::tari_address::{TariAddress, TariAddressFeatures};
 use tari_crypto::compressed_key::CompressedKey;
+use tari_crypto::keys::PublicKey;
 use tari_crypto::ristretto::{RistrettoPublicKey, RistrettoSecretKey};
 
 use crate::db::{AccountRow, delete_old_scanned_tip_blocks, get_accounts, init_db};
@@ -28,6 +34,20 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Create a new address, and returns a file with the
+    /// seed words, address, birthday, private view key and public spend key,
+    /// optionally encrypting the file with a password
+    CreateAddress {
+        #[arg(short, long, help = "Password to encrypt the wallet file")]
+        password: Option<String>,
+        #[arg(
+            short,
+            long,
+            help = "Path to the output file",
+            default_value = "data/output.json"
+        )]
+        output_file: String,
+    },
     /// Scan the blockchain for transactions
     Scan {
         #[arg(short, long, help = "Password to decrypt the wallet file")]
@@ -113,6 +133,73 @@ async fn main() -> Result<(), anyhow::Error> {
     let cli = Cli::parse();
 
     match cli.command {
+        Commands::CreateAddress {
+            password,
+            output_file,
+        } => {
+            println!("Creating new address...");
+            let seeds = CipherSeed::random();
+            let birthday = seeds.birthday();
+            let seed_words = seeds
+                .to_mnemonic(MnemonicLanguage::English, None)?
+                .join(" ");
+            let key_manager = KeyManagerBuilder::default()
+                .with_master_seed(seeds)
+                .try_build()
+                .await?;
+
+            let view_key = key_manager.get_private_view_key().await?;
+            let spend_key = key_manager.get_spend_key().await?;
+
+            let public_view_key = CompressedKey::from_secret_key(&view_key);
+
+            let tari_address = TariAddress::new_dual_address(
+                public_view_key,
+                spend_key.pub_key.clone(),
+                Network::MainNet,
+                TariAddressFeatures::create_one_sided_only(),
+                None,
+            )?;
+            println!("New address: {}", tari_address);
+
+            let wallet_data = if let Some(password) = password {
+                let password = if password.len() < 32 {
+                    format!("{:0<32}", password)
+                } else {
+                    password[..32].to_string()
+                };
+                let key = Key::from_slice(password.as_bytes());
+                let cipher = XChaCha20Poly1305::new(key);
+
+                let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
+                let encrypted_view_key = cipher.encrypt(&nonce, view_key.as_bytes())?;
+                let encrypted_spend_key = cipher.encrypt(&nonce, spend_key.pub_key.as_bytes())?;
+
+                let encrypted_seed_words =
+                    cipher.encrypt(&nonce, seed_words.reveal().as_bytes())?;
+
+                serde_json::json!({
+                    "address": tari_address.to_base58(),
+                    "encrypted_view_key": hex::encode(encrypted_view_key),
+                    "encrypted_spend_key": hex::encode(encrypted_spend_key),
+                    "encrypted_seed_words": hex::encode(encrypted_seed_words),
+                    "nonce": hex::encode(nonce),
+                    "birthday": birthday,
+                })
+            } else {
+                serde_json::json!({
+                    "address": tari_address.to_base58(),
+                    "view_key": hex::encode(view_key.as_bytes()),
+                    "spend_key": hex::encode(spend_key.pub_key.as_bytes()),
+                    "seed_words": seed_words.reveal().clone(),
+                    "birthday": birthday,
+                })
+            };
+            std::fs::create_dir_all(std::path::Path::new(&output_file).parent().unwrap())?;
+            std::fs::write(output_file, serde_json::to_string_pretty(&wallet_data)?)?;
+            println!("Wallet data written to file.");
+            Ok(())
+        }
         Commands::ImportViewKey {
             view_private_key,
             spend_public_key,
