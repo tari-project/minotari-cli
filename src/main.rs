@@ -14,6 +14,8 @@ use tari_common_types::tari_address::{TariAddress, TariAddressFeatures};
 use tari_crypto::compressed_key::CompressedKey;
 use tari_crypto::keys::PublicKey;
 use tari_crypto::ristretto::{RistrettoPublicKey, RistrettoSecretKey};
+use tari_transaction_components::key_manager::TransactionKeyManagerWrapper;
+use tari_transaction_components::key_manager::memory_key_manager::MemoryKeyManagerBackend;
 
 use crate::db::{AccountRow, delete_old_scanned_tip_blocks, get_accounts, init_db};
 use crate::models::{BalanceChange, WalletEvent};
@@ -247,7 +249,7 @@ async fn main() -> Result<(), anyhow::Error> {
             account_name,
         } => {
             println!("Fetching balance...");
-            handle_balance(&database_file, account_name.as_deref()).await;
+            let _ = handle_balance(&database_file, account_name.as_deref()).await;
             Ok(())
         }
     }
@@ -311,23 +313,15 @@ async fn scan(
     for account in get_accounts(&db, account_name).await? {
         println!("Found account: {:?}", account);
 
-        // load wallet file
-        // let (view_key, spend_key) = decrypt_keys("data/wallet.json", password)?;
-        // let (view_key, spend_key) = decrypt_keys(&account, password)?;
+        let (view_key, spend_key) = decrypt_keys(&account, password)?;
+        let key_manager = KeyManagerBuilder::default()
+            .with_view_key_and_spend_key(view_key, spend_key, account.birthday as u16)
+            .try_build()
+            .await?;
+        let mut scanner =
+            HttpBlockchainScanner::new(base_url.to_string(), key_manager.clone()).await?;
 
-        // println!("Decrypted view key: {:x?}", view_key);
-        // println!("Decrypted spend key: {:x?}", spend_key);
-
-        // // let scanner = ScannerBuilder::default().build()?;
-        // let key_manager = KeyManagerBuilder::default().try_build().await?;
-        // let mut scanner =
-        //     HttpBlockchainScanner::new(base_url.to_string(), key_manager.clone()).await?;
-
-        // Get last scanned blocks.
-
-        //  Scan for reorgs.
-
-        let mut last_blocks = db::get_scanned_tip_blocks_by_account(&db, account.id).await?;
+        let last_blocks = db::get_scanned_tip_blocks_by_account(&db, account.id).await?;
 
         let mut start_height = 0;
         if last_blocks.is_empty() {
@@ -341,9 +335,7 @@ async fn scan(
                 last_blocks.len(),
                 account.friendly_name
             );
-            last_blocks.sort_by(|a, b| b.height.cmp(&a.height));
-            let reorged_blocks =
-                check_for_reorgs(&last_blocks, &account, password, base_url, &db).await?;
+            let reorged_blocks = check_for_reorgs(&mut scanner, &db, &last_blocks).await?;
             if reorged_blocks.len() == last_blocks.len() {
                 println!("All previously scanned blocks have been reorged, starting from genesis.");
 
@@ -383,13 +375,6 @@ async fn scan(
             let scan_config = ScanConfig::default()
                 .with_start_height(start_height)
                 .with_end_height(start_height.saturating_add(max_remaining.min(batch_size)));
-            let (view_key, spend_key) = decrypt_keys(&account, password)?;
-            let key_manager = KeyManagerBuilder::default()
-                .with_view_key_and_spend_key(view_key, spend_key, account.birthday as u16)
-                .try_build()
-                .await?;
-            let mut scanner =
-                HttpBlockchainScanner::new(base_url.to_string(), key_manager.clone()).await?;
             println!(
                 "Scanning blocks {} to {:?}...",
                 scan_config.start_height, scan_config.end_height
@@ -653,40 +638,13 @@ fn parse_balance_changes(
 
 /// Returns (removed_blocks, added_blocks   )
 async fn check_for_reorgs(
-    last_blocks_in_desc: &[models::ScannedTipBlock],
-    account: &AccountRow,
-    password: &str,
-    base_url: &str,
+    scanner: &mut HttpBlockchainScanner<TransactionKeyManagerWrapper<MemoryKeyManagerBackend>>,
     db: &sqlx::SqlitePool,
+    last_blocks_in_desc: &[models::ScannedTipBlock],
 ) -> Result<Vec<models::ScannedTipBlock>, anyhow::Error> {
-    let (view_key, spend_key) = decrypt_keys(&account, password)?;
-    let birthday = account.birthday;
-    let start_height = if let Some(last_block) = last_blocks_in_desc.last() {
-        last_block.height as u64
-    } else {
-        0
-    };
-
-    let end_height = if let Some(last_block) = last_blocks_in_desc.first() {
-        last_block.height
-    } else {
-        0
-    };
-
-    let key_manager = KeyManagerBuilder::default()
-        .with_view_key_and_spend_key(view_key, spend_key, birthday as u16)
-        .try_build()
-        .await?;
-    let mut scanner = HttpBlockchainScanner::new(base_url.to_string(), key_manager).await?;
-    // let scan_config = ScanConfig::default()
-    // .with_start_height(start_height)
-    // .with_end_height(end_height + 1);
-    // let scanned_blocks = scanner.(scan_config).await?;
-
     let mut removed_blocks = vec![];
     for block in last_blocks_in_desc {
         let chain_block = scanner.get_header_by_height(block.height).await?;
-        dbg!(&chain_block);
         if let Some(chain_block) = chain_block {
             if chain_block.hash == block.hash {
                 // Block matches, no reorg at this height.
@@ -717,14 +675,6 @@ async fn check_for_reorgs(
             // Handle the reorg as needed (e.g., delete affected records, rescan, etc.).
             continue;
         }
-
-        // if scanned_blocks
-        //     .iter()
-        //     .any(|b| b.height == block.height && b.block_hash == block.hash)
-        // {
-        //     // Block matches, no reorg at this height.
-        //     continue;
-        // }
 
         // Fetch the block from the blockchain to verify its hash.
         // For simplicity, we'll just print out the block info here.

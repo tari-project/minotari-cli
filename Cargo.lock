@@ -1850,6 +1850,7 @@ dependencies = [
  "sqlx",
  "tari_common_types",
  "tari_crypto",
+ "tari_transaction_components",
  "tari_utilities",
  "tokio",
 ]
