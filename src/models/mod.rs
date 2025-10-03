@@ -1,5 +1,6 @@
 use chrono::NaiveDateTime;
 use serde::{Deserialize, Serialize};
+use tari_common_types::types::FixedHash;
 
 // Change depending on sql type.
 pub type Id = i64;
@@ -24,7 +25,7 @@ pub struct WalletEvent {
 pub enum WalletEventType {
     BlockRolledBack,
     OutputDetected {
-        hash: Vec<u8>,
+        hash: FixedHash,
         block_height: u64,
         block_hash: Vec<u8>,
         memo_parsed: Option<String>,

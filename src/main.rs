@@ -413,7 +413,7 @@ async fn scan(
                     let output_id = db::insert_output(
                         &db,
                         account.id,
-                        hash.clone(),
+                        hash.to_vec().clone(),
                         output,
                         scanned_block.height,
                         scanned_block.block_hash.as_slice(),
