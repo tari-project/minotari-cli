@@ -379,9 +379,10 @@ async fn scan(
             if total_scanned >= max_blocks {
                 break;
             }
+            let max_remaining = max_blocks - total_scanned;
             let scan_config = ScanConfig::default()
                 .with_start_height(start_height)
-                .with_end_height(start_height.saturating_add(max_blocks.min(batch_size)));
+                .with_end_height(start_height.saturating_add(max_remaining.min(batch_size)));
             let (view_key, spend_key) = decrypt_keys(&account, password)?;
             let key_manager = KeyManagerBuilder::default()
                 .with_view_key_and_spend_key(view_key, spend_key, account.birthday as u16)
