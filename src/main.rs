@@ -273,10 +273,10 @@ async fn handle_balance(
             AccountBalance,
             r#"
             SELECT 
-              SUM(balance_credit) as total_credits, 
-              Sum(balance_debit) as total_debits, 
-              max(effective_height) as max_height,
-              strftime('%Y-%m-%d %H:%M:%S', max(effective_date))  as max_date
+              SUM(balance_credit) as "total_credits: _",
+              Sum(balance_debit) as "total_debits: _",
+              max(effective_height) as "max_height: _",
+              strftime('%Y-%m-%d %H:%M:%S', max(effective_date))  as "max_date: _"
             FROM balance_changes
             WHERE account_id = ?
             "#,
