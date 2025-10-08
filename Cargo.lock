@@ -1688,6 +1688,7 @@ dependencies = [
 [[package]]
 name = "lightweight_wallet_libs"
 version = "0.2.0"
+source = "git+https://github.com/tari-project/tari-wallet?rev=83364a19642516036c87264344dbd3992d7bd039#83364a19642516036c87264344dbd3992d7bd039"
 dependencies = [
  "anyhow",
  "argon2 0.5.3",
@@ -1848,6 +1849,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sqlx",
+ "tari_common",
  "tari_common_types",
  "tari_crypto",
  "tari_transaction_components",

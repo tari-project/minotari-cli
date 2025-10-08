@@ -4,16 +4,21 @@ use chacha20poly1305::{AeadCore, KeyInit, aead::OsRng};
 use chacha20poly1305::{Key, XChaCha20Poly1305, XNonce};
 use clap::{Parser, Subcommand};
 use lightweight_wallet_libs::BlockchainScanner;
-use lightweight_wallet_libs::transaction_components::{Network, TransactionKeyManagerInterface};
+// use lightweight_wallet_libs::transaction_components::{Network, TransactionKeyManagerInterface};
 use lightweight_wallet_libs::{HttpBlockchainScanner, KeyManagerBuilder, ScanConfig};
+use std::sync::Arc;
 use std::time::Instant;
+use tari_common::configuration::Network;
 use tari_common_types::seeds::cipher_seed::CipherSeed;
 use tari_common_types::seeds::mnemonic::{Mnemonic, MnemonicLanguage};
 use tari_common_types::seeds::seed_words;
 use tari_common_types::tari_address::{TariAddress, TariAddressFeatures};
+use tari_common_types::wallet_types::WalletType;
 use tari_crypto::compressed_key::CompressedKey;
 use tari_crypto::keys::PublicKey;
 use tari_crypto::ristretto::{RistrettoPublicKey, RistrettoSecretKey};
+use tari_transaction_components::crypto_factories::CryptoFactories;
+use tari_transaction_components::key_manager::TransactionKeyManagerInterface;
 use tari_transaction_components::key_manager::TransactionKeyManagerWrapper;
 use tari_transaction_components::key_manager::memory_key_manager::MemoryKeyManagerBackend;
 
@@ -145,9 +150,12 @@ async fn main() -> Result<(), anyhow::Error> {
             let seed_words = seeds
                 .to_mnemonic(MnemonicLanguage::English, None)?
                 .join(" ");
-            let key_manager = KeyManagerBuilder::default()
-                .with_master_seed(seeds)
-                .try_build()
+            let key_manager: TransactionKeyManagerWrapper<MemoryKeyManagerBackend> =
+                TransactionKeyManagerWrapper::new(
+                    Some(seeds),
+                    CryptoFactories::default(),
+                    Arc::new(WalletType::DerivedKeys),
+                )
                 .await?;
 
             let view_key = key_manager.get_private_view_key().await?;
