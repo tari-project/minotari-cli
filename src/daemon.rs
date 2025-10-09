@@ -1,8 +1,13 @@
 use std::time::Duration;
 
+use anyhow::anyhow;
 use tokio::time::sleep;
 
-use crate::scan::{self, ScanError};
+use crate::{
+    api,
+    db,
+    scan::{self, ScanError},
+};
 
 pub struct Daemon {
     password: String,
@@ -11,6 +16,7 @@ pub struct Daemon {
     max_blocks: u64,
     batch_size: u64,
     scan_interval: Duration,
+    api_port: u16,
 }
 
 impl Daemon {
@@ -21,6 +27,7 @@ impl Daemon {
         max_blocks: u64,
         batch_size: u64,
         scan_interval_secs: u64,
+        api_port: u16,
     ) -> Self {
         Self {
             password,
@@ -29,11 +36,25 @@ impl Daemon {
             max_blocks,
             batch_size,
             scan_interval: Duration::from_secs(scan_interval_secs),
+            api_port,
         }
     }
 
     pub async fn run(&self) -> Result<(), ScanError> {
         println!("Daemon started. Press Ctrl+C to stop.");
+
+        let db_pool = db::init_db(&self.database_file).await.map_err(ScanError::Fatal)?;
+
+        let router = api::create_router(db_pool);
+        let addr = format!("0.0.0.0:{}", self.api_port);
+        let listener = tokio::net::TcpListener::bind(&addr)
+            .await
+            .map_err(|e| ScanError::Fatal(anyhow!("Failed to bind API server to {}: {}", addr, e)))?;
+
+        println!("API server listening on {}", addr);
+        let api_server = tokio::spawn(async move {
+            axum::serve(listener, router).await.unwrap();
+        });
 
         loop {
             tokio::select! {
@@ -57,6 +78,7 @@ impl Daemon {
                 }
             }
         }
+        api_server.abort();
         println!("Daemon stopped.");
         Ok(())
     }

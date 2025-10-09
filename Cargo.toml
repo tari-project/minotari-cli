@@ -29,3 +29,6 @@ tari_common = { git = "https://github.com/stringhandler/tari/", rev = "a39cb6520
 tari_common_types = { git = "https://github.com/stringhandler/tari/", rev = "a39cb6520c6d58c0740f2df65770a4d01386a3c2" }
 tari_transaction_components = { git = "https://github.com/stringhandler/tari/", rev = "a39cb6520c6d58c0740f2df65770a4d01386a3c2" }
 thiserror = "2.0.17"
+axum = { version = "0.8.6", features = ["default", "http2", "macros"] }
+utoipa = "5.4.0"
+utoipa-swagger-ui = { version = "9.0.2", features = ["axum"] }

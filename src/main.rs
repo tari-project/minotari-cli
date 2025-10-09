@@ -34,6 +34,7 @@ use crate::{
     models::WalletEvent,
     scan::ScanError,
 };
+mod api;
 mod daemon;
 mod db;
 mod models;
@@ -106,6 +107,8 @@ enum Commands {
         batch_size: u64,
         #[arg(short, long, help = "Interval between scans in seconds", default_value_t = 60)]
         scan_interval_secs: u64,
+        #[arg(long, help = "Port for the API server", default_value_t = 9000)]
+        api_port: u16,
     },
     /// Show wallet balance
     Balance {
@@ -250,6 +253,7 @@ async fn main() -> Result<(), anyhow::Error> {
             max_blocks_to_scan,
             batch_size,
             scan_interval_secs,
+            api_port,
         } => {
             println!("Starting Tari wallet daemon...");
             let daemon = daemon::Daemon::new(
@@ -259,6 +263,7 @@ async fn main() -> Result<(), anyhow::Error> {
                 max_blocks_to_scan,
                 batch_size,
                 scan_interval_secs,
+                api_port,
             );
             daemon.run().await?;
             Ok(())

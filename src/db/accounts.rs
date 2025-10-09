@@ -1,4 +1,6 @@
+use serde::Serialize;
 use sqlx::SqlitePool;
+use utoipa::ToSchema;
 
 pub async fn create_account(
     pool: &SqlitePool,
@@ -107,7 +109,7 @@ pub struct AccountRow {
     pub birthday: i64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, ToSchema, Serialize)]
 pub struct AccountBalance {
     pub total_credits: Option<i64>,
     pub total_debits: Option<i64>,
