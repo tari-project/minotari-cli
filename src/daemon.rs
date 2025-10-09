@@ -4,8 +4,7 @@ use anyhow::anyhow;
 use tokio::time::sleep;
 
 use crate::{
-    api,
-    db,
+    api, db,
     scan::{self, ScanError},
 };
 

@@ -8,6 +8,7 @@ pub type Id = i64;
 #[derive(Debug, Clone)]
 pub struct ScannedTipBlock {
     pub id: Id,
+    #[allow(dead_code)]
     pub account_id: Id,
     pub height: u64,
     pub hash: Vec<u8>,
@@ -15,7 +16,9 @@ pub struct ScannedTipBlock {
 
 #[derive(Debug, Clone)]
 pub struct WalletEvent {
+    #[allow(dead_code)]
     pub id: Id,
+    #[allow(dead_code)]
     pub account_id: Id,
     pub event_type: WalletEventType,
     pub description: String,

@@ -3,7 +3,6 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
-use serde::Serialize;
 use serde_json::json;
 use thiserror::Error;
 use utoipa::ToSchema;
@@ -11,6 +10,7 @@ use utoipa::ToSchema;
 #[derive(Debug, Error, ToSchema)]
 pub enum ApiError {
     #[error("Internal server error: {0}")]
+    #[allow(dead_code)]
     InternalServerError(String),
     #[error("Database error: {0}")]
     DbError(String),
@@ -38,9 +38,4 @@ impl IntoResponse for ApiError {
 
         (status, body).into_response()
     }
-}
-
-#[derive(Serialize)]
-struct ErrorResponse {
-    error: String,
 }

@@ -1,14 +1,14 @@
 use std::time::Instant;
 
 use chacha20poly1305::{Key, KeyInit, XChaCha20Poly1305, XNonce, aead::Aead};
+use chrono::{DateTime, Utc};
 use lightweight_wallet_libs::{BlockchainScanner, HttpBlockchainScanner, KeyManagerBuilder, ScanConfig};
 use tari_crypto::{
     compressed_key::CompressedKey,
     ristretto::{RistrettoPublicKey, RistrettoSecretKey},
 };
 use tari_transaction_components::key_manager::{
-    TransactionKeyManagerWrapper,
-    memory_key_manager::MemoryKeyManagerBackend,
+    TransactionKeyManagerWrapper, memory_key_manager::MemoryKeyManagerBackend,
 };
 use tari_utilities::byte_array::ByteArray;
 use thiserror::Error;
@@ -145,7 +145,7 @@ pub async fn scan(
                             &db,
                             account.id,
                             output_id,
-                            scanned_block.height as u64,
+                            scanned_block.height,
                             scanned_block.block_hash.as_slice(),
                             scanned_block.mined_timestamp,
                         )
@@ -157,14 +157,16 @@ pub async fn scan(
                                 account_id: account.id,
                                 caused_by_output_id: None,
                                 caused_by_input_id: Some(input_id),
-                                description: format!("Output spent as input"),
+                                description: "Output spent as input".to_string(),
                                 balance_credit: 0,
                                 balance_debit: value,
-                                effective_date: chrono::NaiveDateTime::from_timestamp(
+                                effective_date: DateTime::<Utc>::from_timestamp(
                                     scanned_block.mined_timestamp as i64,
                                     0,
-                                ),
-                                effective_height: scanned_block.height as u64,
+                                )
+                                .unwrap()
+                                .naive_utc(),
+                                effective_height: scanned_block.height,
                                 claimed_recipient_address: None,
                                 claimed_sender_address: None,
                                 memo_hex: None,
@@ -204,7 +206,7 @@ pub async fn scan(
                         id: 0,
                         account_id: account.id,
                         event_type: models::WalletEventType::OutputDetected {
-                            hash: hash.clone(),
+                            hash: *hash,
                             block_height: scanned_block.height,
                             block_hash: scanned_block.block_hash.to_vec(),
                             memo_parsed: memo_parsed.clone(),
@@ -242,7 +244,7 @@ pub async fn scan(
                             output_id,
                             scanned_block.mined_timestamp,
                             scanned_block.height,
-                            &output,
+                            output,
                         );
                         for change in balance_changes {
                             db::insert_balance_change(&db, &change)
@@ -408,7 +410,9 @@ fn parse_balance_changes(
 ) -> Vec<models::BalanceChange> {
     // Coinbases.
     if output.features().is_coinbase() {
-        let effective_date = chrono::NaiveDateTime::from_timestamp(chain_timestamp as i64, 0);
+        let effective_date = DateTime::<Utc>::from_timestamp(chain_timestamp as i64, 0)
+            .unwrap()
+            .naive_utc();
         let balance_change = models::BalanceChange {
             account_id,
             caused_by_output_id: Some(output_id),
@@ -429,7 +433,9 @@ fn parse_balance_changes(
     }
 
     let mut changes = vec![];
-    let effective_date = chrono::NaiveDateTime::from_timestamp(chain_timestamp as i64, 0);
+    let effective_date = DateTime::<Utc>::from_timestamp(chain_timestamp as i64, 0)
+        .unwrap()
+        .naive_utc();
     let payment_info = output.payment_id();
     let memo_bytes = payment_info.get_payment_id();
     let memo = String::from_utf8_lossy(&memo_bytes);

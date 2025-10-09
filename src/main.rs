@@ -2,10 +2,7 @@ use std::sync::Arc;
 
 use blake2::{Blake2s256, Digest};
 use chacha20poly1305::{
-    AeadCore,
-    Key,
-    KeyInit,
-    XChaCha20Poly1305,
+    AeadCore, Key, KeyInit, XChaCha20Poly1305,
     aead::{Aead, OsRng},
 };
 use clap::{Parser, Subcommand};
@@ -22,9 +19,7 @@ use tari_crypto::compressed_key::CompressedKey;
 use tari_transaction_components::{
     crypto_factories::CryptoFactories,
     key_manager::{
-        TransactionKeyManagerInterface,
-        TransactionKeyManagerWrapper,
-        memory_key_manager::MemoryKeyManagerBackend,
+        TransactionKeyManagerInterface, TransactionKeyManagerWrapper, memory_key_manager::MemoryKeyManagerBackend,
     },
 };
 use tari_utilities::byte_array::ByteArray;

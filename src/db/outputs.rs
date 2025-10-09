@@ -1,6 +1,8 @@
+use chrono::{DateTime, Utc};
 use lightweight_wallet_libs::transaction_components::WalletOutput;
 use sqlx::SqlitePool;
 
+#[allow(clippy::too_many_arguments)]
 pub async fn insert_output(
     pool: &SqlitePool,
     account_id: i64,
@@ -13,17 +15,17 @@ pub async fn insert_output(
     memo_hex: Option<String>,
 ) -> Result<(i64, bool), sqlx::Error> {
     let output_json = serde_json::to_string(&output).map_err(|e| {
-        sqlx::Error::Io(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("Failed to serialize output to JSON: {}", e),
-        ))
+        sqlx::Error::Io(std::io::Error::other(format!(
+            "Failed to serialize output to JSON: {}",
+            e
+        )))
     })?;
-    let mined_timestamp = chrono::NaiveDateTime::from_timestamp_opt(mined_timestamp as i64, 0)
+    let mined_timestamp = DateTime::<Utc>::from_timestamp(mined_timestamp as i64, 0)
         .ok_or_else(|| {
-            sqlx::Error::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("Invalid mined timestamp: {}", mined_timestamp),
-            ))
+            sqlx::Error::Io(std::io::Error::other(format!(
+                "Invalid mined timestamp: {}",
+                mined_timestamp
+            )))
         })?
         .to_string();
     let block_height = block_height as i64;
@@ -62,10 +64,7 @@ pub async fn insert_output(
     Ok((output_id, rows_affected > 0))
 }
 
-pub async fn get_output_info_by_hash(
-    pool: &SqlitePool,
-    output_hash: &[u8],
-) -> Result<Option<(i64, u64)>, sqlx::Error> {
+pub async fn get_output_info_by_hash(pool: &SqlitePool, output_hash: &[u8]) -> Result<Option<(i64, u64)>, sqlx::Error> {
     let row = sqlx::query!(
         r#"
         SELECT id, value
@@ -80,22 +79,13 @@ pub async fn get_output_info_by_hash(
     Ok(row.map(|r| (r.id, r.value as u64)))
 }
 
-pub struct OutputInfo {
-    pub id: i64,
-    pub value: u64,
-}
-
 pub async fn get_unconfirmed_outputs(
     pool: &SqlitePool,
     account_id: i64,
     current_height: u64,
     confirmation_blocks: u64,
 ) -> Result<Vec<(Vec<u8>, u64, Option<String>, Option<String>)>, sqlx::Error> {
-    let min_height_to_confirm = if current_height >= confirmation_blocks {
-        current_height - confirmation_blocks
-    } else {
-        0
-    };
+    let min_height_to_confirm = current_height.saturating_sub(confirmation_blocks);
     let min_height = min_height_to_confirm as i64;
 
     let rows = sqlx::query!(

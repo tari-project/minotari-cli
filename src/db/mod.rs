@@ -7,9 +7,7 @@ pub use accounts::{AccountBalance, AccountRow, create_account, get_account_by_na
 
 mod scanned_tip_blocks;
 pub use scanned_tip_blocks::{
-    delete_old_scanned_tip_blocks,
-    get_scanned_tip_blocks_by_account,
-    insert_scanned_tip_block,
+    delete_old_scanned_tip_blocks, get_scanned_tip_blocks_by_account, insert_scanned_tip_block,
 };
 
 mod outputs;
@@ -34,12 +32,8 @@ pub async fn init_db(db_path: &str) -> Result<SqlitePool, anyhow::Error> {
         .ok_or_else(|| anyhow::anyhow!("Invalid database file path"))?;
     std::fs::create_dir_all(parent)?;
     if fs::metadata(&path).is_err() {
-        fs::File::create(&path).map_err(|e| {
-            sqlx::Error::Io(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                format!("Failed to create database file: {}", e),
-            ))
-        })?;
+        fs::File::create(&path)
+            .map_err(|e| sqlx::Error::Io(std::io::Error::other(format!("Failed to create database file: {}", e))))?;
     }
     let db_url = format!("sqlite:///{}", path.display().to_string().replace("\\", "/"));
     dbg!(&db_url);

@@ -105,6 +105,7 @@ pub struct AccountRow {
     pub encrypted_view_private_key: Vec<u8>,
     pub encrypted_spend_public_key: Vec<u8>,
     pub cipher_nonce: Vec<u8>,
+    #[allow(dead_code)]
     pub unencrypted_view_key_hash: Option<Vec<u8>>,
     pub birthday: i64,
 }
