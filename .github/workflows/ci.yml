@@ -23,14 +23,8 @@ jobs:
         with:
           components: clippy, rustfmt, cargo-machete
 
-      - name: Cache cargo registry
-        uses: actions/cache@v3
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-            target
-          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+      - name: Cache Rust dependencies
+        uses: Swatinem/rust-cache@v2
 
       - name: Check formatting
         run: cargo fmt --all -- --check
@@ -38,8 +32,11 @@ jobs:
       - name: Run clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
 
+      - name: Build
+        run: cargo build --all-targets --all-features
+
       - name: Run tests
-        run: cargo test
+        run: cargo test --all-targets --all-features
 
       - name: Check unused dependencies
         run: cargo machete
