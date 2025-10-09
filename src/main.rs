@@ -30,7 +30,7 @@ use tari_transaction_components::{
 use tari_utilities::byte_array::ByteArray;
 
 use crate::{
-    db::{get_accounts, init_db},
+    db::{get_accounts, get_balance, init_db},
     models::WalletEvent,
     scan::ScanError,
 };
@@ -278,30 +278,7 @@ async fn handle_balance(database_file: &str, account_name: Option<&str>) -> Resu
     let db = init_db(database_file).await?;
     let accounts = get_accounts(&db, account_name).await?;
     for account in accounts {
-        struct AccountBalance {
-            total_credits: Option<i64>,
-            total_debits: Option<i64>,
-            max_height: Option<i64>,
-            max_date: Option<String>,
-        }
-        println!("Account: {}", account.friendly_name);
-        let agg_result = sqlx::query_as!(
-            AccountBalance,
-            r#"
-            SELECT 
-              SUM(balance_credit) as "total_credits: _",
-              Sum(balance_debit) as "total_debits: _",
-              max(effective_height) as "max_height: _",
-              strftime('%Y-%m-%d %H:%M:%S', max(effective_date))  as "max_date: _"
-            FROM balance_changes
-            WHERE account_id = ?
-            "#,
-            account.id
-        )
-        .fetch_one(&db)
-        .await?;
-
-        // if let Some(agg) = agg_result {
+        let agg_result = get_balance(&db, account.id).await?;
         let micro_tari_balance = (agg_result.total_credits.unwrap_or(0) - agg_result.total_debits.unwrap_or(0)) as f64;
         let tari_balance = micro_tari_balance / 1_000_000.0;
         println!(
