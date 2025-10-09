@@ -2,7 +2,7 @@ use std::time::Duration;
 
 use tokio::time::sleep;
 
-use crate::scan;
+use crate::scan::{self, ScanError};
 
 pub struct Daemon {
     password: String,
@@ -32,7 +32,7 @@ impl Daemon {
         }
     }
 
-    pub async fn run(&self) -> Result<(), anyhow::Error> {
+    pub async fn run(&self) -> Result<(), ScanError> {
         println!("Daemon started. Press Ctrl+C to stop.");
 
         loop {
@@ -43,8 +43,16 @@ impl Daemon {
                 }
                 res = self.scan_and_sleep() => {
                     if let Err(e) = res {
-                        println!("An error occurred during the scan cycle: {}", e);
-                        sleep(self.scan_interval).await;
+                        match e {
+                            ScanError::Fatal(_) | ScanError::FatalSqlx(_) => {
+                                println!("A fatal error occurred during the scan cycle: {}", e);
+                                return Err(e);
+                            },
+                            ScanError::Intermittent(err_msg) => {
+                                println!("An intermittent error occurred during the scan cycle: {}", err_msg);
+                                sleep(self.scan_interval).await;
+                            },
+                        }
                     }
                 }
             }
@@ -53,7 +61,7 @@ impl Daemon {
         Ok(())
     }
 
-    async fn scan_and_sleep(&self) -> Result<(), anyhow::Error> {
+    async fn scan_and_sleep(&self) -> Result<(), ScanError> {
         println!("Starting wallet scan...");
         let result = scan::scan(
             &self.password,

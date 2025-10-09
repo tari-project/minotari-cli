@@ -32,6 +32,7 @@ use tari_utilities::byte_array::ByteArray;
 use crate::{
     db::{get_accounts, init_db},
     models::WalletEvent,
+    scan::ScanError,
 };
 mod daemon;
 mod db;
@@ -321,7 +322,7 @@ async fn scan(
     account_name: Option<&str>,
     max_blocks: u64,
     batch_size: u64,
-) -> Result<Vec<WalletEvent>, anyhow::Error> {
+) -> Result<Vec<WalletEvent>, ScanError> {
     scan::scan(password, base_url, database_file, account_name, max_blocks, batch_size).await
 }
 
