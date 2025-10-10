@@ -39,6 +39,6 @@ pub fn create_router(db_pool: SqlitePool) -> Router {
 
     Router::new()
         .merge(SwaggerUi::new("/swagger-ui").url("/openapi.json", ApiDoc::openapi()))
-        .route("/accounts/:name/balance", get(accounts::api_get_balance))
+        .route("/accounts/{name}/balance", get(accounts::api_get_balance))
         .with_state(app_state)
 }
