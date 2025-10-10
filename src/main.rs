@@ -272,7 +272,9 @@ async fn handle_balance(database_file: &str, account_name: Option<&str>) -> Resu
     let accounts = get_accounts(&db, account_name).await?;
     for account in accounts {
         let agg_result = get_balance(&db, account.id).await?;
-        let micro_tari_balance = (agg_result.total_credits.unwrap_or(0) - agg_result.total_debits.unwrap_or(0)) as f64;
+        let credits = agg_result.total_credits.unwrap_or(0) as u64;
+        let debits = agg_result.total_debits.unwrap_or(0) as u64;
+        let micro_tari_balance = credits.saturating_sub(debits) as f64;
         let tari_balance = micro_tari_balance / 1_000_000.0;
         println!(
             "Balance at height {}({}): {} microTari ({} Tari)",
