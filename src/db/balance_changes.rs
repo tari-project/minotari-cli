@@ -2,19 +2,13 @@ use sqlx::SqlitePool;
 
 use crate::models::BalanceChange;
 
-pub async fn insert_balance_change(
-    pool: &SqlitePool,
-    change: &BalanceChange,
-) -> Result<(), sqlx::Error> {
+pub async fn insert_balance_change(pool: &SqlitePool, change: &BalanceChange) -> Result<(), sqlx::Error> {
     let balance_credit = change.balance_credit as i64;
     let balance_debit = change.balance_debit as i64;
     let effective_height = change.effective_height as i64;
     let claimed_fee = change.claimed_fee.map(|v| v as i64);
     let claimed_amount = change.claimed_amount.map(|v| v as i64);
-    let effective_date = change
-        .effective_date
-        .format("%Y-%m-%d %H:%M:%S")
-        .to_string();
+    let effective_date = change.effective_date.format("%Y-%m-%d %H:%M:%S").to_string();
     let description = &change.description;
     sqlx::query!(
         r#"

@@ -1,0 +1,15 @@
+# General formatting options
+edition = "2021"
+max_width = 120
+hard_tabs = false
+newline_style = "Auto"
+use_small_heuristics = "Default"
+
+# Import reordering and grouping (stable version)
+reorder_imports = true
+reorder_modules = true
+
+# Code style preferences
+match_block_trailing_comma = true
+use_field_init_shorthand = true
+use_try_shorthand = true

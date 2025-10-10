@@ -1,4 +1,6 @@
+use serde::Serialize;
 use sqlx::SqlitePool;
+use utoipa::ToSchema;
 
 pub async fn create_account(
     pool: &SqlitePool,
@@ -32,10 +34,7 @@ pub async fn create_account(
     Ok(())
 }
 
-pub async fn get_account_by_name(
-    pool: &SqlitePool,
-    friendly_name: &str,
-) -> Result<Option<AccountRow>, sqlx::Error> {
+pub async fn get_account_by_name(pool: &SqlitePool, friendly_name: &str) -> Result<Option<AccountRow>, sqlx::Error> {
     let row = sqlx::query_as!(
         AccountRow,
         r#"
@@ -57,10 +56,7 @@ pub async fn get_account_by_name(
     Ok(row)
 }
 
-pub async fn get_accounts(
-    pool: &SqlitePool,
-    friendly_name: Option<&str>,
-) -> Result<Vec<AccountRow>, sqlx::Error> {
+pub async fn get_accounts(pool: &SqlitePool, friendly_name: Option<&str>) -> Result<Vec<AccountRow>, sqlx::Error> {
     let rows = if let Some(name) = friendly_name {
         sqlx::query_as!(
             AccountRow,
@@ -109,6 +105,34 @@ pub struct AccountRow {
     pub encrypted_view_private_key: Vec<u8>,
     pub encrypted_spend_public_key: Vec<u8>,
     pub cipher_nonce: Vec<u8>,
+    #[allow(dead_code)]
     pub unencrypted_view_key_hash: Option<Vec<u8>>,
     pub birthday: i64,
+}
+
+#[derive(Debug, Clone, ToSchema, Serialize)]
+pub struct AccountBalance {
+    pub total_credits: Option<i64>,
+    pub total_debits: Option<i64>,
+    pub max_height: Option<i64>,
+    pub max_date: Option<String>,
+}
+
+pub async fn get_balance(pool: &SqlitePool, account_id: i64) -> Result<AccountBalance, sqlx::Error> {
+    let agg_result = sqlx::query_as!(
+        AccountBalance,
+        r#"
+            SELECT 
+              SUM(balance_credit) as "total_credits: _",
+              Sum(balance_debit) as "total_debits: _",
+              max(effective_height) as "max_height: _",
+              strftime('%Y-%m-%d %H:%M:%S', max(effective_date))  as "max_date: _"
+            FROM balance_changes
+            WHERE account_id = ?
+            "#,
+        account_id
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok(agg_result)
 }
