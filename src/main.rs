@@ -91,13 +91,6 @@ enum Commands {
         base_url: String,
         #[arg(short, long, help = "Path to the database file", default_value = "data/wallet.db")]
         database_file: String,
-        #[arg(
-            short = 'n',
-            long,
-            help = "Maximum number of blocks to scan per batch",
-            default_value_t = 100
-        )]
-        max_blocks_to_scan: u64,
         #[arg(long, help = "Batch size for scanning", default_value_t = 100)]
         batch_size: u64,
         #[arg(short, long, help = "Interval between scans in seconds", default_value_t = 60)]
@@ -245,12 +238,12 @@ async fn main() -> Result<(), anyhow::Error> {
             password,
             base_url,
             database_file,
-            max_blocks_to_scan,
             batch_size,
             scan_interval_secs,
             api_port,
         } => {
             println!("Starting Tari wallet daemon...");
+            let max_blocks_to_scan = u64::MAX;
             let daemon = daemon::Daemon::new(
                 password,
                 base_url,
