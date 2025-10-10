@@ -98,15 +98,23 @@ pub async fn scan(
             );
             start_height = estimate_birthday_block;
         }
+
+        let tip_info = scanner
+            .get_tip_info()
+            .await
+            .map_err(|e| ScanError::Intermittent(e.to_string()))?;
+
         let mut total_scanned = 0;
         loop {
             if total_scanned >= max_blocks {
                 break;
             }
             let max_remaining = max_blocks - total_scanned;
-            let scan_config = ScanConfig::default()
-                .with_start_height(start_height)
-                .with_end_height(start_height.saturating_add(max_remaining.min(batch_size)));
+            let scan_config = ScanConfig::default().with_start_height(start_height).with_end_height(
+                start_height
+                    .saturating_add(max_remaining.min(batch_size))
+                    .min(tip_info.best_block_height),
+            );
             println!(
                 "Scanning blocks {} to {:?}...",
                 scan_config.start_height, scan_config.end_height
