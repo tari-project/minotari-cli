@@ -9,6 +9,7 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  DATABASE_URL: sqlite:wallet.db
 
 jobs:
   check:
@@ -21,13 +22,22 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy, rustfmt, cargo-machete
+          components: clippy, rustfmt
+
+      - name: Install cargo-machete
+        run: cargo install cargo-machete
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2
 
       - name: Check formatting
         run: cargo fmt --all -- --check
+        
+      - name: Install sqlx-cli
+        run: cargo install sqlx-cli --no-default-features --features sqlite
+        
+      - name: Create database and run migrations
+        run: sqlx database create && sqlx migrate run
 
       - name: Run clippy
         run: cargo clippy --all-targets --all-features -- -D warnings

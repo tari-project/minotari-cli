@@ -1,0 +1,143 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "minotari",
+    "description": "",
+    "license": {
+      "name": ""
+    },
+    "version": "0.1.0"
+  },
+  "paths": {
+    "/accounts/{name}/balance": {
+      "get": {
+        "tags": [
+          "accounts"
+        ],
+        "operationId": "api_get_balance",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Name of the account to retrieve balance for",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Account balance retrieved successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AccountBalance"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Account not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "AccountBalance": {
+        "type": "object",
+        "properties": {
+          "max_date": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "max_height": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "total_credits": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          },
+          "total_debits": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64"
+          }
+        }
+      },
+      "ApiError": {
+        "oneOf": [
+          {
+            "type": "object",
+            "required": [
+              "InternalServerError"
+            ],
+            "properties": {
+              "InternalServerError": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "DbError"
+            ],
+            "properties": {
+              "DbError": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
+              "AccountNotFound"
+            ],
+            "properties": {
+              "AccountNotFound": {
+                "type": "string"
+              }
+            }
+          }
+        ]
+      }
+    }
+  },
+  "tags": [
+    {
+      "name": "minotari-cli",
+      "description": "Minotari CLI API"
+    }
+  ]
+}

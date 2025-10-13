@@ -28,7 +28,7 @@ cargo build --release
 Import a wallet using your view private key and spend public key:
 
 ```bash
-cargo run -- import-view-key \
+cargo run --bin minotari -- import-view-key \
   --view-private-key <HEX_VIEW_KEY> \
   --spend-public-key <HEX_SPEND_KEY> \
   --password <PASSWORD> \
@@ -48,7 +48,7 @@ cargo run -- import-view-key \
 Scan the blockchain for transactions:
 
 ```bash
-cargo run -- scan \
+cargo run --bin minotari -- scan \
   --password <PASSWORD> \
   --base-url https://rpc.tari.com \
   --database-file data/wallet.db \
@@ -69,7 +69,7 @@ cargo run -- scan \
 View your wallet balance:
 
 ```bash
-cargo run -- balance \
+cargo run --bin minotari -- balance \
   --database-file data/wallet.db \
   --account-name default
 ```
@@ -136,6 +136,14 @@ sqlx migrate run
 6. Track confirmations (6 blocks required)
 7. Parse memos and payment information
 8. Update balance changes and generate events
+
+### OpenAPI Specification
+
+The OpenAPI specification (`openapi.json`) is generated from the API definitions. If the API changes, you need to regenerate the `openapi.json` file using the following command:
+
+```bash
+cargo run --bin generate-openapi
+```
 
 ## Dependencies
 
