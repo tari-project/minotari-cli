@@ -32,7 +32,7 @@ impl FromRef<AppState> for SqlitePool {
         (name = "minotari-cli", description = "Minotari CLI API"),
     )
 )]
-struct ApiDoc;
+pub struct ApiDoc;
 
 pub fn create_router(db_pool: SqlitePool) -> Router {
     let app_state = AppState { db_pool };

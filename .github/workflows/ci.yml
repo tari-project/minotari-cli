@@ -21,7 +21,10 @@ jobs:
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy, rustfmt, cargo-machete
+          components: clippy, rustfmt
+
+      - name: Install cargo-machete
+        run: cargo install cargo-machete
 
       - name: Cache Rust dependencies
         uses: Swatinem/rust-cache@v2

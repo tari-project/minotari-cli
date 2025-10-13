@@ -24,16 +24,13 @@ use tari_transaction_components::{
 };
 use tari_utilities::byte_array::ByteArray;
 
-use crate::{
+use minotari::{
+    daemon, db,
     db::{get_accounts, get_balance, init_db},
     models::WalletEvent,
+    scan,
     scan::ScanError,
 };
-mod api;
-mod daemon;
-mod db;
-mod models;
-mod scan;
 
 #[derive(Parser)]
 #[command(name = "tari")]
