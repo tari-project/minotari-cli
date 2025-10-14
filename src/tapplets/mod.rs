@@ -1,8 +1,15 @@
 use crate::cli::TappletCommand;
 use anyhow::Result;
 
+mod fetch;
+
 pub async fn tapplet_command_handler(tapplet_subcommand: TappletCommand) -> Result<()> {
     match tapplet_subcommand {
+        TappletCommand::Fetch { cache_directory } => {
+            // Logic to fetch tapplets
+            println!("Fetching all tapplets from registries...");
+            fetch::fetch(cache_directory.into()).await?;
+        },
         TappletCommand::Search { query } => {
             // Logic to search tapplets
             println!("Searching for tapplets matching: {}", query);

@@ -95,6 +95,17 @@ pub enum Commands {
 }
 #[derive(Subcommand)]
 pub enum TappletCommand {
+    /// Fetch all registries
+    Fetch {
+        #[arg(
+            short,
+            long,
+            help = "Path to the cache directory",
+            default_value = "data/tapplet_cache"
+        )]
+        cache_directory: String,
+    },
+    /// Search for tapplets in registries
     Search {
         #[arg(short, long, help = "Query string to search for tapplets")]
         query: String,
