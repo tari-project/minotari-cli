@@ -1789,7 +1789,7 @@ dependencies = [
 [[package]]
 name = "lightweight_wallet_libs"
 version = "0.2.0"
-source = "git+https://github.com/tari-project/tari-wallet?rev=83364a19642516036c87264344dbd3992d7bd039#83364a19642516036c87264344dbd3992d7bd039"
+source = "git+https://github.com/swvheerden/tari-wallet?rev=91d27da9393ea77f1027ee8d20074adbab201580#91d27da9393ea77f1027ee8d20074adbab201580"
 dependencies = [
  "anyhow",
  "argon2 0.5.3",

@@ -1,8 +1,8 @@
 use std::time::Instant;
-
+use tari_transaction_components::transaction_components::WalletOutput;
 use chacha20poly1305::{Key, KeyInit, XChaCha20Poly1305, XNonce, aead::Aead};
 use chrono::{DateTime, Utc};
-use lightweight_wallet_libs::{BlockchainScanner, HttpBlockchainScanner, KeyManagerBuilder, ScanConfig};
+use lightweight_wallet_libs::{scanning::BlockchainScanner, HttpBlockchainScanner, KeyManagerBuilder, ScanConfig};
 use tari_crypto::{
     compressed_key::CompressedKey,
     ristretto::{RistrettoPublicKey, RistrettoSecretKey},
@@ -99,49 +99,43 @@ pub async fn scan(
             start_height = estimate_birthday_block;
         }
 
-        let tip_info = scanner
-            .get_tip_info()
-            .await
-            .map_err(|e| ScanError::Intermittent(e.to_string()))?;
-
         let mut total_scanned = 0;
+        let total_timer = Instant::now();
+        let scan_config = ScanConfig::default().with_start_height(start_height).with_batch_size(batch_size);
+        println!("starting scan from height {}", start_height);
         loop {
             if total_scanned >= max_blocks {
+                println!("Reached maximum number of blocks to scan: {}", max_blocks);
                 break;
             }
-            let max_remaining = max_blocks - total_scanned;
-            let scan_config = ScanConfig::default().with_start_height(start_height).with_end_height(
-                start_height
-                    .saturating_add(max_remaining.min(batch_size))
-                    .min(tip_info.best_block_height),
-            );
-            println!(
-                "Scanning blocks {} to {:?}...",
-                scan_config.start_height, scan_config.end_height
-            );
+
+            // println!(
+            //     "Scanning blocks {} to {:?}...",
+            //     scan_config.start_height, scan_config.end_height
+            // );
             let timer = Instant::now();
-            let scanned_blocks = scanner
-                .scan_blocks(scan_config)
+            let (scanned_blocks, more_blocks) = scanner
+                .scan_blocks(&scan_config)
                 .await
                 .map_err(|e| ScanError::Intermittent(e.to_string()))?;
-            println!(
-                "Scan took {:?}, on average: {} per second. Total outputs found: {}",
-                timer.elapsed(),
-                scanned_blocks.len() as f64 / timer.elapsed().as_secs_f64(),
-                scanned_blocks.iter().map(|b| b.wallet_outputs.len()).sum::<usize>()
-            );
+            // println!(
+            //     "Scan took {:?}, on average: {} per second. Total outputs found: {}",
+            //     timer.elapsed(),
+            //     scanned_blocks.len() as f64 / timer.elapsed().as_secs_f64(),
+            //     scanned_blocks.iter().map(|b| b.wallet_outputs.len()).sum::<usize>()
+            // );
 
             total_scanned += scanned_blocks.len() as u64;
-            if scanned_blocks.is_empty() {
+            if scanned_blocks.is_empty() || !more_blocks {
                 println!("No more blocks to scan.");
                 break;
             }
             start_height = scanned_blocks.last().unwrap().height + 1;
-            println!(
-                "Scanned {} blocks, total scanned: {}",
-                scanned_blocks.len(),
-                total_scanned
-            );
+            // println!(
+            //     "Scanned {} blocks, total scanned: {}",
+            //     scanned_blocks.len(),
+            //     total_scanned
+            // );
             for scanned_block in &scanned_blocks {
                 // Deleted inputs
                 for input in &scanned_block.inputs {
@@ -190,11 +184,11 @@ pub async fn scan(
                 }
 
                 for (hash, output) in &scanned_block.wallet_outputs {
-                    println!(
-                        "Detected output with amount {} at height {}",
-                        output.value(),
-                        scanned_block.height
-                    );
+                    // println!(
+                    //     "Detected output with amount {} at height {}",
+                    //     output.value(),
+                    //     scanned_block.height
+                    // );
 
                     // Extract memo information
                     let payment_info = output.payment_id();
@@ -312,25 +306,25 @@ pub async fn scan(
                     .await
                     .map_err(ScanError::FatalSqlx)?;
 
-                    println!(
-                        "Output {:?} confirmed at height {} (originally at height {})",
-                        hex::encode(&output_hash),
-                        scanned_block.height,
-                        original_height
-                    );
+                    // println!(
+                    //     "Output {:?} confirmed at height {} (originally at height {})",
+                    //     hex::encode(&output_hash),
+                    //     scanned_block.height,
+                    //     original_height
+                    // );
                 }
             }
 
-            println!("Batch took {:?}.", timer.elapsed());
-            println!("deleting old scanned tip blocks...");
+            // println!("Batch took {:?}.", timer.elapsed());
+            // println!("deleting old scanned tip blocks...");
             delete_old_scanned_tip_blocks(&db, account.id, 50)
                 .await
                 .map_err(ScanError::FatalSqlx)?;
 
-            println!("Cleanup took {:?}.", timer.elapsed());
+            // println!("Cleanup took {:?}.", timer.elapsed());
         }
 
-        println!("Scan complete.");
+        println!("Scan complete. in {:?}", total_timer.elapsed());
     }
     Ok(result)
 }
@@ -414,7 +408,7 @@ fn parse_balance_changes(
     output_id: i64,
     chain_timestamp: u64,
     chain_height: u64,
-    output: &lightweight_wallet_libs::transaction_components::WalletOutput,
+    output: &WalletOutput,
 ) -> Vec<models::BalanceChange> {
     // Coinbases.
     if output.features().is_coinbase() {
