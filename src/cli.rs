@@ -124,7 +124,15 @@ pub enum TappletCommand {
         url: String,
     },
     /// List installed tapplets
-    List,
+    List {
+        #[arg(
+            short,
+            long,
+            help = "Path to the cache directory",
+            default_value = "data/tapplet_cache"
+        )]
+        cache_directory: String,
+    },
     /// Install a tapplet from a file
     Install {
         #[arg(short, long, help = "The name of the registry to install from")]

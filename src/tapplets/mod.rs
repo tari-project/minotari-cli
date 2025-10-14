@@ -4,6 +4,7 @@ use anyhow::Result;
 mod default_registries;
 mod fetch;
 mod install;
+mod list;
 mod search;
 
 pub async fn tapplet_command_handler(tapplet_subcommand: TappletCommand) -> Result<()> {
@@ -19,9 +20,17 @@ pub async fn tapplet_command_handler(tapplet_subcommand: TappletCommand) -> Resu
                 println!("- {}: {}", tapplet.name, tapplet.description);
             }
         },
-        TappletCommand::List => {
-            // Logic to list tapplets
-            println!("Listing all tapplets...");
+        TappletCommand::List { cache_directory } => {
+            println!("Listing installed tapplets...");
+            let tapplets = list::list_installed_tapplets(cache_directory.into()).await?;
+            if tapplets.is_empty() {
+                println!("No tapplets installed.");
+            } else {
+                println!("Installed tapplets ({}):", tapplets.len());
+                for tapplet in tapplets {
+                    println!("  - {}", tapplet);
+                }
+            }
         },
         TappletCommand::AddRegistry { name, url } => {
             // Logic to add a new tapplet
