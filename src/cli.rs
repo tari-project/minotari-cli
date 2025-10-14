@@ -128,11 +128,18 @@ pub enum TappletCommand {
     /// Install a tapplet from a file
     Install {
         #[arg(short, long, help = "The name of the registry to install from")]
-        registry: String,
+        registry: Option<String>,
         #[arg(short, long, help = "Name of the tapplet to install")]
         name: Option<String>,
         #[arg(short, long, help = "Path to a local tapplet file to install")]
         path: Option<String>,
+        #[arg(
+            short,
+            long,
+            help = "Path to the cache directory",
+            default_value = "data/tapplet_cache"
+        )]
+        cache_directory: String,
     },
     /// Uninstall a tapplet by name
     Uninstall {
