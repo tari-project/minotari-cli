@@ -31,13 +31,19 @@ pub async fn tapplet_command_handler(tapplet_subcommand: TappletCommand) -> Resu
             registry,
             cache_directory,
             name,
-            ..
+            path,
         } => {
             if let Some(n) = name {
                 println!("Installing tapplet...");
-                install::install(registry, &n, cache_directory.into()).await?;
+                install::install_from_git(registry, &n, cache_directory.into()).await?;
             } else {
-                println!("Installing without a name is not yet supported.");
+                if let Some(p) = path {
+                    println!("Installing tapplet from local path...");
+                    install::install_from_local(p.into(), cache_directory.into()).await?;
+                } else {
+                    println!("Either name or path must be provided for installation.");
+                    return Err(anyhow::anyhow!("Name or path required"));
+                }
             }
         },
         TappletCommand::Uninstall { name } => {

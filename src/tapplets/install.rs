@@ -1,9 +1,13 @@
 use std::path::PathBuf;
 
 use tari_common::configuration::bootstrap::prompt;
-use tari_tapplet_lib::{TappletRegistry, tapplet::Tapplet};
+use tari_tapplet_lib::{TappletRegistry, git_tapplet::GitTapplet, local_folder_tapplet::LocalFolderTapplet};
 
-pub async fn install(registry: Option<String>, name: &str, cache_directory: PathBuf) -> Result<(), anyhow::Error> {
+pub async fn install_from_git(
+    registry: Option<String>,
+    name: &str,
+    cache_directory: PathBuf,
+) -> Result<(), anyhow::Error> {
     // Placeholder for install logic
     println!("Install function called");
     if let Some(reg) = registry {
@@ -42,7 +46,7 @@ pub async fn install(registry: Option<String>, name: &str, cache_directory: Path
             println!("Installing tapplet: {} from {}", tapplet_config.name, registry_name);
 
             if prompt("Are you sure you want to install") {
-                let tapplet = Tapplet::new(tapplet_config.clone());
+                let tapplet = GitTapplet::new(tapplet_config.clone());
                 tapplet.install(cache_directory.join("installed"))?;
             } else {
                 println!("Installation cancelled.");
@@ -50,5 +54,14 @@ pub async fn install(registry: Option<String>, name: &str, cache_directory: Path
             }
         }
     }
+    Ok(())
+}
+
+pub async fn install_from_local(path: PathBuf, cache_directory: PathBuf) -> Result<(), anyhow::Error> {
+    // Placeholder for install logic
+    println!("Install from local function called");
+    println!("Installing tapplet from local path: {:?}", path);
+    let tapplet = LocalFolderTapplet::load(path)?;
+    tapplet.install(cache_directory.join("installed"))?;
     Ok(())
 }
