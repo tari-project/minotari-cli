@@ -10,7 +10,7 @@ path = "src/bin/generate_openapi.rs"
 [dependencies]
 anyhow = "1.0.99"
 tokio = { version = "1.47.1", features = ["full"] }
-lightweight_wallet_libs = { git = "https://github.com/swvheerden/tari-wallet", rev = "91d27da9393ea77f1027ee8d20074adbab201580", features = [
+lightweight_wallet_libs = { git = "https://github.com/swvheerden/tari-wallet", rev = "9bce34c30d72e54e67e8249640da6dcfea65fd66", features = ["grpc",
     "http",
 ] }
 # lightweight_wallet_libs = { path = "../tari-wallet", features = ["http"] }

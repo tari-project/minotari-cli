@@ -1,8 +1,7 @@
-use std::time::Instant;
-use tari_transaction_components::transaction_components::WalletOutput;
 use chacha20poly1305::{Key, KeyInit, XChaCha20Poly1305, XNonce, aead::Aead};
 use chrono::{DateTime, Utc};
-use lightweight_wallet_libs::{scanning::BlockchainScanner, HttpBlockchainScanner, KeyManagerBuilder, ScanConfig};
+use lightweight_wallet_libs::{HttpBlockchainScanner, KeyManagerBuilder, ScanConfig, scanning::BlockchainScanner, scanning::GrpcBlockchainScanner};
+use std::time::Instant;
 use tari_crypto::{
     compressed_key::CompressedKey,
     ristretto::{RistrettoPublicKey, RistrettoSecretKey},
@@ -10,6 +9,7 @@ use tari_crypto::{
 use tari_transaction_components::key_manager::{
     TransactionKeyManagerWrapper, memory_key_manager::MemoryKeyManagerBackend,
 };
+use tari_transaction_components::transaction_components::WalletOutput;
 use tari_utilities::byte_array::ByteArray;
 use thiserror::Error;
 
@@ -101,29 +101,24 @@ pub async fn scan(
 
         let mut total_scanned = 0;
         let total_timer = Instant::now();
-        let scan_config = ScanConfig::default().with_start_height(start_height).with_batch_size(batch_size);
+        let scan_config = ScanConfig::default()
+            .with_start_height(start_height)
+            .with_batch_size(batch_size);
         println!("starting scan from height {}", start_height);
         loop {
             if total_scanned >= max_blocks {
                 println!("Reached maximum number of blocks to scan: {}", max_blocks);
                 break;
             }
-
-            // println!(
-            //     "Scanning blocks {} to {:?}...",
-            //     scan_config.start_height, scan_config.end_height
-            // );
+            if total_scanned % 1000 == 0 && total_scanned > 0 {
+                println!("Scanned {} blocks so far...", total_scanned);
+                println!("Total scan time so far: {:?}", total_timer.elapsed());
+            }
             let timer = Instant::now();
             let (scanned_blocks, more_blocks) = scanner
                 .scan_blocks(&scan_config)
                 .await
                 .map_err(|e| ScanError::Intermittent(e.to_string()))?;
-            // println!(
-            //     "Scan took {:?}, on average: {} per second. Total outputs found: {}",
-            //     timer.elapsed(),
-            //     scanned_blocks.len() as f64 / timer.elapsed().as_secs_f64(),
-            //     scanned_blocks.iter().map(|b| b.wallet_outputs.len()).sum::<usize>()
-            // );
 
             total_scanned += scanned_blocks.len() as u64;
             if scanned_blocks.is_empty() || !more_blocks {
@@ -131,11 +126,6 @@ pub async fn scan(
                 break;
             }
             start_height = scanned_blocks.last().unwrap().height + 1;
-            // println!(
-            //     "Scanned {} blocks, total scanned: {}",
-            //     scanned_blocks.len(),
-            //     total_scanned
-            // );
             for scanned_block in &scanned_blocks {
                 // Deleted inputs
                 for input in &scanned_block.inputs {
