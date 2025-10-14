@@ -4134,7 +4134,9 @@ dependencies = [
  "git2",
  "serde",
  "serde_json",
+ "tokio",
  "toml 0.8.23",
+ "walkdir",
  "wasmer",
  "windows-sys 0.59.0",
 ]
