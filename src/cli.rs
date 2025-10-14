@@ -109,6 +109,13 @@ pub enum TappletCommand {
     Search {
         #[arg(short, long, help = "Query string to search for tapplets")]
         query: String,
+        #[arg(
+            short,
+            long,
+            help = "Path to the cache directory",
+            default_value = "data/tapplet_cache"
+        )]
+        cache_directory: String,
     },
     AddRegistry {
         #[arg(short, long, help = "Name of the tapplet registry")]

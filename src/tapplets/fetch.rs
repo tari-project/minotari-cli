@@ -2,14 +2,14 @@ use std::path::PathBuf;
 
 use tari_tapplet_lib::registry::TappletRegistry;
 
+use crate::tapplets::default_registries::get_default_registries;
+
 pub async fn fetch(cache_directory: PathBuf) -> Result<(), anyhow::Error> {
     println!("Fetching tapplets from all registries...");
 
-    let default_registries = vec![("Tari Official", "https://github.com/tari-project/tapplet-registry")];
+    let default_registries = get_default_registries();
 
     for (name, url) in default_registries {
-        println!("Fetching from registry: {} ({})", name, url);
-
         let mut registry = TappletRegistry::new(name, url, cache_directory.clone());
         registry.fetch().await?;
 
