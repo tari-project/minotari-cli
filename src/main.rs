@@ -5,7 +5,7 @@ use chacha20poly1305::{
     AeadCore, Key, KeyInit, XChaCha20Poly1305,
     aead::{Aead, OsRng},
 };
-use clap::{Parser, Subcommand};
+use clap::{Command, Parser, Subcommand};
 use tari_common::configuration::Network;
 use tari_common_types::{
     seeds::{
@@ -15,7 +15,7 @@ use tari_common_types::{
     tari_address::{TariAddress, TariAddressFeatures},
     wallet_types::WalletType,
 };
-use tari_crypto::compressed_key::CompressedKey;
+use tari_crypto::{compressed_key::CompressedKey, ristretto::RistrettoPublicKey};
 use tari_transaction_components::{
     crypto_factories::CryptoFactories,
     key_manager::{
@@ -24,6 +24,7 @@ use tari_transaction_components::{
 };
 use tari_utilities::byte_array::ByteArray;
 
+use minotari::cli::{Cli, Commands};
 use minotari::{
     daemon, db,
     db::{get_accounts, get_balance, init_db},
@@ -32,94 +33,7 @@ use minotari::{
     scan::ScanError,
 };
 
-#[derive(Parser)]
-#[command(name = "tari")]
-#[command(about = "Tari wallet CLI", long_about = None)]
-struct Cli {
-    #[command(subcommand)]
-    command: Commands,
-}
-
-#[derive(Subcommand)]
-enum Commands {
-    /// Create a new address, and returns a file with the
-    /// seed words, address, birthday, private view key and public spend key,
-    /// optionally encrypting the file with a password
-    CreateAddress {
-        #[arg(short, long, help = "Password to encrypt the wallet file")]
-        password: Option<String>,
-        #[arg(short, long, help = "Path to the output file", default_value = "data/output.json")]
-        output_file: String,
-    },
-    /// Scan the blockchain for transactions
-    Scan {
-        #[arg(short, long, help = "Password to decrypt the wallet file")]
-        password: String,
-        #[arg(
-            short = 'u',
-            long,
-            default_value = "https://rpc.tari.com",
-            help = "The base URL of the Tari HTTP API"
-        )]
-        base_url: String,
-        #[arg(short, long, help = "Path to the database file", default_value = "data/wallet.db")]
-        database_file: String,
-        #[arg(
-            short,
-            long,
-            help = "Optional account name to scan. If not provided, all accounts will be used"
-        )]
-        account_name: Option<String>,
-        #[arg(short = 'n', long, help = "Maximum number of blocks to scan", default_value_t = 50)]
-        max_blocks_to_scan: u64,
-        #[arg(long, help = "Batch size for scanning", default_value_t = 1)]
-        batch_size: u64,
-    },
-    /// Run the daemon to continuously scan the blockchain
-    Daemon {
-        #[arg(short, long, help = "Password to decrypt the wallet file")]
-        password: String,
-        #[arg(
-            short = 'u',
-            long,
-            default_value = "https://rpc.tari.com",
-            help = "The base URL of the Tari HTTP API"
-        )]
-        base_url: String,
-        #[arg(short, long, help = "Path to the database file", default_value = "data/wallet.db")]
-        database_file: String,
-        #[arg(long, help = "Batch size for scanning", default_value_t = 100)]
-        batch_size: u64,
-        #[arg(short, long, help = "Interval between scans in seconds", default_value_t = 60)]
-        scan_interval_secs: u64,
-        #[arg(long, help = "Port for the API server", default_value_t = 9000)]
-        api_port: u16,
-    },
-    /// Show wallet balance
-    Balance {
-        #[arg(short, long, help = "Path to the database file", default_value = "data/wallet.db")]
-        database_file: String,
-        #[arg(
-            short,
-            long,
-            help = "Optional account name to show balance for. If not provided, all accounts will be used"
-        )]
-        account_name: Option<String>,
-    },
-    /// Import a wallet from a view key
-    ImportViewKey {
-        #[arg(short, long, alias = "view_key", help = "The view key in hex format")]
-        view_private_key: String,
-        #[arg(short, long, alias = "spend_key", help = "The spend public key in hex format")]
-        spend_public_key: String,
-        #[arg(short, long, help = "Password to encrypt the wallet file")]
-        password: String,
-        #[arg(short, long, help = "Path to the database file", default_value = "data/wallet.db")]
-        database_file: String,
-        #[arg(short, long, help = "The wallet birthday (block height)", default_value = "0")]
-        birthday: u16,
-    },
-}
+use minotari::tapplets::tapplet_command_handler;
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
@@ -144,7 +58,7 @@ async fn main() -> Result<(), anyhow::Error> {
             let public_view_key = CompressedKey::from_secret_key(&view_key);
 
             let tari_address = TariAddress::new_dual_address(
-                public_view_key,
+                public_view_key.clone(),
                 spend_key.pub_key.clone(),
                 Network::MainNet,
                 TariAddressFeatures::create_one_sided_only(),
@@ -179,6 +93,7 @@ async fn main() -> Result<(), anyhow::Error> {
                 serde_json::json!({
                     "address": tari_address.to_base58(),
                     "view_key": hex::encode(view_key.as_bytes()),
+                    "public_view_key": hex::encode(public_view_key.as_bytes()),
                     "spend_key": hex::encode(spend_key.pub_key.as_bytes()),
                     "seed_words": seed_words.reveal().clone(),
                     "birthday": birthday,
@@ -259,6 +174,10 @@ async fn main() -> Result<(), anyhow::Error> {
         } => {
             println!("Fetching balance...");
             let _ = handle_balance(&database_file, account_name.as_deref()).await;
+            Ok(())
+        },
+        Commands::Tapplet { tapplet_subcommand } => {
+            tapplet_command_handler(tapplet_subcommand).await?;
             Ok(())
         },
     }
