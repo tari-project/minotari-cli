@@ -11,7 +11,16 @@ pub use scanned_tip_blocks::{
 };
 
 mod outputs;
-pub use outputs::{get_output_info_by_hash, get_unconfirmed_outputs, insert_output, mark_output_confirmed};
+pub use outputs::{
+    DbWalletOutput, fetch_unspent_outputs, get_output_info_by_hash, get_unconfirmed_outputs, insert_output,
+    lock_output, mark_output_confirmed, unlock_outputs_for_request, update_output_status,
+};
+
+mod pending_transactions;
+pub use pending_transactions::{
+    PendingTransaction, create_pending_transaction, find_expired_pending_transactions,
+    update_pending_transaction_status,
+};
 
 mod events;
 pub use events::insert_wallet_event;

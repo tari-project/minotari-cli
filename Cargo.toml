@@ -21,6 +21,7 @@ sqlx = { version = "0.8.6", features = [
     "runtime-tokio",
     "sqlite",
     "macros",
+    "chrono",
 ] }
 blake2 = "0.10.6"
 tari_crypto = { version = "0.22.1", features = ["borsh"] }
@@ -29,6 +30,7 @@ chrono = "0.4.42"
 serde = "1.0.225"
 tari_common = { git = "https://github.com/stringhandler/tari/", rev = "6430bfffb53af71d80535243eec9165534af2b41" }
 tari_common_types = { git = "https://github.com/stringhandler/tari/", rev = "6430bfffb53af71d80535243eec9165534af2b41" }
+tari_script = { git = "https://github.com/stringhandler/tari/", rev = "6430bfffb53af71d80535243eec9165534af2b41" }
 tari_transaction_components = { git = "https://github.com/stringhandler/tari/", rev = "6430bfffb53af71d80535243eec9165534af2b41" }
 #tari_common = { path = "../tari/common" }
 #tari_common_types = { path = "../tari/base_layer/common_types" }
@@ -37,3 +39,4 @@ thiserror = "2.0.17"
 axum = { version = "0.8.6", features = ["default", "http2", "macros"] }
 utoipa = "5.4.0"
 utoipa-swagger-ui = { version = "9.0.2", features = ["axum"] }
+uuid = "1.18.1"

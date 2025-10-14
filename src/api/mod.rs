@@ -1,14 +1,18 @@
-use axum::{Router, extract::FromRef, routing::get};
+use axum::{Router, extract::FromRef, routing::get, routing::post};
 use sqlx::SqlitePool;
+use tari_common::configuration::Network;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
 mod accounts;
 mod error;
+mod types;
 
 #[derive(Clone)]
 pub struct AppState {
     pub db_pool: SqlitePool,
+    pub network: Network,
+    pub password: String,
 }
 
 impl FromRef<AppState> for SqlitePool {
@@ -21,11 +25,16 @@ impl FromRef<AppState> for SqlitePool {
 #[openapi(
     paths(
         accounts::api_get_balance,
+        accounts::api_create_unsigned_transaction,
     ),
     components(
         schemas(
             crate::db::AccountBalance,
             error::ApiError,
+            accounts::CreateTransactionRequest,
+            accounts::RecipientRequest,
+            accounts::WalletParams,
+            crate::api::types::TariAddressHex,
         )
     ),
     tags(
@@ -34,11 +43,19 @@ impl FromRef<AppState> for SqlitePool {
 )]
 pub struct ApiDoc;
 
-pub fn create_router(db_pool: SqlitePool) -> Router {
-    let app_state = AppState { db_pool };
+pub fn create_router(db_pool: SqlitePool, network: Network, password: String) -> Router {
+    let app_state = AppState {
+        db_pool,
+        network,
+        password,
+    };
 
     Router::new()
         .merge(SwaggerUi::new("/swagger-ui").url("/openapi.json", ApiDoc::openapi()))
         .route("/accounts/{name}/balance", get(accounts::api_get_balance))
+        .route(
+            "/accounts/{name}/create_unsigned_transaction",
+            post(accounts::api_create_unsigned_transaction),
+        )
         .with_state(app_state)
 }

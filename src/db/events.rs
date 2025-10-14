@@ -1,8 +1,12 @@
-use sqlx::SqlitePool;
+use sqlx::SqliteConnection;
 
 use crate::models::WalletEvent;
 
-pub async fn insert_wallet_event(pool: &SqlitePool, account_id: i64, event: &WalletEvent) -> Result<(), anyhow::Error> {
+pub async fn insert_wallet_event(
+    conn: &mut SqliteConnection,
+    account_id: i64,
+    event: &WalletEvent,
+) -> Result<(), anyhow::Error> {
     let event_type = &event.event_type.to_key_string();
     let description = &event.description;
     let data_json = serde_json::to_value(&event.event_type)?.to_string();
@@ -16,7 +20,7 @@ pub async fn insert_wallet_event(pool: &SqlitePool, account_id: i64, event: &Wal
         description,
         data_json
     )
-    .execute(pool)
+    .execute(&mut *conn)
     .await?;
 
     Ok(())

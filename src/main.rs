@@ -94,6 +94,8 @@ enum Commands {
         scan_interval_secs: u64,
         #[arg(long, help = "Port for the API server", default_value_t = 9000)]
         api_port: u16,
+        #[arg(long, help = "The Tari network to connect to", default_value_t = Network::MainNet)]
+        network: Network,
     },
     /// Show wallet balance
     Balance {
@@ -238,6 +240,7 @@ async fn main() -> Result<(), anyhow::Error> {
             batch_size,
             scan_interval_secs,
             api_port,
+            network,
         } => {
             println!("Starting Tari wallet daemon...");
             let max_blocks_to_scan = u64::MAX;
@@ -249,6 +252,7 @@ async fn main() -> Result<(), anyhow::Error> {
                 batch_size,
                 scan_interval_secs,
                 api_port,
+                network,
             );
             daemon.run().await?;
             Ok(())
@@ -265,10 +269,11 @@ async fn main() -> Result<(), anyhow::Error> {
 }
 
 async fn handle_balance(database_file: &str, account_name: Option<&str>) -> Result<(), anyhow::Error> {
-    let db = init_db(database_file).await?;
-    let accounts = get_accounts(&db, account_name).await?;
+    let pool = init_db(database_file).await?;
+    let mut conn = pool.acquire().await?;
+    let accounts = get_accounts(&mut conn, account_name).await?;
     for account in accounts {
-        let agg_result = get_balance(&db, account.id).await?;
+        let agg_result = get_balance(&mut conn, account.id).await?;
         let credits = agg_result.total_credits.unwrap_or(0) as u64;
         let debits = agg_result.total_debits.unwrap_or(0) as u64;
         let micro_tari_balance = credits.saturating_sub(debits) as f64;
@@ -319,9 +324,10 @@ async fn init_with_view_key(
 
     // create a hash of the viewkey to determine duplicate wallets
     let view_key_hash = hash_view_key(&view_key_bytes);
-    let db = init_db(database_file).await?;
+    let pool = init_db(database_file).await?;
+    let mut conn = pool.acquire().await?;
     db::create_account(
-        &db,
+        &mut conn,
         "default",
         &encrypted_view_key,
         &encrypted_spend_key,

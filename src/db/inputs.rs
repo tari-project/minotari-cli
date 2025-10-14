@@ -1,8 +1,8 @@
 use chrono::{DateTime, Utc};
-use sqlx::SqlitePool;
+use sqlx::SqliteConnection;
 
 pub async fn insert_input(
-    pool: &SqlitePool,
+    conn: &mut SqliteConnection,
     account_id: i64,
     output_id: i64,
     mined_in_block_height: u64,
@@ -29,7 +29,7 @@ pub async fn insert_input(
         mined_in_block_hash,
         timestamp
     )
-    .execute(pool)
+    .execute(&mut *conn)
     .await?;
 
     let rows_affected = insert_result.rows_affected();
@@ -41,7 +41,7 @@ pub async fn insert_input(
         "#,
         output_id
     )
-    .fetch_one(pool)
+    .fetch_one(&mut *conn)
     .await?
     .id;
 

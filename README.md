@@ -100,6 +100,7 @@ Database migrations are located in the `migrations/` directory. To reset the dat
 Or manually:
 
 ```bash
+mkdir -p data
 rm data/wallet.db
 sqlx database create
 sqlx migrate run
