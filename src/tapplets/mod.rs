@@ -74,7 +74,7 @@ pub async fn tapplet_command_handler(tapplet_subcommand: TappletCommand) -> Resu
                     println!("Ignoring invalid argument: {}", arg);
                 }
             }
-            run::run(&name, &method, args_map, "data/tapplet_cache".into()).await?;
+            run::run_lua(&name, &method, args_map, "data/tapplet_cache".into()).await?;
         },
     }
     Ok(())

@@ -1,7 +1,10 @@
 use std::path::PathBuf;
 
 use tari_common::configuration::bootstrap::prompt;
-use tari_tapplet_lib::{TappletRegistry, git_tapplet::GitTapplet, local_folder_tapplet::LocalFolderTapplet};
+use tari_tapplet_lib::{
+    TappletRegistry, git_tapplet::GitTapplet, local_folder_lua_tapplet::LocalFolderLuaTapplet,
+    local_folder_tapplet::LocalFolderTapplet,
+};
 
 pub async fn install_from_git(
     registry: Option<String>,
@@ -61,7 +64,7 @@ pub async fn install_from_local(path: PathBuf, cache_directory: PathBuf) -> Resu
     // Placeholder for install logic
     println!("Install from local function called");
     println!("Installing tapplet from local path: {:?}", path);
-    let tapplet = LocalFolderTapplet::load(path)?;
+    let tapplet = LocalFolderLuaTapplet::load(path)?;
     tapplet.install(cache_directory.join("installed"))?;
     Ok(())
 }
