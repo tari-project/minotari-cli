@@ -159,7 +159,13 @@ pub enum TappletCommand {
         name: String,
         #[arg(short, long, help = "The method to invoke on the tapplet")]
         method: String,
-        #[arg(short, long, help = "Arguments to pass to the tapplet method", default_value = "")]
+        #[arg(
+            short,
+            long,
+            help = "Arguments to pass to the tapplet method",
+            default_value = "",
+            alias = "arg"
+        )]
         args: Vec<String>,
     },
 }
