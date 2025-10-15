@@ -1,3 +1,5 @@
+use std::collections::HashMap;
+
 use crate::cli::TappletCommand;
 use anyhow::Result;
 
@@ -5,6 +7,7 @@ mod default_registries;
 mod fetch;
 mod install;
 mod list;
+mod run;
 mod search;
 
 pub async fn tapplet_command_handler(tapplet_subcommand: TappletCommand) -> Result<()> {
@@ -58,6 +61,20 @@ pub async fn tapplet_command_handler(tapplet_subcommand: TappletCommand) -> Resu
         TappletCommand::Uninstall { name } => {
             // Logic to remove a tapplet
             println!("Uninstalling tapplet: {}", name);
+        },
+        TappletCommand::Run { name, method, args } => {
+            // Logic to run a tapplet
+            println!("Running tapplet: {} with method: {} and args: {:?}", name, method, args);
+            let mut args_map = HashMap::new();
+            for arg in args {
+                let parts: Vec<&str> = arg.splitn(2, '=').collect();
+                if parts.len() == 2 {
+                    args_map.insert(parts[0].to_string(), parts[1].to_string());
+                } else {
+                    println!("Ignoring invalid argument: {}", arg);
+                }
+            }
+            run::run(&name, &method, args_map, "data/tapplet_cache".into()).await?;
         },
     }
     Ok(())

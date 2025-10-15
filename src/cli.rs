@@ -154,4 +154,12 @@ pub enum TappletCommand {
         #[arg(short, long, help = "Name of the tapplet to uninstall")]
         name: String,
     },
+    Run {
+        #[arg(short, long, help = "Name of the tapplet to run")]
+        name: String,
+        #[arg(short, long, help = "The method to invoke on the tapplet")]
+        method: String,
+        #[arg(short, long, help = "Arguments to pass to the tapplet method", default_value = "")]
+        args: Vec<String>,
+    },
 }
