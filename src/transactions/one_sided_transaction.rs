@@ -46,6 +46,16 @@ impl OneSidedTransaction {
         idempotency_key: Option<String>,
         seconds_to_lock_utxos: u64,
     ) -> Result<PrepareOneSidedTransactionForSigningResult, anyhow::Error> {
+        let mut conn = self.db_pool.acquire().await?;
+        if let Some(idempotency_key_str) = &idempotency_key
+            && let Some(unsigned_tx_json) =
+                db::find_pending_transaction_by_idempotency_key(&mut conn, idempotency_key_str, account.id).await?
+        {
+            let result: PrepareOneSidedTransactionForSigningResult =
+                serde_json::from_str(&unsigned_tx_json).map_err(|e| anyhow!(e))?;
+            return Ok(result);
+        }
+
         if recipients.is_empty() {
             return Err(anyhow!("No recipients provided"));
         }
@@ -59,7 +69,6 @@ impl OneSidedTransaction {
 
         let input_selector = InputSelector::new(account.id);
         let fee_per_gram = MicroMinotari(5);
-        let mut conn = self.db_pool.acquire().await?;
         let utxo_selection = input_selector
             .fetch_unspent_outputs(&mut conn, recipient.amount, fee_per_gram)
             .await?;

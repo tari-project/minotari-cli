@@ -98,3 +98,23 @@ pub async fn update_pending_transaction_status(
 
     Ok(())
 }
+
+pub async fn find_pending_transaction_by_idempotency_key(
+    conn: &mut SqliteConnection,
+    idempotency_key: &str,
+    account_id: i64,
+) -> Result<Option<String>, SqlxError> {
+    let res = sqlx::query!(
+        r#"
+        SELECT unsigned_tx_json
+        FROM pending_transactions
+        WHERE idempotency_key = ? AND account_id = ? AND status = 'PENDING'
+        "#,
+        idempotency_key,
+        account_id
+    )
+    .fetch_optional(&mut *conn)
+    .await?;
+
+    Ok(res.map(|r| r.unsigned_tx_json))
+}

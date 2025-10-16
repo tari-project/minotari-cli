@@ -19,7 +19,7 @@ pub use outputs::{
 mod pending_transactions;
 pub use pending_transactions::{
     PendingTransaction, create_pending_transaction, find_expired_pending_transactions,
-    update_pending_transaction_status,
+    find_pending_transaction_by_idempotency_key, update_pending_transaction_status,
 };
 
 mod events;
