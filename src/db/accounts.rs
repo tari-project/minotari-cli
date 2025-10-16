@@ -1,19 +1,23 @@
+use std::sync::Arc;
+
 use chacha20poly1305::{Key, KeyInit, XChaCha20Poly1305, XNonce, aead::Aead};
-use lightweight_wallet_libs::KeyManagerBuilder;
 use serde::Serialize;
 use sqlx::SqliteConnection;
 use tari_common::configuration::Network;
 use tari_common_types::{
+    seeds::cipher_seed::CipherSeed,
     tari_address::{TariAddress, TariAddressFeatures},
     types::CompressedPublicKey,
+    wallet_types::{ProvidedKeysWallet, WalletType},
 };
 use tari_crypto::keys::PublicKey;
 use tari_crypto::{
     compressed_key::CompressedKey,
     ristretto::{RistrettoPublicKey, RistrettoSecretKey},
 };
-use tari_transaction_components::key_manager::{
-    TransactionKeyManagerWrapper, memory_key_manager::MemoryKeyManagerBackend,
+use tari_transaction_components::{
+    crypto_factories::CryptoFactories,
+    key_manager::{TransactionKeyManagerWrapper, memory_key_manager::MemoryKeyManagerBackend},
 };
 use tari_utilities::byte_array::ByteArray;
 use utoipa::ToSchema;
@@ -173,10 +177,16 @@ impl AccountRow {
         password: &str,
     ) -> Result<TransactionKeyManagerWrapper<MemoryKeyManagerBackend>, anyhow::Error> {
         let (view_key, spend_key) = self.decrypt_keys(password)?;
-        let key_manager = KeyManagerBuilder::default()
-            .with_view_key_and_spend_key(view_key, spend_key, self.birthday as u16)
-            .try_build()
-            .await?;
+        let seed = CipherSeed::random();
+        let wallet_type = Arc::new(WalletType::ProvidedKeys(ProvidedKeysWallet {
+            view_key,
+            birthday: Some(self.birthday as u16),
+            public_spend_key: spend_key,
+            private_spend_key: None,
+            private_comms_key: None,
+        }));
+        let key_manager: TransactionKeyManagerWrapper<MemoryKeyManagerBackend> =
+            TransactionKeyManagerWrapper::new(Some(seed), CryptoFactories::default(), wallet_type).await?;
         Ok(key_manager)
     }
 }
