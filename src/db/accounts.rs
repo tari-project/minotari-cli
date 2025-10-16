@@ -2,6 +2,8 @@ use serde::Serialize;
 use sqlx::SqlitePool;
 use utoipa::ToSchema;
 
+use crate::models::Id;
+
 pub async fn create_account(
     pool: &SqlitePool,
     friendly_name: &str,
@@ -135,4 +137,28 @@ pub async fn get_balance(pool: &SqlitePool, account_id: i64) -> Result<AccountBa
     .fetch_one(pool)
     .await?;
     Ok(agg_result)
+}
+
+pub async fn create_child_account_for_tapplet(
+    pool: &SqlitePool,
+    parent_account_id: Id,
+    parent_account_name: &str,
+    tapplet_name: &str,
+    tapplet_public_key_hex: &str,
+) -> Result<Id, sqlx::Error> {
+    let child_account_name = format!("{}::{}", parent_account_name, tapplet_name);
+    let id = sqlx::query!(
+        r#"
+        INSERT INTO child_accounts (parent_account_id, child_account_name, for_tapplet_name, tapplet_public_key)
+        VALUES (?, ?, ?, ?)
+        RETURNING id
+        "#,
+        parent_account_id,
+        child_account_name,
+        tapplet_name,
+        tapplet_public_key_hex
+    )
+    .fetch_one(pool)
+    .await?;
+    Ok(id.id)
 }

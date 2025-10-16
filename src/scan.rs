@@ -335,7 +335,8 @@ pub async fn scan(
     Ok(result)
 }
 
-fn decrypt_keys(
+// TODO: Move this to accounts.rs or somewhere db related.
+pub fn decrypt_keys(
     account_row: &AccountRow,
     password: &str,
 ) -> Result<(RistrettoSecretKey, CompressedKey<RistrettoPublicKey>), anyhow::Error> {

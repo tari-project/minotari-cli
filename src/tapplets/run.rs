@@ -3,6 +3,8 @@ use std::{collections::HashMap, path::PathBuf};
 use serde_json::Value;
 use tari_tapplet_lib::{LuaTappletHost, TappletConfig, WasmTappletHost, host::MinotariTappletApiV1};
 
+use crate::tapplets::api::MinotariApiProvider;
+
 pub async fn run_wasm(
     name: &str,
     method: &str,
@@ -33,21 +35,6 @@ pub async fn run_wasm(
     Ok(())
 }
 
-#[derive(Clone)]
-struct MinotariApiProvider {}
-
-impl MinotariTappletApiV1 for MinotariApiProvider {
-    fn append_data(&self, slot: &str, value: &str) -> Result<(), anyhow::Error> {
-        println!("Appending data to slot '{}': {}", slot, value);
-        Ok(())
-    }
-
-    fn load_data_entries(&self, slot: &str) -> Result<Vec<String>, anyhow::Error> {
-        println!("Loading data entries from slot '{}'", slot);
-        Ok(vec!["example_entry_1".to_string(), "example_entry_2".to_string()])
-    }
-}
-
 pub async fn run_lua(
     name: &str,
     method: &str,
@@ -61,8 +48,16 @@ pub async fn run_lua(
         println!("Tapplet '{}' is not installed.", name);
         return Err(anyhow::anyhow!("Tapplet not installed"));
     }
+    let config = tari_tapplet_lib::parse_tapplet_file(tapplet_path.join("manifest.toml"))?;
 
-    let api = MinotariApiProvider {};
+    let api = MinotariApiProvider::try_create(
+        "default".to_string(),
+        &config,
+        "minotari.db",
+        "password", // Placeholder, replace with actual password handling
+    )
+    .await?;
+
     // Load the tapplet configuration
     let config = tari_tapplet_lib::parse_tapplet_file(tapplet_path.join("manifest.toml"))?;
     let lua_path = tapplet_path.join(&config.name).with_extension("lua");

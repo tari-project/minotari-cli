@@ -10,6 +10,8 @@ pub async fn install_from_git(
     registry: Option<String>,
     name: &str,
     cache_directory: PathBuf,
+    account: Option<String>,
+    database_file: &str,
 ) -> Result<(), anyhow::Error> {
     // Placeholder for install logic
     println!("Install function called");
@@ -60,11 +62,25 @@ pub async fn install_from_git(
     Ok(())
 }
 
-pub async fn install_from_local(path: PathBuf, cache_directory: PathBuf) -> Result<(), anyhow::Error> {
+pub async fn install_from_local(
+    path: PathBuf,
+    cache_directory: PathBuf,
+    account_name: Option<String>,
+    database_file: &str,
+) -> Result<(), anyhow::Error> {
     // Placeholder for install logic
     println!("Install from local function called");
     println!("Installing tapplet from local path: {:?}", path);
     let tapplet = LocalFolderLuaTapplet::load(path)?;
+
+    // open the db and create the child accounts.
+    let db = crate::init_db(database_file).await?;
+    for account in crate::get_accounts(&db, account_name.as_deref()).await? {
+        let mut child_account = crate::create_child_account_for_tapplet(&db, &account, &tapplet).await?;
+        println!("Created child account: {:?}", child_account);
+    }
+
     tapplet.install(cache_directory.join("installed"))?;
+
     Ok(())
 }

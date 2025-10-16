@@ -148,6 +148,14 @@ pub enum TappletCommand {
             default_value = "data/tapplet_cache"
         )]
         cache_directory: String,
+        #[arg(
+            short,
+            long,
+            help = "Optional account name to use for the tapplet. If not provided, all accounts will be installed"
+        )]
+        account_name: Option<String>,
+        #[arg(short, long, help = "Path to the database file", default_value = "data/wallet.db")]
+        database_file: String,
     },
     /// Uninstall a tapplet by name
     Uninstall {

@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use crate::cli::TappletCommand;
 use anyhow::Result;
 
+mod api;
 mod default_registries;
 mod fetch;
 mod install;
@@ -44,14 +45,16 @@ pub async fn tapplet_command_handler(tapplet_subcommand: TappletCommand) -> Resu
             cache_directory,
             name,
             path,
+            database_file,
+            account_name,
         } => {
             if let Some(n) = name {
                 println!("Installing tapplet...");
-                install::install_from_git(registry, &n, cache_directory.into()).await?;
+                install::install_from_git(registry, &n, cache_directory.into(), account_name, &database_file).await?;
             } else {
                 if let Some(p) = path {
                     println!("Installing tapplet from local path...");
-                    install::install_from_local(p.into(), cache_directory.into()).await?;
+                    install::install_from_local(p.into(), cache_directory.into(), account_name, &database_file).await?;
                 } else {
                     println!("Either name or path must be provided for installation.");
                     return Err(anyhow::anyhow!("Name or path required"));
