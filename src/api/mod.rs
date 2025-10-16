@@ -34,7 +34,7 @@ impl FromRef<AppState> for SqlitePool {
             accounts::CreateTransactionRequest,
             accounts::RecipientRequest,
             accounts::WalletParams,
-            crate::api::types::TariAddressHex,
+            crate::api::types::TariAddressBase58,
         )
     ),
     tags(

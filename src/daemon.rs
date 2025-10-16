@@ -84,6 +84,9 @@ impl Daemon {
             Ok::<(), ()>(())
         });
 
+        // HttpBlockchainScanner is marked as "NOT Send", so it is not possible to launch it in a new thread.
+        // #[async_trait(?Send)]
+        // impl<KM> BlockchainScanner for HttpBlockchainScanner<KM>
         let scanner_res = self.scan_and_sleep_loop(shutdown_rx_scanner).await;
 
         if let Err(e) = scanner_res {

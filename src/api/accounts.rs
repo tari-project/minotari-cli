@@ -7,7 +7,7 @@ use utoipa::IntoParams;
 
 use super::error::ApiError;
 use crate::{
-    api::{AppState, types::TariAddressHex},
+    api::{AppState, types::TariAddressBase58},
     db::{AccountBalance, get_account_by_name, get_balance},
     transactions::one_sided_transaction::{OneSidedTransaction, Recipient},
 };
@@ -24,7 +24,7 @@ pub struct WalletParams {
 
 #[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
 pub struct RecipientRequest {
-    address: TariAddressHex,
+    address: TariAddressBase58,
     #[schema(value_type = u64)]
     amount: MicroMinotari,
 }
