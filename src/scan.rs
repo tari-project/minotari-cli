@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
 use lightweight_wallet_libs::{HttpBlockchainScanner, ScanConfig, scanning::BlockchainScanner};
-use sqlx::SqliteConnection;
+use sqlx::{Acquire, SqliteConnection};
 use std::time::Instant;
 
 use tari_transaction_components::key_manager::{
@@ -123,14 +123,17 @@ pub async fn scan(
                     println!("Total scan time so far: {:?}", total_timer.elapsed());
                     scan_update_height += 1000;
                 }
+                // Start a transaction for all DB operations related to this scanned block so
+                // that either all inserts/updates succeed or none are applied.
+                let mut tx = conn.begin().await.map_err(ScanError::FatalSqlx)?;
                 // Deleted inputs
                 for input in &scanned_block.inputs {
-                    if let Some((output_id, value)) = db::get_output_info_by_hash(&mut conn, input.as_slice())
+                    if let Some((output_id, value)) = db::get_output_info_by_hash(&mut tx, input.as_slice())
                         .await
                         .map_err(ScanError::FatalSqlx)?
                     {
                         let (input_id, inserted_new_input) = db::insert_input(
-                            &mut conn,
+                            &mut tx,
                             account.id,
                             output_id,
                             scanned_block.height,
@@ -162,11 +165,11 @@ pub async fn scan(
                                 claimed_fee: None,
                                 claimed_amount: None,
                             };
-                            db::insert_balance_change(&mut conn, &balance_change)
+                            db::insert_balance_change(&mut tx, &balance_change)
                                 .await
                                 .map_err(ScanError::FatalSqlx)?;
 
-                            db::update_output_status(&mut conn, output_id, models::OutputStatus::Spent)
+                            db::update_output_status(&mut tx, output_id, models::OutputStatus::Spent)
                                 .await
                                 .map_err(ScanError::FatalSqlx)?;
                         }
@@ -206,7 +209,7 @@ pub async fn scan(
                     };
                     result.push(event.clone());
                     let (output_id, inserted_new_output) = db::insert_output(
-                        &mut conn,
+                        &mut tx,
                         account.id,
                         hash.to_vec().clone(),
                         output,
@@ -220,7 +223,7 @@ pub async fn scan(
                     .map_err(ScanError::FatalSqlx)?;
 
                     if inserted_new_output {
-                        db::insert_wallet_event(&mut conn, account.id, &event)
+                        db::insert_wallet_event(&mut tx, account.id, &event)
                             .await
                             .map_err(ScanError::Fatal)?;
 
@@ -233,14 +236,14 @@ pub async fn scan(
                             output,
                         );
                         for change in balance_changes {
-                            db::insert_balance_change(&mut conn, &change)
+                            db::insert_balance_change(&mut tx, &change)
                                 .await
                                 .map_err(ScanError::FatalSqlx)?;
                         }
                     }
                 }
                 db::insert_scanned_tip_block(
-                    &mut conn,
+                    &mut tx,
                     account.id,
                     scanned_block.height as i64,
                     scanned_block.block_hash.as_slice(),
@@ -250,7 +253,7 @@ pub async fn scan(
 
                 // Check for outputs that should be confirmed (6 block confirmations)
                 let unconfirmed_outputs = db::get_unconfirmed_outputs(
-                    &mut conn,
+                    &mut tx,
                     account.id,
                     scanned_block.height,
                     6, // 6 block confirmations required
@@ -276,13 +279,13 @@ pub async fn scan(
                     };
 
                     result.push(confirmation_event.clone());
-                    db::insert_wallet_event(&mut conn, account.id, &confirmation_event)
+                    db::insert_wallet_event(&mut tx, account.id, &confirmation_event)
                         .await
                         .map_err(ScanError::Fatal)?;
 
                     // Mark the output as confirmed in the database
                     db::mark_output_confirmed(
-                        &mut conn,
+                        &mut tx,
                         &output_hash,
                         scanned_block.height,
                         scanned_block.block_hash.as_slice(),
@@ -297,6 +300,10 @@ pub async fn scan(
                     //     original_height
                     // );
                 }
+
+                // Commit transaction for this block's DB changes. If commit fails, return error and
+                // rollback will be implicit when tx is dropped.
+                tx.commit().await.map_err(ScanError::FatalSqlx)?;
             }
 
             // println!("Batch took {:?}.", timer.elapsed());
