@@ -10,10 +10,8 @@ path = "src/bin/generate_openapi.rs"
 [dependencies]
 anyhow = "1.0.99"
 tokio = { version = "1.47.1", features = ["full"] }
-lightweight_wallet_libs = { git = "https://github.com/tari-project/tari-wallet", rev = "83364a19642516036c87264344dbd3992d7bd039", features = [
-    "http",
-] }
-# lightweight_wallet_libs = { path = "../tari-wallet", features = ["http"] }
+#lightweight_wallet_libs = { path = "../tari-wallet", features = ["grpc","http",] }
+lightweight_wallet_libs = { git = "https://github.com/tari-project/tari-wallet", rev = "8d8ef9da5b7436420663d20c81ca29a323253f2a", features = ["grpc","http",] }
 clap = { version = "4.5.47", features = ["derive"] }
 hex = "0.4.3"
 chacha20poly1305 = { version = "0.10.1", features = ["rand_core", "std"] }
@@ -29,9 +27,12 @@ tari_crypto = { version = "0.22.1", features = ["borsh"] }
 tari_utilities = { version = "0.8", features = ["std"] }
 chrono = "0.4.42"
 serde = "1.0.225"
-tari_common = { git = "https://github.com/stringhandler/tari/", rev = "a39cb6520c6d58c0740f2df65770a4d01386a3c2" }
-tari_common_types = { git = "https://github.com/stringhandler/tari/", rev = "a39cb6520c6d58c0740f2df65770a4d01386a3c2" }
-tari_transaction_components = { git = "https://github.com/stringhandler/tari/", rev = "a39cb6520c6d58c0740f2df65770a4d01386a3c2" }
+tari_common = { git = "https://github.com/stringhandler/tari/", rev = "6430bfffb53af71d80535243eec9165534af2b41" }
+tari_common_types = { git = "https://github.com/stringhandler/tari/", rev = "6430bfffb53af71d80535243eec9165534af2b41" }
+tari_transaction_components = { git = "https://github.com/stringhandler/tari/", rev = "6430bfffb53af71d80535243eec9165534af2b41" }
+#tari_common = { path = "../tari/common" }
+#tari_common_types = { path = "../tari/base_layer/common_types" }
+#tari_transaction_components = { path = "../tari/base_layer/transaction_components" }
 thiserror = "2.0.17"
 axum = { version = "0.8.6", features = ["default", "http2", "macros"] }
 utoipa = "5.4.0"

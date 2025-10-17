@@ -1,6 +1,6 @@
 use chrono::{DateTime, Utc};
-use lightweight_wallet_libs::transaction_components::WalletOutput;
 use sqlx::SqlitePool;
+use tari_transaction_components::transaction_components::WalletOutput;
 
 #[allow(clippy::too_many_arguments)]
 pub async fn insert_output(
