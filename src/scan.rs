@@ -1,8 +1,6 @@
 use chacha20poly1305::{Key, KeyInit, XChaCha20Poly1305, XNonce, aead::Aead};
 use chrono::{DateTime, Utc};
-use lightweight_wallet_libs::{
-    HttpBlockchainScanner, KeyManagerBuilder, ScanConfig, scanning::BlockchainScanner,
-};
+use lightweight_wallet_libs::{HttpBlockchainScanner, KeyManagerBuilder, ScanConfig, scanning::BlockchainScanner};
 use std::time::Instant;
 use tari_crypto::{
     compressed_key::CompressedKey,
