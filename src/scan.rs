@@ -1,6 +1,8 @@
 use chacha20poly1305::{Key, KeyInit, XChaCha20Poly1305, XNonce, aead::Aead};
 use chrono::{DateTime, Utc};
-use lightweight_wallet_libs::{HttpBlockchainScanner, KeyManagerBuilder, ScanConfig, scanning::BlockchainScanner, scanning::GrpcBlockchainScanner};
+use lightweight_wallet_libs::{
+    HttpBlockchainScanner, KeyManagerBuilder, ScanConfig, scanning::BlockchainScanner, scanning::GrpcBlockchainScanner,
+};
 use std::time::Instant;
 use tari_crypto::{
     compressed_key::CompressedKey,
@@ -105,20 +107,23 @@ pub async fn scan(
             .with_start_height(start_height)
             .with_batch_size(batch_size);
         println!("starting scan from height {}", start_height);
+        let mut scan_update_height = start_height + 1000;
         loop {
             if total_scanned >= max_blocks {
                 println!("Reached maximum number of blocks to scan: {}", max_blocks);
                 break;
             }
-            if total_scanned % 1000 == 0 && total_scanned > 0 {
+            if total_scanned > scan_update_height {
                 println!("Scanned {} blocks so far...", total_scanned);
                 println!("Total scan time so far: {:?}", total_timer.elapsed());
+                scan_update_height += 1000;
             }
             let timer = Instant::now();
             let (scanned_blocks, more_blocks) = scanner
                 .scan_blocks(&scan_config)
                 .await
                 .map_err(|e| ScanError::Intermittent(e.to_string()))?;
+            let elapsed = timer.elapsed().as_millis();
 
             total_scanned += scanned_blocks.len() as u64;
             if scanned_blocks.is_empty() || !more_blocks {
@@ -174,12 +179,6 @@ pub async fn scan(
                 }
 
                 for (hash, output) in &scanned_block.wallet_outputs {
-                    // println!(
-                    //     "Detected output with amount {} at height {}",
-                    //     output.value(),
-                    //     scanned_block.height
-                    // );
-
                     // Extract memo information
                     let payment_info = output.payment_id();
                     let memo_bytes = payment_info.get_payment_id();
@@ -315,6 +314,10 @@ pub async fn scan(
         }
 
         println!("Scan complete. in {:?}", total_timer.elapsed());
+        println!(
+            "Took on average {:?}ms per block.",
+            total_timer.elapsed().as_millis() / total_scanned as u128
+        );
     }
     Ok(result)
 }
