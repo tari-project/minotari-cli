@@ -1,7 +1,7 @@
 use chacha20poly1305::{Key, KeyInit, XChaCha20Poly1305, XNonce, aead::Aead};
 use chrono::{DateTime, Utc};
 use lightweight_wallet_libs::{
-    HttpBlockchainScanner, KeyManagerBuilder, ScanConfig, scanning::BlockchainScanner, scanning::GrpcBlockchainScanner,
+    HttpBlockchainScanner, KeyManagerBuilder, ScanConfig, scanning::BlockchainScanner,
 };
 use std::time::Instant;
 use tari_crypto::{
@@ -113,25 +113,22 @@ pub async fn scan(
                 println!("Reached maximum number of blocks to scan: {}", max_blocks);
                 break;
             }
-            if total_scanned > scan_update_height {
-                println!("Scanned {} blocks so far...", total_scanned);
-                println!("Total scan time so far: {:?}", total_timer.elapsed());
-                scan_update_height += 1000;
-            }
-            let timer = Instant::now();
             let (scanned_blocks, more_blocks) = scanner
                 .scan_blocks(&scan_config)
                 .await
                 .map_err(|e| ScanError::Intermittent(e.to_string()))?;
-            let elapsed = timer.elapsed().as_millis();
 
             total_scanned += scanned_blocks.len() as u64;
             if scanned_blocks.is_empty() || !more_blocks {
                 println!("No more blocks to scan.");
                 break;
             }
-            start_height = scanned_blocks.last().unwrap().height + 1;
             for scanned_block in &scanned_blocks {
+                if scanned_block.height >= scan_update_height {
+                    println!("Scanned {} blocks so far...", total_scanned);
+                    println!("Total scan time so far: {:?}", total_timer.elapsed());
+                    scan_update_height += 1000;
+                }
                 // Deleted inputs
                 for input in &scanned_block.inputs {
                     if let Some((output_id, value)) = db::get_output_info_by_hash(&db, input.as_slice())
