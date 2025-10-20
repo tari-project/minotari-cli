@@ -160,8 +160,12 @@ async fn main() -> Result<(), anyhow::Error> {
                 } else {
                     password[..32].to_string()
                 };
-                let key = Key::from_slice(password.as_bytes());
-                let cipher = XChaCha20Poly1305::new(key);
+                let key_bytes: [u8; 32] = password
+                    .as_bytes()
+                    .try_into()
+                    .map_err(|_| anyhow::anyhow!("Password must be 32 bytes"))?;
+                let key = Key::from(key_bytes);
+                let cipher = XChaCha20Poly1305::new(&key);
 
                 let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
                 let encrypted_view_key = cipher.encrypt(&nonce, view_key.as_bytes())?;
@@ -315,8 +319,12 @@ async fn init_with_view_key(
     } else {
         password[..32].to_string()
     };
-    let key = Key::from_slice(password.as_bytes());
-    let cipher = XChaCha20Poly1305::new(key);
+    let key_bytes: [u8; 32] = password
+        .as_bytes()
+        .try_into()
+        .map_err(|_| anyhow::anyhow!("Password must be 32 bytes"))?;
+    let key = Key::from(key_bytes);
+    let cipher = XChaCha20Poly1305::new(&key);
 
     let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
     let encrypted_view_key = cipher.encrypt(&nonce, view_key_bytes.as_ref())?;

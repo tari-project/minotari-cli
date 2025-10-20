@@ -39,4 +39,4 @@ thiserror = "2.0.17"
 axum = { version = "0.8.6", features = ["default", "http2", "macros"] }
 utoipa = "5.4.0"
 utoipa-swagger-ui = { version = "9.0.2", features = ["axum"] }
-uuid = "1.18.1"
+uuid = { version = "1", features = ["v4"] }

@@ -146,10 +146,19 @@ impl AccountRow {
         } else {
             password[..32].to_string()
         };
-        let key = Key::from_slice(password.as_bytes());
-        let cipher = XChaCha20Poly1305::new(key);
+        let key_bytes: [u8; 32] = password
+            .as_bytes()
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("Password must be 32 bytes"))?;
+        let key = Key::from(key_bytes);
+        let cipher = XChaCha20Poly1305::new(&key);
 
-        let nonce = XNonce::clone_from_slice(self.cipher_nonce.as_ref());
+        let nonce_bytes: &[u8; 24] = self
+            .cipher_nonce
+            .as_slice()
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("Nonce must be 24 bytes"))?;
+        let nonce = XNonce::from(*nonce_bytes);
 
         let view_key = cipher.decrypt(&nonce, self.encrypted_view_private_key.as_ref())?;
         let spend_key = cipher.decrypt(&nonce, self.encrypted_spend_public_key.as_ref())?;
