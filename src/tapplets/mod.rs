@@ -73,7 +73,14 @@ pub async fn tapplet_command_handler(tapplet_subcommand: TappletCommand) -> Resu
             // Logic to remove a tapplet
             println!("Uninstalling tapplet: {}", name);
         },
-        TappletCommand::Run { name, method, args } => {
+        TappletCommand::Run {
+            name,
+            method,
+            args,
+            cache_directory,
+            database_file,
+            password,
+        } => {
             // Logic to run a tapplet
             println!("Running tapplet: {} with method: {} and args: {:?}", name, method, args);
             let mut args_map = HashMap::new();
@@ -85,7 +92,15 @@ pub async fn tapplet_command_handler(tapplet_subcommand: TappletCommand) -> Resu
                     println!("Ignoring invalid argument: {}", arg);
                 }
             }
-            run::run_lua(&name, &method, args_map, "data/tapplet_cache".into()).await?;
+            run::run_lua(
+                &database_file,
+                &password,
+                &name,
+                &method,
+                args_map,
+                cache_directory.into(),
+            )
+            .await?;
         },
     }
     Ok(())

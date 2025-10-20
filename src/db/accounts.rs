@@ -256,3 +256,38 @@ pub async fn create_child_account_for_tapplet(
         .id
         .ok_or_else(|| anyhow::anyhow!("Failed to get inserted child account ID"))?)
 }
+
+pub async fn get_child_account(
+    conn: &mut SqliteConnection,
+    parent_account_id: Id,
+    tapplet_name: &str,
+) -> Result<ChildAccountRow, anyhow::Error> {
+    let row = sqlx::query_as!(
+        ChildAccountRow,
+        r#"
+        SELECT id, 
+            parent_account_id, 
+            child_account_name, 
+            for_tapplet_name, 
+            version, 
+            tapplet_pub_key
+        FROM child_accounts
+        WHERE parent_account_id = ? AND for_tapplet_name = ?
+       "#,
+        parent_account_id,
+        tapplet_name
+    )
+    .fetch_one(&mut *conn)
+    .await?;
+
+    Ok(row)
+}
+
+pub struct ChildAccountRow {
+    pub id: i64,
+    pub parent_account_id: i64,
+    pub child_account_name: String,
+    pub for_tapplet_name: String,
+    pub version: String,
+    pub tapplet_pub_key: String,
+}

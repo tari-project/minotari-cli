@@ -180,5 +180,17 @@ pub enum TappletCommand {
             alias = "arg"
         )]
         args: Vec<String>,
+
+        #[arg(
+            short,
+            long,
+            help = "Path to the cache directory",
+            default_value = "data/tapplet_cache"
+        )]
+        cache_directory: String,
+        #[arg(short, long, help = "Path to the database file", default_value = "data/wallet.db")]
+        database_file: String,
+        #[arg(short, long, help = "Password to decrypt the wallet file")]
+        password: String,
     },
 }

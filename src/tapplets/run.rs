@@ -36,6 +36,8 @@ pub async fn run_wasm(
 }
 
 pub async fn run_lua(
+    database_file: &str,
+    password: &str,
     name: &str,
     method: &str,
     args: HashMap<String, String>,
@@ -50,13 +52,7 @@ pub async fn run_lua(
     }
     let config = tari_tapplet_lib::parse_tapplet_file(tapplet_path.join("manifest.toml"))?;
 
-    let api = MinotariApiProvider::try_create(
-        "default".to_string(),
-        &config,
-        "minotari.db",
-        "password", // Placeholder, replace with actual password handling
-    )
-    .await?;
+    let api = MinotariApiProvider::try_create("default".to_string(), &config, database_file, password).await?;
 
     // Load the tapplet configuration
     let config = tari_tapplet_lib::parse_tapplet_file(tapplet_path.join("manifest.toml"))?;

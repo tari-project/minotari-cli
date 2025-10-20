@@ -1,16 +1,21 @@
+use crate::{db::get_child_account, get_accounts, init_db};
+use anyhow::anyhow;
 use tari_crypto::{
     compressed_key::CompressedKey,
     ristretto::{RistrettoPublicKey, RistrettoSecretKey},
 };
 use tari_tapplet_lib::{TappletConfig, host::MinotariTappletApiV1};
-
-use crate::{get_accounts, init_db};
+use tari_utilities::ByteArray;
 
 #[derive(Clone)]
 pub(crate) struct MinotariApiProvider {
     account_name: String,
     private_view_key: RistrettoSecretKey,
     public_spend_key: CompressedKey<RistrettoPublicKey>,
+    account_id: i64,
+    child_account_id: i64,
+    tapplet_name: String,
+    tapplet_public_key: CompressedKey<RistrettoPublicKey>,
 }
 
 fn derive_tapplet_account_name(account_name: &str, tapplet_canonical_name: &str) -> String {
@@ -26,24 +31,36 @@ impl MinotariApiProvider {
     ) -> Result<Self, anyhow::Error> {
         let pool = init_db(database_file).await?;
         let mut conn = pool.acquire().await?;
-        let tapplet_account = derive_tapplet_account_name(&account_name, &tapplet_config.canonical_name());
-        let accounts = get_accounts(&mut conn, Some(&tapplet_account)).await?;
+        // let tapplet_account = derive_tapplet_account_name(&account_name, &tapplet_config.canonical_name());
+        let accounts = get_accounts(&mut conn, Some(&account_name)).await?;
+
         if accounts.is_empty() {
-            Err(anyhow::anyhow!("No account found with name '{}'", tapplet_account))
+            Err(anyhow::anyhow!("No account found with name '{}'", account_name))
         } else if accounts.len() > 1 {
             println!(
                 "Multiple accounts found with name '{}'. Please ensure only one account per tapplet.",
-                tapplet_account
+                account_name
             );
             Err(anyhow::anyhow!("Multiple accounts found"))
         } else {
             let account = &accounts[0];
             println!("Found account: {:?}", account);
             let (view_key, spend_key) = account.decrypt_keys(password)?;
+
+            let child_account = get_child_account(&mut conn, account.id, &tapplet_config.name).await?;
+
+            let child_pub_key = CompressedKey::<RistrettoPublicKey>::from_canonical_bytes(&hex::decode(
+                child_account.tapplet_pub_key.clone(),
+            )?)
+            .map_err(|e| anyhow!("Could not decode public key"))?;
             Ok(Self {
-                account_name: tapplet_account,
+                account_name,
                 private_view_key: view_key,
                 public_spend_key: spend_key,
+                account_id: account.id,
+                child_account_id: child_account.id,
+                tapplet_name: tapplet_config.canonical_name(),
+                tapplet_public_key: child_pub_key,
             })
         }
     }
