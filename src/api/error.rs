@@ -16,11 +16,19 @@ pub enum ApiError {
     DbError(String),
     #[error("Account not found: {0}")]
     AccountNotFound(String),
+    #[error("Failed to create an unsigned transaction: {0}")]
+    FailedCreateUnsignedTx(String),
 }
 
 impl From<sqlx::Error> for ApiError {
     fn from(err: sqlx::Error) -> Self {
         ApiError::DbError(err.to_string())
+    }
+}
+
+impl From<serde_json::Error> for ApiError {
+    fn from(err: serde_json::Error) -> Self {
+        ApiError::InternalServerError(format!("JSON serialization error: {}", err))
     }
 }
 
@@ -30,6 +38,7 @@ impl IntoResponse for ApiError {
             ApiError::InternalServerError(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg),
             ApiError::DbError(e) => (StatusCode::INTERNAL_SERVER_ERROR, e),
             ApiError::AccountNotFound(name) => (StatusCode::NOT_FOUND, format!("Account '{}' not found", name)),
+            ApiError::FailedCreateUnsignedTx(e) => (StatusCode::INTERNAL_SERVER_ERROR, e),
         };
 
         let body = Json(json!({

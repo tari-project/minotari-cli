@@ -1,4 +1,4 @@
-use sqlx::SqlitePool;
+use sqlx::SqliteConnection;
 
 use crate::models::ScannedTipBlock;
 
@@ -10,7 +10,7 @@ struct ScannedTipBlockRow {
 }
 
 pub async fn get_scanned_tip_blocks_by_account(
-    pool: &SqlitePool,
+    conn: &mut SqliteConnection,
     account_id: i64,
 ) -> Result<Vec<ScannedTipBlock>, sqlx::Error> {
     let row = sqlx::query_as!(
@@ -23,7 +23,7 @@ pub async fn get_scanned_tip_blocks_by_account(
         "#,
         account_id
     )
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await?;
 
     Ok(row
@@ -38,7 +38,7 @@ pub async fn get_scanned_tip_blocks_by_account(
 }
 
 pub async fn insert_scanned_tip_block(
-    pool: &SqlitePool,
+    conn: &mut SqliteConnection,
     account_id: i64,
     height: i64,
     hash: &[u8],
@@ -52,14 +52,14 @@ pub async fn insert_scanned_tip_block(
         height,
         hash
     )
-    .execute(pool)
+    .execute(&mut *conn)
     .await?;
 
     Ok(())
 }
 
 pub async fn delete_old_scanned_tip_blocks(
-    pool: &SqlitePool,
+    conn: &mut SqliteConnection,
     account_id: i64,
     keep_last_n: i64,
 ) -> Result<(), sqlx::Error> {
@@ -78,7 +78,7 @@ pub async fn delete_old_scanned_tip_blocks(
         account_id,
         keep_last_n
     )
-    .execute(pool)
+    .execute(&mut *conn)
     .await?;
 
     Ok(())

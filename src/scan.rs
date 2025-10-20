@@ -1,11 +1,8 @@
-use chacha20poly1305::{Key, KeyInit, XChaCha20Poly1305, XNonce, aead::Aead};
 use chrono::{DateTime, Utc};
-use lightweight_wallet_libs::{HttpBlockchainScanner, KeyManagerBuilder, ScanConfig, scanning::BlockchainScanner};
+use lightweight_wallet_libs::{HttpBlockchainScanner, ScanConfig, scanning::BlockchainScanner};
+use sqlx::{Acquire, SqliteConnection};
 use std::time::Instant;
-use tari_crypto::{
-    compressed_key::CompressedKey,
-    ristretto::{RistrettoPublicKey, RistrettoSecretKey},
-};
+
 use tari_transaction_components::key_manager::{
     TransactionKeyManagerWrapper, memory_key_manager::MemoryKeyManagerBackend,
 };
@@ -14,7 +11,7 @@ use tari_utilities::byte_array::ByteArray;
 use thiserror::Error;
 
 use crate::{
-    db::{self, AccountRow, delete_old_scanned_tip_blocks, get_accounts, init_db},
+    db::{self, delete_old_scanned_tip_blocks, get_accounts, init_db},
     models::{self, BalanceChange, WalletEvent},
 };
 
@@ -39,22 +36,21 @@ pub async fn scan(
     max_blocks: u64,
     batch_size: u64,
 ) -> Result<Vec<WalletEvent>, ScanError> {
-    let db = init_db(database_file).await.map_err(ScanError::Fatal)?;
+    let pool = init_db(database_file).await.map_err(ScanError::Fatal)?;
+    let mut conn = pool.acquire().await?;
     let mut result = vec![];
-    for account in get_accounts(&db, account_name).await.map_err(ScanError::FatalSqlx)? {
+    for account in get_accounts(&mut conn, account_name)
+        .await
+        .map_err(ScanError::FatalSqlx)?
+    {
         println!("Found account: {:?}", account);
 
-        let (view_key, spend_key) = decrypt_keys(&account, password).map_err(ScanError::Fatal)?;
-        let key_manager = KeyManagerBuilder::default()
-            .with_view_key_and_spend_key(view_key, spend_key, account.birthday as u16)
-            .try_build()
-            .await
-            .map_err(ScanError::Fatal)?;
+        let key_manager = account.get_key_manager(password).await.map_err(ScanError::Fatal)?;
         let mut scanner = HttpBlockchainScanner::new(base_url.to_string(), key_manager.clone())
             .await
             .map_err(|e| ScanError::Intermittent(e.to_string()))?;
 
-        let last_blocks = db::get_scanned_tip_blocks_by_account(&db, account.id)
+        let last_blocks = db::get_scanned_tip_blocks_by_account(&mut conn, account.id)
             .await
             .map_err(ScanError::FatalSqlx)?;
 
@@ -70,7 +66,7 @@ pub async fn scan(
                 last_blocks.len(),
                 account.friendly_name
             );
-            let reorged_blocks = check_for_reorgs(&mut scanner, &db, &last_blocks)
+            let reorged_blocks = check_for_reorgs(&mut scanner, &mut conn, &last_blocks)
                 .await
                 .map_err(ScanError::Fatal)?;
             if reorged_blocks.len() == last_blocks.len() {
@@ -127,14 +123,17 @@ pub async fn scan(
                     println!("Total scan time so far: {:?}", total_timer.elapsed());
                     scan_update_height += 1000;
                 }
+                // Start a transaction for all DB operations related to this scanned block so
+                // that either all inserts/updates succeed or none are applied.
+                let mut tx = conn.begin().await.map_err(ScanError::FatalSqlx)?;
                 // Deleted inputs
                 for input in &scanned_block.inputs {
-                    if let Some((output_id, value)) = db::get_output_info_by_hash(&db, input.as_slice())
+                    if let Some((output_id, value)) = db::get_output_info_by_hash(&mut tx, input.as_slice())
                         .await
                         .map_err(ScanError::FatalSqlx)?
                     {
                         let (input_id, inserted_new_input) = db::insert_input(
-                            &db,
+                            &mut tx,
                             account.id,
                             output_id,
                             scanned_block.height,
@@ -166,7 +165,11 @@ pub async fn scan(
                                 claimed_fee: None,
                                 claimed_amount: None,
                             };
-                            db::insert_balance_change(&db, &balance_change)
+                            db::insert_balance_change(&mut tx, &balance_change)
+                                .await
+                                .map_err(ScanError::FatalSqlx)?;
+
+                            db::update_output_status(&mut tx, output_id, models::OutputStatus::Spent)
                                 .await
                                 .map_err(ScanError::FatalSqlx)?;
                         }
@@ -206,7 +209,7 @@ pub async fn scan(
                     };
                     result.push(event.clone());
                     let (output_id, inserted_new_output) = db::insert_output(
-                        &db,
+                        &mut tx,
                         account.id,
                         hash.to_vec().clone(),
                         output,
@@ -220,7 +223,7 @@ pub async fn scan(
                     .map_err(ScanError::FatalSqlx)?;
 
                     if inserted_new_output {
-                        db::insert_wallet_event(&db, account.id, &event)
+                        db::insert_wallet_event(&mut tx, account.id, &event)
                             .await
                             .map_err(ScanError::Fatal)?;
 
@@ -233,14 +236,14 @@ pub async fn scan(
                             output,
                         );
                         for change in balance_changes {
-                            db::insert_balance_change(&db, &change)
+                            db::insert_balance_change(&mut tx, &change)
                                 .await
                                 .map_err(ScanError::FatalSqlx)?;
                         }
                     }
                 }
                 db::insert_scanned_tip_block(
-                    &db,
+                    &mut tx,
                     account.id,
                     scanned_block.height as i64,
                     scanned_block.block_hash.as_slice(),
@@ -250,7 +253,7 @@ pub async fn scan(
 
                 // Check for outputs that should be confirmed (6 block confirmations)
                 let unconfirmed_outputs = db::get_unconfirmed_outputs(
-                    &db,
+                    &mut tx,
                     account.id,
                     scanned_block.height,
                     6, // 6 block confirmations required
@@ -276,13 +279,13 @@ pub async fn scan(
                     };
 
                     result.push(confirmation_event.clone());
-                    db::insert_wallet_event(&db, account.id, &confirmation_event)
+                    db::insert_wallet_event(&mut tx, account.id, &confirmation_event)
                         .await
                         .map_err(ScanError::Fatal)?;
 
                     // Mark the output as confirmed in the database
                     db::mark_output_confirmed(
-                        &db,
+                        &mut tx,
                         &output_hash,
                         scanned_block.height,
                         scanned_block.block_hash.as_slice(),
@@ -297,11 +300,15 @@ pub async fn scan(
                     //     original_height
                     // );
                 }
+
+                // Commit transaction for this block's DB changes. If commit fails, return error and
+                // rollback will be implicit when tx is dropped.
+                tx.commit().await.map_err(ScanError::FatalSqlx)?;
             }
 
             // println!("Batch took {:?}.", timer.elapsed());
             // println!("deleting old scanned tip blocks...");
-            delete_old_scanned_tip_blocks(&db, account.id, 50)
+            delete_old_scanned_tip_blocks(&mut conn, account.id, 50)
                 .await
                 .map_err(ScanError::FatalSqlx)?;
 
@@ -317,33 +324,10 @@ pub async fn scan(
     Ok(result)
 }
 
-fn decrypt_keys(
-    account_row: &AccountRow,
-    password: &str,
-) -> Result<(RistrettoSecretKey, CompressedKey<RistrettoPublicKey>), anyhow::Error> {
-    let password = if password.len() < 32 {
-        format!("{:0<32}", password)
-    } else {
-        password[..32].to_string()
-    };
-    let key = Key::from_slice(password.as_bytes());
-    let cipher = XChaCha20Poly1305::new(key);
-
-    let nonce = XNonce::clone_from_slice(account_row.cipher_nonce.as_ref());
-
-    let view_key = cipher.decrypt(&nonce, account_row.encrypted_view_private_key.as_ref())?;
-    let spend_key = cipher.decrypt(&nonce, account_row.encrypted_spend_public_key.as_ref())?;
-
-    let view_key = RistrettoSecretKey::from_canonical_bytes(&view_key).map_err(|e| anyhow::anyhow!(e))?;
-    let spend_key =
-        CompressedKey::<RistrettoPublicKey>::from_canonical_bytes(&spend_key).map_err(|e| anyhow::anyhow!(e))?;
-    Ok((view_key, spend_key))
-}
-
 /// Returns (removed_blocks, added_blocks   )
 async fn check_for_reorgs(
     scanner: &mut HttpBlockchainScanner<TransactionKeyManagerWrapper<MemoryKeyManagerBackend>>,
-    db: &sqlx::SqlitePool,
+    conn: &mut SqliteConnection,
     last_blocks_in_desc: &[models::ScannedTipBlock],
 ) -> Result<Vec<models::ScannedTipBlock>, anyhow::Error> {
     let mut removed_blocks = vec![];
@@ -367,7 +351,7 @@ async fn check_for_reorgs(
                     "#,
                     block.id
                 )
-                .execute(db)
+                .execute(&mut *conn)
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to delete scanned tip block: {}", e))?;
             }

@@ -59,6 +59,77 @@
           }
         }
       }
+    },
+    "/accounts/{name}/create_unsigned_transaction": {
+      "post": {
+        "tags": [
+          "accounts"
+        ],
+        "operationId": "api_create_unsigned_transaction",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Name of the account to create transaction for",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateTransactionRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Unsigned transaction created successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/Value"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Account not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -129,8 +200,86 @@
                 "type": "string"
               }
             }
+          },
+          {
+            "type": "object",
+            "required": [
+              "FailedCreateUnsignedTx"
+            ],
+            "properties": {
+              "FailedCreateUnsignedTx": {
+                "type": "string"
+              }
+            }
           }
         ]
+      },
+      "CreateTransactionRequest": {
+        "type": "object",
+        "required": [
+          "recipients"
+        ],
+        "properties": {
+          "idempotency_key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "payment_id": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "recipients": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RecipientRequest"
+            }
+          },
+          "seconds_to_lock_utxos": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "default": "86400",
+            "minimum": 0
+          }
+        }
+      },
+      "RecipientRequest": {
+        "type": "object",
+        "required": [
+          "address",
+          "amount"
+        ],
+        "properties": {
+          "address": {
+            "$ref": "#/components/schemas/TariAddressBase58"
+          },
+          "amount": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "TariAddressBase58": {
+        "type": "string"
+      },
+      "Value": {},
+      "WalletParams": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          }
+        }
       }
     }
   },
