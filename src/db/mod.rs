@@ -1,4 +1,4 @@
-use std::{env::current_dir, fs};
+use std::{env::current_dir, fs, path::Path};
 
 use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
 
@@ -34,8 +34,8 @@ pub use balance_changes::insert_balance_change;
 mod inputs;
 pub use inputs::insert_input;
 
-pub async fn init_db(db_path: &str) -> Result<SqlitePool, anyhow::Error> {
-    let mut path = std::path::Path::new(db_path).to_path_buf();
+pub async fn init_db<P: AsRef<Path>>(db_path: P) -> Result<SqlitePool, anyhow::Error> {
+    let mut path = db_path.as_ref().to_path_buf();
     if path.is_relative() {
         path = current_dir()?.to_path_buf().join(path);
     }

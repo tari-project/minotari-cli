@@ -74,6 +74,7 @@ pub async fn tapplet_command_handler(tapplet_subcommand: TappletCommand) -> Resu
             println!("Uninstalling tapplet: {}", name);
         },
         TappletCommand::Run {
+            account_name,
             name,
             method,
             args,
@@ -93,6 +94,7 @@ pub async fn tapplet_command_handler(tapplet_subcommand: TappletCommand) -> Resu
                 }
             }
             run::run_lua(
+                &account_name,
                 &database_file,
                 &password,
                 &name,

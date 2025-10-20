@@ -168,6 +168,12 @@ pub enum TappletCommand {
         name: String,
     },
     Run {
+        #[arg(
+            long,
+            help = "Optional account name to use for the tapplet",
+            default_value = "default"
+        )]
+        account_name: String,
         #[arg(short, long, help = "Name of the tapplet to run")]
         name: String,
         #[arg(short, long, help = "The method to invoke on the tapplet")]
