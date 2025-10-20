@@ -186,7 +186,6 @@ impl AccountRow {
         password: &str,
     ) -> Result<TransactionKeyManagerWrapper<MemoryKeyManagerBackend>, anyhow::Error> {
         let (view_key, spend_key) = self.decrypt_keys(password)?;
-        let seed = CipherSeed::random();
         let wallet_type = Arc::new(WalletType::ProvidedKeys(ProvidedKeysWallet {
             view_key,
             birthday: Some(self.birthday as u16),
@@ -195,7 +194,7 @@ impl AccountRow {
             private_comms_key: None,
         }));
         let key_manager: TransactionKeyManagerWrapper<MemoryKeyManagerBackend> =
-            TransactionKeyManagerWrapper::new(Some(seed), CryptoFactories::default(), wallet_type).await?;
+            TransactionKeyManagerWrapper::new(None, CryptoFactories::default(), wallet_type).await?;
         Ok(key_manager)
     }
 }
