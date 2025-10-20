@@ -1,8 +1,8 @@
-use sqlx::SqlitePool;
+use sqlx::SqliteConnection;
 
 use crate::models::BalanceChange;
 
-pub async fn insert_balance_change(pool: &SqlitePool, change: &BalanceChange) -> Result<(), sqlx::Error> {
+pub async fn insert_balance_change(conn: &mut SqliteConnection, change: &BalanceChange) -> Result<(), sqlx::Error> {
     let balance_credit = change.balance_credit as i64;
     let balance_debit = change.balance_debit as i64;
     let effective_height = change.effective_height as i64;
@@ -44,7 +44,7 @@ pub async fn insert_balance_change(pool: &SqlitePool, change: &BalanceChange) ->
         claimed_fee,
         claimed_amount
     )
-    .execute(pool)
+    .execute(&mut *conn)
     .await?;
 
     Ok(())

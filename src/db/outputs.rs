@@ -1,10 +1,12 @@
+use crate::models::OutputStatus;
 use chrono::{DateTime, Utc};
-use lightweight_wallet_libs::transaction_components::WalletOutput;
-use sqlx::SqlitePool;
+use serde_json;
+use sqlx::SqliteConnection;
+use tari_transaction_components::transaction_components::WalletOutput;
 
 #[allow(clippy::too_many_arguments)]
 pub async fn insert_output(
-    pool: &SqlitePool,
+    conn: &mut SqliteConnection,
     account_id: i64,
     output_hash: Vec<u8>,
     output: &WalletOutput,
@@ -45,7 +47,7 @@ pub async fn insert_output(
         memo_parsed,
         memo_hex
            )
-    .execute(pool)
+    .execute(&mut *conn)
     .await?;
 
     let rows_affected = insert_result.rows_affected();
@@ -57,14 +59,17 @@ pub async fn insert_output(
         "#,
         output_hash
     )
-    .fetch_one(pool)
+    .fetch_one(&mut *conn)
     .await?
     .id;
 
     Ok((output_id, rows_affected > 0))
 }
 
-pub async fn get_output_info_by_hash(pool: &SqlitePool, output_hash: &[u8]) -> Result<Option<(i64, u64)>, sqlx::Error> {
+pub async fn get_output_info_by_hash(
+    conn: &mut SqliteConnection,
+    output_hash: &[u8],
+) -> Result<Option<(i64, u64)>, sqlx::Error> {
     let row = sqlx::query!(
         r#"
         SELECT id, value
@@ -73,14 +78,14 @@ pub async fn get_output_info_by_hash(pool: &SqlitePool, output_hash: &[u8]) -> R
         "#,
         output_hash
     )
-    .fetch_optional(pool)
+    .fetch_optional(&mut *conn)
     .await?;
 
     Ok(row.map(|r| (r.id, r.value as u64)))
 }
 
 pub async fn get_unconfirmed_outputs(
-    pool: &SqlitePool,
+    conn: &mut SqliteConnection,
     account_id: i64,
     current_height: u64,
     confirmation_blocks: u64,
@@ -99,7 +104,7 @@ pub async fn get_unconfirmed_outputs(
         account_id,
         min_height
     )
-    .fetch_all(pool)
+    .fetch_all(&mut *conn)
     .await?;
 
     Ok(rows
@@ -116,7 +121,7 @@ pub async fn get_unconfirmed_outputs(
 }
 
 pub async fn mark_output_confirmed(
-    pool: &SqlitePool,
+    conn: &mut SqliteConnection,
     output_hash: &[u8],
     confirmed_height: u64,
     confirmed_hash: &[u8],
@@ -132,7 +137,106 @@ pub async fn mark_output_confirmed(
         confirmed_hash,
         output_hash
     )
-    .execute(pool)
+    .execute(&mut *conn)
+    .await?;
+
+    Ok(())
+}
+
+pub async fn update_output_status(
+    conn: &mut SqliteConnection,
+    output_id: i64,
+    status: OutputStatus,
+) -> Result<(), sqlx::Error> {
+    let status = status.to_string();
+    sqlx::query!(
+        r#"
+        UPDATE outputs
+        SET status = ?
+        WHERE id = ?
+        "#,
+        status,
+        output_id
+    )
+    .execute(&mut *conn)
+    .await?;
+
+    Ok(())
+}
+
+pub async fn lock_output(
+    conn: &mut SqliteConnection,
+    output_id: i64,
+    locked_by_request_id: &str,
+    locked_at: DateTime<Utc>,
+) -> Result<(), sqlx::Error> {
+    let locked_status = OutputStatus::Locked.to_string();
+    let unspent_status = OutputStatus::Unspent.to_string();
+    sqlx::query!(
+        r#"
+        UPDATE outputs
+        SET status = ?, locked_by_request_id = ?, locked_at = ?
+        WHERE id = ? and status = ?
+        "#,
+        locked_status,
+        locked_by_request_id,
+        locked_at,
+        output_id,
+        unspent_status,
+    )
+    .execute(&mut *conn)
+    .await?;
+
+    Ok(())
+}
+
+#[derive(Debug)]
+pub struct DbWalletOutput {
+    pub id: i64,
+    pub output: WalletOutput,
+}
+
+pub async fn fetch_unspent_outputs(
+    conn: &mut SqliteConnection,
+    account_id: i64,
+) -> Result<Vec<DbWalletOutput>, sqlx::Error> {
+    let rows = sqlx::query!(
+        "SELECT id, wallet_output_json FROM outputs WHERE account_id = ? and status = 'UNSPENT' and wallet_output_json IS NOT NULL ORDER BY value DESC",
+        account_id
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+
+    let mut outputs = Vec::new();
+    for row in rows {
+        if let Some(json_str) = row.wallet_output_json {
+            let output: WalletOutput = serde_json::from_str(&json_str).map_err(|e| {
+                sqlx::Error::Io(std::io::Error::other(format!(
+                    "Failed to deserialize WalletOutput: {}",
+                    e
+                )))
+            })?;
+            outputs.push(DbWalletOutput { id: row.id, output });
+        }
+    }
+    Ok(outputs)
+}
+
+pub async fn unlock_outputs_for_request(
+    conn: &mut SqliteConnection,
+    locked_by_request_id: &str,
+) -> Result<(), sqlx::Error> {
+    let unspent_status = OutputStatus::Unspent.to_string();
+    sqlx::query!(
+        r#"
+        UPDATE outputs
+        SET status = ?, locked_at = NULL, locked_by_request_id = NULL
+        WHERE locked_by_request_id = ?
+        "#,
+        unspent_status,
+        locked_by_request_id,
+    )
+    .execute(&mut *conn)
     .await?;
 
     Ok(())

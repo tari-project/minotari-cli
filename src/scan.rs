@@ -1,20 +1,17 @@
+use chrono::{DateTime, Utc};
+use lightweight_wallet_libs::{HttpBlockchainScanner, ScanConfig, scanning::BlockchainScanner};
+use sqlx::{Acquire, SqliteConnection};
 use std::time::Instant;
 
-use chacha20poly1305::{Key, KeyInit, XChaCha20Poly1305, XNonce, aead::Aead};
-use chrono::{DateTime, Utc};
-use lightweight_wallet_libs::{BlockchainScanner, HttpBlockchainScanner, KeyManagerBuilder, ScanConfig};
-use tari_crypto::{
-    compressed_key::CompressedKey,
-    ristretto::{RistrettoPublicKey, RistrettoSecretKey},
-};
 use tari_transaction_components::key_manager::{
     TransactionKeyManagerWrapper, memory_key_manager::MemoryKeyManagerBackend,
 };
+use tari_transaction_components::transaction_components::WalletOutput;
 use tari_utilities::byte_array::ByteArray;
 use thiserror::Error;
 
 use crate::{
-    db::{self, AccountRow, delete_old_scanned_tip_blocks, get_accounts, init_db},
+    db::{self, delete_old_scanned_tip_blocks, get_accounts, init_db},
     models::{self, BalanceChange, WalletEvent},
 };
 
@@ -39,22 +36,21 @@ pub async fn scan(
     max_blocks: u64,
     batch_size: u64,
 ) -> Result<Vec<WalletEvent>, ScanError> {
-    let db = init_db(database_file).await.map_err(ScanError::Fatal)?;
+    let pool = init_db(database_file).await.map_err(ScanError::Fatal)?;
+    let mut conn = pool.acquire().await?;
     let mut result = vec![];
-    for account in get_accounts(&db, account_name).await.map_err(ScanError::FatalSqlx)? {
+    for account in get_accounts(&mut conn, account_name)
+        .await
+        .map_err(ScanError::FatalSqlx)?
+    {
         println!("Found account: {:?}", account);
 
-        let (view_key, spend_key) = decrypt_keys(&account, password).map_err(ScanError::Fatal)?;
-        let key_manager = KeyManagerBuilder::default()
-            .with_view_key_and_spend_key(view_key, spend_key, account.birthday as u16)
-            .try_build()
-            .await
-            .map_err(ScanError::Fatal)?;
+        let key_manager = account.get_key_manager(password).await.map_err(ScanError::Fatal)?;
         let mut scanner = HttpBlockchainScanner::new(base_url.to_string(), key_manager.clone())
             .await
             .map_err(|e| ScanError::Intermittent(e.to_string()))?;
 
-        let last_blocks = db::get_scanned_tip_blocks_by_account(&db, account.id)
+        let last_blocks = db::get_scanned_tip_blocks_by_account(&mut conn, account.id)
             .await
             .map_err(ScanError::FatalSqlx)?;
 
@@ -70,7 +66,7 @@ pub async fn scan(
                 last_blocks.len(),
                 account.friendly_name
             );
-            let reorged_blocks = check_for_reorgs(&mut scanner, &db, &last_blocks)
+            let reorged_blocks = check_for_reorgs(&mut scanner, &mut conn, &last_blocks)
                 .await
                 .map_err(ScanError::Fatal)?;
             if reorged_blocks.len() == last_blocks.len() {
@@ -99,58 +95,45 @@ pub async fn scan(
             start_height = estimate_birthday_block;
         }
 
-        let tip_info = scanner
-            .get_tip_info()
-            .await
-            .map_err(|e| ScanError::Intermittent(e.to_string()))?;
-
         let mut total_scanned = 0;
+        let total_timer = Instant::now();
+        let scan_config = ScanConfig::default()
+            .with_start_height(start_height)
+            .with_batch_size(batch_size);
+        println!("starting scan from height {}", start_height);
+        let mut scan_update_height = start_height + 1000;
         loop {
             if total_scanned >= max_blocks {
+                println!("Reached maximum number of blocks to scan: {}", max_blocks);
                 break;
             }
-            let max_remaining = max_blocks - total_scanned;
-            let scan_config = ScanConfig::default().with_start_height(start_height).with_end_height(
-                start_height
-                    .saturating_add(max_remaining.min(batch_size))
-                    .min(tip_info.best_block_height),
-            );
-            println!(
-                "Scanning blocks {} to {:?}...",
-                scan_config.start_height, scan_config.end_height
-            );
-            let timer = Instant::now();
-            let scanned_blocks = scanner
-                .scan_blocks(scan_config)
+            let (scanned_blocks, more_blocks) = scanner
+                .scan_blocks(&scan_config)
                 .await
                 .map_err(|e| ScanError::Intermittent(e.to_string()))?;
-            println!(
-                "Scan took {:?}, on average: {} per second. Total outputs found: {}",
-                timer.elapsed(),
-                scanned_blocks.len() as f64 / timer.elapsed().as_secs_f64(),
-                scanned_blocks.iter().map(|b| b.wallet_outputs.len()).sum::<usize>()
-            );
 
             total_scanned += scanned_blocks.len() as u64;
-            if scanned_blocks.is_empty() {
+            if scanned_blocks.is_empty() || !more_blocks {
                 println!("No more blocks to scan.");
                 break;
             }
-            start_height = scanned_blocks.last().unwrap().height + 1;
-            println!(
-                "Scanned {} blocks, total scanned: {}",
-                scanned_blocks.len(),
-                total_scanned
-            );
             for scanned_block in &scanned_blocks {
+                if scanned_block.height >= scan_update_height {
+                    println!("Scanned {} blocks so far...", total_scanned);
+                    println!("Total scan time so far: {:?}", total_timer.elapsed());
+                    scan_update_height += 1000;
+                }
+                // Start a transaction for all DB operations related to this scanned block so
+                // that either all inserts/updates succeed or none are applied.
+                let mut tx = conn.begin().await.map_err(ScanError::FatalSqlx)?;
                 // Deleted inputs
                 for input in &scanned_block.inputs {
-                    if let Some((output_id, value)) = db::get_output_info_by_hash(&db, input.as_slice())
+                    if let Some((output_id, value)) = db::get_output_info_by_hash(&mut tx, input.as_slice())
                         .await
                         .map_err(ScanError::FatalSqlx)?
                     {
                         let (input_id, inserted_new_input) = db::insert_input(
-                            &db,
+                            &mut tx,
                             account.id,
                             output_id,
                             scanned_block.height,
@@ -182,7 +165,11 @@ pub async fn scan(
                                 claimed_fee: None,
                                 claimed_amount: None,
                             };
-                            db::insert_balance_change(&db, &balance_change)
+                            db::insert_balance_change(&mut tx, &balance_change)
+                                .await
+                                .map_err(ScanError::FatalSqlx)?;
+
+                            db::update_output_status(&mut tx, output_id, models::OutputStatus::Spent)
                                 .await
                                 .map_err(ScanError::FatalSqlx)?;
                         }
@@ -190,12 +177,6 @@ pub async fn scan(
                 }
 
                 for (hash, output) in &scanned_block.wallet_outputs {
-                    println!(
-                        "Detected output with amount {} at height {}",
-                        output.value(),
-                        scanned_block.height
-                    );
-
                     // Extract memo information
                     let payment_info = output.payment_id();
                     let memo_bytes = payment_info.get_payment_id();
@@ -228,7 +209,7 @@ pub async fn scan(
                     };
                     result.push(event.clone());
                     let (output_id, inserted_new_output) = db::insert_output(
-                        &db,
+                        &mut tx,
                         account.id,
                         hash.to_vec().clone(),
                         output,
@@ -242,7 +223,7 @@ pub async fn scan(
                     .map_err(ScanError::FatalSqlx)?;
 
                     if inserted_new_output {
-                        db::insert_wallet_event(&db, account.id, &event)
+                        db::insert_wallet_event(&mut tx, account.id, &event)
                             .await
                             .map_err(ScanError::Fatal)?;
 
@@ -255,14 +236,14 @@ pub async fn scan(
                             output,
                         );
                         for change in balance_changes {
-                            db::insert_balance_change(&db, &change)
+                            db::insert_balance_change(&mut tx, &change)
                                 .await
                                 .map_err(ScanError::FatalSqlx)?;
                         }
                     }
                 }
                 db::insert_scanned_tip_block(
-                    &db,
+                    &mut tx,
                     account.id,
                     scanned_block.height as i64,
                     scanned_block.block_hash.as_slice(),
@@ -272,7 +253,7 @@ pub async fn scan(
 
                 // Check for outputs that should be confirmed (6 block confirmations)
                 let unconfirmed_outputs = db::get_unconfirmed_outputs(
-                    &db,
+                    &mut tx,
                     account.id,
                     scanned_block.height,
                     6, // 6 block confirmations required
@@ -298,13 +279,13 @@ pub async fn scan(
                     };
 
                     result.push(confirmation_event.clone());
-                    db::insert_wallet_event(&db, account.id, &confirmation_event)
+                    db::insert_wallet_event(&mut tx, account.id, &confirmation_event)
                         .await
                         .map_err(ScanError::Fatal)?;
 
                     // Mark the output as confirmed in the database
                     db::mark_output_confirmed(
-                        &db,
+                        &mut tx,
                         &output_hash,
                         scanned_block.height,
                         scanned_block.block_hash.as_slice(),
@@ -312,57 +293,41 @@ pub async fn scan(
                     .await
                     .map_err(ScanError::FatalSqlx)?;
 
-                    println!(
-                        "Output {:?} confirmed at height {} (originally at height {})",
-                        hex::encode(&output_hash),
-                        scanned_block.height,
-                        original_height
-                    );
+                    // println!(
+                    //     "Output {:?} confirmed at height {} (originally at height {})",
+                    //     hex::encode(&output_hash),
+                    //     scanned_block.height,
+                    //     original_height
+                    // );
                 }
+
+                // Commit transaction for this block's DB changes. If commit fails, return error and
+                // rollback will be implicit when tx is dropped.
+                tx.commit().await.map_err(ScanError::FatalSqlx)?;
             }
 
-            println!("Batch took {:?}.", timer.elapsed());
-            println!("deleting old scanned tip blocks...");
-            delete_old_scanned_tip_blocks(&db, account.id, 50)
+            // println!("Batch took {:?}.", timer.elapsed());
+            // println!("deleting old scanned tip blocks...");
+            delete_old_scanned_tip_blocks(&mut conn, account.id, 50)
                 .await
                 .map_err(ScanError::FatalSqlx)?;
 
-            println!("Cleanup took {:?}.", timer.elapsed());
+            // println!("Cleanup took {:?}.", timer.elapsed());
         }
 
-        println!("Scan complete.");
+        println!("Scan complete. in {:?}", total_timer.elapsed());
+        println!(
+            "Took on average {:?}ms per block.",
+            total_timer.elapsed().as_millis() / total_scanned as u128
+        );
     }
     Ok(result)
-}
-
-// TODO: Move this to accounts.rs or somewhere db related.
-pub fn decrypt_keys(
-    account_row: &AccountRow,
-    password: &str,
-) -> Result<(RistrettoSecretKey, CompressedKey<RistrettoPublicKey>), anyhow::Error> {
-    let password = if password.len() < 32 {
-        format!("{:0<32}", password)
-    } else {
-        password[..32].to_string()
-    };
-    let key = Key::from_slice(password.as_bytes());
-    let cipher = XChaCha20Poly1305::new(key);
-
-    let nonce = XNonce::clone_from_slice(account_row.cipher_nonce.as_ref());
-
-    let view_key = cipher.decrypt(&nonce, account_row.encrypted_view_private_key.as_ref())?;
-    let spend_key = cipher.decrypt(&nonce, account_row.encrypted_spend_public_key.as_ref())?;
-
-    let view_key = RistrettoSecretKey::from_canonical_bytes(&view_key).map_err(|e| anyhow::anyhow!(e))?;
-    let spend_key =
-        CompressedKey::<RistrettoPublicKey>::from_canonical_bytes(&spend_key).map_err(|e| anyhow::anyhow!(e))?;
-    Ok((view_key, spend_key))
 }
 
 /// Returns (removed_blocks, added_blocks   )
 async fn check_for_reorgs(
     scanner: &mut HttpBlockchainScanner<TransactionKeyManagerWrapper<MemoryKeyManagerBackend>>,
-    db: &sqlx::SqlitePool,
+    conn: &mut SqliteConnection,
     last_blocks_in_desc: &[models::ScannedTipBlock],
 ) -> Result<Vec<models::ScannedTipBlock>, anyhow::Error> {
     let mut removed_blocks = vec![];
@@ -386,7 +351,7 @@ async fn check_for_reorgs(
                     "#,
                     block.id
                 )
-                .execute(db)
+                .execute(&mut *conn)
                 .await
                 .map_err(|e| anyhow::anyhow!("Failed to delete scanned tip block: {}", e))?;
             }
@@ -415,7 +380,7 @@ fn parse_balance_changes(
     output_id: i64,
     chain_timestamp: u64,
     chain_height: u64,
-    output: &lightweight_wallet_libs::transaction_components::WalletOutput,
+    output: &WalletOutput,
 ) -> Vec<models::BalanceChange> {
     // Coinbases.
     if output.features().is_coinbase() {

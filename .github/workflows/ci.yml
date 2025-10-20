@@ -24,6 +24,11 @@ jobs:
         with:
           components: clippy, rustfmt
 
+      - name: ubuntu dependencies
+        run: |
+          sudo apt-get update
+          sudo bash scripts/install_ubuntu_dependencies.sh
+
       - name: Install cargo-machete
         run: cargo install cargo-machete
 

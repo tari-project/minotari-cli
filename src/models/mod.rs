@@ -2,6 +2,9 @@ use chrono::NaiveDateTime;
 use serde::{Deserialize, Serialize};
 use tari_common_types::types::FixedHash;
 
+pub mod output_status;
+pub use output_status::OutputStatus;
+
 // Change depending on sql type.
 pub type Id = i64;
 

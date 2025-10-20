@@ -1,11 +1,31 @@
+use std::sync::Arc;
+
+use chacha20poly1305::{Key, KeyInit, XChaCha20Poly1305, XNonce, aead::Aead};
 use serde::Serialize;
-use sqlx::SqlitePool;
+use sqlx::SqliteConnection;
+use tari_common::configuration::Network;
+use tari_common_types::{
+    seeds::cipher_seed::CipherSeed,
+    tari_address::{TariAddress, TariAddressFeatures},
+    types::CompressedPublicKey,
+    wallet_types::{ProvidedKeysWallet, WalletType},
+};
+use tari_crypto::keys::PublicKey;
+use tari_crypto::{
+    compressed_key::CompressedKey,
+    ristretto::{RistrettoPublicKey, RistrettoSecretKey},
+};
+use tari_transaction_components::{
+    crypto_factories::CryptoFactories,
+    key_manager::{TransactionKeyManagerWrapper, memory_key_manager::MemoryKeyManagerBackend},
+};
+use tari_utilities::byte_array::ByteArray;
 use utoipa::ToSchema;
 
 use crate::models::Id;
 
 pub async fn create_account(
-    pool: &SqlitePool,
+    conn: &mut SqliteConnection,
     friendly_name: &str,
     encryptd_view_private_key: &[u8],
     encrypted_spend_public_key: &[u8],
@@ -30,13 +50,16 @@ pub async fn create_account(
         unencrypted_view_key_hash,
         birthday
     )
-    .execute(pool)
+    .execute(&mut *conn)
     .await?;
 
     Ok(())
 }
 
-pub async fn get_account_by_name(pool: &SqlitePool, friendly_name: &str) -> Result<Option<AccountRow>, sqlx::Error> {
+pub async fn get_account_by_name(
+    conn: &mut SqliteConnection,
+    friendly_name: &str,
+) -> Result<Option<AccountRow>, sqlx::Error> {
     let row = sqlx::query_as!(
         AccountRow,
         r#"
@@ -52,13 +75,16 @@ pub async fn get_account_by_name(pool: &SqlitePool, friendly_name: &str) -> Resu
         "#,
         friendly_name
     )
-    .fetch_optional(pool)
+    .fetch_optional(&mut *conn)
     .await?;
 
     Ok(row)
 }
 
-pub async fn get_accounts(pool: &SqlitePool, friendly_name: Option<&str>) -> Result<Vec<AccountRow>, sqlx::Error> {
+pub async fn get_accounts(
+    conn: &mut SqliteConnection,
+    friendly_name: Option<&str>,
+) -> Result<Vec<AccountRow>, sqlx::Error> {
     let rows = if let Some(name) = friendly_name {
         sqlx::query_as!(
             AccountRow,
@@ -76,7 +102,7 @@ pub async fn get_accounts(pool: &SqlitePool, friendly_name: Option<&str>) -> Res
             "#,
             name
         )
-        .fetch_all(pool)
+        .fetch_all(&mut *conn)
         .await?
     } else {
         sqlx::query_as!(
@@ -93,7 +119,7 @@ pub async fn get_accounts(pool: &SqlitePool, friendly_name: Option<&str>) -> Res
             ORDER BY friendly_name
             "#
         )
-        .fetch_all(pool)
+        .fetch_all(&mut *conn)
         .await?
     };
 
@@ -112,6 +138,70 @@ pub struct AccountRow {
     pub birthday: i64,
 }
 
+impl AccountRow {
+    pub fn decrypt_keys(
+        &self,
+        password: &str,
+    ) -> Result<(RistrettoSecretKey, CompressedKey<RistrettoPublicKey>), anyhow::Error> {
+        let password = if password.len() < 32 {
+            format!("{:0<32}", password)
+        } else {
+            password[..32].to_string()
+        };
+        let key_bytes: [u8; 32] = password
+            .as_bytes()
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("Password must be 32 bytes"))?;
+        let key = Key::from(key_bytes);
+        let cipher = XChaCha20Poly1305::new(&key);
+
+        let nonce_bytes: &[u8; 24] = self
+            .cipher_nonce
+            .as_slice()
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("Nonce must be 24 bytes"))?;
+        let nonce = XNonce::from(*nonce_bytes);
+
+        let view_key = cipher.decrypt(&nonce, self.encrypted_view_private_key.as_ref())?;
+        let spend_key = cipher.decrypt(&nonce, self.encrypted_spend_public_key.as_ref())?;
+
+        let view_key = RistrettoSecretKey::from_canonical_bytes(&view_key).map_err(|e| anyhow::anyhow!(e))?;
+        let spend_key =
+            CompressedKey::<RistrettoPublicKey>::from_canonical_bytes(&spend_key).map_err(|e| anyhow::anyhow!(e))?;
+        Ok((view_key, spend_key))
+    }
+
+    pub fn get_address(&self, network: Network, password: &str) -> Result<TariAddress, anyhow::Error> {
+        let (view_key, spend_key) = self.decrypt_keys(password)?;
+        let address = TariAddress::new_dual_address(
+            CompressedPublicKey::new_from_pk(RistrettoPublicKey::from_secret_key(&view_key)),
+            spend_key,
+            network,
+            TariAddressFeatures::create_one_sided_only(),
+            None,
+        )?;
+        Ok(address)
+    }
+
+    pub async fn get_key_manager(
+        &self,
+        password: &str,
+    ) -> Result<TransactionKeyManagerWrapper<MemoryKeyManagerBackend>, anyhow::Error> {
+        let (view_key, spend_key) = self.decrypt_keys(password)?;
+        let seed = CipherSeed::random();
+        let wallet_type = Arc::new(WalletType::ProvidedKeys(ProvidedKeysWallet {
+            view_key,
+            birthday: Some(self.birthday as u16),
+            public_spend_key: spend_key,
+            private_spend_key: None,
+            private_comms_key: None,
+        }));
+        let key_manager: TransactionKeyManagerWrapper<MemoryKeyManagerBackend> =
+            TransactionKeyManagerWrapper::new(Some(seed), CryptoFactories::default(), wallet_type).await?;
+        Ok(key_manager)
+    }
+}
+
 #[derive(Debug, Clone, ToSchema, Serialize)]
 pub struct AccountBalance {
     pub total_credits: Option<i64>,
@@ -120,7 +210,7 @@ pub struct AccountBalance {
     pub max_date: Option<String>,
 }
 
-pub async fn get_balance(pool: &SqlitePool, account_id: i64) -> Result<AccountBalance, sqlx::Error> {
+pub async fn get_balance(conn: &mut SqliteConnection, account_id: i64) -> Result<AccountBalance, sqlx::Error> {
     let agg_result = sqlx::query_as!(
         AccountBalance,
         r#"
@@ -134,7 +224,7 @@ pub async fn get_balance(pool: &SqlitePool, account_id: i64) -> Result<AccountBa
             "#,
         account_id
     )
-    .fetch_one(pool)
+    .fetch_one(&mut *conn)
     .await?;
     Ok(agg_result)
 }
