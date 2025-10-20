@@ -159,6 +159,8 @@ pub enum TappletCommand {
         account_name: Option<String>,
         #[arg(short, long, help = "Path to the database file", default_value = "data/wallet.db")]
         database_file: String,
+        #[arg(short, long, help = "Password to decrypt the wallet file")]
+        password: String,
     },
     /// Uninstall a tapplet by name
     Uninstall {

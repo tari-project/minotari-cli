@@ -5,6 +5,7 @@ use tari_tapplet_lib::{
     TappletRegistry, git_tapplet::GitTapplet, local_folder_lua_tapplet::LocalFolderLuaTapplet,
     local_folder_tapplet::LocalFolderTapplet,
 };
+use utoipa::PartialSchema;
 
 use crate::db;
 
@@ -69,6 +70,7 @@ pub async fn install_from_local(
     cache_directory: PathBuf,
     account_name: Option<String>,
     database_file: &str,
+    password: &str,
 ) -> Result<(), anyhow::Error> {
     // Placeholder for install logic
     println!("Install from local function called");
@@ -78,7 +80,16 @@ pub async fn install_from_local(
     // open the db and create the child accounts.
     let pool = crate::init_db(database_file).await?;
     let mut db = pool.acquire().await?;
-    for account in crate::get_accounts(&mut db, account_name.as_deref()).await? {
+    let accounts = crate::get_accounts(&mut db, account_name.as_deref()).await?;
+    if accounts.is_empty() {
+        println!("No accounts found to associate with the tapplet.");
+        return Err(anyhow::anyhow!("No accounts found"));
+    }
+    for account in accounts {
+        // Check that we can decrypt otherwise can't install.
+        // In future these might actually be used
+        let (_view_key, _spend_key) = account.decrypt_keys(password)?;
+
         let mut child_account = crate::db::create_child_account_for_tapplet(
             &mut db,
             account.id,

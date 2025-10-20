@@ -47,6 +47,7 @@ pub async fn tapplet_command_handler(tapplet_subcommand: TappletCommand) -> Resu
             path,
             database_file,
             account_name,
+            password,
         } => {
             if let Some(n) = name {
                 println!("Installing tapplet...");
@@ -54,7 +55,14 @@ pub async fn tapplet_command_handler(tapplet_subcommand: TappletCommand) -> Resu
             } else {
                 if let Some(p) = path {
                     println!("Installing tapplet from local path...");
-                    install::install_from_local(p.into(), cache_directory.into(), account_name, &database_file).await?;
+                    install::install_from_local(
+                        p.into(),
+                        cache_directory.into(),
+                        account_name,
+                        &database_file,
+                        &password,
+                    )
+                    .await?;
                 } else {
                     println!("Either name or path must be provided for installation.");
                     return Err(anyhow::anyhow!("Name or path required"));
