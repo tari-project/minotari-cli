@@ -3,7 +3,10 @@ use std::{env::current_dir, fs};
 use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
 
 mod accounts;
-pub use accounts::{AccountBalance, AccountRow, create_account, get_account_by_name, get_accounts, get_balance};
+pub use accounts::{
+    AccountBalance, AccountRow, create_account, create_child_account_for_tapplet, get_account_by_name, get_accounts,
+    get_balance,
+};
 
 mod scanned_tip_blocks;
 pub use scanned_tip_blocks::{

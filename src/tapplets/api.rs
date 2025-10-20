@@ -4,7 +4,7 @@ use tari_crypto::{
 };
 use tari_tapplet_lib::{TappletConfig, host::MinotariTappletApiV1};
 
-use crate::{get_accounts, init_db, scan::decrypt_keys};
+use crate::{get_accounts, init_db};
 
 #[derive(Clone)]
 pub(crate) struct MinotariApiProvider {
@@ -24,9 +24,10 @@ impl MinotariApiProvider {
         database_file: &str,
         password: &str,
     ) -> Result<Self, anyhow::Error> {
-        let db = init_db(database_file).await?;
+        let pool = init_db(database_file).await?;
+        let mut conn = pool.acquire().await?;
         let tapplet_account = derive_tapplet_account_name(&account_name, &tapplet_config.canonical_name());
-        let accounts = get_accounts(&db, Some(&tapplet_account)).await?;
+        let accounts = get_accounts(&mut conn, Some(&tapplet_account)).await?;
         if accounts.is_empty() {
             Err(anyhow::anyhow!("No account found with name '{}'", tapplet_account))
         } else if accounts.len() > 1 {
@@ -38,7 +39,7 @@ impl MinotariApiProvider {
         } else {
             let account = &accounts[0];
             println!("Found account: {:?}", account);
-            let (view_key, spend_key) = decrypt_keys(&account, password)?;
+            let (view_key, spend_key) = account.decrypt_keys(password)?;
             Ok(Self {
                 account_name: tapplet_account,
                 private_view_key: view_key,

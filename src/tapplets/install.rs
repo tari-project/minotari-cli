@@ -6,6 +6,8 @@ use tari_tapplet_lib::{
     local_folder_tapplet::LocalFolderTapplet,
 };
 
+use crate::db;
+
 pub async fn install_from_git(
     registry: Option<String>,
     name: &str,
@@ -74,9 +76,17 @@ pub async fn install_from_local(
     let tapplet = LocalFolderLuaTapplet::load(path)?;
 
     // open the db and create the child accounts.
-    let db = crate::init_db(database_file).await?;
-    for account in crate::get_accounts(&db, account_name.as_deref()).await? {
-        let mut child_account = crate::create_child_account_for_tapplet(&db, &account, &tapplet).await?;
+    let pool = crate::init_db(database_file).await?;
+    let mut db = pool.acquire().await?;
+    for account in crate::get_accounts(&mut db, account_name.as_deref()).await? {
+        let mut child_account = crate::db::create_child_account_for_tapplet(
+            &mut db,
+            account.id,
+            &account.friendly_name,
+            &tapplet.config.canonical_name(),
+            &tapplet.config.public_key,
+        )
+        .await?;
         println!("Created child account: {:?}", child_account);
     }
 

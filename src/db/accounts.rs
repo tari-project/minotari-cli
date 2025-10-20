@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use chacha20poly1305::{Key, KeyInit, XChaCha20Poly1305, XNonce, aead::Aead};
 use serde::Serialize;
-use sqlx::SqliteConnection;
+use sqlx::{SqliteConnection, SqlitePool};
 use tari_common::configuration::Network;
 use tari_common_types::{
     seeds::cipher_seed::CipherSeed,
@@ -230,16 +230,16 @@ pub async fn get_balance(conn: &mut SqliteConnection, account_id: i64) -> Result
 }
 
 pub async fn create_child_account_for_tapplet(
-    pool: &SqlitePool,
+    conn: &mut SqliteConnection,
     parent_account_id: Id,
     parent_account_name: &str,
     tapplet_name: &str,
     tapplet_public_key_hex: &str,
-) -> Result<Id, sqlx::Error> {
+) -> Result<Id, anyhow::Error> {
     let child_account_name = format!("{}::{}", parent_account_name, tapplet_name);
     let id = sqlx::query!(
         r#"
-        INSERT INTO child_accounts (parent_account_id, child_account_name, for_tapplet_name, tapplet_public_key)
+        INSERT INTO child_accounts (parent_account_id, child_account_name, for_tapplet_name, tapplet_pub_key)
         VALUES (?, ?, ?, ?)
         RETURNING id
         "#,
@@ -248,7 +248,9 @@ pub async fn create_child_account_for_tapplet(
         tapplet_name,
         tapplet_public_key_hex
     )
-    .fetch_one(pool)
+    .fetch_one(conn)
     .await?;
-    Ok(id.id)
+    Ok(id
+        .id
+        .ok_or_else(|| anyhow::anyhow!("Failed to get inserted child account ID"))?)
 }

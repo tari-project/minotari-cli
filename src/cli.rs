@@ -1,4 +1,5 @@
 use clap::{Parser, Subcommand};
+use tari_common::configuration::Network;
 
 #[derive(Parser)]
 #[command(name = "tari")]
@@ -62,6 +63,8 @@ pub enum Commands {
         scan_interval_secs: u64,
         #[arg(long, help = "Port for the API server", default_value_t = 9000)]
         api_port: u16,
+        #[arg(long, help = "The Tari network to connect to", default_value_t = Network::MainNet)]
+        network: Network,
     },
     /// Show wallet balance
     Balance {
