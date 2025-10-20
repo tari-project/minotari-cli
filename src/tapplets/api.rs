@@ -102,13 +102,25 @@ impl MinotariTappletApiV1 for MinotariApiProvider {
 
         let tapplet_view_pub_key = CompressedKey::<RistrettoPublicKey>::from_secret_key(&tapplet_private_view_key);
         let spend_key = self.public_spend_key.clone();
-        let tapplet_storage_address =
-            TariAddress::new_dual_address_with_default_features(tapplet_view_pub_key, spend_key, Network::MainNet)?;
+        let tapplet_storage_address = TariAddress::new_dual_address(
+            tapplet_view_pub_key,
+            spend_key,
+            Network::MainNet,
+            TariAddressFeatures::create_one_sided_only(),
+            None,
+        )?;
 
         let recipients = vec![Recipient {
             address: tapplet_storage_address.clone(),
             amount: self.default_amount_for_save,
         }];
+        let payment_id = format!("t:\"{}\",\"{}\"", slot, value);
+        println!(
+            "You can send a manual transaction with this payment memo: {} to address {}",
+            payment_id,
+            tapplet_storage_address.to_base58()
+        );
+        println!("Creating unsigned one-sided transaction. If this fails, use the above fallback ...");
 
         let seconds_to_lock_utxos = self.seconds_to_lock_utxos;
         let path = self.db_file.to_string_lossy();
@@ -119,7 +131,7 @@ impl MinotariTappletApiV1 for MinotariApiProvider {
             .ok_or_else(|| anyhow!("No account found. This should not happen."))?;
 
         let one_sided_tx = OneSidedTransaction::new(db.clone(), Network::MainNet, self.password.clone());
-        let payment_id = format!("t:\"{}\",\"{}\"", slot, value);
+
         let result = one_sided_tx
             .create_unsigned_transaction(
                 account,
