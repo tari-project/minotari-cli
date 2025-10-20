@@ -1,4 +1,8 @@
-use std::sync::Arc;
+use std::{
+    fs::{self, create_dir_all},
+    path::Path,
+    sync::Arc,
+};
 
 use blake2::{Blake2s256, Digest};
 use chacha20poly1305::{
@@ -24,13 +28,17 @@ use tari_transaction_components::{
 };
 use tari_utilities::byte_array::ByteArray;
 
+use anyhow::anyhow;
 use minotari::{
     daemon, db,
     db::{get_accounts, get_balance, init_db},
     models::WalletEvent,
     scan,
     scan::ScanError,
+    transactions::one_sided_transaction::{OneSidedTransaction, Recipient},
 };
+use std::str::FromStr;
+use tari_transaction_components::tari_amount::MicroMinotari;
 
 #[derive(Parser)]
 #[command(name = "tari")]
@@ -120,6 +128,36 @@ enum Commands {
         database_file: String,
         #[arg(short, long, help = "The wallet birthday (block height)", default_value = "0")]
         birthday: u16,
+    },
+    /// Create an unsigned transaction
+    CreateUnsignedTransaction {
+        #[arg(short, long, help = "Name of the account to send from")]
+        account_name: String,
+        #[arg(
+            short,
+            long,
+            help = "Recipient address and amount (e.g., address::amount). Can be specified multiple times."
+        )]
+        recipient: Vec<String>,
+        #[arg(
+            short,
+            long,
+            help = "Path to the output file for the unsigned transaction",
+            default_value = "data/unsigned_transaction.json"
+        )]
+        output_file: String,
+        #[arg(short, long, help = "Password to decrypt the wallet file")]
+        password: String,
+        #[arg(short, long, help = "Path to the database file", default_value = "data/wallet.db")]
+        database_file: String,
+        #[arg(long, help = "Optional payment ID")]
+        payment_id: Option<String>,
+        #[arg(long, help = "Optional idempotency key")]
+        idempotency_key: Option<String>,
+        #[arg(long, help = "Optional seconds to lock UTXOs", default_value_t = 86400)]
+        seconds_to_lock: u64,
+        #[arg(long, help = "The Tari network to connect to", default_value_t = Network::MainNet)]
+        network: Network,
     },
 }
 
@@ -269,6 +307,31 @@ async fn main() -> Result<(), anyhow::Error> {
             let _ = handle_balance(&database_file, account_name.as_deref()).await;
             Ok(())
         },
+        Commands::CreateUnsignedTransaction {
+            account_name,
+            recipient,
+            output_file,
+            password,
+            database_file,
+            payment_id,
+            idempotency_key,
+            seconds_to_lock,
+            network,
+        } => {
+            println!("Creating unsigned transaction...");
+            handle_create_unsigned_transaction(
+                recipient,
+                database_file,
+                account_name,
+                network,
+                password,
+                payment_id,
+                idempotency_key,
+                seconds_to_lock,
+                output_file,
+            )
+            .await
+        },
     }
 }
 
@@ -290,6 +353,51 @@ async fn handle_balance(database_file: &str, account_name: Option<&str>) -> Resu
             tari_balance
         );
     }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_create_unsigned_transaction(
+    recipient: Vec<String>,
+    database_file: String,
+    account_name: String,
+    network: Network,
+    password: String,
+    payment_id: Option<String>,
+    idempotency_key: Option<String>,
+    seconds_to_lock: u64,
+    output_file: String,
+) -> Result<(), anyhow::Error> {
+    let recipients: Result<Vec<Recipient>, anyhow::Error> = recipient
+        .into_iter()
+        .map(|r_str| {
+            let parts: Vec<&str> = r_str.split("::").collect();
+            if parts.len() != 2 {
+                return Err(anyhow!("Invalid recipient format. Expected 'address::amount'"));
+            }
+            let address = TariAddress::from_str(parts[0])?;
+            let amount = MicroMinotari::from_str(parts[1])?;
+            Ok(Recipient { address, amount })
+        })
+        .collect();
+    let recipients = recipients?;
+
+    let pool = init_db(&database_file).await?;
+    let mut conn = pool.acquire().await?;
+    let account = db::get_account_by_name(&mut conn, &account_name)
+        .await?
+        .ok_or_else(|| anyhow!("Account not found: {}", account_name))?;
+
+    let one_sided_tx = OneSidedTransaction::new(pool.clone(), network, password.clone());
+    let result = one_sided_tx
+        .create_unsigned_transaction(account, recipients, payment_id, idempotency_key, seconds_to_lock)
+        .await
+        .map_err(|e| anyhow!("Failed to create unsigned transaction: {}", e))?;
+
+    create_dir_all(Path::new(&output_file).parent().unwrap())?;
+    fs::write(output_file, serde_json::to_string_pretty(&result)?)?;
+
+    println!("Unsigned transaction written to file.");
     Ok(())
 }
 
