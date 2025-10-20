@@ -90,11 +90,23 @@ pub async fn install_from_local(
         // In future these might actually be used
         let (_view_key, _spend_key) = account.decrypt_keys(password)?;
 
-        let mut child_account = crate::db::create_child_account_for_tapplet(
+        // Parse the canonical name to extract name and version
+        let canonical_name = tapplet.config.canonical_name();
+        let (tapplet_name, tapplet_version) = if let Some(at_pos) = canonical_name.rfind('@') {
+            let name = &canonical_name[..at_pos];
+            let version = &canonical_name[at_pos + 1..];
+            (name, version)
+        } else {
+            // If no version separator found, use the whole name and empty version
+            (canonical_name.as_str(), "")
+        };
+
+        let child_account = crate::db::create_child_account_for_tapplet(
             &mut db,
             account.id,
             &account.friendly_name,
-            &tapplet.config.canonical_name(),
+            tapplet_name,
+            tapplet_version,
             &tapplet.config.public_key,
         )
         .await?;

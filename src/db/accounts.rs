@@ -234,18 +234,20 @@ pub async fn create_child_account_for_tapplet(
     parent_account_id: Id,
     parent_account_name: &str,
     tapplet_name: &str,
+    tapplet_version: &str,
     tapplet_public_key_hex: &str,
 ) -> Result<Id, anyhow::Error> {
-    let child_account_name = format!("{}::{}", parent_account_name, tapplet_name);
+    let child_account_name = format!("{}::{}@{}", parent_account_name, tapplet_name, tapplet_version);
     let id = sqlx::query!(
         r#"
-        INSERT INTO child_accounts (parent_account_id, child_account_name, for_tapplet_name, tapplet_pub_key)
-        VALUES (?, ?, ?, ?)
+        INSERT INTO child_accounts (parent_account_id, child_account_name, for_tapplet_name, version, tapplet_pub_key)
+        VALUES (?, ?, ?, ?, ?)
         RETURNING id
         "#,
         parent_account_id,
         child_account_name,
         tapplet_name,
+        tapplet_version,
         tapplet_public_key_hex
     )
     .fetch_one(conn)
