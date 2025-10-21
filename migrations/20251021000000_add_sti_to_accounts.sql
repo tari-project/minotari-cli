@@ -65,6 +65,12 @@ FROM child_accounts ca;
 -- Rename new table to accounts
 ALTER TABLE accounts_new RENAME TO accounts;
 
+
+-- Add indexes for common queries
+CREATE INDEX idx_accounts_parent_account_id ON accounts(parent_account_id);
+CREATE INDEX idx_accounts_account_type ON accounts(account_type);
+CREATE INDEX idx_accounts_for_tapplet_name ON accounts(for_tapplet_name);
+
 -- Update scanned_tip_blocks to reference the new account IDs
 -- Map child_account_id to the new account_id in the unified accounts table
 UPDATE scanned_tip_blocks
@@ -79,16 +85,29 @@ SET account_id = (
 
 
 
-alter table scanned_tip_blocks
-    drop constraint foreign key (child_account_id);
+-- Recreate scanned_tip_blocks without child_account_id and its FK
+PRAGMA foreign_keys=off;
 
-Alter table scanned_tip_blocks
-    drop column child_account_id;
-    
-drop table child_accounts;
+CREATE TABLE scanned_tip_blocks_new (
+    id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL,
+    hash Blob NOT NULL,
+    height INTEGER NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (account_id) REFERENCES accounts(id)
+);
+
+INSERT INTO scanned_tip_blocks_new (id, account_id, hash, height, created_at)
+SELECT id, account_id, hash, height, created_at
+FROM scanned_tip_blocks;
+
+DROP TABLE scanned_tip_blocks;
+
+ALTER TABLE scanned_tip_blocks_new RENAME TO scanned_tip_blocks;
+
+PRAGMA foreign_keys=on;
+
+-- Drop child_accounts table as it's no longer needed
+DROP TABLE child_accounts;
 
 
--- Add indexes for common queries
-CREATE INDEX idx_accounts_parent_account_id ON accounts(parent_account_id);
-CREATE INDEX idx_accounts_account_type ON accounts(account_type);
-CREATE INDEX idx_accounts_for_tapplet_name ON accounts(for_tapplet_name);
