@@ -66,13 +66,18 @@ pub async fn get_account_by_name(
     let row = sqlx::query_as!(
         AccountRow,
         r#"
-        SELECT id, 
-            friendly_name, 
-            encrypted_view_private_key, 
-            encrypted_spend_public_key, 
-            cipher_nonce, 
+        SELECT id,
+            friendly_name,
+            encrypted_view_private_key,
+            encrypted_spend_public_key,
+            cipher_nonce,
             unencrypted_view_key_hash,
-            birthday
+            birthday,
+            account_type,
+            parent_account_id,
+            for_tapplet_name,
+            version,
+            tapplet_pub_key
         FROM accounts
         WHERE friendly_name = ?
         "#,
@@ -89,39 +94,51 @@ pub async fn get_scannable_accounts(
     friendly_name: Option<&str>,
     include_child_accounts: bool,
 ) -> Result<Vec<ScannableAccount>, sqlx::Error> {
-    let accounts = get_accounts(conn, friendly_name).await?;
-    let mut scannable_accounts = Vec::new();
-    for account in accounts {
-        scannable_accounts.push(ScannableAccount {
-            parent_account_row: account.clone(),
-            child_account_row: None,
-        });
-        if include_child_accounts {
-            // Include child accounts
-            let child_accounts = sqlx::query_as!(
-                ChildAccountRow,
-                r#"
-                SELECT id, 
-                    parent_account_id, 
-                    child_account_name, 
-                    for_tapplet_name, 
-                    version, 
-                    tapplet_pub_key
-                FROM child_accounts
-                WHERE parent_account_id = ?
-               "#,
-                account.id
-            )
-            .fetch_all(&mut *conn)
-            .await?;
-            for child_account in child_accounts {
-                scannable_accounts.push(ScannableAccount {
-                    parent_account_row: account.clone(),
-                    child_account_row: Some(child_account),
-                });
-            }
-        }
+    // With STI, we query accounts table for both parent and child accounts
+    let mut query = String::from(
+        r#"
+        SELECT id,
+          friendly_name,
+          encrypted_view_private_key,
+          encrypted_spend_public_key,
+          cipher_nonce,
+          unencrypted_view_key_hash,
+          birthday,
+          account_type,
+          parent_account_id,
+          for_tapplet_name,
+          version,
+          tapplet_pub_key
+        FROM accounts
+        WHERE 1=1
+        "#,
+    );
+
+    let mut params: Vec<&str> = Vec::new();
+
+    if let Some(name) = friendly_name {
+        query.push_str(" AND friendly_name = ?");
+        params.push(name);
     }
+
+    if !include_child_accounts {
+        query.push_str(" AND account_type = 'parent'");
+    }
+
+    query.push_str(" ORDER BY friendly_name");
+
+    let mut query_builder = sqlx::query_as::<_, AccountRow>(&query);
+    for param in params {
+        query_builder = query_builder.bind(param);
+    }
+
+    let accounts = query_builder.fetch_all(&mut *conn).await?;
+
+    let scannable_accounts = accounts
+        .into_iter()
+        .map(|account| ScannableAccount::from_account_row(account))
+        .collect();
+
     Ok(scannable_accounts)
 }
 
@@ -133,15 +150,20 @@ pub async fn get_accounts(
         sqlx::query_as!(
             AccountRow,
             r#"
-            SELECT id, 
-              friendly_name, 
-              encrypted_view_private_key, 
-              encrypted_spend_public_key, 
-              cipher_nonce, 
+            SELECT id,
+              friendly_name,
+              encrypted_view_private_key,
+              encrypted_spend_public_key,
+              cipher_nonce,
               unencrypted_view_key_hash,
-              birthday
+              birthday,
+              account_type,
+              parent_account_id,
+              for_tapplet_name,
+              version,
+              tapplet_pub_key
             FROM accounts
-            WHERE friendly_name = ?
+            WHERE friendly_name = ? AND account_type = 'parent'
             ORDER BY friendly_name
             "#,
             name
@@ -152,14 +174,20 @@ pub async fn get_accounts(
         sqlx::query_as!(
             AccountRow,
             r#"
-            SELECT id, 
-              friendly_name, 
-              encrypted_view_private_key, 
-              encrypted_spend_public_key, 
-              cipher_nonce, 
+            SELECT id,
+              friendly_name,
+              encrypted_view_private_key,
+              encrypted_spend_public_key,
+              cipher_nonce,
               unencrypted_view_key_hash,
-              birthday
+              birthday,
+              account_type,
+              parent_account_id,
+              for_tapplet_name,
+              version,
+              tapplet_pub_key
             FROM accounts
+            WHERE account_type = 'parent'
             ORDER BY friendly_name
             "#
         )
@@ -180,9 +208,23 @@ pub struct AccountRow {
     #[allow(dead_code)]
     pub unencrypted_view_key_hash: Option<Vec<u8>>,
     pub birthday: i64,
+    // Single Table Inheritance fields
+    pub account_type: String, // 'parent' or 'child'
+    pub parent_account_id: Option<i64>,
+    pub for_tapplet_name: Option<String>,
+    pub version: Option<String>,
+    pub tapplet_pub_key: Option<String>,
 }
 
 impl AccountRow {
+    pub fn is_parent(&self) -> bool {
+        self.account_type == "parent"
+    }
+
+    pub fn is_child(&self) -> bool {
+        self.account_type == "child"
+    }
+
     pub fn decrypt_keys(
         &self,
         password: &str,
@@ -280,18 +322,62 @@ pub async fn create_child_account_for_tapplet(
     tapplet_version: &str,
     tapplet_public_key_hex: &str,
 ) -> Result<Id, anyhow::Error> {
+    // Get parent account to copy cryptographic fields
+    let parent = sqlx::query_as!(
+        AccountRow,
+        r#"
+        SELECT id,
+          friendly_name,
+          encrypted_view_private_key,
+          encrypted_spend_public_key,
+          cipher_nonce,
+          unencrypted_view_key_hash,
+          birthday,
+          account_type,
+          parent_account_id,
+          for_tapplet_name,
+          version,
+          tapplet_pub_key
+        FROM accounts
+        WHERE id = ?
+        "#,
+        parent_account_id
+    )
+    .fetch_one(&mut *conn)
+    .await?;
+
     let child_account_name = format!("{}::{}@{}", parent_account_name, tapplet_name, tapplet_version);
+    let account_type = "child";
+
     let id = sqlx::query!(
         r#"
-        INSERT INTO child_accounts (parent_account_id, child_account_name, for_tapplet_name, version, tapplet_pub_key)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO accounts (
+            account_type,
+            friendly_name,
+            parent_account_id,
+            for_tapplet_name,
+            version,
+            tapplet_pub_key,
+            encrypted_view_private_key,
+            encrypted_spend_public_key,
+            cipher_nonce,
+            unencrypted_view_key_hash,
+            birthday
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         RETURNING id
         "#,
-        parent_account_id,
+        account_type,
         child_account_name,
+        parent_account_id,
         tapplet_name,
         tapplet_version,
-        tapplet_public_key_hex
+        tapplet_public_key_hex,
+        parent.encrypted_view_private_key,
+        parent.encrypted_spend_public_key,
+        parent.cipher_nonce,
+        parent.unencrypted_view_key_hash,
+        parent.birthday
     )
     .fetch_one(conn)
     .await?;
@@ -304,18 +390,24 @@ pub async fn get_child_account(
     conn: &mut SqliteConnection,
     parent_account_id: Id,
     tapplet_name: &str,
-) -> Result<ChildAccountRow, anyhow::Error> {
+) -> Result<AccountRow, anyhow::Error> {
     let row = sqlx::query_as!(
-        ChildAccountRow,
+        AccountRow,
         r#"
-        SELECT id, 
-            parent_account_id, 
-            child_account_name, 
-            for_tapplet_name, 
-            version, 
+        SELECT id,
+            friendly_name,
+            encrypted_view_private_key,
+            encrypted_spend_public_key,
+            cipher_nonce,
+            unencrypted_view_key_hash,
+            birthday,
+            account_type,
+            parent_account_id,
+            for_tapplet_name,
+            version,
             tapplet_pub_key
-        FROM child_accounts
-        WHERE parent_account_id = ? AND for_tapplet_name = ?
+        FROM accounts
+        WHERE parent_account_id = ? AND for_tapplet_name = ? AND account_type = 'child'
        "#,
         parent_account_id,
         tapplet_name
@@ -326,11 +418,4 @@ pub async fn get_child_account(
     Ok(row)
 }
 
-pub struct ChildAccountRow {
-    pub id: i64,
-    pub parent_account_id: i64,
-    pub child_account_name: String,
-    pub for_tapplet_name: String,
-    pub version: String,
-    pub tapplet_pub_key: String,
-}
+// ChildAccountRow is no longer needed - child accounts are now stored in AccountRow with account_type = 'child'

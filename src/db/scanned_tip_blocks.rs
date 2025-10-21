@@ -4,8 +4,7 @@ use crate::models::ScannedTipBlock;
 
 struct ScannedTipBlockRow {
     pub id: i64,
-    pub account_id: Option<i64>,
-    pub child_account_id: Option<i64>,
+    pub account_id: i64,
     pub height: i64,
     pub hash: Vec<u8>,
 }
@@ -13,18 +12,17 @@ struct ScannedTipBlockRow {
 pub async fn get_scanned_tip_blocks_by_account(
     conn: &mut SqliteConnection,
     account_id: Option<i64>,
-    child_account_id: Option<i64>,
+    _child_account_id: Option<i64>, // Deprecated parameter, kept for API compatibility
 ) -> Result<Vec<ScannedTipBlock>, sqlx::Error> {
     let row = sqlx::query_as!(
         ScannedTipBlockRow,
         r#"
-        SELECT id, account_id, child_account_id, height, hash
+        SELECT id, account_id, height, hash
         FROM scanned_tip_blocks
-        WHERE (account_id = ? or child_account_id = ?)
+        WHERE account_id = ?
         ORDER BY height DESC
         "#,
-        account_id,
-        child_account_id
+        account_id
     )
     .fetch_all(&mut *conn)
     .await?;
@@ -33,8 +31,8 @@ pub async fn get_scanned_tip_blocks_by_account(
         .into_iter()
         .map(|r| ScannedTipBlock {
             id: r.id,
-            account_id: r.account_id,
-            child_account_id: r.child_account_id,
+            account_id: Some(r.account_id),
+            child_account_id: None, // Deprecated field, always None now
             height: r.height as u64,
             hash: r.hash,
         })

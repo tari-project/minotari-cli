@@ -67,7 +67,7 @@ impl MinotariApiProvider {
             let child_account = get_child_account(&mut conn, account.id, &tapplet_config.name).await?;
 
             let child_pub_key = CompressedKey::<RistrettoPublicKey>::from_canonical_bytes(&hex::decode(
-                child_account.tapplet_pub_key.clone(),
+                child_account.tapplet_pub_key.as_ref().ok_or_else(|| anyhow!("Child account missing tapplet_pub_key"))?,
             )?)
             .map_err(|e| anyhow!("Could not decode public key"))?;
             Ok(Self {
