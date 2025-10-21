@@ -11,7 +11,7 @@ struct ScannedTipBlockRow {
 
 pub async fn get_scanned_tip_blocks_by_account(
     conn: &mut SqliteConnection,
-    account_id: Option<i64>,
+    account_id: i64,
 ) -> Result<Vec<ScannedTipBlock>, sqlx::Error> {
     let row = sqlx::query_as!(
         ScannedTipBlockRow,
@@ -30,8 +30,7 @@ pub async fn get_scanned_tip_blocks_by_account(
         .into_iter()
         .map(|r| ScannedTipBlock {
             id: r.id,
-            account_id: Some(r.account_id),
-            child_account_id: None, // Deprecated field, always None now
+            account_id: r.account_id,
             height: r.height as u64,
             hash: r.hash,
         })

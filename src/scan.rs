@@ -44,6 +44,7 @@ pub async fn scan(
         .await
         .map_err(ScanError::FatalSqlx)?
     {
+        dbg!("here");
         let account_type_row = if account.is_parent() {
             let a = account.try_into_parent().map_err(ScanError::Fatal)?;
             AccountTypeRow::from_parent(a)
@@ -63,18 +64,23 @@ pub async fn scan(
 
             AccountTypeRow::from_child(child)
         };
+        dbg!("here");
 
         let key_manager = account_type_row
             .get_key_manager(password)
             .await
             .map_err(ScanError::Fatal)?;
+        dbg!("here");
         let mut scanner = HttpBlockchainScanner::new(base_url.to_string(), key_manager.clone())
             .await
             .map_err(|e| ScanError::Intermittent(e.to_string()))?;
+        dbg!("here");
 
-        let last_blocks = db::get_scanned_tip_blocks_by_account(&mut conn, Some(account_type_row.account_id()))
+        let last_blocks = db::get_scanned_tip_blocks_by_account(&mut conn, account_type_row.account_id())
             .await
             .map_err(ScanError::FatalSqlx)?;
+
+        dbg!("here");
 
         let mut start_height = 0;
         if last_blocks.is_empty() {

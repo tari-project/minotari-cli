@@ -15,6 +15,7 @@ use tari_common_types::{
     wallet_types::{ProvidedKeysWallet, WalletType},
 };
 use tari_crypto::keys::PublicKey;
+use tari_crypto::keys::SecretKey;
 use tari_crypto::{
     compressed_key::CompressedKey,
     ristretto::{RistrettoPublicKey, RistrettoSecretKey},
@@ -474,14 +475,17 @@ impl ChildAccountRow {
     ) -> Result<TransactionKeyManagerWrapper<MemoryKeyManagerBackend>, anyhow::Error> {
         let (mut view_key, spend_key) = self.parent_account_row.decrypt_keys(password)?;
 
+        dbg!("here");
         // If this is a child account, derive the tapplet-specific view key
         let tapplet_private_view_key_bytes = Blake2b512::new()
             .chain(b"tapplet_storage_address")
             .chain(view_key.as_bytes())
             .chain(hex::decode(&self.tapplet_pub_key)?)
             .finalize();
-        view_key = RistrettoSecretKey::from_canonical_bytes(&tapplet_private_view_key_bytes)
-            .map_err(|e| anyhow::anyhow!(e))?;
+        dbg!(tapplet_private_view_key_bytes.len());
+        dbg!("here");
+        view_key =
+            RistrettoSecretKey::from_uniform_bytes(&tapplet_private_view_key_bytes).map_err(|e| anyhow::anyhow!(e))?;
 
         let wallet_type = Arc::new(WalletType::ProvidedKeys(ProvidedKeysWallet {
             view_key,
