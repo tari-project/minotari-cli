@@ -38,12 +38,12 @@ INSERT INTO accounts_new (
     for_tapplet_name,
     version,
     tapplet_pub_key,
-    -- Copy parent's cryptographic fields (child accounts share parent keys)
-    unencrypted_view_key_hash,
-    encrypted_view_private_key,
-    encrypted_spend_public_key,
-    cipher_nonce,
-    birthday,
+    -- -- Copy parent's cryptographic fields (child accounts share parent keys)
+    -- unencrypted_view_key_hash,
+    -- encrypted_view_private_key,
+    -- encrypted_spend_public_key,
+    -- cipher_nonce,
+    -- birthday,
     created_at
 )
 SELECT
@@ -77,6 +77,10 @@ SET account_id = (
     WHERE ca.id = scanned_tip_blocks.child_account_id
 );
 
+
+
+alter table scanned_tip_blocks
+    drop constraint foreign key (child_account_id);
 
 Alter table scanned_tip_blocks
     drop column child_account_id;
