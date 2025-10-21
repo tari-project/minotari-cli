@@ -12,7 +12,8 @@ pub type Id = i64;
 pub struct ScannedTipBlock {
     pub id: Id,
     #[allow(dead_code)]
-    pub account_id: Id,
+    pub account_id: Option<Id>,
+    pub child_account_id: Option<Id>,
     pub height: u64,
     pub hash: Vec<u8>,
 }

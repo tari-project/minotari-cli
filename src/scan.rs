@@ -39,32 +39,31 @@ pub async fn scan(
     let pool = init_db(database_file).await.map_err(ScanError::Fatal)?;
     let mut conn = pool.acquire().await?;
     let mut result = vec![];
-    for account in get_accounts(&mut conn, account_name)
+    for account in db::get_scannable_accounts(&mut conn, account_name, true)
         .await
         .map_err(ScanError::FatalSqlx)?
     {
-        println!("Found account: {:?}", account);
-
         let key_manager = account.get_key_manager(password).await.map_err(ScanError::Fatal)?;
         let mut scanner = HttpBlockchainScanner::new(base_url.to_string(), key_manager.clone())
             .await
             .map_err(|e| ScanError::Intermittent(e.to_string()))?;
 
-        let last_blocks = db::get_scanned_tip_blocks_by_account(&mut conn, account.id)
-            .await
-            .map_err(ScanError::FatalSqlx)?;
+        let last_blocks =
+            db::get_scanned_tip_blocks_by_account(&mut conn, account.account_id(), account.child_account_id())
+                .await
+                .map_err(ScanError::FatalSqlx)?;
 
         let mut start_height = 0;
         if last_blocks.is_empty() {
             println!(
                 "No previously scanned blocks found for account {}, starting from genesis.",
-                account.friendly_name
+                account.friendly_name()
             );
         } else {
             println!(
                 "Found {} previously scanned blocks for account {}",
                 last_blocks.len(),
-                account.friendly_name
+                account.friendly_name()
             );
             let reorged_blocks = check_for_reorgs(&mut scanner, &mut conn, &last_blocks)
                 .await
@@ -82,15 +81,17 @@ pub async fn scan(
             }
         }
         if start_height == 0 {
-            let birthday_day = (account.birthday as u64) * 24 * 60 * 60 + BIRTHDAY_GENESIS_FROM_UNIX_EPOCH;
+            let birthday_day = (account.birthday() as u64) * 24 * 60 * 60 + BIRTHDAY_GENESIS_FROM_UNIX_EPOCH;
             println!(
                 "Calculating birthday day from birthday {} to be {} (unix epoch)",
-                account.birthday, birthday_day
+                account.birthday(),
+                birthday_day
             );
             let estimate_birthday_block = (birthday_day.saturating_sub(MAINNET_GENESIS_DATE)) / 120; // 2 minute blocks
             println!(
                 "Estimating birthday block height from birthday {} to be {}",
-                account.birthday, estimate_birthday_block
+                account.birthday(),
+                estimate_birthday_block
             );
             start_height = estimate_birthday_block;
         }

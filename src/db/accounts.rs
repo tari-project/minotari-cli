@@ -1,5 +1,10 @@
 use std::sync::Arc;
 
+use crate::db::scannable_account::ScannableAccount;
+use crate::models::Id;
+use blake2::Blake2b512;
+use blake2::Digest;
+use blake2::digest::Update;
 use chacha20poly1305::{Key, KeyInit, XChaCha20Poly1305, XNonce, aead::Aead};
 use serde::Serialize;
 use sqlx::{SqliteConnection, SqlitePool};
@@ -21,8 +26,6 @@ use tari_transaction_components::{
 };
 use tari_utilities::byte_array::ByteArray;
 use utoipa::ToSchema;
-
-use crate::models::Id;
 
 pub async fn create_account(
     conn: &mut SqliteConnection,
@@ -81,6 +84,47 @@ pub async fn get_account_by_name(
     Ok(row)
 }
 
+pub async fn get_scannable_accounts(
+    conn: &mut SqliteConnection,
+    friendly_name: Option<&str>,
+    include_child_accounts: bool,
+) -> Result<Vec<ScannableAccount>, sqlx::Error> {
+    let accounts = get_accounts(conn, friendly_name).await?;
+    let mut scannable_accounts = Vec::new();
+    for account in accounts {
+        scannable_accounts.push(ScannableAccount {
+            parent_account_row: account.clone(),
+            child_account_row: None,
+        });
+        if include_child_accounts {
+            // Include child accounts
+            let child_accounts = sqlx::query_as!(
+                ChildAccountRow,
+                r#"
+                SELECT id, 
+                    parent_account_id, 
+                    child_account_name, 
+                    for_tapplet_name, 
+                    version, 
+                    tapplet_pub_key
+                FROM child_accounts
+                WHERE parent_account_id = ?
+               "#,
+                account.id
+            )
+            .fetch_all(&mut *conn)
+            .await?;
+            for child_account in child_accounts {
+                scannable_accounts.push(ScannableAccount {
+                    parent_account_row: account.clone(),
+                    child_account_row: Some(child_account),
+                });
+            }
+        }
+    }
+    Ok(scannable_accounts)
+}
+
 pub async fn get_accounts(
     conn: &mut SqliteConnection,
     friendly_name: Option<&str>,
@@ -126,7 +170,7 @@ pub async fn get_accounts(
     Ok(rows)
 }
 
-#[derive(sqlx::FromRow, Debug)]
+#[derive(sqlx::FromRow, Debug, Clone)]
 pub struct AccountRow {
     pub id: i64,
     pub friendly_name: String,
@@ -188,7 +232,6 @@ impl AccountRow {
         password: &str,
     ) -> Result<TransactionKeyManagerWrapper<MemoryKeyManagerBackend>, anyhow::Error> {
         let (view_key, spend_key) = self.decrypt_keys(password)?;
-        let seed = CipherSeed::random();
         let wallet_type = Arc::new(WalletType::ProvidedKeys(ProvidedKeysWallet {
             view_key,
             birthday: Some(self.birthday as u16),
@@ -197,7 +240,7 @@ impl AccountRow {
             private_comms_key: None,
         }));
         let key_manager: TransactionKeyManagerWrapper<MemoryKeyManagerBackend> =
-            TransactionKeyManagerWrapper::new(Some(seed), CryptoFactories::default(), wallet_type).await?;
+            TransactionKeyManagerWrapper::new(None, CryptoFactories::default(), wallet_type).await?;
         Ok(key_manager)
     }
 }
