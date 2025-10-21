@@ -10,6 +10,7 @@ use tari_transaction_components::transaction_components::WalletOutput;
 use tari_utilities::byte_array::ByteArray;
 use thiserror::Error;
 
+use crate::db::AccountTypeRow;
 use crate::{
     db::{self, delete_old_scanned_tip_blocks, get_accounts, init_db},
     models::{self, BalanceChange, WalletEvent},
@@ -39,31 +40,53 @@ pub async fn scan(
     let pool = init_db(database_file).await.map_err(ScanError::Fatal)?;
     let mut conn = pool.acquire().await?;
     let mut result = vec![];
-    for account in db::get_scannable_accounts(&mut conn, account_name, true)
+    for account in db::get_accounts(&mut conn, account_name, true)
         .await
         .map_err(ScanError::FatalSqlx)?
     {
-        let key_manager = account.get_key_manager(password).await.map_err(ScanError::Fatal)?;
+        let account_type_row = if account.is_parent() {
+            let a = account.try_into_parent().map_err(ScanError::Fatal)?;
+            AccountTypeRow::from_parent(a)
+        } else {
+            if account.parent_account_id.is_none() {
+                return Err(ScanError::Fatal(anyhow::anyhow!(
+                    "Child account found but parent_account_id is None"
+                )));
+            }
+            let parent_account_id = account.parent_account_id.unwrap();
+            let a = db::get_account_by_id(&mut conn, parent_account_id)
+                .await
+                .map_err(ScanError::FatalSqlx)?
+                .ok_or_else(|| ScanError::Fatal(anyhow::anyhow!("Parent account not found")))?
+                .try_into_parent()?;
+            let child = account.try_into_child(a)?;
+
+            AccountTypeRow::from_child(child)
+        };
+
+        let key_manager = account_type_row
+            .get_key_manager(password)
+            .await
+            .map_err(ScanError::Fatal)?;
         let mut scanner = HttpBlockchainScanner::new(base_url.to_string(), key_manager.clone())
             .await
             .map_err(|e| ScanError::Intermittent(e.to_string()))?;
 
-        let last_blocks =
-            db::get_scanned_tip_blocks_by_account(&mut conn, account.account_id(), account.child_account_id())
-                .await
-                .map_err(ScanError::FatalSqlx)?;
+        let last_blocks = db::get_scanned_tip_blocks_by_account(&mut conn, Some(account_type_row.account_id()))
+            .await
+            .map_err(ScanError::FatalSqlx)?;
 
         let mut start_height = 0;
         if last_blocks.is_empty() {
             println!(
                 "No previously scanned blocks found for account {}, starting from genesis.",
-                account.friendly_name()
+                account_type_row.friendly_name()
             );
         } else {
             println!(
                 "Found {} previously scanned blocks for account {}",
                 last_blocks.len(),
-                account.friendly_name()
+                account_type_row.friendly_name()
             );
             let reorged_blocks = check_for_reorgs(&mut scanner, &mut conn, &last_blocks)
                 .await
@@ -81,16 +104,16 @@ pub async fn scan(
             }
         }
         if start_height == 0 {
-            let birthday_day = (account.birthday() as u64) * 24 * 60 * 60 + BIRTHDAY_GENESIS_FROM_UNIX_EPOCH;
+            let birthday_day = (account_type_row.birthday() as u64) * 24 * 60 * 60 + BIRTHDAY_GENESIS_FROM_UNIX_EPOCH;
             println!(
                 "Calculating birthday day from birthday {} to be {} (unix epoch)",
-                account.birthday(),
+                account_type_row.birthday(),
                 birthday_day
             );
             let estimate_birthday_block = (birthday_day.saturating_sub(MAINNET_GENESIS_DATE)) / 120; // 2 minute blocks
             println!(
                 "Estimating birthday block height from birthday {} to be {}",
-                account.birthday(),
+                account_type_row.birthday(),
                 estimate_birthday_block
             );
             start_height = estimate_birthday_block;
@@ -135,7 +158,7 @@ pub async fn scan(
                     {
                         let (input_id, inserted_new_input) = db::insert_input(
                             &mut tx,
-                            account.id,
+                            account_type_row.account_id(),
                             output_id,
                             scanned_block.height,
                             scanned_block.block_hash.as_slice(),
@@ -146,7 +169,7 @@ pub async fn scan(
 
                         if inserted_new_input {
                             let balance_change = BalanceChange {
-                                account_id: account.id,
+                                account_id: account_type_row.account_id(),
                                 caused_by_output_id: None,
                                 caused_by_input_id: Some(input_id),
                                 description: "Output spent as input".to_string(),
@@ -194,7 +217,7 @@ pub async fn scan(
 
                     let event = models::WalletEvent {
                         id: 0,
-                        account_id: account.id,
+                        account_id: account_type_row.account_id(),
                         event_type: models::WalletEventType::OutputDetected {
                             hash: *hash,
                             block_height: scanned_block.height,
@@ -211,7 +234,7 @@ pub async fn scan(
                     result.push(event.clone());
                     let (output_id, inserted_new_output) = db::insert_output(
                         &mut tx,
-                        account.id,
+                        account_type_row.account_id(),
                         hash.to_vec().clone(),
                         output,
                         scanned_block.height,
@@ -224,13 +247,13 @@ pub async fn scan(
                     .map_err(ScanError::FatalSqlx)?;
 
                     if inserted_new_output {
-                        db::insert_wallet_event(&mut tx, account.id, &event)
+                        db::insert_wallet_event(&mut tx, account_type_row.account_id(), &event)
                             .await
                             .map_err(ScanError::Fatal)?;
 
                         // parse balance changes.
                         let balance_changes = parse_balance_changes(
-                            account.id,
+                            account_type_row.account_id(),
                             output_id,
                             scanned_block.mined_timestamp,
                             scanned_block.height,
@@ -245,7 +268,7 @@ pub async fn scan(
                 }
                 db::insert_scanned_tip_block(
                     &mut tx,
-                    account.id,
+                    account_type_row.account_id(),
                     scanned_block.height as i64,
                     scanned_block.block_hash.as_slice(),
                 )
@@ -255,7 +278,7 @@ pub async fn scan(
                 // Check for outputs that should be confirmed (6 block confirmations)
                 let unconfirmed_outputs = db::get_unconfirmed_outputs(
                     &mut tx,
-                    account.id,
+                    account_type_row.account_id(),
                     scanned_block.height,
                     6, // 6 block confirmations required
                 )
@@ -265,7 +288,7 @@ pub async fn scan(
                 for (output_hash, original_height, memo_parsed, memo_hex) in unconfirmed_outputs {
                     let confirmation_event = models::WalletEvent {
                         id: 0,
-                        account_id: account.id,
+                        account_id: account_type_row.account_id(),
                         event_type: models::WalletEventType::OutputConfirmed {
                             hash: output_hash.clone(),
                             block_height: original_height,
@@ -280,7 +303,7 @@ pub async fn scan(
                     };
 
                     result.push(confirmation_event.clone());
-                    db::insert_wallet_event(&mut tx, account.id, &confirmation_event)
+                    db::insert_wallet_event(&mut tx, account_type_row.account_id(), &confirmation_event)
                         .await
                         .map_err(ScanError::Fatal)?;
 
@@ -309,7 +332,7 @@ pub async fn scan(
 
             // println!("Batch took {:?}.", timer.elapsed());
             // println!("deleting old scanned tip blocks...");
-            delete_old_scanned_tip_blocks(&mut conn, account.id, 50)
+            delete_old_scanned_tip_blocks(&mut conn, account_type_row.account_id(), 50)
                 .await
                 .map_err(ScanError::FatalSqlx)?;
 

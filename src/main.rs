@@ -192,7 +192,7 @@ async fn main() -> Result<(), anyhow::Error> {
 async fn handle_balance(database_file: &str, account_name: Option<&str>) -> Result<(), anyhow::Error> {
     let pool = init_db(database_file).await?;
     let mut conn = pool.acquire().await?;
-    let accounts = get_accounts(&mut conn, account_name).await?;
+    let accounts = get_accounts(&mut conn, account_name, false).await?;
     for account in accounts {
         let agg_result = get_balance(&mut conn, account.id).await?;
         let credits = agg_result.total_credits.unwrap_or(0) as u64;

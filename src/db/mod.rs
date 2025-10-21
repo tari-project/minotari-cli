@@ -3,10 +3,9 @@ use std::{env::current_dir, fs, path::Path};
 use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
 
 mod accounts;
-mod scannable_account;
 pub use accounts::{
-    AccountBalance, AccountRow, create_account, create_child_account_for_tapplet, get_account_by_name, get_accounts,
-    get_balance, get_child_account, get_scannable_accounts,
+    AccountBalance, AccountRow, AccountTypeRow, ParentAccountRow, create_account, create_child_account_for_tapplet,
+    get_account_by_id, get_account_by_name, get_accounts, get_balance, get_child_account,
 };
 
 mod scanned_tip_blocks;

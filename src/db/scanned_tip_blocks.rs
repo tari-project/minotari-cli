@@ -12,7 +12,6 @@ struct ScannedTipBlockRow {
 pub async fn get_scanned_tip_blocks_by_account(
     conn: &mut SqliteConnection,
     account_id: Option<i64>,
-    _child_account_id: Option<i64>, // Deprecated parameter, kept for API compatibility
 ) -> Result<Vec<ScannedTipBlock>, sqlx::Error> {
     let row = sqlx::query_as!(
         ScannedTipBlockRow,

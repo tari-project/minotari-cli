@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use crate::db::scannable_account::ScannableAccount;
 use crate::models::Id;
 use blake2::Blake2b512;
 use blake2::Digest;
@@ -89,64 +88,42 @@ pub async fn get_account_by_name(
     Ok(row)
 }
 
-pub async fn get_scannable_accounts(
+pub async fn get_account_by_id(
     conn: &mut SqliteConnection,
-    friendly_name: Option<&str>,
-    include_child_accounts: bool,
-) -> Result<Vec<ScannableAccount>, sqlx::Error> {
-    // With STI, we query accounts table for both parent and child accounts
-    let mut query = String::from(
+    account_id: i64,
+) -> Result<Option<AccountRow>, sqlx::Error> {
+    let row = sqlx::query_as!(
+        AccountRow,
         r#"
         SELECT id,
-          friendly_name,
-          encrypted_view_private_key,
-          encrypted_spend_public_key,
-          cipher_nonce,
-          unencrypted_view_key_hash,
-          birthday,
-          account_type,
-          parent_account_id,
-          for_tapplet_name,
-          version,
-          tapplet_pub_key
+            friendly_name,
+            encrypted_view_private_key,
+            encrypted_spend_public_key,
+            cipher_nonce,
+            unencrypted_view_key_hash,
+            birthday,
+            account_type,
+            parent_account_id,
+            for_tapplet_name,
+            version,
+            tapplet_pub_key
         FROM accounts
-        WHERE 1=1
+        WHERE id = ?
         "#,
-    );
+        account_id
+    )
+    .fetch_optional(&mut *conn)
+    .await?;
 
-    let mut params: Vec<&str> = Vec::new();
-
-    if let Some(name) = friendly_name {
-        query.push_str(" AND friendly_name = ?");
-        params.push(name);
-    }
-
-    if !include_child_accounts {
-        query.push_str(" AND account_type = 'parent'");
-    }
-
-    query.push_str(" ORDER BY friendly_name");
-
-    let mut query_builder = sqlx::query_as::<_, AccountRow>(&query);
-    for param in params {
-        query_builder = query_builder.bind(param);
-    }
-
-    let accounts = query_builder.fetch_all(&mut *conn).await?;
-
-    let scannable_accounts = accounts
-        .into_iter()
-        .map(|account| ScannableAccount::from_account_row(account))
-        .collect();
-
-    Ok(scannable_accounts)
+    Ok(row)
 }
 
 pub async fn get_accounts(
     conn: &mut SqliteConnection,
     friendly_name: Option<&str>,
+    include_children: bool,
 ) -> Result<Vec<AccountRow>, sqlx::Error> {
-    let rows = if let Some(name) = friendly_name {
+    let mut rows = if let Some(name) = friendly_name {
         sqlx::query_as!(
             AccountRow,
             r#"
@@ -194,6 +171,38 @@ pub async fn get_accounts(
         .fetch_all(&mut *conn)
         .await?
     };
+    if include_children {
+        let mut child_rows = vec![];
+        for r in &rows {
+            child_rows.extend(
+                sqlx::query_as!(
+                    AccountRow,
+                    r#"
+                SELECT id,
+                  friendly_name,
+                  encrypted_view_private_key,
+                  encrypted_spend_public_key,
+                  cipher_nonce,
+                  unencrypted_view_key_hash,
+                  birthday,
+                  account_type,
+                  parent_account_id,
+                  for_tapplet_name,
+                  version,
+                  tapplet_pub_key
+                FROM accounts
+                WHERE parent_account_id = ? AND account_type = 'child'
+                ORDER BY friendly_name
+                "#,
+                    r.id
+                )
+                .fetch_all(&mut *conn)
+                .await?,
+            );
+            // rows.extend(child_rows);
+        }
+        rows.extend(child_rows);
+    }
 
     Ok(rows)
 }
@@ -201,15 +210,13 @@ pub async fn get_accounts(
 #[derive(sqlx::FromRow, Debug, Clone)]
 pub struct AccountRow {
     pub id: i64,
-    pub friendly_name: String,
-    pub encrypted_view_private_key: Vec<u8>,
-    pub encrypted_spend_public_key: Vec<u8>,
-    pub cipher_nonce: Vec<u8>,
-    #[allow(dead_code)]
-    pub unencrypted_view_key_hash: Option<Vec<u8>>,
-    pub birthday: i64,
-    // Single Table Inheritance fields
     pub account_type: String, // 'parent' or 'child'
+    pub friendly_name: Option<String>,
+    pub encrypted_view_private_key: Option<Vec<u8>>,
+    pub encrypted_spend_public_key: Option<Vec<u8>>,
+    pub cipher_nonce: Option<Vec<u8>>,
+    pub unencrypted_view_key_hash: Option<Vec<u8>>,
+    pub birthday: Option<i64>,
     pub parent_account_id: Option<i64>,
     pub for_tapplet_name: Option<String>,
     pub version: Option<String>,
@@ -225,6 +232,170 @@ impl AccountRow {
         self.account_type == "child"
     }
 
+    pub fn try_into_parent(self) -> Result<ParentAccountRow, anyhow::Error> {
+        if self.account_type != "parent" {
+            return Err(anyhow::anyhow!("Account is not a parent account"));
+        }
+        Ok(ParentAccountRow {
+            id: self.id,
+            friendly_name: self
+                .friendly_name
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("Parent account missing friendly_name"))?,
+            encrypted_view_private_key: self
+                .encrypted_view_private_key
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("Parent account missing encrypted_view_private_key"))?,
+            encrypted_spend_public_key: self
+                .encrypted_spend_public_key
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("Parent account missing encrypted_spend_public_key"))?,
+            cipher_nonce: self
+                .cipher_nonce
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("Parent account missing cipher_nonce"))?,
+            unencrypted_view_key_hash: self
+                .unencrypted_view_key_hash
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("Parent account missing unencrypted_view_key_hash"))?,
+            birthday: self
+                .birthday
+                .ok_or_else(|| anyhow::anyhow!("Parent account missing birthday"))?,
+        })
+    }
+
+    pub fn try_into_child(self, parent_row: ParentAccountRow) -> Result<ChildAccountRow, anyhow::Error> {
+        if self.account_type != "child" {
+            return Err(anyhow::anyhow!("Account is not a child account"));
+        }
+        Ok(ChildAccountRow {
+            id: self.id,
+            parent_account_id: self
+                .parent_account_id
+                .ok_or_else(|| anyhow::anyhow!("Child account missing parent_account_id"))?,
+            for_tapplet_name: self
+                .for_tapplet_name
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("Child account missing for_tapplet_name"))?,
+            version: self
+                .version
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("Child account missing version"))?,
+            tapplet_pub_key: self
+                .tapplet_pub_key
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("Child account missing tapplet_pub_key"))?,
+            parent_account_row: parent_row,
+        })
+    }
+}
+
+pub enum AccountTypeRow {
+    Parent(ParentAccountRow),
+    Child(ChildAccountRow),
+}
+
+impl AccountTypeRow {
+    pub fn from_parent(parent: ParentAccountRow) -> Self {
+        AccountTypeRow::Parent(parent)
+    }
+    pub fn from_child(child: ChildAccountRow) -> Self {
+        AccountTypeRow::Child(child)
+    }
+
+    pub async fn try_from_account(conn: &mut SqliteConnection, account: AccountRow) -> Result<Self, anyhow::Error> {
+        match account.account_type.as_str() {
+            "parent" => {
+                let parent = account.try_into_parent()?;
+                Ok(AccountTypeRow::Parent(parent))
+            },
+            "child" => {
+                let parent_id = account
+                    .parent_account_id
+                    .ok_or_else(|| anyhow::anyhow!("Child account missing parent_account_id"))?;
+                let parent_account = sqlx::query_as!(
+                    AccountRow,
+                    r#"
+                    SELECT id,
+                        friendly_name,
+                        encrypted_view_private_key,
+                        encrypted_spend_public_key,
+                        cipher_nonce,
+                        unencrypted_view_key_hash,
+                        birthday,
+                        account_type,
+                        parent_account_id,
+                        for_tapplet_name,
+                        version,
+                        tapplet_pub_key
+                    FROM accounts
+                    WHERE id = ?
+                    "#,
+                    parent_id
+                )
+                .fetch_one(&mut *conn)
+                .await?;
+                let parent_row = parent_account.try_into_parent()?;
+                let child = account.try_into_child(parent_row)?;
+                Ok(AccountTypeRow::Child(child))
+            },
+            _ => Err(anyhow::anyhow!("Unknown account type")),
+        }
+    }
+
+    pub fn decrypt_keys(
+        &self,
+        password: &str,
+    ) -> Result<(RistrettoSecretKey, CompressedKey<RistrettoPublicKey>), anyhow::Error> {
+        match self {
+            AccountTypeRow::Parent(parent) => parent.decrypt_keys(password),
+            AccountTypeRow::Child(child) => child.parent_account_row.decrypt_keys(password),
+        }
+    }
+
+    pub async fn get_key_manager(
+        &self,
+        password: &str,
+    ) -> Result<TransactionKeyManagerWrapper<MemoryKeyManagerBackend>, anyhow::Error> {
+        match self {
+            AccountTypeRow::Parent(parent) => parent.get_key_manager(password).await,
+            AccountTypeRow::Child(child) => child.get_key_manager(password).await,
+        }
+    }
+
+    pub fn account_id(&self) -> i64 {
+        match self {
+            AccountTypeRow::Parent(parent) => parent.id,
+            AccountTypeRow::Child(child) => child.id,
+        }
+    }
+
+    pub fn friendly_name(&self) -> String {
+        match self {
+            AccountTypeRow::Parent(parent) => parent.friendly_name.clone(),
+            AccountTypeRow::Child(child) => child.for_tapplet_name.clone(),
+        }
+    }
+
+    pub fn birthday(&self) -> i64 {
+        match self {
+            AccountTypeRow::Parent(parent) => parent.birthday,
+            AccountTypeRow::Child(child) => child.parent_account_row.birthday,
+        }
+    }
+}
+
+pub struct ParentAccountRow {
+    pub id: i64,
+    pub friendly_name: String,
+    pub encrypted_view_private_key: Vec<u8>,
+    pub encrypted_spend_public_key: Vec<u8>,
+    pub cipher_nonce: Vec<u8>,
+    pub unencrypted_view_key_hash: Vec<u8>,
+    pub birthday: i64,
+}
+
+impl ParentAccountRow {
     pub fn decrypt_keys(
         &self,
         password: &str,
@@ -277,6 +448,44 @@ impl AccountRow {
         let wallet_type = Arc::new(WalletType::ProvidedKeys(ProvidedKeysWallet {
             view_key,
             birthday: Some(self.birthday as u16),
+            public_spend_key: spend_key,
+            private_spend_key: None,
+            private_comms_key: None,
+        }));
+        let key_manager: TransactionKeyManagerWrapper<MemoryKeyManagerBackend> =
+            TransactionKeyManagerWrapper::new(None, CryptoFactories::default(), wallet_type).await?;
+        Ok(key_manager)
+    }
+}
+
+pub(crate) struct ChildAccountRow {
+    pub id: i64,
+    pub parent_account_id: i64,
+    pub for_tapplet_name: String,
+    pub version: String,
+    pub tapplet_pub_key: String,
+    pub parent_account_row: ParentAccountRow,
+}
+
+impl ChildAccountRow {
+    pub async fn get_key_manager(
+        &self,
+        password: &str,
+    ) -> Result<TransactionKeyManagerWrapper<MemoryKeyManagerBackend>, anyhow::Error> {
+        let (mut view_key, spend_key) = self.parent_account_row.decrypt_keys(password)?;
+
+        // If this is a child account, derive the tapplet-specific view key
+        let tapplet_private_view_key_bytes = Blake2b512::new()
+            .chain(b"tapplet_storage_address")
+            .chain(view_key.as_bytes())
+            .chain(hex::decode(&self.tapplet_pub_key)?)
+            .finalize();
+        view_key = RistrettoSecretKey::from_canonical_bytes(&tapplet_private_view_key_bytes)
+            .map_err(|e| anyhow::anyhow!(e))?;
+
+        let wallet_type = Arc::new(WalletType::ProvidedKeys(ProvidedKeysWallet {
+            view_key,
+            birthday: Some(self.parent_account_row.birthday as u16),
             public_spend_key: spend_key,
             private_spend_key: None,
             private_comms_key: None,
@@ -381,9 +590,7 @@ pub async fn create_child_account_for_tapplet(
     )
     .fetch_one(conn)
     .await?;
-    Ok(id
-        .id
-        .ok_or_else(|| anyhow::anyhow!("Failed to get inserted child account ID"))?)
+    Ok(id.id)
 }
 
 pub async fn get_child_account(

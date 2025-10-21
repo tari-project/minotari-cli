@@ -13,7 +13,7 @@ use tari_transaction_components::{
 use uuid::Uuid;
 
 use crate::{
-    db::{self, AccountRow},
+    db::{self, AccountRow, ParentAccountRow},
     transactions::input_selector::InputSelector,
 };
 
@@ -40,7 +40,7 @@ impl OneSidedTransaction {
 
     pub async fn create_unsigned_transaction(
         &self,
-        account: AccountRow,
+        account: ParentAccountRow,
         recipients: Vec<Recipient>,
         payment_id: Option<String>,
         idempotency_key: Option<String>,

@@ -1,7 +1,7 @@
 use std::{fs, path::PathBuf, sync::Arc};
 
 use crate::{
-    db::get_child_account,
+    db::{AccountTypeRow, get_child_account},
     get_accounts, init_db,
     transactions::one_sided_transaction::{OneSidedTransaction, Recipient},
 };
@@ -49,7 +49,7 @@ impl MinotariApiProvider {
         let pool = init_db(&database_file).await?;
         let mut conn = pool.acquire().await?;
         // let tapplet_account = derive_tapplet_account_name(&account_name, &tapplet_config.canonical_name());
-        let accounts = get_accounts(&mut conn, Some(&account_name)).await?;
+        let accounts = get_accounts(&mut conn, Some(&account_name), false).await?;
 
         if accounts.is_empty() {
             Err(anyhow::anyhow!("No account found with name '{}'", account_name))
@@ -62,12 +62,17 @@ impl MinotariApiProvider {
         } else {
             let account = &accounts[0];
             println!("Found account: {:?}", account);
-            let (view_key, spend_key) = account.decrypt_keys(&password)?;
+            let account_type_row = AccountTypeRow::try_from_account(&mut conn, account.clone()).await?;
+
+            let (view_key, spend_key) = account_type_row.decrypt_keys(&password)?;
 
             let child_account = get_child_account(&mut conn, account.id, &tapplet_config.name).await?;
 
             let child_pub_key = CompressedKey::<RistrettoPublicKey>::from_canonical_bytes(&hex::decode(
-                child_account.tapplet_pub_key.as_ref().ok_or_else(|| anyhow!("Child account missing tapplet_pub_key"))?,
+                child_account
+                    .tapplet_pub_key
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("Child account missing tapplet_pub_key"))?,
             )?)
             .map_err(|e| anyhow!("Could not decode public key"))?;
             Ok(Self {
@@ -130,11 +135,14 @@ impl MinotariTappletApiV1 for MinotariApiProvider {
             .await?
             .ok_or_else(|| anyhow!("No account found. This should not happen."))?;
 
+        let parent_account = account
+            .try_into_parent()
+            .map_err(|e| anyhow::anyhow!("Invalid account type: {}", e))?;
         let one_sided_tx = OneSidedTransaction::new(db.clone(), Network::MainNet, self.password.clone());
 
         let result = one_sided_tx
             .create_unsigned_transaction(
-                account,
+                parent_account,
                 recipients,
                 Some(payment_id.clone()),
                 Some("tapplet_append_data".to_string()),

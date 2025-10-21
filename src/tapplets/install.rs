@@ -80,15 +80,20 @@ pub async fn install_from_local(
     // open the db and create the child accounts.
     let pool = crate::init_db(database_file).await?;
     let mut db = pool.acquire().await?;
-    let accounts = crate::get_accounts(&mut db, account_name.as_deref()).await?;
+    let accounts = crate::get_accounts(&mut db, account_name.as_deref(), false).await?;
     if accounts.is_empty() {
         println!("No accounts found to associate with the tapplet.");
         return Err(anyhow::anyhow!("No accounts found"));
     }
     for account in accounts {
+        if account.is_child() {
+            println!("Skipping child account  (ID: {}) for tapplet installation.", account.id);
+            continue;
+        }
+        let parent_account = account.try_into_parent()?;
         // Check that we can decrypt otherwise can't install.
         // In future these might actually be used
-        let (_view_key, _spend_key) = account.decrypt_keys(password)?;
+        let (_view_key, _spend_key) = parent_account.decrypt_keys(password)?;
 
         // Parse the canonical name to extract name and version
         let canonical_name = tapplet.config.canonical_name();
@@ -103,8 +108,8 @@ pub async fn install_from_local(
 
         let child_account = crate::db::create_child_account_for_tapplet(
             &mut db,
-            account.id,
-            &account.friendly_name,
+            parent_account.id,
+            &parent_account.friendly_name,
             tapplet_name,
             tapplet_version,
             &tapplet.config.public_key,

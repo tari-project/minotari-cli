@@ -8,7 +8,7 @@ use utoipa::IntoParams;
 use super::error::ApiError;
 use crate::{
     api::{AppState, types::TariAddressBase58},
-    db::{AccountBalance, get_account_by_name, get_balance},
+    db::{AccountBalance, ParentAccountRow, get_account_by_name, get_balance},
     transactions::one_sided_transaction::{OneSidedTransaction, Recipient},
 };
 use tari_transaction_components::tari_amount::MicroMinotari;
@@ -100,11 +100,15 @@ pub async fn api_create_unsigned_transaction(
         .await?
         .ok_or_else(|| ApiError::AccountNotFound(name.clone()))?;
 
+    let parent_account = account
+        .try_into_parent()
+        .map_err(|e| ApiError::InvalidAccountType(e.to_string()))?;
+
     let one_sided_tx =
         OneSidedTransaction::new(app_state.db_pool.clone(), app_state.network, app_state.password.clone());
     let result = one_sided_tx
         .create_unsigned_transaction(
-            account,
+            parent_account,
             recipients,
             body.payment_id,
             body.idempotency_key,

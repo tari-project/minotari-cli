@@ -4,14 +4,14 @@
 
 -- Create new table with additional STI columns
 CREATE TABLE accounts_new (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
     account_type TEXT NOT NULL DEFAULT 'parent' CHECK(account_type IN ('parent', 'child')),
     friendly_name TEXT,
     unencrypted_view_key_hash blob ,
     encrypted_view_private_key blob,
     encrypted_spend_public_key blob,
     cipher_nonce blob NOT NULL,
-    birthday INTEGER NOT NULL,
+    birthday INTEGER,
     parent_account_id INTEGER,
     for_tapplet_name TEXT,
     version TEXT,
