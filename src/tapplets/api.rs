@@ -40,6 +40,10 @@ fn derive_tapplet_account_name(account_name: &str, tapplet_canonical_name: &str)
     format!("{}::{}", account_name, tapplet_canonical_name)
 }
 
+fn memo_pattern_for_slot(slot: &str) -> String {
+    format!(r#"^t:"{}","((?s:.*?))"$"#, regex::escape(slot))
+}
+
 impl MinotariApiProvider {
     pub async fn try_create(
         account_name: String,
@@ -183,9 +187,9 @@ impl MinotariTappletApiV1 for MinotariApiProvider {
 
         dbg!(&outputs);
         let mut entries = Vec::new();
-        let pattern = format!(r#"^t:"{}","((?s:.*?))"$"#, regex::escape(slot));
+        let pattern = memo_pattern_for_slot(slot);
         let re = Regex::new(&pattern)?;
-        for (id, _memo_hex, memo_parsed) in outputs {
+        for (id, memo_parsed, _memo_hex) in outputs {
             dbg!(&id, &memo_parsed);
             if let Some(captures) = re.captures(&memo_parsed) {
                 if let Some(value) = captures.get(1) {
@@ -206,7 +210,7 @@ mod tests {
     #[test]
     fn test_memo_regex_matching() {
         let slot = "default";
-        let pattern = format!(r#"^t:"{}","((?s:.*?))"$"#, regex::escape(slot));
+        let pattern = memo_pattern_for_slot(slot);
         let re = Regex::new(&pattern).unwrap();
 
         // Test basic matching
