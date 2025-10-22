@@ -5,6 +5,52 @@ use tari_tapplet_lib::{LuaTappletHost, TappletConfig, WasmTappletHost, host::Min
 
 use crate::tapplets::api::MinotariApiProvider;
 
+fn print_value_as_table(value: &Value, indent: usize) {
+    let prefix = "  ".repeat(indent);
+
+    match value {
+        Value::Object(map) => {
+            for (key, val) in map {
+                match val {
+                    Value::Object(_) | Value::Array(_) => {
+                        println!("{}{}", prefix, key);
+                        print_value_as_table(val, indent + 1);
+                    }
+                    _ => {
+                        println!("{}{}  {}", prefix, key, format_value(val));
+                    }
+                }
+            }
+        }
+        Value::Array(arr) => {
+            for (idx, val) in arr.iter().enumerate() {
+                match val {
+                    Value::Object(_) | Value::Array(_) => {
+                        println!("{}[{}]", prefix, idx);
+                        print_value_as_table(val, indent + 1);
+                    }
+                    _ => {
+                        println!("{}[{}]  {}", prefix, idx, format_value(val));
+                    }
+                }
+            }
+        }
+        _ => {
+            println!("{}{}", prefix, format_value(value));
+        }
+    }
+}
+
+fn format_value(value: &Value) -> String {
+    match value {
+        Value::Null => "null".to_string(),
+        Value::Bool(b) => b.to_string(),
+        Value::Number(n) => n.to_string(),
+        Value::String(s) => s.clone(),
+        _ => value.to_string(),
+    }
+}
+
 pub async fn run_wasm(
     name: &str,
     method: &str,
@@ -73,7 +119,9 @@ pub async fn run_lua(
     let args_json: Value = serde_json::to_value(&args)?;
 
     let result = tapplet.run(method, args_json).await?;
-    let result_str = serde_json::to_string_pretty(&result)?;
+
+    println!("\nResult:");
+    print_value_as_table(&result, 0);
 
     Ok(())
 }
