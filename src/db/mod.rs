@@ -49,7 +49,6 @@ pub async fn init_db<P: AsRef<Path>>(db_path: P) -> Result<SqlitePool, anyhow::E
             .map_err(|e| sqlx::Error::Io(std::io::Error::other(format!("Failed to create database file: {}", e))))?;
     }
     let db_url = format!("sqlite:///{}", path.display().to_string().replace("\\", "/"));
-    dbg!(&db_url);
     let pool = SqlitePoolOptions::new().max_connections(5).connect(&db_url).await?;
 
     // Run migrations

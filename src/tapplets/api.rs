@@ -66,7 +66,6 @@ impl MinotariApiProvider {
             Err(anyhow::anyhow!("Multiple accounts found"))
         } else {
             let account = &accounts[0];
-            println!("Found account: {:?}", account);
             let account_type_row = AccountTypeRow::try_from_account(&mut conn, account.clone()).await?;
 
             let (view_key, spend_key) = account_type_row.decrypt_keys(&password)?;
@@ -181,23 +180,19 @@ impl MinotariTappletApiV1 for MinotariApiProvider {
         let db = SqlitePool::connect(&path).await?;
         let mut conn = db.acquire().await?;
 
-        dbg!(self.child_account_id);
         // TODO: Pagination
         let outputs = crate::db::get_output_memos_for_account(&mut conn, self.child_account_id, 100, 0).await?;
 
-        dbg!(&outputs);
         let mut entries = Vec::new();
         let pattern = memo_pattern_for_slot(slot);
         let re = Regex::new(&pattern)?;
         for (id, memo_parsed, _memo_hex) in outputs {
-            dbg!(&id, &memo_parsed);
             if let Some(captures) = re.captures(&memo_parsed) {
                 if let Some(value) = captures.get(1) {
                     entries.push(value.as_str().to_string());
                 }
             }
         }
-        dbg!(&entries);
 
         Ok(entries)
     }
