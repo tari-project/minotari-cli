@@ -87,7 +87,7 @@ impl MinotariApiProvider {
                 child_account_id: child_account.id,
                 tapplet_name: tapplet_config.canonical_name(),
                 tapplet_public_key: child_pub_key,
-                default_amount_for_save: MicroMinotari::from(1_000), // 0.001 Minotari
+                default_amount_for_save: MicroMinotari::from(10),
                 seconds_to_lock_utxos: 30,
                 db_file: database_file,
                 password,
@@ -167,8 +167,6 @@ impl MinotariTappletApiV1 for MinotariApiProvider {
             payment_id,
             tapplet_storage_address.to_base58()
         );
-
-        dbg!(&result);
 
         Ok(())
     }
