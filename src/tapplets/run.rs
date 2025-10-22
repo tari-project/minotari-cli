@@ -73,7 +73,8 @@ pub async fn run_lua(
     let args_json: Value = serde_json::to_value(&args)?;
 
     let result = tapplet.run(method, args_json).await?;
-    dbg!("Lua tapplet result: {:?}", result);
+    let result_str = serde_json::to_string_pretty(&result)?;
+    dbg!("Lua tapplet result:", result_str);
 
     Ok(())
 }

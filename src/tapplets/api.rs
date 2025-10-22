@@ -8,6 +8,7 @@ use crate::{
 use anyhow::anyhow;
 use async_trait::async_trait;
 use blake2::{Blake2b512, Blake2s, Digest, digest::Update};
+use regex::Regex;
 use sqlx::{SqliteConnection, SqlitePool};
 use tari_common::configuration::Network;
 use tari_common_types::tari_address::{TariAddress, TariAddressFeatures};
@@ -119,7 +120,11 @@ impl MinotariTappletApiV1 for MinotariApiProvider {
             address: tapplet_storage_address.clone(),
             amount: self.default_amount_for_save,
         }];
-        let payment_id = format!("t:\"{}\",\"{}\"", slot, value);
+        let payment_id = format!(
+            "t:\"{}\",\"{}\"",
+            slot.replace("\"", "\\\""),
+            value.replace("\"", "\\\"")
+        );
         println!(
             "You can send a manual transaction with this payment memo: {} to address {}",
             payment_id,
@@ -167,7 +172,29 @@ impl MinotariTappletApiV1 for MinotariApiProvider {
 
     async fn load_data_entries(&self, slot: &str) -> Result<Vec<String>, anyhow::Error> {
         println!("Loading data entries from slot '{}'", slot);
+        // Read outputs for this account from the database
+        let path = self.db_file.to_string_lossy();
+        let db = SqlitePool::connect(&path).await?;
+        let mut conn = db.acquire().await?;
 
-        Ok(vec!["example_entry_1".to_string(), "example_entry_2".to_string()])
+        dbg!(self.child_account_id);
+        // TODO: Pagination
+        let outputs = crate::db::get_output_memos_for_account(&mut conn, self.child_account_id, 100, 0).await?;
+
+        dbg!(&outputs);
+        let mut entries = Vec::new();
+        let pattern = format!(r#"^t:"{}","(.+)"$"#, regex::escape(slot));
+        let re = Regex::new(&pattern)?;
+        for (id, _memo_hex, memo_parsed) in outputs {
+            dbg!(&id, &memo_parsed);
+            if let Some(captures) = re.captures(&memo_parsed) {
+                if let Some(value) = captures.get(1) {
+                    entries.push(value.as_str().to_string());
+                }
+            }
+        }
+        dbg!(&entries);
+
+        Ok(entries)
     }
 }

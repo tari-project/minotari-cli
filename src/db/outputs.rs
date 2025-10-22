@@ -1,5 +1,5 @@
 use crate::models::OutputStatus;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, Utc, offset};
 use serde_json;
 use sqlx::SqliteConnection;
 use tari_transaction_components::transaction_components::WalletOutput;
@@ -240,4 +240,28 @@ pub async fn unlock_outputs_for_request(
     .await?;
 
     Ok(())
+}
+
+pub async fn get_output_memos_for_account(
+    conn: &mut SqliteConnection,
+    account_id: i64,
+    limit: u32,
+    offset: u32,
+) -> Result<Vec<(i64, String, String)>, sqlx::Error> {
+    let rows = sqlx::query!(
+        "SELECT id, memo_parsed, memo_hex FROM outputs WHERE account_id = ? order by id LIMIT ? OFFSET ?",
+        account_id,
+        limit,
+        offset
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+
+    let mut outputs = Vec::new();
+    for row in rows {
+        let memo_parsed = row.memo_parsed.unwrap_or_default();
+        let memo_hex = row.memo_hex.unwrap_or_default();
+        outputs.push((row.id, memo_parsed, memo_hex));
+    }
+    Ok(outputs)
 }

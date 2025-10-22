@@ -2352,6 +2352,7 @@ dependencies = [
  "clap 4.5.49",
  "hex",
  "lightweight_wallet_libs",
+ "regex",
  "serde",
  "serde_json",
  "sqlx",
