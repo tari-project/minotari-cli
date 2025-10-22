@@ -183,7 +183,7 @@ impl MinotariTappletApiV1 for MinotariApiProvider {
 
         dbg!(&outputs);
         let mut entries = Vec::new();
-        let pattern = format!(r#"^t:"{}","(.+)"$"#, regex::escape(slot));
+        let pattern = format!(r#"^t:"{}","((?s:.*?))"$"#, regex::escape(slot));
         let re = Regex::new(&pattern)?;
         for (id, _memo_hex, memo_parsed) in outputs {
             dbg!(&id, &memo_parsed);
@@ -196,5 +196,59 @@ impl MinotariTappletApiV1 for MinotariApiProvider {
         dbg!(&entries);
 
         Ok(entries)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_memo_regex_matching() {
+        let slot = "default";
+        let pattern = format!(r#"^t:"{}","((?s:.*?))"$"#, regex::escape(slot));
+        let re = Regex::new(&pattern).unwrap();
+
+        // Test basic matching
+        let memo1 = r#"t:"default","example.com|mike|SuperSecretPassword123!""#;
+        let captures1 = re.captures(memo1).unwrap();
+        assert_eq!(
+            captures1.get(1).unwrap().as_str(),
+            "example.com|mike|SuperSecretPassword123!"
+        );
+
+        let memo1 = "t:\"default\",\"example.com|mike|SuperSecretPassword123!\n\"";
+        let captures1 = re.captures(memo1).unwrap();
+        assert_eq!(
+            captures1.get(1).unwrap().as_str(),
+            "example.com|mike|SuperSecretPassword123!\n"
+        );
+
+        // Test with simple value
+        let memo2 = r#"t:"default","simple_value""#;
+        let captures2 = re.captures(memo2).unwrap();
+        assert_eq!(captures2.get(1).unwrap().as_str(), "simple_value");
+
+        // Test with empty value
+        let memo3 = r#"t:"default","""#;
+        let captures3 = re.captures(memo3).unwrap();
+        assert_eq!(captures3.get(1).unwrap().as_str(), "");
+
+        // Test with special characters
+        let memo4 = r#"t:"default","value with spaces and !@#$%^&*()""#;
+        let captures4 = re.captures(memo4).unwrap();
+        assert_eq!(captures4.get(1).unwrap().as_str(), "value with spaces and !@#$%^&*()");
+
+        // Test that non-matching memos don't match
+        let memo5 = r#"t:"other_slot","some_value""#;
+        assert!(re.captures(memo5).is_none());
+
+        // Test with escaped quotes in slot name
+        // let slot_with_special = r#"my"slot"#;
+        // let pattern_special = format!(r#"^t:"{}","(.*?)"$"#, regex::escape(slot_with_special));
+        // let re_special = Regex::new(&pattern_special).unwrap();
+        // let memo6 = r#"t:"my\"slot","test_value""#;
+        // let captures6 = re_special.captures(memo6).unwrap();
+        // assert_eq!(captures6.get(1).unwrap().as_str(), "test_value");
     }
 }
