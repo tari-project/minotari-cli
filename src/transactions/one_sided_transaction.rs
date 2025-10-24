@@ -86,7 +86,7 @@ impl OneSidedTransaction {
         let mut offline_signing = OfflineSigner::new(key_manager);
         let tx_id = TxId::new_random();
         let payment_id = match &recipient.payment_id {
-            Some(s) => MemoField::new_open_from_string(&s, TxType::PaymentToOther).map_err(|e| anyhow!(e))?,
+            Some(s) => MemoField::new_open_from_string(s, TxType::PaymentToOther).map_err(|e| anyhow!(e))?,
             None => MemoField::new_empty(),
         };
         let output_features = OutputFeatures::default();
