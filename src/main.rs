@@ -136,7 +136,7 @@ enum Commands {
         #[arg(
             short,
             long,
-            help = "Recipient address and amount (e.g., address::amount). Can be specified multiple times."
+            help = "Recipient address, amount and optional payment id (e.g., address::amount or address::amount::payment_id). Can be specified multiple times."
         )]
         recipient: Vec<String>,
         #[arg(
@@ -150,8 +150,6 @@ enum Commands {
         password: String,
         #[arg(short, long, help = "Path to the database file", default_value = "data/wallet.db")]
         database_file: String,
-        #[arg(long, help = "Optional payment ID")]
-        payment_id: Option<String>,
         #[arg(long, help = "Optional idempotency key")]
         idempotency_key: Option<String>,
         #[arg(long, help = "Optional seconds to lock UTXOs", default_value_t = 86400)]
@@ -313,7 +311,6 @@ async fn main() -> Result<(), anyhow::Error> {
             output_file,
             password,
             database_file,
-            payment_id,
             idempotency_key,
             seconds_to_lock,
             network,
@@ -325,7 +322,6 @@ async fn main() -> Result<(), anyhow::Error> {
                 account_name,
                 network,
                 password,
-                payment_id,
                 idempotency_key,
                 seconds_to_lock,
                 output_file,
@@ -363,7 +359,6 @@ async fn handle_create_unsigned_transaction(
     account_name: String,
     network: Network,
     password: String,
-    payment_id: Option<String>,
     idempotency_key: Option<String>,
     seconds_to_lock: u64,
     output_file: String,
@@ -372,12 +367,23 @@ async fn handle_create_unsigned_transaction(
         .into_iter()
         .map(|r_str| {
             let parts: Vec<&str> = r_str.split("::").collect();
-            if parts.len() != 2 {
-                return Err(anyhow!("Invalid recipient format. Expected 'address::amount'"));
+            if parts.len() < 2 || parts.len() > 3 {
+                return Err(anyhow!(
+                    "Invalid recipient format. Expected 'address::amount' or 'address::amount::payment_id'"
+                ));
             }
             let address = TariAddress::from_str(parts[0])?;
             let amount = MicroMinotari::from_str(parts[1])?;
-            Ok(Recipient { address, amount })
+            let payment_id = if parts.len() == 3 {
+                Some(parts[2].to_string())
+            } else {
+                None
+            };
+            Ok(Recipient {
+                address,
+                amount,
+                payment_id,
+            })
         })
         .collect();
     let recipients = recipients?;
@@ -390,7 +396,7 @@ async fn handle_create_unsigned_transaction(
 
     let one_sided_tx = OneSidedTransaction::new(pool.clone(), network, password.clone());
     let result = one_sided_tx
-        .create_unsigned_transaction(account, recipients, payment_id, idempotency_key, seconds_to_lock)
+        .create_unsigned_transaction(account, recipients, idempotency_key, seconds_to_lock)
         .await
         .map_err(|e| anyhow!("Failed to create unsigned transaction: {}", e))?;
 

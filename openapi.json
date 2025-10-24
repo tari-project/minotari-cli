@@ -226,12 +226,6 @@
               "null"
             ]
           },
-          "payment_id": {
-            "type": [
-              "string",
-              "null"
-            ]
-          },
           "recipients": {
             "type": "array",
             "items": {
@@ -263,6 +257,12 @@
             "type": "integer",
             "format": "int64",
             "minimum": 0
+          },
+          "payment_id": {
+            "type": [
+              "string",
+              "null"
+            ]
           }
         }
       },
