@@ -21,6 +21,7 @@ use crate::{
 pub struct Recipient {
     pub address: TariAddress,
     pub amount: MicroMinotari,
+    pub payment_id: Option<String>,
 }
 
 pub struct OneSidedTransaction {
@@ -42,7 +43,6 @@ impl OneSidedTransaction {
         &self,
         account: AccountRow,
         recipients: Vec<Recipient>,
-        payment_id: Option<String>,
         idempotency_key: Option<String>,
         seconds_to_lock_utxos: u64,
     ) -> Result<PrepareOneSidedTransactionForSigningResult, anyhow::Error> {
@@ -85,7 +85,7 @@ impl OneSidedTransaction {
 
         let mut offline_signing = OfflineSigner::new(key_manager);
         let tx_id = TxId::new_random();
-        let payment_id = match payment_id {
+        let payment_id = match &recipient.payment_id {
             Some(s) => MemoField::new_open_from_string(&s, TxType::PaymentToOther).map_err(|e| anyhow!(e))?,
             None => MemoField::new_empty(),
         };

@@ -27,6 +27,7 @@ pub struct RecipientRequest {
     address: TariAddressBase58,
     #[schema(value_type = u64)]
     amount: MicroMinotari,
+    payment_id: Option<String>,
 }
 
 #[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
@@ -35,7 +36,6 @@ pub struct CreateTransactionRequest {
     #[serde(default = "default_seconds_to_lock_utxos")]
     #[schema(default = "86400")]
     seconds_to_lock_utxos: Option<u64>,
-    payment_id: Option<String>,
     idempotency_key: Option<String>,
 }
 
@@ -90,6 +90,7 @@ pub async fn api_create_unsigned_transaction(
         .map(|r| Recipient {
             address: r.address.0,
             amount: r.amount,
+            payment_id: r.payment_id,
         })
         .collect();
 
@@ -106,7 +107,6 @@ pub async fn api_create_unsigned_transaction(
         .create_unsigned_transaction(
             account,
             recipients,
-            body.payment_id,
             body.idempotency_key,
             seconds_to_lock_utxos.unwrap(),
         )
