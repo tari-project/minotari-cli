@@ -8,8 +8,9 @@ use tari_transaction_components::key_manager::{
 
 use crate::{
     db,
-    models::{WalletEvent, WalletEventType},
+    models::{PendingTransactionStatus, WalletEvent, WalletEventType},
 };
+use std::collections::HashSet;
 
 pub async fn handle_reorgs(
     scanner: &mut HttpBlockchainScanner<TransactionKeyManagerWrapper<MemoryKeyManagerBackend>>,
@@ -88,7 +89,7 @@ async fn rollback_from_height(
     let output_reorg_start_height = reorg_start_height as i64;
     let affected_outputs = sqlx::query!(
         r#"
-        SELECT output_hash, mined_in_block_height
+        SELECT output_hash, mined_in_block_height, locked_by_request_id
         FROM outputs
         WHERE account_id = ? AND mined_in_block_height >= ?
         "#,
@@ -98,7 +99,9 @@ async fn rollback_from_height(
     .fetch_all(&mut *tx)
     .await?;
 
-    for output_row in affected_outputs {
+    let mut cancelled_pending_tx_ids = HashSet::new();
+
+    for output_row in &affected_outputs {
         let event = WalletEvent {
             id: 0,
             account_id,
@@ -113,12 +116,36 @@ async fn rollback_from_height(
             ),
         };
         db::insert_wallet_event(tx, account_id, &event).await?;
+
+        if let Some(request_id) = &output_row.locked_by_request_id {
+            cancelled_pending_tx_ids.insert(request_id.clone());
+        }
     }
 
-    // 3. Revert output statuses (e.g., SPENT or LOCKED back to UNSPENT)
+    // 3. Cancel pending transactions linked to reorged outputs
+    let pending_tx_ids_to_cancel: Vec<String> = cancelled_pending_tx_ids.into_iter().collect();
+    if !pending_tx_ids_to_cancel.is_empty() {
+        db::cancel_pending_transactions_by_ids(tx, &pending_tx_ids_to_cancel, PendingTransactionStatus::Cancelled)
+            .await?;
+
+        for tx_id in pending_tx_ids_to_cancel {
+            let event = WalletEvent {
+                id: 0,
+                account_id,
+                event_type: WalletEventType::PendingTransactionCancelled {
+                    tx_id: tx_id.clone(),
+                    reason: "Transaction cancelled due to blockchain reorg".to_string(),
+                },
+                description: format!("Pending transaction {} cancelled due to reorg", tx_id),
+            };
+            db::insert_wallet_event(tx, account_id, &event).await?;
+        }
+    }
+
+    // 4. Revert output statuses (e.g., SPENT or LOCKED back to UNSPENT)
     db::update_output_status_to_unspent_from_height(tx, account_id, reorg_start_height).await?;
 
-    // 4. Delete dependent data in correct order
+    // 5. Delete dependent data in correct order
     db::delete_balance_changes_from_height(tx, account_id, reorg_start_height).await?;
     db::delete_inputs_from_height(tx, account_id, reorg_start_height).await?;
     db::delete_outputs_from_height(tx, account_id, reorg_start_height).await?;

@@ -20,8 +20,8 @@ pub use outputs::{
 
 mod pending_transactions;
 pub use pending_transactions::{
-    PendingTransaction, create_pending_transaction, find_expired_pending_transactions,
-    find_pending_transaction_by_idempotency_key, update_pending_transaction_status,
+    PendingTransaction, cancel_pending_transactions_by_ids, create_pending_transaction,
+    find_expired_pending_transactions, find_pending_transaction_by_idempotency_key, update_pending_transaction_status,
 };
 
 mod events;

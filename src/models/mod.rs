@@ -4,6 +4,8 @@ use tari_common_types::types::FixedHash;
 
 pub mod output_status;
 pub use output_status::OutputStatus;
+pub mod pending_transactions_status;
+pub use pending_transactions_status::PendingTransactionStatus;
 
 // Change depending on sql type.
 pub type Id = i64;
@@ -52,6 +54,10 @@ pub enum WalletEventType {
         original_block_height: u64,
         rolled_back_at_height: u64,
     },
+    PendingTransactionCancelled {
+        tx_id: String,
+        reason: String,
+    },
 }
 
 impl WalletEventType {
@@ -61,6 +67,7 @@ impl WalletEventType {
             WalletEventType::OutputDetected { .. } => "OutputDetected".to_string(),
             WalletEventType::OutputConfirmed { .. } => "OutputConfirmed".to_string(),
             WalletEventType::OutputRolledBack { .. } => "OutputRolledBack".to_string(),
+            WalletEventType::PendingTransactionCancelled { .. } => "PendingTransactionCancelled".to_string(),
         }
     }
 }
