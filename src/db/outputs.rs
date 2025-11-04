@@ -143,6 +143,51 @@ pub async fn mark_output_confirmed(
     Ok(())
 }
 
+pub async fn delete_outputs_from_height(
+    conn: &mut SqliteConnection,
+    account_id: i64,
+    height: u64,
+) -> Result<(), sqlx::Error> {
+    let height = height as i64;
+    sqlx::query!(
+        r#"
+        DELETE FROM outputs
+        WHERE account_id = ? AND mined_in_block_height >= ?
+        "#,
+        account_id,
+        height
+    )
+    .execute(&mut *conn)
+    .await?;
+
+    Ok(())
+}
+
+pub async fn update_output_status_to_unspent_from_height(
+    conn: &mut SqliteConnection,
+    account_id: i64,
+    height: u64,
+) -> Result<(), sqlx::Error> {
+    let height = height as i64;
+    let unspent_status = OutputStatus::Unspent.to_string();
+    sqlx::query!(
+        r#"
+        UPDATE outputs
+        SET status = ?, locked_at = NULL, locked_by_request_id = NULL
+        WHERE account_id = ?
+          AND mined_in_block_height >= ?
+          AND (status = 'SPENT' OR status = 'LOCKED')
+        "#,
+        unspent_status,
+        account_id,
+        height
+    )
+    .execute(&mut *conn)
+    .await?;
+
+    Ok(())
+}
+
 pub async fn update_output_status(
     conn: &mut SqliteConnection,
     output_id: i64,

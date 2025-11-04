@@ -47,3 +47,23 @@ pub async fn insert_input(
 
     Ok((input_id, rows_affected > 0))
 }
+
+pub async fn delete_inputs_from_height(
+    conn: &mut SqliteConnection,
+    account_id: i64,
+    height: u64,
+) -> Result<(), sqlx::Error> {
+    let height = height as i64;
+    sqlx::query!(
+        r#"
+        DELETE FROM inputs
+        WHERE account_id = ? AND mined_in_block_height >= ?
+        "#,
+        account_id,
+        height
+    )
+    .execute(&mut *conn)
+    .await?;
+
+    Ok(())
+}

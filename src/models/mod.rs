@@ -29,7 +29,10 @@ pub struct WalletEvent {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WalletEventType {
-    BlockRolledBack,
+    BlockRolledBack {
+        height: u64,
+        block_hash: Vec<u8>,
+    },
     OutputDetected {
         hash: FixedHash,
         block_height: u64,
@@ -44,16 +47,20 @@ pub enum WalletEventType {
         memo_parsed: Option<String>,
         memo_hex: Option<String>,
     },
-    OutputRolledBack,
+    OutputRolledBack {
+        hash: FixedHash,
+        original_block_height: u64,
+        rolled_back_at_height: u64,
+    },
 }
 
 impl WalletEventType {
     pub fn to_key_string(&self) -> String {
         match &self {
-            WalletEventType::BlockRolledBack => "BlockRolledBack".to_string(),
+            WalletEventType::BlockRolledBack { .. } => "BlockRolledBack".to_string(),
             WalletEventType::OutputDetected { .. } => "OutputDetected".to_string(),
             WalletEventType::OutputConfirmed { .. } => "OutputConfirmed".to_string(),
-            WalletEventType::OutputRolledBack => "OutputRolledBack".to_string(),
+            WalletEventType::OutputRolledBack { .. } => "OutputRolledBack".to_string(),
         }
     }
 }

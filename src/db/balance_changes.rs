@@ -49,3 +49,23 @@ pub async fn insert_balance_change(conn: &mut SqliteConnection, change: &Balance
 
     Ok(())
 }
+
+pub async fn delete_balance_changes_from_height(
+    conn: &mut SqliteConnection,
+    account_id: i64,
+    height: u64,
+) -> Result<(), sqlx::Error> {
+    let height = height as i64;
+    sqlx::query!(
+        r#"
+        DELETE FROM balance_changes
+        WHERE account_id = ? AND effective_height >= ?
+        "#,
+        account_id,
+        height
+    )
+    .execute(&mut *conn)
+    .await?;
+
+    Ok(())
+}
