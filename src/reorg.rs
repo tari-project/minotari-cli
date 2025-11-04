@@ -23,7 +23,7 @@ pub async fn handle_reorgs(
     }
 
     let mut reorg_start_height = 0;
-    let mut reorged_blocks = vec![];
+    let mut is_reorg_detected = false;
 
     for block in &last_blocks {
         let chain_block = scanner
@@ -38,19 +38,15 @@ pub async fn handle_reorgs(
                 break;
             } else {
                 // This block is reorged.
-                reorged_blocks.push(block);
+                is_reorg_detected = true;
             }
         } else {
             // Block no longer exists on chain, it's reorged.
-            reorged_blocks.push(block);
+            is_reorg_detected = true;
         }
     }
 
-    if reorg_start_height == 0 && !reorged_blocks.is_empty() {
-        // All scanned blocks were reorged, rescan from birthday.
-        println!("All previously scanned blocks have been reorged, starting from genesis.");
-        reorg_start_height = 0; // Indicate full rescan
-    } else if !reorged_blocks.is_empty() {
+    if is_reorg_detected {
         println!("REORG DETECTED. Rolling back from height: {}", reorg_start_height);
         let mut tx = conn.begin().await?;
         rollback_from_height(&mut tx, account_id, reorg_start_height).await?;
