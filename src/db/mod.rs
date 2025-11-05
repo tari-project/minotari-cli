@@ -13,8 +13,8 @@ pub use scanned_tip_blocks::{
 
 mod outputs;
 pub use outputs::{
-    DbWalletOutput, delete_outputs_from_height, fetch_unspent_outputs, get_output_info_by_hash,
-    get_unconfirmed_outputs, insert_output, lock_output, mark_output_confirmed, unlock_outputs_for_request,
+    DbWalletOutput, fetch_unspent_outputs, get_output_info_by_hash, get_unconfirmed_outputs, insert_output,
+    lock_output, mark_output_confirmed, soft_delete_outputs_from_height, unlock_outputs_for_request,
     update_output_status,
 };
 
@@ -31,7 +31,7 @@ mod balance_changes;
 pub use balance_changes::{delete_balance_changes_from_height, insert_balance_change};
 
 mod inputs;
-pub use inputs::{delete_inputs_from_height, insert_input};
+pub use inputs::{insert_input, soft_delete_inputs_from_height};
 
 pub async fn init_db(db_path: &str) -> Result<SqlitePool, anyhow::Error> {
     let mut path = std::path::Path::new(db_path).to_path_buf();

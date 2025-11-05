@@ -91,7 +91,7 @@ async fn rollback_from_height(
         r#"
         SELECT output_hash, mined_in_block_height, locked_by_request_id
         FROM outputs
-        WHERE account_id = ? AND mined_in_block_height >= ?
+        WHERE account_id = ? AND mined_in_block_height >= ? AND deleted_at IS NULL
         "#,
         account_id,
         output_reorg_start_height,
@@ -142,10 +142,9 @@ async fn rollback_from_height(
         }
     }
 
-    // 4. Delete dependent data
-    db::delete_balance_changes_from_height(tx, account_id, reorg_start_height).await?;
-    db::delete_inputs_from_height(tx, account_id, reorg_start_height).await?;
-    db::delete_outputs_from_height(tx, account_id, reorg_start_height).await?;
+    // 4. Soft delete dependent data and create reversal balance changes
+    db::soft_delete_inputs_from_height(tx, account_id, reorg_start_height).await?;
+    db::soft_delete_outputs_from_height(tx, account_id, reorg_start_height).await?;
     db::delete_scanned_tip_blocks_from_height(tx, account_id, reorg_start_height).await?;
 
     Ok(())

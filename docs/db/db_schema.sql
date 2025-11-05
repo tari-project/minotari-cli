@@ -32,7 +32,7 @@ CREATE TABLE outputs (
             mined_in_block_hash blob NOT NULL,
             mined_in_block_height INTEGER NOT NULL,
             value INTEGER NOT NULL,
-            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, wallet_output_json TEXT, mined_timestamp TIMESTAMP NOT NULL, confirmed_height INTEGER, confirmed_hash BLOB, memo_parsed TEXT, memo_hex TEXT, status TEXT NOT NULL DEFAULT 'UNSPENT', locked_at TIMESTAMP, locked_by_request_id TEXT,
+            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, wallet_output_json TEXT, mined_timestamp TIMESTAMP NOT NULL, confirmed_height INTEGER, confirmed_hash BLOB, memo_parsed TEXT, memo_hex TEXT, status TEXT NOT NULL DEFAULT 'UNSPENT', locked_at TIMESTAMP, locked_by_request_id TEXT, deleted_at TIMESTAMP, deleted_in_block_height INTEGER,
             FOREIGN KEY (account_id) REFERENCES accounts(id)
         );
 CREATE TABLE events (
@@ -72,17 +72,12 @@ CREATE TABLE inputs (
     mined_in_block_hash blob NOT NULL,
     mined_in_block_height INTEGER NOT NULL,
     mined_timestamp TIMESTAMP NOT NULL,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, deleted_at TIMESTAMP, deleted_in_block_height INTEGER,
     FOREIGN KEY (output_id) REFERENCES outputs(id),
     FOREIGN KEY (account_id) REFERENCES accounts(id)
 );
 CREATE INDEX idx_scanned_tip_blocks_account_height ON scanned_tip_blocks(account_id, height DESC);
-CREATE UNIQUE INDEX idx_outputs_output_hash ON outputs(output_hash);
-CREATE INDEX idx_outputs_account_mined_height ON outputs(account_id, mined_in_block_height);
-CREATE INDEX idx_inputs_output_id ON inputs(output_id);
-CREATE UNIQUE INDEX idx_inputs_output_id_unique ON inputs(output_id);
 CREATE UNIQUE INDEX idx_scanned_tip_blocks_account_height_hash ON scanned_tip_blocks(account_id, height, hash);
-CREATE INDEX idx_outputs_status ON outputs(status);
 CREATE TABLE pending_transactions (
     id TEXT PRIMARY KEY NOT NULL,
     account_id INTEGER NOT NULL,
@@ -96,4 +91,8 @@ CREATE TABLE pending_transactions (
 );
 CREATE INDEX idx_pending_transactions_status_expires_at ON pending_transactions(status, expires_at);
 CREATE INDEX idx_balance_changes_account_height ON balance_changes(account_id, effective_height);
-CREATE INDEX idx_inputs_account_mined_height ON inputs(account_id, mined_in_block_height);
+CREATE UNIQUE INDEX idx_outputs_output_hash_active ON outputs(output_hash) WHERE deleted_at IS NULL;
+CREATE INDEX idx_outputs_account_mined_height_active ON outputs(account_id, mined_in_block_height) WHERE deleted_at IS NULL;
+CREATE INDEX idx_outputs_status_active ON outputs(status) WHERE deleted_at IS NULL;
+CREATE UNIQUE INDEX idx_inputs_output_id_unique_active ON inputs(output_id) WHERE deleted_at IS NULL;
+CREATE INDEX idx_inputs_account_mined_height_active ON inputs(account_id, mined_in_block_height) WHERE deleted_at IS NULL;
