@@ -170,17 +170,21 @@ pub async fn update_output_status_to_unspent_from_height(
 ) -> Result<(), sqlx::Error> {
     let height = height as i64;
     let unspent_status = OutputStatus::Unspent.to_string();
+    let spent_status = OutputStatus::Spent.to_string();
+    let locked_status = OutputStatus::Locked.to_string();
     sqlx::query!(
         r#"
         UPDATE outputs
         SET status = ?, locked_at = NULL, locked_by_request_id = NULL
         WHERE account_id = ?
           AND mined_in_block_height >= ?
-          AND (status = 'SPENT' OR status = 'LOCKED')
+          AND (status = ? OR status = ?)
         "#,
         unspent_status,
         account_id,
-        height
+        height,
+        spent_status,
+        locked_status
     )
     .execute(&mut *conn)
     .await?;
