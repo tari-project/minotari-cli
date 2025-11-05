@@ -95,6 +95,7 @@ pub async fn prune_scanned_tip_blocks(
         DELETE FROM scanned_tip_blocks
         WHERE account_id = ?
           AND height < ?
+          AND height >= 0
           AND (height % ? != 0)
         "#,
         account_id,
