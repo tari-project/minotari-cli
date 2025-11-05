@@ -15,7 +15,7 @@ mod outputs;
 pub use outputs::{
     DbWalletOutput, delete_outputs_from_height, fetch_unspent_outputs, get_output_info_by_hash,
     get_unconfirmed_outputs, insert_output, lock_output, mark_output_confirmed, unlock_outputs_for_request,
-    update_output_status, update_output_status_to_unspent_from_height,
+    update_output_status,
 };
 
 mod pending_transactions;

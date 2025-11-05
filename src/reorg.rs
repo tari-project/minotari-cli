@@ -142,10 +142,7 @@ async fn rollback_from_height(
         }
     }
 
-    // 4. Revert output statuses (e.g., SPENT or LOCKED back to UNSPENT)
-    db::update_output_status_to_unspent_from_height(tx, account_id, reorg_start_height).await?;
-
-    // 5. Delete dependent data in correct order
+    // 4. Delete dependent data
     db::delete_balance_changes_from_height(tx, account_id, reorg_start_height).await?;
     db::delete_inputs_from_height(tx, account_id, reorg_start_height).await?;
     db::delete_outputs_from_height(tx, account_id, reorg_start_height).await?;
