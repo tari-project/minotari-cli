@@ -66,7 +66,6 @@ pub async fn soft_delete_inputs_from_height(
         WHERE i.account_id = ?
           AND i.mined_in_block_height >= ?
           AND i.deleted_at IS NULL
-          AND o.deleted_at IS NULL
         "#,
         account_id,
         height_i64
