@@ -28,7 +28,7 @@ mod events;
 pub use events::insert_wallet_event;
 
 mod balance_changes;
-pub use balance_changes::{delete_balance_changes_from_height, insert_balance_change};
+pub use balance_changes::insert_balance_change;
 
 mod inputs;
 pub use inputs::{insert_input, soft_delete_inputs_from_height};
