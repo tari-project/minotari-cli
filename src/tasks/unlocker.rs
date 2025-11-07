@@ -3,7 +3,7 @@ use std::time::Duration;
 use sqlx::{Connection, SqliteConnection, SqlitePool};
 use tokio::{sync::broadcast, task::JoinHandle, time::interval};
 
-use crate::db;
+use crate::{db, models::PendingTransactionStatus};
 
 pub struct TransactionUnlocker {
     db_pool: SqlitePool,
@@ -20,7 +20,7 @@ impl TransactionUnlocker {
         for tx in expired_txs {
             let mut transaction = conn.begin().await?;
 
-            db::update_pending_transaction_status(&mut transaction, &tx.id, "EXPIRED").await?;
+            db::update_pending_transaction_status(&mut transaction, &tx.id, PendingTransactionStatus::Expired).await?;
             db::unlock_outputs_for_request(&mut transaction, &tx.id).await?;
 
             transaction.commit().await?;

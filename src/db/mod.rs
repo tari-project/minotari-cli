@@ -7,19 +7,21 @@ pub use accounts::{AccountBalance, AccountRow, create_account, get_account_by_na
 
 mod scanned_tip_blocks;
 pub use scanned_tip_blocks::{
-    delete_old_scanned_tip_blocks, get_scanned_tip_blocks_by_account, insert_scanned_tip_block,
+    delete_scanned_tip_blocks_from_height, get_scanned_tip_blocks_by_account, insert_scanned_tip_block,
+    prune_scanned_tip_blocks,
 };
 
 mod outputs;
 pub use outputs::{
     DbWalletOutput, fetch_unspent_outputs, get_output_info_by_hash, get_unconfirmed_outputs, insert_output,
-    lock_output, mark_output_confirmed, unlock_outputs_for_request, update_output_status,
+    lock_output, mark_output_confirmed, soft_delete_outputs_from_height, unlock_outputs_for_request,
+    update_output_status,
 };
 
 mod pending_transactions;
 pub use pending_transactions::{
-    PendingTransaction, create_pending_transaction, find_expired_pending_transactions,
-    find_pending_transaction_by_idempotency_key, update_pending_transaction_status,
+    PendingTransaction, cancel_pending_transactions_by_ids, create_pending_transaction,
+    find_expired_pending_transactions, find_pending_transaction_by_idempotency_key, update_pending_transaction_status,
 };
 
 mod events;
@@ -29,7 +31,7 @@ mod balance_changes;
 pub use balance_changes::insert_balance_change;
 
 mod inputs;
-pub use inputs::insert_input;
+pub use inputs::{insert_input, soft_delete_inputs_from_height};
 
 pub async fn init_db(db_path: &str) -> Result<SqlitePool, anyhow::Error> {
     let mut path = std::path::Path::new(db_path).to_path_buf();

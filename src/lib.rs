@@ -2,6 +2,7 @@ pub mod api;
 pub mod daemon;
 pub mod db;
 pub mod models;
+pub mod reorg;
 pub mod scan;
 pub mod tasks;
 pub mod transactions;

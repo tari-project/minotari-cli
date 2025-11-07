@@ -2,6 +2,9 @@ use sqlx::SqliteConnection;
 
 use crate::models::ScannedTipBlock;
 
+const RECENT_BLOCKS_TO_KEEP: u64 = 1000;
+const OLD_BLOCKS_PRUNING_INTERVAL: u64 = 500;
+
 struct ScannedTipBlockRow {
     pub id: i64,
     pub account_id: i64,
@@ -58,25 +61,46 @@ pub async fn insert_scanned_tip_block(
     Ok(())
 }
 
-pub async fn delete_old_scanned_tip_blocks(
+pub async fn delete_scanned_tip_blocks_from_height(
     conn: &mut SqliteConnection,
     account_id: i64,
-    keep_last_n: i64,
+    height: u64,
 ) -> Result<(), sqlx::Error> {
+    let height = height as i64;
+    sqlx::query!(
+        r#"
+        DELETE FROM scanned_tip_blocks
+        WHERE account_id = ? AND height >= ?
+        "#,
+        account_id,
+        height
+    )
+    .execute(&mut *conn)
+    .await?;
+
+    Ok(())
+}
+
+pub async fn prune_scanned_tip_blocks(
+    conn: &mut SqliteConnection,
+    account_id: i64,
+    current_tip_height: u64,
+) -> Result<(), anyhow::Error> {
+    // Keep the last RECENT_BLOCKS_TO_KEEP blocks
+    let min_height_for_recent = current_tip_height.saturating_sub(RECENT_BLOCKS_TO_KEEP) as i64;
+
+    // Delete blocks older than min_height_for_recent that are not at the pruning interval
     sqlx::query!(
         r#"
         DELETE FROM scanned_tip_blocks
         WHERE account_id = ?
-        AND id NOT IN (
-            SELECT id FROM scanned_tip_blocks
-            WHERE account_id = ?
-            ORDER BY height DESC
-            LIMIT ?
-        )
+          AND height < ?
+          AND height >= 0
+          AND (height % ? != 0)
         "#,
         account_id,
-        account_id,
-        keep_last_n
+        min_height_for_recent,
+        OLD_BLOCKS_PRUNING_INTERVAL as i64
     )
     .execute(&mut *conn)
     .await?;
