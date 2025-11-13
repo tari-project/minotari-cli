@@ -4,6 +4,9 @@ use sqlx::{Error as SqlxError, SqliteConnection};
 use thiserror::Error;
 use uuid::Uuid;
 
+use crate::{api::types::LockFundsResponse, db::outputs::fetch_outputs_by_lock_request_id};
+use tari_transaction_components::tari_amount::MicroMinotari;
+
 #[derive(Debug, Error)]
 pub enum PendingTransactionError {
     #[error("A pending transaction with the given idempotency key already exists for this account.")]
@@ -17,31 +20,54 @@ pub struct PendingTransaction {
     pub idempotency_key: String,
     pub account_id: i64,
     pub status: PendingTransactionStatus,
-    pub unsigned_tx_blob: Vec<u8>,
+    pub requires_change_output: bool,
+    pub total_value: MicroMinotari,
+    pub fee_without_change: MicroMinotari,
+    pub fee_with_change: MicroMinotari,
     pub expires_at: DateTime<Utc>,
     pub created_at: DateTime<Utc>,
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn create_pending_transaction(
     conn: &mut SqliteConnection,
     idempotency_key: &str,
     account_id: i64,
-    unsigned_tx_json: &str,
+    requires_change_output: bool,
+    total_value: MicroMinotari,
+    fee_without_change: MicroMinotari,
+    fee_with_change: MicroMinotari,
     expires_at: DateTime<Utc>,
 ) -> Result<String, PendingTransactionError> {
     let id = Uuid::new_v4().to_string();
     let status_pending = PendingTransactionStatus::Pending.to_string();
+    let total_value = total_value.as_u64() as i64;
+    let fee_without_change = fee_without_change.as_u64() as i64;
+    let fee_with_change = fee_with_change.as_u64() as i64;
 
     let res = sqlx::query!(
         r#"
-        INSERT INTO pending_transactions (id, idempotency_key, account_id, status, unsigned_tx_json, expires_at)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO pending_transactions (
+            id,
+            idempotency_key,
+            account_id,
+            status,
+            requires_change_output,
+            total_value,
+            fee_without_change,
+            fee_with_change,
+            expires_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#,
         id,
         idempotency_key,
         account_id,
         status_pending,
-        unsigned_tx_json,
+        requires_change_output,
+        total_value,
+        fee_without_change,
+        fee_with_change,
         expires_at
     )
     .execute(&mut *conn)
@@ -107,11 +133,16 @@ pub async fn find_pending_transaction_by_idempotency_key(
     conn: &mut SqliteConnection,
     idempotency_key: &str,
     account_id: i64,
-) -> Result<Option<String>, SqlxError> {
+) -> Result<Option<LockFundsResponse>, SqlxError> {
     let status_pending = PendingTransactionStatus::Pending.to_string();
     let res = sqlx::query!(
         r#"
-        SELECT unsigned_tx_json
+        SELECT
+            id,
+            requires_change_output,
+            total_value,
+            fee_without_change,
+            fee_with_change
         FROM pending_transactions
         WHERE idempotency_key = ? AND account_id = ? AND status = ?
         "#,
@@ -122,7 +153,20 @@ pub async fn find_pending_transaction_by_idempotency_key(
     .fetch_optional(&mut *conn)
     .await?;
 
-    Ok(res.map(|r| r.unsigned_tx_json))
+    match res {
+        Some(row) => {
+            let id_str = row.id;
+            let utxos = fetch_outputs_by_lock_request_id(conn, &id_str).await?;
+            Ok(Some(LockFundsResponse {
+                utxos: utxos.into_iter().map(|db_out| db_out.output).collect(),
+                requires_change_output: row.requires_change_output,
+                total_value: MicroMinotari::from(row.total_value as u64),
+                fee_without_change: MicroMinotari::from(row.fee_without_change as u64),
+                fee_with_change: MicroMinotari::from(row.fee_with_change as u64),
+            }))
+        },
+        None => Ok(None),
+    }
 }
 
 pub async fn cancel_pending_transactions_by_ids(
