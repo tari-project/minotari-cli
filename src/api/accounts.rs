@@ -2,19 +2,26 @@ use axum::{
     Json,
     extract::{Path, State},
 };
-use serde_json::Value as JsonValue;
 use utoipa::IntoParams;
 
 use super::error::ApiError;
 use crate::{
-    api::{AppState, types::TariAddressBase58},
+    api::{AppState, types::LockFundsResponse},
     db::{AccountBalance, get_account_by_name, get_balance},
-    transactions::one_sided_transaction::{OneSidedTransaction, Recipient},
+    transactions::lock_amount::LockAmount,
 };
 use tari_transaction_components::tari_amount::MicroMinotari;
 
 fn default_seconds_to_lock_utxos() -> Option<u64> {
     Some(86400)
+}
+
+fn default_num_outputs() -> Option<usize> {
+    Some(1)
+}
+
+fn default_fee_per_gram() -> Option<MicroMinotari> {
+    Some(MicroMinotari(5))
 }
 
 #[derive(Debug, serde::Deserialize, IntoParams, utoipa::ToSchema)]
@@ -23,19 +30,25 @@ pub struct WalletParams {
 }
 
 #[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
-pub struct RecipientRequest {
-    address: TariAddressBase58,
+pub struct LockFundsRequest {
     #[schema(value_type = u64)]
     amount: MicroMinotari,
-    payment_id: Option<String>,
-}
 
-#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
-pub struct CreateTransactionRequest {
-    recipients: Vec<RecipientRequest>,
+    #[serde(default = "default_num_outputs")]
+    #[schema(default = "1")]
+    num_outputs: Option<usize>,
+
+    #[schema(value_type = u64)]
+    #[serde(default = "default_fee_per_gram")]
+    #[schema(default = "5")]
+    fee_per_gram: Option<MicroMinotari>,
+
+    estimated_output_size: Option<usize>,
+
     #[serde(default = "default_seconds_to_lock_utxos")]
     #[schema(default = "86400")]
     seconds_to_lock_utxos: Option<u64>,
+
     idempotency_key: Option<String>,
 }
 
@@ -65,53 +78,29 @@ pub async fn api_get_balance(
     Ok(Json(balance))
 }
 
-#[utoipa::path(
-    post,
-    path = "/accounts/{name}/create_unsigned_transaction",
-    request_body = CreateTransactionRequest,
-    responses(
-        (status = 200, description = "Unsigned transaction created successfully", body = JsonValue),
-        (status = 400, description = "Bad request", body = ApiError),
-        (status = 404, description = "Account not found", body = ApiError),
-        (status = 500, description = "Internal server error", body = ApiError),
-    ),
-    params(
-        ("name" = String, Path, description = "Name of the account to create transaction for"),
-    )
-)]
-pub async fn api_create_unsigned_transaction(
+#[axum::debug_handler]
+pub async fn api_lock_funds(
     State(app_state): State<AppState>,
     Path(WalletParams { name }): Path<WalletParams>,
-    Json(body): Json<CreateTransactionRequest>,
-) -> Result<Json<JsonValue>, ApiError> {
-    let recipients: Vec<Recipient> = body
-        .recipients
-        .into_iter()
-        .map(|r| Recipient {
-            address: r.address.0,
-            amount: r.amount,
-            payment_id: r.payment_id,
-        })
-        .collect();
-
-    let seconds_to_lock_utxos = body.seconds_to_lock_utxos;
-
+    Json(body): Json<LockFundsRequest>,
+) -> Result<Json<LockFundsResponse>, ApiError> {
     let mut conn = app_state.db_pool.acquire().await?;
     let account = get_account_by_name(&mut conn, &name)
         .await?
         .ok_or_else(|| ApiError::AccountNotFound(name.clone()))?;
 
-    let one_sided_tx =
-        OneSidedTransaction::new(app_state.db_pool.clone(), app_state.network, app_state.password.clone());
-    let result = one_sided_tx
-        .create_unsigned_transaction(
+    let lock_amount = LockAmount::new(app_state.db_pool.clone());
+    let response = lock_amount
+        .lock(
             account,
-            recipients,
+            body.amount,
+            body.num_outputs.expect("must be defaulted"),
+            body.fee_per_gram.expect("must be defaulted"),
+            body.estimated_output_size,
             body.idempotency_key,
-            seconds_to_lock_utxos.unwrap(),
+            body.seconds_to_lock_utxos.expect("must be defaulted"),
         )
         .await
-        .map_err(|e| ApiError::FailedCreateUnsignedTx(e.to_string()))?;
-
-    Ok(Json(serde_json::to_value(result)?))
+        .map_err(|e| ApiError::FailedToLockFunds(e.to_string()))?;
+    Ok(Json(response))
 }

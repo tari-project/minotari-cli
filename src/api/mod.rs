@@ -6,7 +6,7 @@ use utoipa_swagger_ui::SwaggerUi;
 
 mod accounts;
 mod error;
-mod types;
+pub mod types;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -25,16 +25,12 @@ impl FromRef<AppState> for SqlitePool {
 #[openapi(
     paths(
         accounts::api_get_balance,
-        accounts::api_create_unsigned_transaction,
     ),
     components(
         schemas(
             crate::db::AccountBalance,
             error::ApiError,
-            accounts::CreateTransactionRequest,
-            accounts::RecipientRequest,
             accounts::WalletParams,
-            crate::api::types::TariAddressBase58,
         )
     ),
     tags(
@@ -53,9 +49,6 @@ pub fn create_router(db_pool: SqlitePool, network: Network, password: String) ->
     Router::new()
         .merge(SwaggerUi::new("/swagger-ui").url("/openapi.json", ApiDoc::openapi()))
         .route("/accounts/{name}/balance", get(accounts::api_get_balance))
-        .route(
-            "/accounts/{name}/create_unsigned_transaction",
-            post(accounts::api_create_unsigned_transaction),
-        )
+        .route("/accounts/{name}/lock_funds", post(accounts::api_lock_funds))
         .with_state(app_state)
 }
