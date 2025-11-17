@@ -1,10 +1,21 @@
+use std::sync::LazyLock;
+
 use sqlx::SqliteConnection;
+use tokio::sync::{
+    Mutex,
+    mpsc::{Receiver, Sender},
+};
 
 use crate::models::ScannedTipBlock;
 
 const RECENT_BLOCKS_TO_KEEP: u64 = 1000;
 const OLD_BLOCKS_PRUNING_INTERVAL: u64 = 500;
 
+pub static SCANNED_TIP_BLOCK_CHANNEL: LazyLock<(Sender<ScannedTipBlock>, Mutex<Receiver<ScannedTipBlock>>)> =
+    LazyLock::new(|| {
+        let (tx, rx) = tokio::sync::mpsc::channel(100);
+        (tx, Mutex::new(rx))
+    });
 struct ScannedTipBlockRow {
     pub id: i64,
     pub account_id: i64,
@@ -46,7 +57,7 @@ pub async fn insert_scanned_tip_block(
     height: i64,
     hash: &[u8],
 ) -> Result<(), sqlx::Error> {
-    sqlx::query!(
+    let query_result = sqlx::query!(
         r#"
         INSERT OR IGNORE INTO scanned_tip_blocks (account_id, height, hash)
         VALUES (?, ?, ?)
@@ -57,6 +68,19 @@ pub async fn insert_scanned_tip_block(
     )
     .execute(&mut *conn)
     .await?;
+
+    // Notify listeners about the new scanned tip block
+    // Do not fail because of notification failure
+    let _unused = SCANNED_TIP_BLOCK_CHANNEL
+        .0
+        .send(ScannedTipBlock {
+            id: query_result.last_insert_rowid(),
+            account_id,
+            height: height as u64,
+            hash: hash.to_vec(),
+        })
+        .await
+        .map_err(|e| sqlx::Error::Protocol(e.to_string()));
 
     Ok(())
 }

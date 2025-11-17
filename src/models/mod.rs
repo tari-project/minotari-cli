@@ -72,6 +72,9 @@ impl WalletEventType {
     }
 }
 
+// Clone used during event notification.
+// Debug used in TU logging
+#[derive(Debug, Clone)]
 pub struct BalanceChange {
     pub account_id: Id,
     pub caused_by_output_id: Option<Id>,

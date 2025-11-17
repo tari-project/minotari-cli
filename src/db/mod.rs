@@ -3,19 +3,22 @@ use std::{env::current_dir, fs};
 use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
 
 mod accounts;
-pub use accounts::{AccountBalance, AccountRow, create_account, get_account_by_name, get_accounts, get_balance};
+pub use accounts::{
+    ACCOUNT_CREATION_CHANNEL, AccountBalance, AccountRow, create_account, get_account_by_name, get_accounts,
+    get_balance,
+};
 
 mod scanned_tip_blocks;
 pub use scanned_tip_blocks::{
-    delete_scanned_tip_blocks_from_height, get_scanned_tip_blocks_by_account, insert_scanned_tip_block,
-    prune_scanned_tip_blocks,
+    SCANNED_TIP_BLOCK_CHANNEL, delete_scanned_tip_blocks_from_height, get_scanned_tip_blocks_by_account,
+    insert_scanned_tip_block, prune_scanned_tip_blocks,
 };
 
 mod outputs;
 pub use outputs::{
-    DbWalletOutput, fetch_unspent_outputs, get_output_info_by_hash, get_unconfirmed_outputs, insert_output,
-    lock_output, mark_output_confirmed, soft_delete_outputs_from_height, unlock_outputs_for_request,
-    update_output_status,
+    DbWalletOutput, fetch_unspent_outputs, get_output_details_for_balance_change_by_id, get_output_info_by_hash,
+    get_unconfirmed_outputs, insert_output, lock_output, mark_output_confirmed, soft_delete_outputs_from_height,
+    unlock_outputs_for_request, update_output_status,
 };
 
 mod pending_transactions;
@@ -25,13 +28,13 @@ pub use pending_transactions::{
 };
 
 mod events;
-pub use events::insert_wallet_event;
+pub use events::{EVENT_CHANNEL, insert_wallet_event};
 
 mod balance_changes;
-pub use balance_changes::insert_balance_change;
+pub use balance_changes::{BALANCE_CHANGE_CHANNEL, get_all_balance_changes_by_account_id, insert_balance_change};
 
 mod inputs;
-pub use inputs::{insert_input, soft_delete_inputs_from_height};
+pub use inputs::{get_input_details_for_balance_change_by_id, insert_input, soft_delete_inputs_from_height};
 
 pub async fn init_db(db_path: &str) -> Result<SqlitePool, anyhow::Error> {
     let mut path = std::path::Path::new(db_path).to_path_buf();
