@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT unsigned_tx_json\n        FROM pending_transactions\n        WHERE idempotency_key = ? AND account_id = ? AND status = ?\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "unsigned_tx_json",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "c6893f725f4490a03bc03ff4b926f4fe94fdb33df42b48765265387874701e74"
+}

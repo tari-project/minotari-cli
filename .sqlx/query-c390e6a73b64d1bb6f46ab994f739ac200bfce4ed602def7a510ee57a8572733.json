@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n       INSERT OR IGNORE INTO outputs (account_id, output_hash, mined_in_block_height, mined_in_block_hash, value, mined_timestamp, wallet_output_json, memo_parsed, memo_hex)\n       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 9
+    },
+    "nullable": []
+  },
+  "hash": "c390e6a73b64d1bb6f46ab994f739ac200bfce4ed602def7a510ee57a8572733"
+}

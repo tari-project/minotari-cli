@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        DELETE FROM scanned_tip_blocks\n        WHERE account_id = ?\n          AND height < ?\n          AND height >= 0\n          AND (height % ? != 0)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "6dac7d5b6a96bb55ce8d49213d834d4c6d8b15703847c7a56d3f7b7f6b86f775"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        UPDATE inputs\n        SET deleted_at = ?, deleted_in_block_height = ?\n        WHERE account_id = ? AND mined_in_block_height >= ? AND deleted_at IS NULL\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "4a31a6254c01128448a2229e9134f4822db6455796b6cb56218556cad1a26688"
+}

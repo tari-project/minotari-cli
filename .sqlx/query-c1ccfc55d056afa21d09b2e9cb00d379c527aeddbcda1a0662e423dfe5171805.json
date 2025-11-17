@@ -1,0 +1,98 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT \n            account_id as \"account_id: i64\",\n            caused_by_output_id as \"caused_by_output_id: _\",\n            caused_by_input_id as \"caused_by_input_id: _\",\n            description,\n            balance_credit as \"balance_credit: u64\",\n            balance_debit as \"balance_debit: u64\",\n            effective_date as \"effective_date: NaiveDateTime\",\n            effective_height as \"effective_height: u64\",\n            claimed_recipient_address as \"claimed_recipient_address: _\",\n            claimed_sender_address as \"claimed_sender_address: _\",\n            memo_parsed,\n            memo_hex,\n            claimed_fee as \"claimed_fee: _\",\n            claimed_amount as \"claimed_amount: _\"\n        FROM balance_changes\n        WHERE account_id = ?\n        ORDER BY effective_height ASC, id ASC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "account_id: i64",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "caused_by_output_id: _",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "caused_by_input_id: _",
+        "ordinal": 2,
+        "type_info": "Integer"
+      },
+      {
+        "name": "description",
+        "ordinal": 3,
+        "type_info": "Text"
+      },
+      {
+        "name": "balance_credit: u64",
+        "ordinal": 4,
+        "type_info": "Integer"
+      },
+      {
+        "name": "balance_debit: u64",
+        "ordinal": 5,
+        "type_info": "Integer"
+      },
+      {
+        "name": "effective_date: NaiveDateTime",
+        "ordinal": 6,
+        "type_info": "Datetime"
+      },
+      {
+        "name": "effective_height: u64",
+        "ordinal": 7,
+        "type_info": "Integer"
+      },
+      {
+        "name": "claimed_recipient_address: _",
+        "ordinal": 8,
+        "type_info": "Text"
+      },
+      {
+        "name": "claimed_sender_address: _",
+        "ordinal": 9,
+        "type_info": "Text"
+      },
+      {
+        "name": "memo_parsed",
+        "ordinal": 10,
+        "type_info": "Text"
+      },
+      {
+        "name": "memo_hex",
+        "ordinal": 11,
+        "type_info": "Text"
+      },
+      {
+        "name": "claimed_fee: _",
+        "ordinal": 12,
+        "type_info": "Integer"
+      },
+      {
+        "name": "claimed_amount: _",
+        "ordinal": 13,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      true,
+      true,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      true,
+      true,
+      true,
+      true,
+      true
+    ]
+  },
+  "hash": "c1ccfc55d056afa21d09b2e9cb00d379c527aeddbcda1a0662e423dfe5171805"
+}
