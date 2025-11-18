@@ -44,7 +44,7 @@ pub async fn scan(
         println!("Found account: {:?}", account);
 
         let key_manager = account.get_key_manager(password).await.map_err(ScanError::Fatal)?;
-        let mut scanner = HttpBlockchainScanner::new(base_url.to_string(), key_manager.clone())
+        let mut scanner = HttpBlockchainScanner::new(base_url.to_string(), key_manager.clone(), 8)
             .await
             .map_err(|e| ScanError::Intermittent(e.to_string()))?;
 

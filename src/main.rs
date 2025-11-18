@@ -1,34 +1,15 @@
 use std::{
     fs::{self, create_dir_all},
     path::Path,
-    sync::Arc,
 };
 
+use anyhow::anyhow;
 use blake2::{Blake2s256, Digest};
 use chacha20poly1305::{
     AeadCore, Key, KeyInit, XChaCha20Poly1305,
     aead::{Aead, OsRng},
 };
 use clap::{Parser, Subcommand};
-use tari_common::configuration::Network;
-use tari_common_types::{
-    seeds::{
-        cipher_seed::CipherSeed,
-        mnemonic::{Mnemonic, MnemonicLanguage},
-    },
-    tari_address::{TariAddress, TariAddressFeatures},
-    wallet_types::WalletType,
-};
-use tari_crypto::compressed_key::CompressedKey;
-use tari_transaction_components::{
-    crypto_factories::CryptoFactories,
-    key_manager::{
-        TransactionKeyManagerInterface, TransactionKeyManagerWrapper, memory_key_manager::MemoryKeyManagerBackend,
-    },
-};
-use tari_utilities::byte_array::ByteArray;
-
-use anyhow::anyhow;
 use minotari::{
     daemon, db,
     db::{get_accounts, get_balance, init_db},
@@ -38,7 +19,21 @@ use minotari::{
     transactions::one_sided_transaction::{OneSidedTransaction, Recipient},
 };
 use std::str::FromStr;
+use tari_common::configuration::Network;
+use tari_common_types::{
+    seeds::{
+        cipher_seed::CipherSeed,
+        mnemonic::{Mnemonic, MnemonicLanguage},
+    },
+    tari_address::{TariAddress, TariAddressFeatures},
+};
+use tari_crypto::compressed_key::CompressedKey;
+use tari_transaction_components::key_manager::KeyManager;
+use tari_transaction_components::key_manager::TransactionKeyManagerInterface;
+use tari_transaction_components::key_manager::wallet_types::SeedWordsWallet;
+use tari_transaction_components::key_manager::wallet_types::WalletType;
 use tari_transaction_components::tari_amount::MicroMinotari;
+use tari_utilities::byte_array::ByteArray;
 
 #[derive(Parser)]
 #[command(name = "tari")]
@@ -169,15 +164,12 @@ async fn main() -> Result<(), anyhow::Error> {
             let seeds = CipherSeed::random();
             let birthday = seeds.birthday();
             let seed_words = seeds.to_mnemonic(MnemonicLanguage::English, None)?.join(" ");
-            let key_manager: TransactionKeyManagerWrapper<MemoryKeyManagerBackend> = TransactionKeyManagerWrapper::new(
-                Some(seeds),
-                CryptoFactories::default(),
-                Arc::new(WalletType::DerivedKeys),
-            )
-            .await?;
+            let seed_wallet = SeedWordsWallet::construct_new(seeds).map_err(|_| anyhow::anyhow!("Invalid seeds"))?;
+            let wallet = WalletType::SeedWords(seed_wallet);
+            let key_manager = KeyManager::new(wallet)?;
 
-            let view_key = key_manager.get_private_view_key().await?;
-            let spend_key = key_manager.get_spend_key().await?;
+            let view_key = key_manager.get_private_view_key();
+            let spend_key = key_manager.get_spend_key();
 
             let public_view_key = CompressedKey::from_secret_key(&view_key);
 
