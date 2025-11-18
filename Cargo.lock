@@ -2153,12 +2153,12 @@ dependencies = [
  "serde",
  "serde-wasm-bindgen 0.6.5",
  "serde_json",
- "tari_common",
- "tari_common_types",
+ "tari_common 5.2.0-pre.2",
+ "tari_common_types 5.2.0-pre.2",
  "tari_crypto",
  "tari_node_components",
- "tari_script",
- "tari_transaction_components",
+ "tari_script 5.2.0-pre.2",
+ "tari_transaction_components 5.2.0-pre.2",
  "tari_utilities",
  "thiserror 1.0.69",
  "tracing",
@@ -2357,11 +2357,11 @@ dependencies = [
  "serde_json",
  "sqlx",
  "tari-tapplet-lib",
- "tari_common",
- "tari_common_types",
+ "tari_common 5.1.0-rc.1",
+ "tari_common_types 5.1.0-rc.1",
  "tari_crypto",
- "tari_script",
- "tari_transaction_components",
+ "tari_script 5.1.0-rc.1",
+ "tari_transaction_components 5.1.0-rc.1",
  "tari_utilities",
  "thiserror 2.0.17",
  "tokio",
@@ -2374,6 +2374,13 @@ dependencies = [
 name = "minotari_ledger_wallet_common"
 version = "5.1.0-rc.1"
 source = "git+https://github.com/stringhandler/tari/?rev=6430bfffb53af71d80535243eec9165534af2b41#6430bfffb53af71d80535243eec9165534af2b41"
+dependencies = [
+ "bs58 0.5.1",
+]
+
+[[package]]
+name = "minotari_ledger_wallet_common"
+version = "5.2.0-pre.2"
 dependencies = [
  "bs58 0.5.1",
 ]
@@ -4134,7 +4141,29 @@ dependencies = [
  "serde_yaml",
  "sha2",
  "structopt",
- "tari_features",
+ "tari_features 5.1.0-rc.1",
+ "tempfile",
+ "thiserror 2.0.17",
+]
+
+[[package]]
+name = "tari_common"
+version = "5.2.0-pre.2"
+dependencies = [
+ "anyhow",
+ "cargo_toml",
+ "config",
+ "dirs-next",
+ "log",
+ "log4rs",
+ "multiaddr",
+ "path-clean",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "sha2",
+ "structopt",
+ "tari_features 5.2.0-pre.2",
  "tempfile",
  "thiserror 2.0.17",
 ]
@@ -4156,7 +4185,7 @@ dependencies = [
  "digest",
  "getrandom 0.2.16",
  "js-sys",
- "minotari_ledger_wallet_common",
+ "minotari_ledger_wallet_common 5.1.0-rc.1",
  "newtype-ops",
  "once_cell",
  "primitive-types",
@@ -4166,10 +4195,46 @@ dependencies = [
  "strum",
  "strum_macros",
  "subtle",
- "tari_common",
+ "tari_common 5.1.0-rc.1",
  "tari_crypto",
- "tari_hashing",
- "tari_max_size",
+ "tari_hashing 5.1.0-rc.1",
+ "tari_max_size 5.1.0-rc.1",
+ "tari_utilities",
+ "thiserror 2.0.17",
+ "utoipa",
+ "zeroize",
+]
+
+[[package]]
+name = "tari_common_types"
+version = "5.2.0-pre.2"
+dependencies = [
+ "argon2",
+ "base64 0.21.7",
+ "bitflags 2.10.0",
+ "blake2",
+ "borsh",
+ "bs58 0.5.1",
+ "chacha20 0.7.3",
+ "chacha20poly1305",
+ "crc32fast",
+ "digest",
+ "getrandom 0.2.16",
+ "js-sys",
+ "minotari_ledger_wallet_common 5.2.0-pre.2",
+ "newtype-ops",
+ "once_cell",
+ "primitive-types",
+ "rand",
+ "serde",
+ "serde_json",
+ "strum",
+ "strum_macros",
+ "subtle",
+ "tari_common 5.2.0-pre.2",
+ "tari_crypto",
+ "tari_hashing 5.2.0-pre.2",
+ "tari_max_size 5.2.0-pre.2",
  "tari_utilities",
  "thiserror 2.0.17",
  "utoipa",
@@ -4205,9 +4270,23 @@ version = "5.1.0-rc.1"
 source = "git+https://github.com/stringhandler/tari/?rev=6430bfffb53af71d80535243eec9165534af2b41#6430bfffb53af71d80535243eec9165534af2b41"
 
 [[package]]
+name = "tari_features"
+version = "5.2.0-pre.2"
+
+[[package]]
 name = "tari_hashing"
 version = "5.1.0-rc.1"
 source = "git+https://github.com/stringhandler/tari/?rev=6430bfffb53af71d80535243eec9165534af2b41#6430bfffb53af71d80535243eec9165534af2b41"
+dependencies = [
+ "blake2",
+ "borsh",
+ "digest",
+ "tari_crypto",
+]
+
+[[package]]
+name = "tari_hashing"
+version = "5.2.0-pre.2"
 dependencies = [
  "blake2",
  "borsh",
@@ -4225,7 +4304,20 @@ dependencies = [
  "indexmap 2.12.0",
  "serde",
  "tari_crypto",
- "tari_hashing",
+ "tari_hashing 5.1.0-rc.1",
+ "thiserror 2.0.17",
+]
+
+[[package]]
+name = "tari_jellyfish"
+version = "5.2.0-pre.2"
+dependencies = [
+ "borsh",
+ "digest",
+ "indexmap 2.12.0",
+ "serde",
+ "tari_crypto",
+ "tari_hashing 5.2.0-pre.2",
  "thiserror 2.0.17",
 ]
 
@@ -4241,9 +4333,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "tari_max_size"
+version = "5.2.0-pre.2"
+dependencies = [
+ "borsh",
+ "serde",
+ "tari_utilities",
+ "thiserror 2.0.17",
+]
+
+[[package]]
 name = "tari_node_components"
-version = "5.1.0-rc.1"
-source = "git+https://github.com/stringhandler/tari/?rev=6430bfffb53af71d80535243eec9165534af2b41#6430bfffb53af71d80535243eec9165534af2b41"
+version = "5.2.0-pre.2"
 dependencies = [
  "blake2",
  "borsh",
@@ -4253,9 +4354,9 @@ dependencies = [
  "log",
  "primitive-types",
  "serde",
- "tari_common_types",
- "tari_hashing",
- "tari_transaction_components",
+ "tari_common_types 5.2.0-pre.2",
+ "tari_hashing 5.2.0-pre.2",
+ "tari_transaction_components 5.2.0-pre.2",
  "tari_utilities",
  "thiserror 2.0.17",
 ]
@@ -4273,7 +4374,24 @@ dependencies = [
  "sha2",
  "sha3",
  "tari_crypto",
- "tari_max_size",
+ "tari_max_size 5.1.0-rc.1",
+ "tari_utilities",
+ "thiserror 2.0.17",
+]
+
+[[package]]
+name = "tari_script"
+version = "5.2.0-pre.2"
+dependencies = [
+ "blake2",
+ "borsh",
+ "digest",
+ "integer-encoding",
+ "serde",
+ "sha2",
+ "sha3",
+ "tari_crypto",
+ "tari_max_size 5.2.0-pre.2",
  "tari_utilities",
  "thiserror 2.0.17",
 ]
@@ -4287,7 +4405,21 @@ dependencies = [
  "async-trait",
  "futures",
  "log",
- "tari_shutdown",
+ "tari_shutdown 5.1.0-rc.1",
+ "thiserror 2.0.17",
+ "tokio",
+ "tower-service",
+]
+
+[[package]]
+name = "tari_service_framework"
+version = "5.2.0-pre.2"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "futures",
+ "log",
+ "tari_shutdown 5.2.0-pre.2",
  "thiserror 2.0.17",
  "tokio",
  "tower-service",
@@ -4302,6 +4434,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "tari_shutdown"
+version = "5.2.0-pre.2"
+dependencies = [
+ "futures",
+]
+
+[[package]]
 name = "tari_sidechain"
 version = "5.1.0-rc.1"
 source = "git+https://github.com/stringhandler/tari/?rev=6430bfffb53af71d80535243eec9165534af2b41#6430bfffb53af71d80535243eec9165534af2b41"
@@ -4310,10 +4449,26 @@ dependencies = [
  "hex",
  "log",
  "serde",
- "tari_common_types",
+ "tari_common_types 5.1.0-rc.1",
  "tari_crypto",
- "tari_hashing",
- "tari_jellyfish",
+ "tari_hashing 5.1.0-rc.1",
+ "tari_jellyfish 5.1.0-rc.1",
+ "tari_utilities",
+ "thiserror 2.0.17",
+]
+
+[[package]]
+name = "tari_sidechain"
+version = "5.2.0-pre.2"
+dependencies = [
+ "borsh",
+ "hex",
+ "log",
+ "serde",
+ "tari_common_types 5.2.0-pre.2",
+ "tari_crypto",
+ "tari_hashing 5.2.0-pre.2",
+ "tari_jellyfish 5.2.0-pre.2",
  "tari_utilities",
  "thiserror 2.0.17",
 ]
@@ -4349,14 +4504,60 @@ dependencies = [
  "serde_valid",
  "strum",
  "strum_macros",
- "tari_common",
- "tari_common_types",
+ "tari_common 5.1.0-rc.1",
+ "tari_common_types 5.1.0-rc.1",
  "tari_crypto",
- "tari_hashing",
- "tari_max_size",
- "tari_script",
- "tari_service_framework",
- "tari_sidechain",
+ "tari_hashing 5.1.0-rc.1",
+ "tari_max_size 5.1.0-rc.1",
+ "tari_script 5.1.0-rc.1",
+ "tari_service_framework 5.1.0-rc.1",
+ "tari_sidechain 5.1.0-rc.1",
+ "tari_utilities",
+ "thiserror 2.0.17",
+ "tokio",
+ "utoipa",
+ "uuid",
+ "zeroize",
+]
+
+[[package]]
+name = "tari_transaction_components"
+version = "5.2.0-pre.2"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "bitflags 2.10.0",
+ "blake2",
+ "borsh",
+ "bytes 0.5.6",
+ "chacha20poly1305",
+ "chrono",
+ "decimal-rs",
+ "derivative",
+ "digest",
+ "integer-encoding",
+ "log",
+ "newtype-ops",
+ "num-derive",
+ "num-format",
+ "num-traits",
+ "primitive-types",
+ "rand",
+ "semver",
+ "serde",
+ "serde_json",
+ "serde_repr",
+ "serde_valid",
+ "strum",
+ "strum_macros",
+ "tari_common 5.2.0-pre.2",
+ "tari_common_types 5.2.0-pre.2",
+ "tari_crypto",
+ "tari_hashing 5.2.0-pre.2",
+ "tari_max_size 5.2.0-pre.2",
+ "tari_script 5.2.0-pre.2",
+ "tari_service_framework 5.2.0-pre.2",
+ "tari_sidechain 5.2.0-pre.2",
  "tari_utilities",
  "thiserror 2.0.17",
  "tokio",
