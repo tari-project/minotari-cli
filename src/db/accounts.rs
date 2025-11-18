@@ -1,24 +1,21 @@
-use std::sync::{Arc, LazyLock};
-
 use chacha20poly1305::{Key, KeyInit, XChaCha20Poly1305, XNonce, aead::Aead};
 use serde::Serialize;
 use sqlx::SqliteConnection;
+use std::sync::{Arc, LazyLock};
 use tari_common::configuration::Network;
 use tari_common_types::{
-    seeds::cipher_seed::CipherSeed,
     tari_address::{TariAddress, TariAddressFeatures},
     types::CompressedPublicKey,
-    wallet_types::{ProvidedKeysWallet, WalletType},
 };
 use tari_crypto::keys::PublicKey;
 use tari_crypto::{
     compressed_key::CompressedKey,
     ristretto::{RistrettoPublicKey, RistrettoSecretKey},
 };
-use tari_transaction_components::{
-    crypto_factories::CryptoFactories,
-    key_manager::{TransactionKeyManagerWrapper, memory_key_manager::MemoryKeyManagerBackend},
-};
+use tari_transaction_components::key_manager::KeyManager;
+use tari_transaction_components::key_manager::wallet_types::ViewWallet;
+use tari_transaction_components::key_manager::wallet_types::WalletType;
+
 use tari_utilities::byte_array::ByteArray;
 use tokio::sync::{
     Mutex,
@@ -207,21 +204,11 @@ impl AccountRow {
         Ok(address)
     }
 
-    pub async fn get_key_manager(
-        &self,
-        password: &str,
-    ) -> Result<TransactionKeyManagerWrapper<MemoryKeyManagerBackend>, anyhow::Error> {
+    pub async fn get_key_manager(&self, password: &str) -> Result<KeyManager, anyhow::Error> {
         let (view_key, spend_key) = self.decrypt_keys(password)?;
-        let seed = CipherSeed::random();
-        let wallet_type = Arc::new(WalletType::ProvidedKeys(ProvidedKeysWallet {
-            view_key,
-            birthday: Some(self.birthday as u16),
-            public_spend_key: spend_key,
-            private_spend_key: None,
-            private_comms_key: None,
-        }));
-        let key_manager: TransactionKeyManagerWrapper<MemoryKeyManagerBackend> =
-            TransactionKeyManagerWrapper::new(Some(seed), CryptoFactories::default(), wallet_type).await?;
+        let view_wallet = ViewWallet::new(spend_key, view_key, Some(self.birthday as u16));
+        let wallet_type = WalletType::ViewWallet(view_wallet);
+        let key_manager = KeyManager::new(wallet_type)?;
         Ok(key_manager)
     }
 }

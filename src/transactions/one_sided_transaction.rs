@@ -75,12 +75,12 @@ impl OneSidedTransaction {
 
         let key_manager = account.get_key_manager(&self.password).await?;
         let consensus_constants = ConsensusConstantsBuilder::new(self.network).build();
-        let mut tx_builder = TransactionBuilder::new(consensus_constants, key_manager.clone(), self.network).await?;
+        let mut tx_builder = TransactionBuilder::new(consensus_constants, key_manager.clone(), self.network)?;
 
         tx_builder.with_fee_per_gram(fee_per_gram);
 
         for utxo in &utxo_selection.utxos {
-            tx_builder.with_input(utxo.output.clone()).await?;
+            tx_builder.with_input(utxo.output.clone())?;
         }
 
         let mut offline_signing = OfflineSigner::new(key_manager);
@@ -91,17 +91,15 @@ impl OneSidedTransaction {
         };
         let output_features = OutputFeatures::default();
 
-        let result = offline_signing
-            .prepare_one_sided_transaction_for_signing(
-                tx_id,
-                tx_builder,
-                recipient.address.clone(),
-                recipient.amount,
-                output_features,
-                payment_id,
-                sender_address,
-            )
-            .await?;
+        let result = offline_signing.prepare_one_sided_transaction_for_signing(
+            tx_id,
+            tx_builder,
+            recipient.address.clone(),
+            recipient.amount,
+            output_features,
+            payment_id,
+            sender_address,
+        )?;
 
         let mut transaction = self.db_pool.begin().await?;
 

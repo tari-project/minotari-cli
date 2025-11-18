@@ -1,19 +1,16 @@
-use anyhow::anyhow;
-use lightweight_wallet_libs::{HttpBlockchainScanner, scanning::BlockchainScanner};
-use sqlx::{Acquire, SqliteConnection};
-use tari_common_types::types::FixedHash;
-use tari_transaction_components::key_manager::{
-    TransactionKeyManagerWrapper, memory_key_manager::MemoryKeyManagerBackend,
-};
-
 use crate::{
     db,
     models::{PendingTransactionStatus, WalletEvent, WalletEventType},
 };
+use anyhow::anyhow;
+use lightweight_wallet_libs::{HttpBlockchainScanner, scanning::BlockchainScanner};
+use sqlx::{Acquire, SqliteConnection};
 use std::collections::HashSet;
+use tari_common_types::types::FixedHash;
+use tari_transaction_components::key_manager::KeyManager;
 
 pub async fn handle_reorgs(
-    scanner: &mut HttpBlockchainScanner<TransactionKeyManagerWrapper<MemoryKeyManagerBackend>>,
+    scanner: &mut HttpBlockchainScanner<KeyManager>,
     conn: &mut SqliteConnection,
     account_id: i64,
 ) -> Result<u64, anyhow::Error> {
