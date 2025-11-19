@@ -10,8 +10,8 @@ pub use accounts::{
 
 mod scanned_tip_blocks;
 pub use scanned_tip_blocks::{
-    SCANNED_TIP_BLOCK_CHANNEL, delete_scanned_tip_blocks_from_height, get_scanned_tip_blocks_by_account,
-    insert_scanned_tip_block, prune_scanned_tip_blocks,
+    SCANNED_TIP_BLOCK_CHANNEL, delete_scanned_tip_blocks_from_height, get_latest_scanned_tip_block_by_account,
+    get_scanned_tip_blocks_by_account, insert_scanned_tip_block, prune_scanned_tip_blocks,
 };
 
 mod outputs;

@@ -374,6 +374,7 @@ pub async fn init_with_view_key(
     password: &str,
     database_file: &str,
     birthday: u16,
+    friendly_name: Option<&str>,
 ) -> Result<(), anyhow::Error> {
     let view_key_bytes = hex::decode(view_private_key)?;
     let spend_key_bytes = hex::decode(spend_public_key)?;
@@ -398,9 +399,10 @@ pub async fn init_with_view_key(
     let view_key_hash = hash_view_key(&view_key_bytes);
     let pool = init_db(database_file).await?;
     let mut conn = pool.acquire().await?;
+    let friendly_name = friendly_name.unwrap_or("default");
     db::create_account(
         &mut conn,
-        "default",
+        friendly_name,
         &encrypted_view_key,
         &encrypted_spend_key,
         &nonce,

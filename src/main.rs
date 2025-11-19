@@ -417,5 +417,13 @@ async fn init_with_view_key(
     database_file: &str,
     birthday: u16,
 ) -> Result<(), anyhow::Error> {
-    scan::init_with_view_key(view_private_key, spend_public_key, password, database_file, birthday).await
+    scan::init_with_view_key(
+        view_private_key,
+        spend_public_key,
+        password,
+        database_file,
+        birthday,
+        None,
+    )
+    .await
 }
