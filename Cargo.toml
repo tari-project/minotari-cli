@@ -10,8 +10,11 @@ path = "src/bin/generate_openapi.rs"
 [dependencies]
 anyhow = "1.0.99"
 tokio = { version = "1.47.1", features = ["full"] }
-#lightweight_wallet_libs = { path = "../tari-wallet", features = ["grpc","http",] }
-lightweight_wallet_libs = { git = "https://github.com/tari-project/tari-wallet", rev = "28a9acca86c4bec5bd5329d2f9f163d22b5d302c", features = ["grpc","http",] }
+lightweight_wallet_libs = { path = "../tari-wallet", features = [
+    "grpc",
+    "http",
+] }
+# lightweight_wallet_libs = { git = "https://github.com/tari-project/tari-wallet", rev = "28a9acca86c4bec5bd5329d2f9f163d22b5d302c", features = ["grpc","http",] }
 clap = { version = "4.5.47", features = ["derive"] }
 hex = "0.4.3"
 chacha20poly1305 = { version = "0.10.1", features = ["rand_core", "std"] }
