@@ -33,6 +33,7 @@ pub async fn scan(
     account_name: Option<&str>,
     max_blocks: u64,
     batch_size: u64,
+    include_mempool: bool,
 ) -> Result<Vec<WalletEvent>, ScanError> {
     let pool = db::init_db(database_file).await.map_err(ScanError::Fatal)?;
     let mut conn = pool.acquire().await?;
@@ -296,16 +297,18 @@ pub async fn scan(
             total_timer.elapsed().as_millis() / total_scanned as u128
         );
 
-        // After blockchain scan, scan the mempool for pending transactions
-        println!("Scanning mempool for pending outputs and inputs...");
-        match scan_mempool_for_account(&mut scanner, &mut conn, &account).await {
-            Ok(mempool_events) => {
-                println!("Mempool scan complete. Found {} pending transactions.", mempool_events.len());
-                result.extend(mempool_events);
-            },
-            Err(e) => {
-                println!("Mempool scan failed (non-fatal): {}", e);
-            },
+        // After blockchain scan, scan the mempool for pending transactions if requested
+        if include_mempool {
+            println!("Scanning mempool for pending outputs and inputs...");
+            match scan_mempool_for_account(&mut scanner, &mut conn, &account).await {
+                Ok(mempool_events) => {
+                    println!("Mempool scan complete. Found {} pending transactions.", mempool_events.len());
+                    result.extend(mempool_events);
+                },
+                Err(e) => {
+                    println!("Mempool scan failed (non-fatal): {}", e);
+                },
+            }
         }
     }
     Ok(result)

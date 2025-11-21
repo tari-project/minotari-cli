@@ -20,6 +20,7 @@ pub struct Daemon {
     scan_interval: Duration,
     api_port: u16,
     network: Network,
+    include_mempool: bool,
 }
 
 impl Daemon {
@@ -33,6 +34,7 @@ impl Daemon {
         scan_interval_secs: u64,
         api_port: u16,
         network: Network,
+        include_mempool: bool,
     ) -> Self {
         Self {
             password,
@@ -43,6 +45,7 @@ impl Daemon {
             scan_interval: Duration::from_secs(scan_interval_secs),
             api_port,
             network,
+            include_mempool,
         }
     }
 
@@ -118,6 +121,7 @@ impl Daemon {
             None, // Scan all accounts
             self.max_blocks,
             self.batch_size,
+            self.include_mempool,
         )
         .await;
 

@@ -77,6 +77,8 @@ enum Commands {
         max_blocks_to_scan: u64,
         #[arg(long, help = "Batch size for scanning", default_value_t = 1)]
         batch_size: u64,
+        #[arg(long, help = "Include mempool scanning for pending transactions", default_value_t = false)]
+        include_mempool: bool,
     },
     /// Run the daemon to continuously scan the blockchain
     Daemon {
@@ -99,6 +101,8 @@ enum Commands {
         api_port: u16,
         #[arg(long, help = "The Tari network to connect to", default_value_t = Network::MainNet)]
         network: Network,
+        #[arg(long, help = "Include mempool scanning for pending transactions", default_value_t = false)]
+        include_mempool: bool,
     },
     /// Show wallet balance
     Balance {
@@ -250,6 +254,7 @@ async fn main() -> Result<(), anyhow::Error> {
             account_name,
             max_blocks_to_scan,
             batch_size,
+            include_mempool,
         } => {
             println!("Scanning blockchain...");
             let events = scan(
@@ -259,6 +264,7 @@ async fn main() -> Result<(), anyhow::Error> {
                 account_name.as_deref(),
                 max_blocks_to_scan,
                 batch_size,
+                include_mempool,
             )
             .await?;
             println!("Scan complete. Events: {}", events.len());
@@ -273,6 +279,7 @@ async fn main() -> Result<(), anyhow::Error> {
             scan_interval_secs,
             api_port,
             network,
+            include_mempool,
         } => {
             println!("Starting Tari wallet daemon...");
             let max_blocks_to_scan = u64::MAX;
@@ -285,6 +292,7 @@ async fn main() -> Result<(), anyhow::Error> {
                 scan_interval_secs,
                 api_port,
                 network,
+                include_mempool,
             );
             daemon.run().await?;
             Ok(())
@@ -406,8 +414,9 @@ async fn scan(
     account_name: Option<&str>,
     max_blocks: u64,
     batch_size: u64,
+    include_mempool: bool,
 ) -> Result<Vec<WalletEvent>, ScanError> {
-    scan::scan(password, base_url, database_file, account_name, max_blocks, batch_size).await
+    scan::scan(password, base_url, database_file, account_name, max_blocks, batch_size, include_mempool).await
 }
 
 async fn init_with_view_key(
