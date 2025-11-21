@@ -23,10 +23,46 @@ pub async fn upsert_pending_output(
 
     let value = value as i64;
 
-    // Try to insert first
+    // First check if a soft-deleted entry exists and un-delete it
+    let existing = sqlx::query!(
+        r#"
+        SELECT id, deleted_at FROM pending_outputs
+        WHERE output_hash = ? AND account_id = ?
+        "#,
+        output_hash,
+        account_id
+    )
+    .fetch_optional(&mut *conn)
+    .await?;
+
+    if let Some(existing_row) = existing {
+        if existing_row.deleted_at.is_some() {
+            // Un-delete the soft-deleted entry
+            sqlx::query!(
+                r#"
+                UPDATE pending_outputs
+                SET deleted_at = NULL, value = ?, wallet_output_json = ?, memo_parsed = ?, memo_hex = ?, status = 'PENDING'
+                WHERE id = ?
+                "#,
+                value,
+                output_json,
+                memo_parsed,
+                memo_hex,
+                existing_row.id
+            )
+            .execute(&mut *conn)
+            .await?;
+            return Ok((existing_row.id, true)); // Treat un-delete as an insert
+        } else {
+            // Already exists and is active, just return the ID
+            return Ok((existing_row.id, false));
+        }
+    }
+
+    // Insert new entry
     let insert_result = sqlx::query!(
         r#"
-        INSERT OR IGNORE INTO pending_outputs (account_id, output_hash, value, wallet_output_json, memo_parsed, memo_hex, status)
+        INSERT INTO pending_outputs (account_id, output_hash, value, wallet_output_json, memo_parsed, memo_hex, status)
         VALUES (?, ?, ?, ?, ?, ?, 'PENDING')
         "#,
         account_id,
@@ -39,21 +75,7 @@ pub async fn upsert_pending_output(
     .execute(&mut *conn)
     .await?;
 
-    let rows_affected = insert_result.rows_affected();
-
-    // Fetch the ID
-    let pending_output_id = sqlx::query!(
-        r#"
-        SELECT id FROM pending_outputs WHERE output_hash = ? AND account_id = ?
-        "#,
-        output_hash,
-        account_id
-    )
-    .fetch_one(&mut *conn)
-    .await?
-    .id;
-
-    Ok((pending_output_id, rows_affected > 0))
+    Ok((insert_result.last_insert_rowid(), true))
 }
 
 /// Get pending output by hash

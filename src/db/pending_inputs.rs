@@ -8,10 +8,49 @@ pub async fn upsert_pending_input(
     output_id: Option<i64>,
     pending_output_id: Option<i64>,
 ) -> Result<(i64, bool), sqlx::Error> {
-    // Try to insert first
+    if output_id.is_none() && pending_output_id.is_none() {
+        return Err(sqlx::Error::Io(std::io::Error::other(
+            "Either output_id or pending_output_id must be provided",
+        )));
+    }
+
+    // First check if an entry exists (including soft-deleted)
+    let existing = sqlx::query!(
+        r#"
+            SELECT id, deleted_at FROM pending_inputs
+            WHERE account_id = ? AND (output_id = ? or pending_output_id = ?)
+            "#,
+        account_id,
+        output_id,
+        pending_output_id
+    )
+    .fetch_optional(&mut *conn)
+    .await?;
+
+    if let Some(existing_row) = existing {
+        if existing_row.deleted_at.is_some() {
+            // Un-delete the soft-deleted entry
+            sqlx::query!(
+                r#"
+                UPDATE pending_inputs
+                SET deleted_at = NULL, status = 'PENDING'
+                WHERE id = ?
+                "#,
+                existing_row.id
+            )
+            .execute(&mut *conn)
+            .await?;
+            return Ok((existing_row.id, true)); // Treat un-delete as an insert
+        } else {
+            // Already exists and is active, just return the ID
+            return Ok((existing_row.id, false));
+        }
+    }
+
+    // Insert new entry
     let insert_result = sqlx::query!(
         r#"
-        INSERT OR IGNORE INTO pending_inputs (account_id, output_id, pending_output_id, status)
+        INSERT INTO pending_inputs (account_id, output_id, pending_output_id, status)
         VALUES (?, ?, ?, 'PENDING')
         "#,
         account_id,
@@ -21,44 +60,7 @@ pub async fn upsert_pending_input(
     .execute(&mut *conn)
     .await?;
 
-    let rows_affected = insert_result.rows_affected();
-
-    // Fetch the ID - we need to find by the unique combination
-    let pending_input_id = if let Some(oid) = output_id {
-        sqlx::query!(
-            r#"
-            SELECT id FROM pending_inputs
-            WHERE account_id = ? AND output_id = ?
-            ORDER BY created_at DESC
-            LIMIT 1
-            "#,
-            account_id,
-            oid
-        )
-        .fetch_one(&mut *conn)
-        .await?
-        .id
-    } else if let Some(poid) = pending_output_id {
-        sqlx::query!(
-            r#"
-            SELECT id FROM pending_inputs
-            WHERE account_id = ? AND pending_output_id = ?
-            ORDER BY created_at DESC
-            LIMIT 1
-            "#,
-            account_id,
-            poid
-        )
-        .fetch_one(&mut *conn)
-        .await?
-        .id
-    } else {
-        return Err(sqlx::Error::Io(std::io::Error::other(
-            "Either output_id or pending_output_id must be provided",
-        )));
-    };
-
-    Ok((pending_input_id, rows_affected > 0))
+    Ok((insert_result.last_insert_rowid(), true))
 }
 
 /// Get pending input by output_id
