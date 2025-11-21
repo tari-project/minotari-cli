@@ -295,8 +295,153 @@ pub async fn scan(
             "Took on average {:?}ms per block.",
             total_timer.elapsed().as_millis() / total_scanned as u128
         );
+
+        // After blockchain scan, scan the mempool for pending transactions
+        println!("Scanning mempool for pending outputs and inputs...");
+        match scan_mempool_for_account(&mut scanner, &mut conn, &account).await {
+            Ok(mempool_events) => {
+                println!("Mempool scan complete. Found {} pending transactions.", mempool_events.len());
+                result.extend(mempool_events);
+            },
+            Err(e) => {
+                println!("Mempool scan failed (non-fatal): {}", e);
+            },
+        }
     }
     Ok(result)
+}
+
+async fn scan_mempool_for_account(
+    scanner: &mut (impl lightweight_wallet_libs::scanning::BlockchainScanner + Send),
+    conn: &mut sqlx::pool::PoolConnection<sqlx::Sqlite>,
+    account: &db::AccountRow,
+) -> Result<Vec<WalletEvent>, ScanError> {
+    let (wallet_outputs, spent_input_hashes) = scanner
+        .scan_mempool()
+        .await
+        .map_err(|e| ScanError::Intermittent(e.to_string()))?;
+
+    let mut events = vec![];
+    let mut tx = conn.begin().await.map_err(ScanError::FatalSqlx)?;
+
+    // Process pending outputs found in mempool
+    for output in wallet_outputs {
+        let output_hash = output.hash().to_vec();
+
+        // Check if this output is already confirmed on-chain
+        if db::get_output_info_by_hash(&mut *tx, &output_hash).await?.is_some() {
+            // Already confirmed, skip
+            continue;
+        }
+
+        // Parse memo from output - TransactionOutput doesn't have payment_id() method
+        // We'll extract it during database insertion if needed
+        let memo_parsed = None;
+        let memo_hex = None;
+
+        // Note: TransactionOutput doesn't expose value directly (it's in the commitment)
+        // We store 0 as a placeholder. In the future, scan_mempool should return WalletOutput
+        // which has the recovered value.
+        let value = 0u64;
+
+        // Insert or update pending output
+        let (pending_output_id, was_inserted) = db::upsert_pending_output(
+            &mut *tx,
+            account.id,
+            output_hash.clone(),
+            &output,
+            value,
+            memo_parsed.clone(),
+            memo_hex.clone(),
+        )
+        .await
+        .map_err(ScanError::FatalSqlx)?;
+
+        if was_inserted {
+            println!(
+                "Found new pending output in mempool: {} (value: {})",
+                hex::encode(&output_hash),
+                value
+            );
+
+            let event = models::WalletEvent {
+                id: 0,
+                account_id: account.id,
+                event_type: models::WalletEventType::PendingOutputDetected {
+                    hash: output_hash.clone(),
+                    value,
+                    memo_parsed,
+                    memo_hex,
+                },
+                description: format!("Pending output detected in mempool: {}", hex::encode(&output_hash)),
+            };
+            events.push(event);
+        }
+    }
+
+    // Process spent inputs found in mempool
+    for spent_hash in spent_input_hashes {
+        let spent_hash_bytes = spent_hash.as_slice();
+
+        // Check if this is one of our outputs being spent
+        if let Some((output_id, _value)) = db::get_output_info_by_hash(&mut *tx, spent_hash_bytes).await? {
+            // Insert pending input
+            let (pending_input_id, was_inserted) = db::upsert_pending_input(
+                &mut *tx,
+                account.id,
+                Some(output_id),
+                None,
+            )
+            .await
+            .map_err(ScanError::FatalSqlx)?;
+
+            if was_inserted {
+                println!(
+                    "Found pending spend of our output in mempool: {}",
+                    hex::encode(spent_hash_bytes)
+                );
+
+                let event = models::WalletEvent {
+                    id: 0,
+                    account_id: account.id,
+                    event_type: models::WalletEventType::PendingOutputSpent {
+                        hash: spent_hash_bytes.to_vec(),
+                    },
+                    description: format!("Output being spent in mempool: {}", hex::encode(spent_hash_bytes)),
+                };
+                events.push(event);
+            }
+        } else if let Some(pending_output_id) = db::get_pending_output_by_hash(&mut *tx, spent_hash_bytes).await? {
+            // This is a pending output being spent (chained transaction)
+            let (pending_input_id, was_inserted) = db::upsert_pending_input(
+                &mut *tx,
+                account.id,
+                None,
+                Some(pending_output_id),
+            )
+            .await
+            .map_err(ScanError::FatalSqlx)?;
+
+            if was_inserted {
+                println!(
+                    "Found chained transaction spending pending output in mempool: {}",
+                    hex::encode(spent_hash_bytes)
+                );
+            }
+        }
+    }
+
+    tx.commit().await.map_err(ScanError::FatalSqlx)?;
+
+    // Cleanup old pending transactions (older than 24 hours)
+    db::cleanup_pending_outputs(&mut **conn, 24)
+        .await
+        .map_err(ScanError::FatalSqlx)?;
+    db::cleanup_pending_inputs(&mut **conn, 24)
+        .await
+        .map_err(ScanError::FatalSqlx)?;
+
+    Ok(events)
 }
 
 fn parse_balance_changes(
