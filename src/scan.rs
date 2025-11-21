@@ -330,9 +330,13 @@ async fn scan_mempool_for_account(
     let mut events = vec![];
     let mut tx = conn.begin().await.map_err(ScanError::FatalSqlx)?;
 
+    // Track output hashes currently in mempool for soft delete logic
+    let mut mempool_output_hashes = std::collections::HashSet::new();
+
     // Process pending outputs found in mempool
     for (output, value, memo_field) in wallet_outputs {
         let output_hash = output.hash().to_vec();
+        mempool_output_hashes.insert(output_hash.clone());
 
         // Check if this output is already confirmed on-chain
         if db::get_output_info_by_hash(&mut *tx, &output_hash).await?.is_some() {
@@ -385,7 +389,7 @@ async fn scan_mempool_for_account(
     }
 
     // Process spent inputs found in mempool
-    for spent_hash in spent_input_hashes {
+    for spent_hash in &spent_input_hashes {
         let spent_hash_bytes = spent_hash.as_slice();
 
         // Check if this is one of our outputs being spent
@@ -425,6 +429,68 @@ async fn scan_mempool_for_account(
                     hex::encode(spent_hash_bytes)
                 );
             }
+        }
+    }
+
+    // Soft delete pending outputs that are no longer in the mempool
+    // Get all active pending outputs for this account
+    let active_pending_outputs = db::get_active_pending_outputs(&mut *tx, account.id)
+        .await
+        .map_err(ScanError::FatalSqlx)?;
+
+    // Find outputs that are no longer in the mempool
+    let outputs_to_delete: Vec<Vec<u8>> = active_pending_outputs
+        .into_iter()
+        .filter(|hash| !mempool_output_hashes.contains(hash))
+        .collect();
+
+    if !outputs_to_delete.is_empty() {
+        let deleted_count = db::soft_delete_pending_outputs(&mut *tx, outputs_to_delete.clone())
+            .await
+            .map_err(ScanError::FatalSqlx)?;
+
+        if deleted_count > 0 {
+            println!("Soft deleted {} pending outputs no longer in mempool", deleted_count);
+        }
+    }
+
+    // Soft delete pending inputs that are no longer in the mempool
+    // Get all active pending inputs for this account
+    let active_pending_input_outputs = db::get_active_pending_inputs_by_output(&mut *tx, account.id)
+        .await
+        .map_err(ScanError::FatalSqlx)?;
+
+    // Build a set of spent output IDs currently in the mempool
+    let mempool_spent_outputs: std::collections::HashSet<Vec<u8>> =
+        spent_input_hashes.iter().map(|h| h.as_slice().to_vec()).collect();
+
+    // Find inputs whose outputs are no longer being spent in the mempool
+    let mut inputs_to_delete = Vec::new();
+    for output_id in active_pending_input_outputs {
+        // Get the output hash for this output_id
+        if let Some(output_info) = sqlx::query!(
+            r#"
+            SELECT output_hash FROM outputs WHERE id = ?
+            "#,
+            output_id
+        )
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(ScanError::FatalSqlx)?
+        {
+            if !mempool_spent_outputs.contains(&output_info.output_hash) {
+                inputs_to_delete.push(output_id);
+            }
+        }
+    }
+
+    if !inputs_to_delete.is_empty() {
+        let deleted_count = db::soft_delete_pending_inputs_by_output(&mut *tx, inputs_to_delete)
+            .await
+            .map_err(ScanError::FatalSqlx)?;
+
+        if deleted_count > 0 {
+            println!("Soft deleted {} pending inputs no longer in mempool", deleted_count);
         }
     }
 

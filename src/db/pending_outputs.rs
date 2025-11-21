@@ -106,3 +106,49 @@ pub async fn cleanup_pending_outputs(conn: &mut SqliteConnection, expiry_hours: 
 
     Ok(result.rows_affected())
 }
+
+/// Get all active (non-deleted) pending outputs for an account
+pub async fn get_active_pending_outputs(
+    conn: &mut SqliteConnection,
+    account_id: i64,
+) -> Result<Vec<Vec<u8>>, sqlx::Error> {
+    let rows = sqlx::query!(
+        r#"
+        SELECT output_hash
+        FROM pending_outputs
+        WHERE account_id = ? AND deleted_at IS NULL
+        "#,
+        account_id
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+
+    Ok(rows.into_iter().map(|r| r.output_hash).collect())
+}
+
+/// Soft delete pending outputs that are no longer in the mempool
+pub async fn soft_delete_pending_outputs(
+    conn: &mut SqliteConnection,
+    output_hashes: Vec<Vec<u8>>,
+) -> Result<u64, sqlx::Error> {
+    if output_hashes.is_empty() {
+        return Ok(0);
+    }
+
+    let mut affected = 0;
+    for hash in output_hashes {
+        let result = sqlx::query!(
+            r#"
+            UPDATE pending_outputs
+            SET deleted_at = CURRENT_TIMESTAMP
+            WHERE output_hash = ? AND deleted_at IS NULL
+            "#,
+            hash
+        )
+        .execute(&mut *conn)
+        .await?;
+        affected += result.rows_affected();
+    }
+
+    Ok(affected)
+}
