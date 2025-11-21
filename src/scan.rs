@@ -302,7 +302,10 @@ pub async fn scan(
             println!("Scanning mempool for pending outputs and inputs...");
             match scan_mempool_for_account(&mut scanner, &mut conn, &account).await {
                 Ok(mempool_events) => {
-                    println!("Mempool scan complete. Found {} pending transactions.", mempool_events.len());
+                    println!(
+                        "Mempool scan complete. Found {} pending transactions.",
+                        mempool_events.len()
+                    );
                     result.extend(mempool_events);
                 },
                 Err(e) => {
@@ -328,7 +331,7 @@ async fn scan_mempool_for_account(
     let mut tx = conn.begin().await.map_err(ScanError::FatalSqlx)?;
 
     // Process pending outputs found in mempool
-    for output in wallet_outputs {
+    for (output, value, memo_field) in wallet_outputs {
         let output_hash = output.hash().to_vec();
 
         // Check if this output is already confirmed on-chain
@@ -339,13 +342,12 @@ async fn scan_mempool_for_account(
 
         // Parse memo from output - TransactionOutput doesn't have payment_id() method
         // We'll extract it during database insertion if needed
-        let memo_parsed = None;
-        let memo_hex = None;
+        let memo_hex = memo_field.get_raw_bytes().map(|x| hex::encode(x));
+        let memo_parsed = memo_field.payment_id_as_string();
 
         // Note: TransactionOutput doesn't expose value directly (it's in the commitment)
         // We store 0 as a placeholder. In the future, scan_mempool should return WalletOutput
         // which has the recovered value.
-        let value = 0u64;
 
         // Insert or update pending output
         let (pending_output_id, was_inserted) = db::upsert_pending_output(
@@ -353,7 +355,7 @@ async fn scan_mempool_for_account(
             account.id,
             output_hash.clone(),
             &output,
-            value,
+            value.0,
             memo_parsed.clone(),
             memo_hex.clone(),
         )
@@ -372,8 +374,8 @@ async fn scan_mempool_for_account(
                 account_id: account.id,
                 event_type: models::WalletEventType::PendingOutputDetected {
                     hash: output_hash.clone(),
-                    value,
-                    memo_parsed,
+                    value: value.0,
+                    memo_parsed: Some(memo_parsed),
                     memo_hex,
                 },
                 description: format!("Pending output detected in mempool: {}", hex::encode(&output_hash)),
@@ -389,14 +391,10 @@ async fn scan_mempool_for_account(
         // Check if this is one of our outputs being spent
         if let Some((output_id, _value)) = db::get_output_info_by_hash(&mut *tx, spent_hash_bytes).await? {
             // Insert pending input
-            let (pending_input_id, was_inserted) = db::upsert_pending_input(
-                &mut *tx,
-                account.id,
-                Some(output_id),
-                None,
-            )
-            .await
-            .map_err(ScanError::FatalSqlx)?;
+            let (pending_input_id, was_inserted) =
+                db::upsert_pending_input(&mut *tx, account.id, Some(output_id), None)
+                    .await
+                    .map_err(ScanError::FatalSqlx)?;
 
             if was_inserted {
                 println!(
@@ -416,14 +414,10 @@ async fn scan_mempool_for_account(
             }
         } else if let Some(pending_output_id) = db::get_pending_output_by_hash(&mut *tx, spent_hash_bytes).await? {
             // This is a pending output being spent (chained transaction)
-            let (pending_input_id, was_inserted) = db::upsert_pending_input(
-                &mut *tx,
-                account.id,
-                None,
-                Some(pending_output_id),
-            )
-            .await
-            .map_err(ScanError::FatalSqlx)?;
+            let (pending_input_id, was_inserted) =
+                db::upsert_pending_input(&mut *tx, account.id, None, Some(pending_output_id))
+                    .await
+                    .map_err(ScanError::FatalSqlx)?;
 
             if was_inserted {
                 println!(

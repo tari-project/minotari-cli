@@ -11,7 +11,7 @@ pub async fn upsert_pending_output(
     output_hash: Vec<u8>,
     output: &TransactionOutput,
     value: u64,
-    memo_parsed: Option<String>,
+    memo_parsed: String,
     memo_hex: Option<String>,
 ) -> Result<(i64, bool), sqlx::Error> {
     let output_json = serde_json::to_string(&output).map_err(|e| {
@@ -93,10 +93,7 @@ pub async fn delete_pending_output_by_hash(
 }
 
 /// Clean up expired or old pending outputs
-pub async fn cleanup_pending_outputs(
-    conn: &mut SqliteConnection,
-    expiry_hours: i64,
-) -> Result<u64, sqlx::Error> {
+pub async fn cleanup_pending_outputs(conn: &mut SqliteConnection, expiry_hours: i64) -> Result<u64, sqlx::Error> {
     let result = sqlx::query!(
         r#"
         DELETE FROM pending_outputs
