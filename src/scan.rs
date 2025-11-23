@@ -30,7 +30,7 @@ pub enum ScanError {
     #[error("Intermittent error: {0}")]
     Intermittent(String),
 }
-
+/// Returns a vector of wallet events generated during the scan and a boolean indicating if more blocks are available to scan.
 pub async fn scan(
     password: &str,
     base_url: &str,
@@ -38,7 +38,7 @@ pub async fn scan(
     account_name: Option<&str>,
     max_blocks: u64,
     batch_size: u64,
-) -> Result<Vec<WalletEvent>, ScanError> {
+) -> Result<(Vec<WalletEvent>, bool), ScanError> {
     let pool = db::init_db(database_file).await.map_err(ScanError::Fatal)?;
     let mut conn = pool.acquire().await?;
     let mut result = vec![];
@@ -46,7 +46,7 @@ pub async fn scan(
         .await
         .map_err(ScanError::FatalSqlx)?
     {
-        println!("Found account: {:?}", account);
+        // println!("Found account: {:?}", account);
 
         let key_manager = account.get_key_manager(password).await.map_err(ScanError::Fatal)?;
         let mut scanner = HttpBlockchainScanner::new(base_url.to_string(), key_manager.clone(), 8)
@@ -91,7 +91,7 @@ pub async fn scan(
             total_scanned += scanned_blocks.len() as u64;
             if scanned_blocks.is_empty() || !more_blocks {
                 println!("No more blocks to scan.");
-                break;
+                return Ok((result, false));
             }
             for scanned_block in &scanned_blocks {
                 if scanned_block.height >= scan_update_height {
@@ -102,55 +102,6 @@ pub async fn scan(
                 // Start a transaction for all DB operations related to this scanned block so
                 // that either all inserts/updates succeed or none are applied.
                 let mut tx = conn.begin().await.map_err(ScanError::FatalSqlx)?;
-                // Deleted inputs
-                for input in &scanned_block.inputs {
-                    if let Some((output_id, value)) = db::get_output_info_by_hash(&mut tx, input.as_slice())
-                        .await
-                        .map_err(ScanError::FatalSqlx)?
-                    {
-                        let (input_id, inserted_new_input) = db::insert_input(
-                            &mut tx,
-                            account.id,
-                            output_id,
-                            scanned_block.height,
-                            scanned_block.block_hash.as_slice(),
-                            scanned_block.mined_timestamp,
-                        )
-                        .await
-                        .map_err(ScanError::FatalSqlx)?;
-
-                        if inserted_new_input {
-                            let balance_change = BalanceChange {
-                                account_id: account.id,
-                                caused_by_output_id: None,
-                                caused_by_input_id: Some(input_id),
-                                description: "Output spent as input".to_string(),
-                                balance_credit: 0,
-                                balance_debit: value,
-                                effective_date: DateTime::<Utc>::from_timestamp(
-                                    scanned_block.mined_timestamp as i64,
-                                    0,
-                                )
-                                .unwrap()
-                                .naive_utc(),
-                                effective_height: scanned_block.height,
-                                claimed_recipient_address: None,
-                                claimed_sender_address: None,
-                                memo_hex: None,
-                                memo_parsed: None,
-                                claimed_fee: None,
-                                claimed_amount: None,
-                            };
-                            db::insert_balance_change(&mut tx, &balance_change)
-                                .await
-                                .map_err(ScanError::FatalSqlx)?;
-
-                            db::update_output_status(&mut tx, output_id, models::OutputStatus::Spent)
-                                .await
-                                .map_err(ScanError::FatalSqlx)?;
-                        }
-                    }
-                }
 
                 for (hash, output) in &scanned_block.wallet_outputs {
                     // Extract memo information
@@ -218,6 +169,56 @@ pub async fn scan(
                         }
                     }
                 }
+                // Deleted inputs
+                for input in &scanned_block.inputs {
+                    if let Some((output_id, value)) = db::get_output_info_by_hash(&mut tx, input.as_slice())
+                        .await
+                        .map_err(ScanError::FatalSqlx)?
+                    {
+                        let (input_id, inserted_new_input) = db::insert_input(
+                            &mut tx,
+                            account.id,
+                            output_id,
+                            scanned_block.height,
+                            scanned_block.block_hash.as_slice(),
+                            scanned_block.mined_timestamp,
+                        )
+                        .await
+                        .map_err(ScanError::FatalSqlx)?;
+
+                        if inserted_new_input {
+                            let balance_change = BalanceChange {
+                                account_id: account.id,
+                                caused_by_output_id: None,
+                                caused_by_input_id: Some(input_id),
+                                description: "Output spent as input".to_string(),
+                                balance_credit: 0,
+                                balance_debit: value,
+                                effective_date: DateTime::<Utc>::from_timestamp(
+                                    scanned_block.mined_timestamp as i64,
+                                    0,
+                                )
+                                .unwrap()
+                                .naive_utc(),
+                                effective_height: scanned_block.height,
+                                claimed_recipient_address: None,
+                                claimed_sender_address: None,
+                                memo_hex: None,
+                                memo_parsed: None,
+                                claimed_fee: None,
+                                claimed_amount: None,
+                            };
+                            db::insert_balance_change(&mut tx, &balance_change)
+                                .await
+                                .map_err(ScanError::FatalSqlx)?;
+
+                            db::update_output_status(&mut tx, output_id, models::OutputStatus::Spent)
+                                .await
+                                .map_err(ScanError::FatalSqlx)?;
+                        }
+                    }
+                }
+
                 db::insert_scanned_tip_block(
                     &mut tx,
                     account.id,
@@ -295,13 +296,13 @@ pub async fn scan(
             // println!("Cleanup took {:?}.", timer.elapsed());
         }
 
-        println!("Scan complete. in {:?}", total_timer.elapsed());
-        println!(
-            "Took on average {:?}ms per block.",
-            total_timer.elapsed().as_millis() / total_scanned as u128
-        );
+        // println!("Scan complete. in {:?}", total_timer.elapsed());
+        // println!(
+        //     "Took on average {:?}ms per block.",
+        //     total_timer.elapsed().as_millis() / total_scanned as u128
+        // );
     }
-    Ok(result)
+    Ok((result, true))
 }
 
 fn parse_balance_changes(

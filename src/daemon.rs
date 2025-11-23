@@ -122,7 +122,7 @@ impl Daemon {
         .await;
 
         match result {
-            Ok(events) => {
+            Ok((events, _are_there_more_blocks_to_scan)) => {
                 println!("Scan completed successfully. Found {} events.", events.len());
             },
             Err(e) => {
