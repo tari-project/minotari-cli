@@ -55,7 +55,7 @@ pub async fn insert_output(
     // Now fetch the ID, which is guaranteed to exist
     let output_id = sqlx::query!(
         r#"
-        SELECT id FROM outputs WHERE output_hash = ?
+        SELECT id FROM outputs WHERE output_hash = ? AND deleted_at IS NULL
         "#,
         output_hash
     )
@@ -74,7 +74,7 @@ pub async fn get_output_info_by_hash(
         r#"
         SELECT id, value
         FROM outputs
-        WHERE output_hash = ?
+        WHERE output_hash = ? AND deleted_at IS NULL
         "#,
         output_hash
     )
@@ -100,6 +100,7 @@ pub async fn get_unconfirmed_outputs(
         WHERE o.account_id = ?
           AND o.mined_in_block_height <= ?
           AND o.confirmed_height IS NULL
+          AND o.deleted_at IS NULL
         "#,
         account_id,
         min_height
@@ -136,6 +137,66 @@ pub async fn mark_output_confirmed(
         confirmed_height,
         confirmed_hash,
         output_hash
+    )
+    .execute(&mut *conn)
+    .await?;
+
+    Ok(())
+}
+
+use crate::db::balance_changes::insert_balance_change;
+use crate::models::BalanceChange;
+
+pub async fn soft_delete_outputs_from_height(
+    conn: &mut SqliteConnection,
+    account_id: i64,
+    height: u64,
+) -> Result<(), sqlx::Error> {
+    let height_i64 = height as i64;
+    let now = Utc::now().naive_utc().to_string();
+
+    let outputs_to_delete = sqlx::query!(
+        r#"
+        SELECT id, value, wallet_output_json
+        FROM outputs
+        WHERE account_id = ? AND mined_in_block_height >= ? AND deleted_at IS NULL
+        "#,
+        account_id,
+        height_i64
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+
+    for output_row in outputs_to_delete {
+        let balance_change = BalanceChange {
+            account_id,
+            caused_by_output_id: Some(output_row.id),
+            caused_by_input_id: None,
+            description: format!("Reversal: Output found in blockchain scan (reorg at height {})", height),
+            balance_credit: 0,
+            balance_debit: output_row.value as u64, // Reversing a credit, so debit the value
+            effective_date: Utc::now().naive_utc(),
+            effective_height: height,
+            claimed_recipient_address: None,
+            claimed_sender_address: None,
+            memo_parsed: None,
+            memo_hex: None,
+            claimed_fee: None,
+            claimed_amount: None,
+        };
+        insert_balance_change(conn, &balance_change).await?;
+    }
+
+    sqlx::query!(
+        r#"
+        UPDATE outputs
+        SET deleted_at = ?, deleted_in_block_height = ?
+        WHERE account_id = ? AND mined_in_block_height >= ? AND deleted_at IS NULL
+        "#,
+        now,
+        height_i64,
+        account_id,
+        height_i64
     )
     .execute(&mut *conn)
     .await?;
@@ -201,7 +262,7 @@ pub async fn fetch_unspent_outputs(
     account_id: i64,
 ) -> Result<Vec<DbWalletOutput>, sqlx::Error> {
     let rows = sqlx::query!(
-        "SELECT id, wallet_output_json FROM outputs WHERE account_id = ? and status = 'UNSPENT' and wallet_output_json IS NOT NULL ORDER BY value DESC",
+        "SELECT id, wallet_output_json FROM outputs WHERE account_id = ? AND status = 'UNSPENT' AND wallet_output_json IS NOT NULL AND deleted_at IS NULL ORDER BY value DESC",
         account_id
     )
     .fetch_all(&mut *conn)
@@ -240,6 +301,32 @@ pub async fn unlock_outputs_for_request(
     .await?;
 
     Ok(())
+}
+
+pub async fn fetch_outputs_by_lock_request_id(
+    conn: &mut SqliteConnection,
+    locked_by_request_id: &str,
+) -> Result<Vec<DbWalletOutput>, sqlx::Error> {
+    let rows = sqlx::query!(
+        "SELECT id, wallet_output_json FROM outputs WHERE locked_by_request_id = ? and wallet_output_json IS NOT NULL",
+        locked_by_request_id
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+
+    let mut outputs = Vec::new();
+    for row in rows {
+        if let Some(json_str) = row.wallet_output_json {
+            let output: WalletOutput = serde_json::from_str(&json_str).map_err(|e| {
+                sqlx::Error::Io(std::io::Error::other(format!(
+                    "Failed to deserialize WalletOutput: {}",
+                    e
+                )))
+            })?;
+            outputs.push(DbWalletOutput { id: row.id, output });
+        }
+    }
+    Ok(outputs)
 }
 
 pub async fn get_output_memos_for_account(

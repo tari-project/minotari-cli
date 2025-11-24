@@ -4,9 +4,9 @@ use tari_common::configuration::Network;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
 
-mod accounts;
+pub mod accounts;
 mod error;
-mod types;
+pub mod types;
 
 #[derive(Clone)]
 pub struct AppState {
@@ -25,15 +25,18 @@ impl FromRef<AppState> for SqlitePool {
 #[openapi(
     paths(
         accounts::api_get_balance,
+        accounts::api_lock_funds,
         accounts::api_create_unsigned_transaction,
     ),
     components(
         schemas(
             crate::db::AccountBalance,
             error::ApiError,
+            accounts::WalletParams,
+            accounts::LockFundsRequest,
             accounts::CreateTransactionRequest,
             accounts::RecipientRequest,
-            accounts::WalletParams,
+            crate::api::types::LockFundsResponse,
             crate::api::types::TariAddressBase58,
         )
     ),
@@ -53,6 +56,7 @@ pub fn create_router(db_pool: SqlitePool, network: Network, password: String) ->
     Router::new()
         .merge(SwaggerUi::new("/swagger-ui").url("/openapi.json", ApiDoc::openapi()))
         .route("/accounts/{name}/balance", get(accounts::api_get_balance))
+        .route("/accounts/{name}/lock_funds", post(accounts::api_lock_funds))
         .route(
             "/accounts/{name}/create_unsigned_transaction",
             post(accounts::api_create_unsigned_transaction),

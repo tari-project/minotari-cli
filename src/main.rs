@@ -1,11 +1,27 @@
-use std::sync::Arc;
+use std::{
+    fs::{self, create_dir_all},
+    path::Path,
+};
 
+use anyhow::anyhow;
 use blake2::{Blake2s256, Digest};
 use chacha20poly1305::{
     AeadCore, Key, KeyInit, XChaCha20Poly1305,
     aead::{Aead, OsRng},
 };
-use clap::{Command, Parser, Subcommand};
+use clap::{Parser, Subcommand};
+use minotari::{
+    api::accounts::LockFundsRequest,
+    daemon,
+    db::{self, get_accounts, get_balance, init_db},
+    models::WalletEvent,
+    scan::{self, ScanError},
+    transactions::{
+        lock_amount::LockAmount,
+        one_sided_transaction::{OneSidedTransaction, Recipient},
+    },
+};
+use std::str::FromStr;
 use tari_common::configuration::Network;
 use tari_common_types::{
     seeds::{
@@ -13,15 +29,13 @@ use tari_common_types::{
         mnemonic::{Mnemonic, MnemonicLanguage},
     },
     tari_address::{TariAddress, TariAddressFeatures},
-    wallet_types::WalletType,
 };
-use tari_crypto::{compressed_key::CompressedKey, ristretto::RistrettoPublicKey};
-use tari_transaction_components::{
-    crypto_factories::CryptoFactories,
-    key_manager::{
-        TransactionKeyManagerInterface, TransactionKeyManagerWrapper, memory_key_manager::MemoryKeyManagerBackend,
-    },
-};
+use tari_crypto::compressed_key::CompressedKey;
+use tari_transaction_components::key_manager::KeyManager;
+use tari_transaction_components::key_manager::TransactionKeyManagerInterface;
+use tari_transaction_components::key_manager::wallet_types::SeedWordsWallet;
+use tari_transaction_components::key_manager::wallet_types::WalletType;
+use tari_transaction_components::tari_amount::MicroMinotari;
 use tari_utilities::byte_array::ByteArray;
 
 use minotari::cli::{Cli, Commands};
@@ -45,15 +59,12 @@ async fn main() -> Result<(), anyhow::Error> {
             let seeds = CipherSeed::random();
             let birthday = seeds.birthday();
             let seed_words = seeds.to_mnemonic(MnemonicLanguage::English, None)?.join(" ");
-            let key_manager: TransactionKeyManagerWrapper<MemoryKeyManagerBackend> = TransactionKeyManagerWrapper::new(
-                Some(seeds),
-                CryptoFactories::default(),
-                Arc::new(WalletType::DerivedKeys),
-            )
-            .await?;
+            let seed_wallet = SeedWordsWallet::construct_new(seeds).map_err(|_| anyhow::anyhow!("Invalid seeds"))?;
+            let wallet = WalletType::SeedWords(seed_wallet);
+            let key_manager = KeyManager::new(wallet)?;
 
-            let view_key = key_manager.get_private_view_key().await?;
-            let spend_key = key_manager.get_spend_key().await?;
+            let view_key = key_manager.get_private_view_key();
+            let spend_key = key_manager.get_spend_key();
 
             let public_view_key = CompressedKey::from_secret_key(&view_key);
 
@@ -182,6 +193,51 @@ async fn main() -> Result<(), anyhow::Error> {
             let _ = handle_balance(&database_file, account_name.as_deref()).await;
             Ok(())
         },
+        Commands::CreateUnsignedTransaction {
+            account_name,
+            recipient,
+            output_file,
+            password,
+            database_file,
+            idempotency_key,
+            seconds_to_lock,
+            network,
+        } => {
+            println!("Creating unsigned transaction...");
+            handle_create_unsigned_transaction(
+                recipient,
+                database_file,
+                account_name,
+                network,
+                password,
+                idempotency_key,
+                seconds_to_lock,
+                output_file,
+            )
+            .await
+        },
+        Commands::LockFunds {
+            account_name,
+            output_file,
+            database_file,
+            amount,
+            num_outputs,
+            fee_per_gram,
+            estimated_output_size,
+            seconds_to_lock_utxos,
+            idempotency_key,
+        } => {
+            println!("Creating unsigned transaction...");
+            let request = LockFundsRequest {
+                amount,
+                num_outputs: Some(num_outputs),
+                fee_per_gram: Some(fee_per_gram),
+                estimated_output_size,
+                seconds_to_lock_utxos,
+                idempotency_key,
+            };
+            handle_lock_funds(database_file, account_name, output_file, request).await
+        },
         Commands::Tapplet { tapplet_subcommand } => {
             tapplet_command_handler(tapplet_subcommand).await?;
             Ok(())
@@ -207,6 +263,113 @@ async fn handle_balance(database_file: &str, account_name: Option<&str>) -> Resu
             tari_balance
         );
     }
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_create_unsigned_transaction(
+    recipient: Vec<String>,
+    database_file: String,
+    account_name: String,
+    network: Network,
+    password: String,
+    idempotency_key: Option<String>,
+    seconds_to_lock: u64,
+    output_file: String,
+) -> Result<(), anyhow::Error> {
+    let recipients: Result<Vec<Recipient>, anyhow::Error> = recipient
+        .into_iter()
+        .map(|r_str| {
+            let parts: Vec<&str> = r_str.split("::").collect();
+            if parts.len() < 2 || parts.len() > 3 {
+                return Err(anyhow!(
+                    "Invalid recipient format. Expected 'address::amount' or 'address::amount::payment_id'"
+                ));
+            }
+            let address = TariAddress::from_str(parts[0])?;
+            let amount = MicroMinotari::from_str(parts[1])?;
+            let payment_id = if parts.len() == 3 {
+                Some(parts[2].to_string())
+            } else {
+                None
+            };
+            Ok(Recipient {
+                address,
+                amount,
+                payment_id,
+            })
+        })
+        .collect();
+    let recipients = recipients?;
+
+    let pool = init_db(&database_file).await?;
+    let mut conn = pool.acquire().await?;
+    let account = db::get_account_by_name(&mut conn, &account_name)
+        .await?
+        .ok_or_else(|| anyhow!("Account not found: {}", account_name))?;
+
+    let amount = recipients.iter().map(|r| r.amount).sum();
+    let num_outputs = recipients.len();
+    let fee_per_gram = MicroMinotari(5);
+    let estimated_output_size = None;
+
+    let lock_amount = LockAmount::new(pool.clone());
+    let locked_funds = lock_amount
+        .lock(
+            &account,
+            amount,
+            num_outputs,
+            fee_per_gram,
+            estimated_output_size,
+            idempotency_key,
+            seconds_to_lock,
+        )
+        .await
+        .map_err(|e| anyhow!("Failed to lock funds: {}", e))?;
+
+    let one_sided_tx = OneSidedTransaction::new(pool.clone(), network, password.clone());
+    let result = one_sided_tx
+        .create_unsigned_transaction(&account, locked_funds, recipients, fee_per_gram)
+        .await
+        .map_err(|e| anyhow!("Failed to create an unsigned transaction: {}", e))?;
+
+    create_dir_all(Path::new(&output_file).parent().unwrap())?;
+    fs::write(output_file, serde_json::to_string_pretty(&result)?)?;
+
+    println!("Unsigned transaction written to file.");
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_lock_funds(
+    database_file: String,
+    account_name: String,
+    output_file: String,
+    request: LockFundsRequest,
+) -> Result<(), anyhow::Error> {
+    let pool = init_db(&database_file).await?;
+    let mut conn = pool.acquire().await?;
+    let account = db::get_account_by_name(&mut conn, &account_name)
+        .await?
+        .ok_or_else(|| anyhow!("Account not found: {}", account_name))?;
+    let lock_amount = LockAmount::new(pool.clone());
+    let result = lock_amount
+        .lock(
+            &account,
+            request.amount,
+            request.num_outputs.expect("must be present"),
+            request.fee_per_gram.expect("must be present"),
+            request.estimated_output_size,
+            request.idempotency_key,
+            request.seconds_to_lock_utxos.expect("must be present"),
+        )
+        .await
+        .map_err(|e| anyhow!("Failed to lock funds: {}", e))?;
+
+    create_dir_all(Path::new(&output_file).parent().unwrap())?;
+    fs::write(output_file, serde_json::to_string_pretty(&result)?)?;
+
+    println!("Locked funds output written to file.");
     Ok(())
 }
 

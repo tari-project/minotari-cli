@@ -18,6 +18,8 @@ pub enum ApiError {
     DbError(String),
     #[error("Account not found: {0}")]
     AccountNotFound(String),
+    #[error("Failed to lock funds: {0}")]
+    FailedToLockFunds(String),
     #[error("Failed to create an unsigned transaction: {0}")]
     FailedCreateUnsignedTx(String),
     #[error("Invalid account type: {0}")]
@@ -42,6 +44,7 @@ impl IntoResponse for ApiError {
             ApiError::InternalServerError(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg),
             ApiError::DbError(e) => (StatusCode::INTERNAL_SERVER_ERROR, e),
             ApiError::AccountNotFound(name) => (StatusCode::NOT_FOUND, format!("Account '{}' not found", name)),
+            ApiError::FailedToLockFunds(e) => (StatusCode::INTERNAL_SERVER_ERROR, e),
             ApiError::FailedCreateUnsignedTx(e) => (StatusCode::INTERNAL_SERVER_ERROR, e),
             ApiError::InvalidAccountType(e) => (StatusCode::BAD_REQUEST, e),
         };

@@ -1,5 +1,3 @@
-use std::sync::Arc;
-
 use crate::models::Id;
 use blake2::Blake2b512;
 use blake2::Digest;
@@ -9,10 +7,8 @@ use serde::Serialize;
 use sqlx::{SqliteConnection, SqlitePool};
 use tari_common::configuration::Network;
 use tari_common_types::{
-    seeds::cipher_seed::CipherSeed,
     tari_address::{TariAddress, TariAddressFeatures},
     types::CompressedPublicKey,
-    wallet_types::{ProvidedKeysWallet, WalletType},
 };
 use tari_crypto::keys::PublicKey;
 use tari_crypto::keys::SecretKey;
@@ -20,10 +16,10 @@ use tari_crypto::{
     compressed_key::CompressedKey,
     ristretto::{RistrettoPublicKey, RistrettoSecretKey},
 };
-use tari_transaction_components::{
-    crypto_factories::CryptoFactories,
-    key_manager::{TransactionKeyManagerWrapper, memory_key_manager::MemoryKeyManagerBackend},
-};
+use tari_transaction_components::key_manager::KeyManager;
+use tari_transaction_components::key_manager::wallet_types::ViewWallet;
+use tari_transaction_components::key_manager::wallet_types::WalletType;
+
 use tari_utilities::byte_array::ByteArray;
 use utoipa::ToSchema;
 
@@ -441,11 +437,11 @@ impl ParentAccountRow {
         Ok(address)
     }
 
-    pub async fn get_key_manager(
-        &self,
-        password: &str,
-    ) -> Result<TransactionKeyManagerWrapper<MemoryKeyManagerBackend>, anyhow::Error> {
+    pub async fn get_key_manager(&self, password: &str) -> Result<KeyManager, anyhow::Error> {
         let (view_key, spend_key) = self.decrypt_keys(password)?;
+        let view_wallet = ViewWallet::new(spend_key, view_key, Some(self.birthday as u16));
+        let wallet_type = WalletType::ViewWallet(view_wallet);
+        let key_manager = KeyManager::new(wallet_type)?;
         let wallet_type = Arc::new(WalletType::ProvidedKeys(ProvidedKeysWallet {
             view_key,
             birthday: Some(self.birthday as u16),

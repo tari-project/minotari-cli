@@ -1,19 +1,17 @@
 use chrono::{DateTime, Utc};
 use lightweight_wallet_libs::{HttpBlockchainScanner, ScanConfig, scanning::BlockchainScanner};
-use sqlx::{Acquire, SqliteConnection};
+use sqlx::Acquire;
 use std::time::Instant;
 
-use tari_transaction_components::key_manager::{
-    TransactionKeyManagerWrapper, memory_key_manager::MemoryKeyManagerBackend,
-};
 use tari_transaction_components::transaction_components::WalletOutput;
 use tari_utilities::byte_array::ByteArray;
 use thiserror::Error;
 
 use crate::db::AccountTypeRow;
 use crate::{
-    db::{self, delete_old_scanned_tip_blocks, get_accounts, init_db},
+    db,
     models::{self, BalanceChange, WalletEvent},
+    reorg,
 };
 
 const BIRTHDAY_GENESIS_FROM_UNIX_EPOCH: u64 = 1640995200;
@@ -37,10 +35,10 @@ pub async fn scan(
     max_blocks: u64,
     batch_size: u64,
 ) -> Result<Vec<WalletEvent>, ScanError> {
-    let pool = init_db(database_file).await.map_err(ScanError::Fatal)?;
+    let pool = db::init_db(database_file).await.map_err(ScanError::Fatal)?;
     let mut conn = pool.acquire().await?;
     let mut result = vec![];
-    for account in db::get_accounts(&mut conn, account_name, true)
+    for account in db::db::get_accounts(&mut conn, account_name, true)
         .await
         .map_err(ScanError::FatalSqlx)?
     {
@@ -68,41 +66,14 @@ pub async fn scan(
             .get_key_manager(password)
             .await
             .map_err(ScanError::Fatal)?;
-        let mut scanner = HttpBlockchainScanner::new(base_url.to_string(), key_manager.clone())
+        let mut scanner = HttpBlockchainScanner::new(base_url.to_string(), key_manager.clone(), 8)
             .await
             .map_err(|e| ScanError::Intermittent(e.to_string()))?;
 
-        let last_blocks = db::get_scanned_tip_blocks_by_account(&mut conn, account_type_row.account_id())
+        let mut start_height = reorg::handle_reorgs(&mut scanner, &mut conn, account.id)
             .await
-            .map_err(ScanError::FatalSqlx)?;
+            .map_err(ScanError::Fatal)?;
 
-        let mut start_height = 0;
-        if last_blocks.is_empty() {
-            println!(
-                "No previously scanned blocks found for account {}, starting from genesis.",
-                account_type_row.friendly_name()
-            );
-        } else {
-            println!(
-                "Found {} previously scanned blocks for account {}",
-                last_blocks.len(),
-                account_type_row.friendly_name()
-            );
-            let reorged_blocks = check_for_reorgs(&mut scanner, &mut conn, &last_blocks)
-                .await
-                .map_err(ScanError::Fatal)?;
-            if reorged_blocks.len() == last_blocks.len() {
-                println!("All previously scanned blocks have been reorged, starting from genesis.");
-
-                todo!("Need to remove outputs that are no longer valid.");
-            } else if !reorged_blocks.is_empty() {
-                println!("Removed {} reorged blocks from the database.", reorged_blocks.len());
-                start_height = (reorged_blocks.iter().map(|b| b.height).min().unwrap_or(0) as u64).saturating_sub(1);
-            } else {
-                println!("No reorgs detected.");
-                start_height = last_blocks[0].height as u64 + 1;
-            }
-        }
         if start_height == 0 {
             let birthday_day = (account_type_row.birthday() as u64) * 24 * 60 * 60 + BIRTHDAY_GENESIS_FROM_UNIX_EPOCH;
             println!(
@@ -331,10 +302,14 @@ pub async fn scan(
             }
 
             // println!("Batch took {:?}.", timer.elapsed());
-            // println!("deleting old scanned tip blocks...");
-            delete_old_scanned_tip_blocks(&mut conn, account_type_row.account_id(), 50)
-                .await
-                .map_err(ScanError::FatalSqlx)?;
+            // println!("pruning old scanned tip blocks...");
+            db::prune_scanned_tip_blocks(
+                &mut conn,
+                account.id,
+                scanned_blocks.last().map(|b| b.height).unwrap_or(0),
+            )
+            .await
+            .map_err(ScanError::Fatal)?;
 
             // println!("Cleanup took {:?}.", timer.elapsed());
         }
@@ -346,57 +321,6 @@ pub async fn scan(
         );
     }
     Ok(result)
-}
-
-/// Returns (removed_blocks, added_blocks   )
-async fn check_for_reorgs(
-    scanner: &mut HttpBlockchainScanner<TransactionKeyManagerWrapper<MemoryKeyManagerBackend>>,
-    conn: &mut SqliteConnection,
-    last_blocks_in_desc: &[models::ScannedTipBlock],
-) -> Result<Vec<models::ScannedTipBlock>, anyhow::Error> {
-    let mut removed_blocks = vec![];
-    for block in last_blocks_in_desc {
-        let chain_block = scanner
-            .get_header_by_height(block.height)
-            .await
-            .map_err(|e| anyhow::anyhow!("Failed to get header by height: {}", e))?;
-        if let Some(chain_block) = chain_block {
-            if chain_block.hash == block.hash {
-                // Block matches, no reorg at this height.
-                break;
-            } else {
-                println!("REORG DETECTED at height {}, updating record.", block.height);
-                removed_blocks.push(block.clone());
-                // If the block hash has changed, delete the old record.
-                sqlx::query!(
-                    r#"
-                    DELETE FROM scanned_tip_blocks
-                    WHERE id = ?
-                    "#,
-                    block.id
-                )
-                .execute(&mut *conn)
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to delete scanned tip block: {}", e))?;
-            }
-        } else {
-            println!(
-                "Block at height {} no longer exists in the chain, reorg detected.",
-                block.height
-            );
-            removed_blocks.push(block.clone());
-            // Handle the reorg as needed (e.g., delete affected records, rescan, etc.).
-            continue;
-        }
-
-        // Fetch the block from the blockchain to verify its hash.
-        // For simplicity, we'll just print out the block info here.
-        println!("Verifying block at height: {}, hash: {:x?}", block.height, block.hash);
-        // In a real implementation, you would fetch the block from the blockchain
-        // and compare its hash to `block.hash`. If they differ, a reorg has occurred.
-        // Handle the reorg as needed (e.g., delete affected records, rescan, etc.).
-    }
-    Ok(removed_blocks)
 }
 
 fn parse_balance_changes(
