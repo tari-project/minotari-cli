@@ -97,6 +97,25 @@ pub async fn get_pending_output_by_hash(
     Ok(row.map(|r| r.id))
 }
 
+/// Get pending output info (id and value) by hash
+pub async fn get_pending_output_info_by_hash(
+    conn: &mut SqliteConnection,
+    output_hash: &[u8],
+) -> Result<Option<(i64, u64)>, sqlx::Error> {
+    let row = sqlx::query!(
+        r#"
+        SELECT id, value
+        FROM pending_outputs
+        WHERE output_hash = ?
+        "#,
+        output_hash
+    )
+    .fetch_optional(&mut *conn)
+    .await?;
+
+    Ok(row.map(|r| (r.id, r.value as u64)))
+}
+
 /// Delete pending output when it's confirmed on-chain
 pub async fn delete_pending_output_by_hash(
     conn: &mut SqliteConnection,

@@ -36,7 +36,7 @@ pub use inputs::{insert_input, soft_delete_inputs_from_height};
 mod pending_outputs;
 pub use pending_outputs::{
     cleanup_pending_outputs, delete_pending_output_by_hash, get_active_pending_outputs, get_pending_output_by_hash,
-    soft_delete_pending_outputs, upsert_pending_output,
+    get_pending_output_info_by_hash, soft_delete_pending_outputs, upsert_pending_output,
 };
 
 mod pending_inputs;

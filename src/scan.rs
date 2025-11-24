@@ -393,10 +393,10 @@ async fn scan_mempool_for_account(
         let spent_hash_bytes = spent_hash.as_slice();
 
         // Check if this is one of our outputs being spent
-        if let Some((output_id, _value)) = db::get_output_info_by_hash(&mut *tx, spent_hash_bytes).await? {
+        if let Some((output_id, value)) = db::get_output_info_by_hash(&mut *tx, spent_hash_bytes).await? {
             // Insert pending input
             let (pending_input_id, was_inserted) =
-                db::upsert_pending_input(&mut *tx, account.id, Some(output_id), None)
+                db::upsert_pending_input(&mut *tx, account.id, Some(output_id), None, value)
                     .await
                     .map_err(ScanError::FatalSqlx)?;
 
@@ -416,10 +416,10 @@ async fn scan_mempool_for_account(
                 };
                 events.push(event);
             }
-        } else if let Some(pending_output_id) = db::get_pending_output_by_hash(&mut *tx, spent_hash_bytes).await? {
+        } else if let Some((pending_output_id, value)) = db::get_pending_output_info_by_hash(&mut *tx, spent_hash_bytes).await? {
             // This is a pending output being spent (chained transaction)
             let (pending_input_id, was_inserted) =
-                db::upsert_pending_input(&mut *tx, account.id, None, Some(pending_output_id))
+                db::upsert_pending_input(&mut *tx, account.id, None, Some(pending_output_id), value)
                     .await
                     .map_err(ScanError::FatalSqlx)?;
 

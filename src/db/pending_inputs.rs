@@ -7,12 +7,15 @@ pub async fn upsert_pending_input(
     account_id: i64,
     output_id: Option<i64>,
     pending_output_id: Option<i64>,
+    value: u64,
 ) -> Result<(i64, bool), sqlx::Error> {
     if output_id.is_none() && pending_output_id.is_none() {
         return Err(sqlx::Error::Io(std::io::Error::other(
             "Either output_id or pending_output_id must be provided",
         )));
     }
+
+    let value = value as i64;
 
     // First check if an entry exists (including soft-deleted)
     let existing = sqlx::query!(
@@ -33,9 +36,10 @@ pub async fn upsert_pending_input(
             sqlx::query!(
                 r#"
                 UPDATE pending_inputs
-                SET deleted_at = NULL, status = 'PENDING'
+                SET deleted_at = NULL, status = 'PENDING', value = ?
                 WHERE id = ?
                 "#,
+                value,
                 existing_row.id
             )
             .execute(&mut *conn)
@@ -50,12 +54,13 @@ pub async fn upsert_pending_input(
     // Insert new entry
     let insert_result = sqlx::query!(
         r#"
-        INSERT INTO pending_inputs (account_id, output_id, pending_output_id, status)
-        VALUES (?, ?, ?, 'PENDING')
+        INSERT INTO pending_inputs (account_id, output_id, pending_output_id, status, value)
+        VALUES (?, ?, ?, 'PENDING', ?)
         "#,
         account_id,
         output_id,
-        pending_output_id
+        pending_output_id,
+        value
     )
     .execute(&mut *conn)
     .await?;
