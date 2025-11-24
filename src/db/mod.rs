@@ -33,6 +33,18 @@ pub use balance_changes::insert_balance_change;
 mod inputs;
 pub use inputs::{insert_input, soft_delete_inputs_from_height};
 
+mod pending_outputs;
+pub use pending_outputs::{
+    cleanup_pending_outputs, delete_pending_output_by_hash, get_active_pending_outputs, get_pending_output_by_hash,
+    get_pending_output_info_by_hash, soft_delete_pending_outputs, upsert_pending_output,
+};
+
+mod pending_inputs;
+pub use pending_inputs::{
+    cleanup_pending_inputs, delete_pending_input_by_output_id, get_active_pending_inputs_by_output,
+    get_pending_input_by_output_id, soft_delete_pending_inputs_by_output, upsert_pending_input,
+};
+
 pub async fn init_db(db_path: &str) -> Result<SqlitePool, anyhow::Error> {
     let mut path = std::path::Path::new(db_path).to_path_buf();
     if path.is_relative() {

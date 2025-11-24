@@ -60,10 +60,10 @@ CREATE TABLE balance_changes (
     memo_hex TEXT,
     claimed_fee INTEGER,
     claimed_amount INTEGER,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, caused_by_pending_output_id INTEGER, caused_by_pending_input_id INTEGER,
     FOREIGN KEY (account_id) REFERENCES accounts(id),
     FOREIGN KEY (caused_by_output_id) REFERENCES outputs(id),
-    FOREIGN KEY (caused_by_input_id) REFERENCES inputs(id)
+    FOREIGN KEY (caused_by_input_id) REFERENCES inputs(id), FOREIGN KEY (caused_by_pending_output_id) REFERENCES pending_outputs(id), FOREIGN KEY (caused_by_pending_input_id) REFERENCES pending_inputs(id)
 );
 CREATE TABLE inputs (
     id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
@@ -89,7 +89,41 @@ CREATE TABLE pending_transactions (
     FOREIGN KEY (account_id) REFERENCES accounts(id),
     UNIQUE (account_id, idempotency_key)
 );
+CREATE TABLE pending_outputs (
+    id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL,
+    output_hash BLOB NOT NULL,
+    value INTEGER NOT NULL,
+    wallet_output_json TEXT,
+    memo_parsed TEXT,
+    memo_hex TEXT,
+    status TEXT NOT NULL DEFAULT 'PENDING',
+    locked_by_request_id TEXT,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    expires_at TIMESTAMP,
+    FOREIGN KEY (account_id) REFERENCES accounts(id)
+);
+CREATE TABLE pending_inputs (
+    id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    account_id INTEGER NOT NULL,
+    output_id INTEGER,
+    pending_output_id INTEGER,
+    status TEXT NOT NULL DEFAULT 'PENDING',
+    locked_by_request_id TEXT,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    expires_at TIMESTAMP,
+    FOREIGN KEY (account_id) REFERENCES accounts(id),
+    FOREIGN KEY (output_id) REFERENCES outputs(id),
+    FOREIGN KEY (pending_output_id) REFERENCES pending_outputs(id)
+);
 CREATE INDEX idx_pending_transactions_status_expires_at ON pending_transactions(status, expires_at);
+CREATE INDEX idx_pending_outputs_account_id ON pending_outputs(account_id);
+CREATE INDEX idx_pending_outputs_output_hash ON pending_outputs(output_hash);
+CREATE INDEX idx_pending_outputs_status ON pending_outputs(status);
+CREATE INDEX idx_pending_inputs_account_id ON pending_inputs(account_id);
+CREATE INDEX idx_pending_inputs_output_id ON pending_inputs(output_id);
+CREATE INDEX idx_pending_inputs_pending_output_id ON pending_inputs(pending_output_id);
+CREATE INDEX idx_pending_inputs_status ON pending_inputs(status);
 CREATE INDEX idx_balance_changes_account_height ON balance_changes(account_id, effective_height);
 CREATE UNIQUE INDEX idx_outputs_output_hash_active ON outputs(output_hash) WHERE deleted_at IS NULL;
 CREATE INDEX idx_outputs_account_mined_height_active ON outputs(account_id, mined_in_block_height) WHERE deleted_at IS NULL;

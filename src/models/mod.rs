@@ -58,6 +58,15 @@ pub enum WalletEventType {
         tx_id: String,
         reason: String,
     },
+    PendingOutputDetected {
+        hash: Vec<u8>,
+        value: u64,
+        memo_parsed: Option<String>,
+        memo_hex: Option<String>,
+    },
+    PendingOutputSpent {
+        hash: Vec<u8>,
+    },
 }
 
 impl WalletEventType {
@@ -68,6 +77,8 @@ impl WalletEventType {
             WalletEventType::OutputConfirmed { .. } => "OutputConfirmed".to_string(),
             WalletEventType::OutputRolledBack { .. } => "OutputRolledBack".to_string(),
             WalletEventType::PendingTransactionCancelled { .. } => "PendingTransactionCancelled".to_string(),
+            WalletEventType::PendingOutputDetected { .. } => "PendingOutputDetected".to_string(),
+            WalletEventType::PendingOutputSpent { .. } => "PendingOutputSpent".to_string(),
         }
     }
 }

@@ -33,6 +33,7 @@ pub async fn scan(
     account_name: Option<&str>,
     max_blocks: u64,
     batch_size: u64,
+    include_mempool: bool,
 ) -> Result<Vec<WalletEvent>, ScanError> {
     let pool = db::init_db(database_file).await.map_err(ScanError::Fatal)?;
     let mut conn = pool.acquire().await?;
@@ -295,8 +296,215 @@ pub async fn scan(
             "Took on average {:?}ms per block.",
             total_timer.elapsed().as_millis() / total_scanned as u128
         );
+
+        // After blockchain scan, scan the mempool for pending transactions if requested
+        if include_mempool {
+            println!("Scanning mempool for pending outputs and inputs...");
+            match scan_mempool_for_account(&mut scanner, &mut conn, &account).await {
+                Ok(mempool_events) => {
+                    println!(
+                        "Mempool scan complete. Found {} pending transactions.",
+                        mempool_events.len()
+                    );
+                    result.extend(mempool_events);
+                },
+                Err(e) => {
+                    println!("Mempool scan failed (non-fatal): {}", e);
+                },
+            }
+        }
     }
     Ok(result)
+}
+
+async fn scan_mempool_for_account(
+    scanner: &mut (impl lightweight_wallet_libs::scanning::BlockchainScanner + Send),
+    conn: &mut sqlx::pool::PoolConnection<sqlx::Sqlite>,
+    account: &db::AccountRow,
+) -> Result<Vec<WalletEvent>, ScanError> {
+    let (wallet_outputs, spent_input_hashes) = scanner
+        .scan_mempool()
+        .await
+        .map_err(|e| ScanError::Intermittent(e.to_string()))?;
+
+    let mut events = vec![];
+    let mut tx = conn.begin().await.map_err(ScanError::FatalSqlx)?;
+
+    // Track output hashes currently in mempool for soft delete logic
+    let mut mempool_output_hashes = std::collections::HashSet::new();
+
+    // Process pending outputs found in mempool
+    for (output, value, memo_field) in wallet_outputs {
+        let output_hash = output.hash().to_vec();
+        mempool_output_hashes.insert(output_hash.clone());
+
+        // Check if this output is already confirmed on-chain
+        if db::get_output_info_by_hash(&mut *tx, &output_hash).await?.is_some() {
+            // Already confirmed, skip
+            continue;
+        }
+
+        // Parse memo from output - TransactionOutput doesn't have payment_id() method
+        // We'll extract it during database insertion if needed
+        let memo_hex = memo_field.get_raw_bytes().map(|x| hex::encode(x));
+        let memo_parsed = memo_field.payment_id_as_string();
+
+        // Note: TransactionOutput doesn't expose value directly (it's in the commitment)
+        // We store 0 as a placeholder. In the future, scan_mempool should return WalletOutput
+        // which has the recovered value.
+
+        // Insert or update pending output
+        let (pending_output_id, was_inserted) = db::upsert_pending_output(
+            &mut *tx,
+            account.id,
+            output_hash.clone(),
+            &output,
+            value.0,
+            memo_parsed.clone(),
+            memo_hex.clone(),
+        )
+        .await
+        .map_err(ScanError::FatalSqlx)?;
+
+        if was_inserted {
+            println!(
+                "Found new pending output in mempool: {} (value: {})",
+                hex::encode(&output_hash),
+                value
+            );
+
+            let event = models::WalletEvent {
+                id: 0,
+                account_id: account.id,
+                event_type: models::WalletEventType::PendingOutputDetected {
+                    hash: output_hash.clone(),
+                    value: value.0,
+                    memo_parsed: Some(memo_parsed),
+                    memo_hex,
+                },
+                description: format!("Pending output detected in mempool: {}", hex::encode(&output_hash)),
+            };
+            events.push(event);
+        }
+    }
+
+    // Process spent inputs found in mempool
+    for spent_hash in &spent_input_hashes {
+        let spent_hash_bytes = spent_hash.as_slice();
+
+        // Check if this is one of our outputs being spent
+        if let Some((output_id, value)) = db::get_output_info_by_hash(&mut *tx, spent_hash_bytes).await? {
+            // Insert pending input
+            let (pending_input_id, was_inserted) =
+                db::upsert_pending_input(&mut *tx, account.id, Some(output_id), None, value)
+                    .await
+                    .map_err(ScanError::FatalSqlx)?;
+
+            if was_inserted {
+                println!(
+                    "Found pending spend of our output in mempool: {}",
+                    hex::encode(spent_hash_bytes)
+                );
+
+                let event = models::WalletEvent {
+                    id: 0,
+                    account_id: account.id,
+                    event_type: models::WalletEventType::PendingOutputSpent {
+                        hash: spent_hash_bytes.to_vec(),
+                    },
+                    description: format!("Output being spent in mempool: {}", hex::encode(spent_hash_bytes)),
+                };
+                events.push(event);
+            }
+        } else if let Some((pending_output_id, value)) = db::get_pending_output_info_by_hash(&mut *tx, spent_hash_bytes).await? {
+            // This is a pending output being spent (chained transaction)
+            let (pending_input_id, was_inserted) =
+                db::upsert_pending_input(&mut *tx, account.id, None, Some(pending_output_id), value)
+                    .await
+                    .map_err(ScanError::FatalSqlx)?;
+
+            if was_inserted {
+                println!(
+                    "Found chained transaction spending pending output in mempool: {}",
+                    hex::encode(spent_hash_bytes)
+                );
+            }
+        }
+    }
+
+    // Soft delete pending outputs that are no longer in the mempool
+    // Get all active pending outputs for this account
+    let active_pending_outputs = db::get_active_pending_outputs(&mut *tx, account.id)
+        .await
+        .map_err(ScanError::FatalSqlx)?;
+
+    // Find outputs that are no longer in the mempool
+    let outputs_to_delete: Vec<Vec<u8>> = active_pending_outputs
+        .into_iter()
+        .filter(|hash| !mempool_output_hashes.contains(hash))
+        .collect();
+
+    if !outputs_to_delete.is_empty() {
+        let deleted_count = db::soft_delete_pending_outputs(&mut *tx, outputs_to_delete.clone())
+            .await
+            .map_err(ScanError::FatalSqlx)?;
+
+        if deleted_count > 0 {
+            println!("Soft deleted {} pending outputs no longer in mempool", deleted_count);
+        }
+    }
+
+    // Soft delete pending inputs that are no longer in the mempool
+    // Get all active pending inputs for this account
+    let active_pending_input_outputs = db::get_active_pending_inputs_by_output(&mut *tx, account.id)
+        .await
+        .map_err(ScanError::FatalSqlx)?;
+
+    // Build a set of spent output IDs currently in the mempool
+    let mempool_spent_outputs: std::collections::HashSet<Vec<u8>> =
+        spent_input_hashes.iter().map(|h| h.as_slice().to_vec()).collect();
+
+    // Find inputs whose outputs are no longer being spent in the mempool
+    let mut inputs_to_delete = Vec::new();
+    for output_id in active_pending_input_outputs {
+        // Get the output hash for this output_id
+        if let Some(output_info) = sqlx::query!(
+            r#"
+            SELECT output_hash FROM outputs WHERE id = ?
+            "#,
+            output_id
+        )
+        .fetch_optional(&mut *tx)
+        .await
+        .map_err(ScanError::FatalSqlx)?
+        {
+            if !mempool_spent_outputs.contains(&output_info.output_hash) {
+                inputs_to_delete.push(output_id);
+            }
+        }
+    }
+
+    if !inputs_to_delete.is_empty() {
+        let deleted_count = db::soft_delete_pending_inputs_by_output(&mut *tx, inputs_to_delete)
+            .await
+            .map_err(ScanError::FatalSqlx)?;
+
+        if deleted_count > 0 {
+            println!("Soft deleted {} pending inputs no longer in mempool", deleted_count);
+        }
+    }
+
+    tx.commit().await.map_err(ScanError::FatalSqlx)?;
+
+    // Cleanup old pending transactions (older than 24 hours)
+    db::cleanup_pending_outputs(&mut **conn, 24)
+        .await
+        .map_err(ScanError::FatalSqlx)?;
+    db::cleanup_pending_inputs(&mut **conn, 24)
+        .await
+        .map_err(ScanError::FatalSqlx)?;
+
+    Ok(events)
 }
 
 fn parse_balance_changes(
