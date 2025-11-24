@@ -302,3 +302,29 @@ pub async fn unlock_outputs_for_request(
 
     Ok(())
 }
+
+pub async fn fetch_outputs_by_lock_request_id(
+    conn: &mut SqliteConnection,
+    locked_by_request_id: &str,
+) -> Result<Vec<DbWalletOutput>, sqlx::Error> {
+    let rows = sqlx::query!(
+        "SELECT id, wallet_output_json FROM outputs WHERE locked_by_request_id = ? and wallet_output_json IS NOT NULL",
+        locked_by_request_id
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+
+    let mut outputs = Vec::new();
+    for row in rows {
+        if let Some(json_str) = row.wallet_output_json {
+            let output: WalletOutput = serde_json::from_str(&json_str).map_err(|e| {
+                sqlx::Error::Io(std::io::Error::other(format!(
+                    "Failed to deserialize WalletOutput: {}",
+                    e
+                )))
+            })?;
+            outputs.push(DbWalletOutput { id: row.id, output });
+        }
+    }
+    Ok(outputs)
+}
