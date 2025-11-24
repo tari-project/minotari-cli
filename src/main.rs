@@ -39,13 +39,6 @@ use tari_transaction_components::tari_amount::MicroMinotari;
 use tari_utilities::byte_array::ByteArray;
 
 use minotari::cli::{Cli, Commands};
-use minotari::{
-    daemon, db,
-    db::{get_accounts, get_balance, init_db},
-    models::WalletEvent,
-    scan,
-    scan::ScanError,
-};
 
 use minotari::tapplets::tapplet_command_handler;
 
@@ -307,6 +300,9 @@ async fn handle_create_unsigned_transaction(
     let account = db::get_account_by_name(&mut conn, &account_name)
         .await?
         .ok_or_else(|| anyhow!("Account not found: {}", account_name))?;
+    let account = account
+        .try_into_parent()
+        .map_err(|e| anyhow!("Invalid account type: {}", e))?;
 
     let amount = recipients.iter().map(|r| r.amount).sum();
     let num_outputs = recipients.len();
@@ -349,7 +345,7 @@ async fn handle_lock_funds(
 ) -> Result<(), anyhow::Error> {
     let pool = init_db(&database_file).await?;
     let mut conn = pool.acquire().await?;
-    let account = db::get_account_by_name(&mut conn, &account_name)
+    let account = db::get_parent_account_by_name(&mut conn, &account_name)
         .await?
         .ok_or_else(|| anyhow!("Account not found: {}", account_name))?;
     let lock_amount = LockAmount::new(pool.clone());

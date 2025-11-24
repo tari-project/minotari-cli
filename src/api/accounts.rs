@@ -126,6 +126,9 @@ pub async fn api_lock_funds(
         .await?
         .ok_or_else(|| ApiError::AccountNotFound(name.clone()))?;
 
+    let account = account
+        .try_into_parent()
+        .map_err(|e| ApiError::InvalidAccountType(e.to_string()))?;
     let lock_amount = LockAmount::new(app_state.db_pool.clone());
     let response = lock_amount
         .lock(
@@ -175,6 +178,9 @@ pub async fn api_create_unsigned_transaction(
     let account = get_account_by_name(&mut conn, &name)
         .await?
         .ok_or_else(|| ApiError::AccountNotFound(name.clone()))?;
+    let account = account
+        .try_into_parent()
+        .map_err(|e| ApiError::InvalidAccountType(e.to_string()))?;
 
     let amount = recipients.iter().map(|r| r.amount).sum();
     let num_outputs = recipients.len();
@@ -196,14 +202,14 @@ pub async fn api_create_unsigned_transaction(
         .await
         .map_err(|e| ApiError::FailedToLockFunds(e.to_string()))?;
 
-    let parent_account = account
-        .try_into_parent()
-        .map_err(|e| ApiError::InvalidAccountType(e.to_string()))?;
+    // let parent_account = account
+    //     .try_into_parent()
+    //     .map_err(|e| ApiError::InvalidAccountType(e.to_string()))?;
 
     let one_sided_tx =
         OneSidedTransaction::new(app_state.db_pool.clone(), app_state.network, app_state.password.clone());
     let result = one_sided_tx
-        .create_unsigned_transaction(&parent_account, locked_funds, recipients, fee_per_gram)
+        .create_unsigned_transaction(&account, locked_funds, recipients, fee_per_gram)
         .await
         .map_err(|e| ApiError::FailedCreateUnsignedTx(e.to_string()))?;
 

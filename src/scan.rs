@@ -38,7 +38,7 @@ pub async fn scan(
     let pool = db::init_db(database_file).await.map_err(ScanError::Fatal)?;
     let mut conn = pool.acquire().await?;
     let mut result = vec![];
-    for account in db::db::get_accounts(&mut conn, account_name, true)
+    for account in db::get_accounts(&mut conn, account_name, true)
         .await
         .map_err(ScanError::FatalSqlx)?
     {
@@ -70,7 +70,7 @@ pub async fn scan(
             .await
             .map_err(|e| ScanError::Intermittent(e.to_string()))?;
 
-        let mut start_height = reorg::handle_reorgs(&mut scanner, &mut conn, account.id)
+        let mut start_height = reorg::handle_reorgs(&mut scanner, &mut conn, account_type_row.account_id())
             .await
             .map_err(ScanError::Fatal)?;
 
@@ -305,7 +305,7 @@ pub async fn scan(
             // println!("pruning old scanned tip blocks...");
             db::prune_scanned_tip_blocks(
                 &mut conn,
-                account.id,
+                account_type_row.account_id(),
                 scanned_blocks.last().map(|b| b.height).unwrap_or(0),
             )
             .await

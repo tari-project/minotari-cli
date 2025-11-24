@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::models::Id;
 use blake2::Blake2b512;
 use blake2::Digest;
@@ -83,6 +85,41 @@ pub async fn get_account_by_name(
     .await?;
 
     Ok(row)
+}
+
+pub async fn get_parent_account_by_name(
+    conn: &mut SqliteConnection,
+    friendly_name: &str,
+) -> Result<Option<ParentAccountRow>, anyhow::Error> {
+    let row = sqlx::query_as!(
+        AccountRow,
+        r#"
+        SELECT id,
+            friendly_name,
+            encrypted_view_private_key,
+            encrypted_spend_public_key,
+            cipher_nonce,
+            unencrypted_view_key_hash,
+            birthday,
+            account_type,
+            parent_account_id,
+            for_tapplet_name,
+            version,
+            tapplet_pub_key
+        FROM accounts
+        WHERE friendly_name = ? AND account_type = 'parent'
+        "#,
+        friendly_name
+    )
+    .fetch_optional(&mut *conn)
+    .await?;
+
+    if let Some(account) = row {
+        let parent_account = account.try_into_parent()?;
+        Ok(Some(parent_account))
+    } else {
+        Ok(None)
+    }
 }
 
 pub async fn get_account_by_id(
@@ -350,10 +387,7 @@ impl AccountTypeRow {
         }
     }
 
-    pub async fn get_key_manager(
-        &self,
-        password: &str,
-    ) -> Result<TransactionKeyManagerWrapper<MemoryKeyManagerBackend>, anyhow::Error> {
+    pub async fn get_key_manager(&self, password: &str) -> Result<KeyManager, anyhow::Error> {
         match self {
             AccountTypeRow::Parent(parent) => parent.get_key_manager(password).await,
             AccountTypeRow::Child(child) => child.get_key_manager(password).await,
@@ -442,15 +476,15 @@ impl ParentAccountRow {
         let view_wallet = ViewWallet::new(spend_key, view_key, Some(self.birthday as u16));
         let wallet_type = WalletType::ViewWallet(view_wallet);
         let key_manager = KeyManager::new(wallet_type)?;
-        let wallet_type = Arc::new(WalletType::ProvidedKeys(ProvidedKeysWallet {
-            view_key,
-            birthday: Some(self.birthday as u16),
-            public_spend_key: spend_key,
-            private_spend_key: None,
-            private_comms_key: None,
-        }));
-        let key_manager: TransactionKeyManagerWrapper<MemoryKeyManagerBackend> =
-            TransactionKeyManagerWrapper::new(None, CryptoFactories::default(), wallet_type).await?;
+        // let wallet_type = Arc::new(WalletType::(ProvidedKeysWallet {
+        // view_key,
+        // birthday: Some(self.birthday as u16),
+        // public_spend_key: spend_key,
+        // private_spend_key: None,
+        // private_comms_key: None,
+        // }));
+        // let key_manager: TransactionKeyManagerWrapper<MemoryKeyManagerBackend> =
+        // TransactionKeyManagerWrapper::new(None, CryptoFactories::default(), wallet_type).await?;
         Ok(key_manager)
     }
 }
@@ -465,10 +499,7 @@ pub(crate) struct ChildAccountRow {
 }
 
 impl ChildAccountRow {
-    pub async fn get_key_manager(
-        &self,
-        password: &str,
-    ) -> Result<TransactionKeyManagerWrapper<MemoryKeyManagerBackend>, anyhow::Error> {
+    pub async fn get_key_manager(&self, password: &str) -> Result<KeyManager, anyhow::Error> {
         let (mut view_key, spend_key) = self.parent_account_row.decrypt_keys(password)?;
 
         // If this is a child account, derive the tapplet-specific view key
@@ -480,15 +511,12 @@ impl ChildAccountRow {
         view_key =
             RistrettoSecretKey::from_uniform_bytes(&tapplet_private_view_key_bytes).map_err(|e| anyhow::anyhow!(e))?;
 
-        let wallet_type = Arc::new(WalletType::ProvidedKeys(ProvidedKeysWallet {
+        let wallet_type = WalletType::ViewWallet(ViewWallet::new(
+            spend_key,
             view_key,
-            birthday: Some(self.parent_account_row.birthday as u16),
-            public_spend_key: spend_key,
-            private_spend_key: None,
-            private_comms_key: None,
-        }));
-        let key_manager: TransactionKeyManagerWrapper<MemoryKeyManagerBackend> =
-            TransactionKeyManagerWrapper::new(None, CryptoFactories::default(), wallet_type).await?;
+            Some(self.parent_account_row.birthday as u16),
+        ));
+        let key_manager = KeyManager::new(wallet_type)?;
         Ok(key_manager)
     }
 }

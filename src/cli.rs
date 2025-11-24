@@ -1,5 +1,6 @@
 use clap::{Parser, Subcommand};
 use tari_common::configuration::Network;
+use tari_transaction_components::MicroMinotari;
 
 #[derive(Parser)]
 #[command(name = "tari")]
@@ -94,6 +95,66 @@ pub enum Commands {
     Tapplet {
         #[command(subcommand)]
         tapplet_subcommand: TappletCommand,
+    },
+
+    /// Create an unsigned transaction
+    CreateUnsignedTransaction {
+        #[arg(short, long, help = "Name of the account to send from")]
+        account_name: String,
+        #[arg(
+            short,
+            long,
+            help = "Recipient address, amount and optional payment id (e.g., address::amount or address::amount::payment_id). Can be specified multiple times."
+        )]
+        recipient: Vec<String>,
+        #[arg(
+            short,
+            long,
+            help = "Path to the output file for the unsigned transaction",
+            default_value = "data/unsigned_transaction.json"
+        )]
+        output_file: String,
+        #[arg(short, long, help = "Password to decrypt the wallet file")]
+        password: String,
+        #[arg(short, long, help = "Path to the database file", default_value = "data/wallet.db")]
+        database_file: String,
+        #[arg(long, help = "Optional idempotency key")]
+        idempotency_key: Option<String>,
+        #[arg(long, help = "Optional seconds to lock UTXOs", default_value_t = 86400)]
+        seconds_to_lock: u64,
+        #[arg(long, help = "The Tari network to connect to", default_value_t = Network::MainNet)]
+        network: Network,
+    },
+    /// Lock funds
+    LockFunds {
+        #[arg(short, long, help = "Name of the account to send from")]
+        account_name: String,
+        #[arg(
+            short,
+            long,
+            help = "Path to the output file for the unsigned transaction",
+            default_value = "data/locked_funds.json"
+        )]
+        output_file: String,
+        #[arg(short, long, help = "Path to the database file", default_value = "data/wallet.db")]
+        database_file: String,
+        #[arg(short, long, help = "Amount to lock")]
+        amount: MicroMinotari,
+        #[arg(short, long, help = "Optional number of outputs", default_value = "1")]
+        num_outputs: usize,
+        #[arg(short, long, help = "Optional fee per gram", default_value = "5")]
+        fee_per_gram: MicroMinotari,
+        #[arg(short, long, help = "Optional estimated output size")]
+        estimated_output_size: Option<usize>,
+        #[arg(
+            short,
+            long,
+            help = "Optional seconds to lock (will be unlocked if not spent)",
+            default_value = "86400"
+        )]
+        seconds_to_lock_utxos: Option<u64>,
+        #[arg(long, help = "Optional idempotency key")]
+        idempotency_key: Option<String>,
     },
 }
 #[derive(Subcommand)]

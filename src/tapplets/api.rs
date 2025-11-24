@@ -3,7 +3,10 @@ use std::{fs, path::PathBuf, sync::Arc};
 use crate::{
     db::{AccountTypeRow, get_child_account},
     get_accounts, init_db,
-    transactions::one_sided_transaction::{OneSidedTransaction, Recipient},
+    transactions::{
+        lock_amount::LockAmount,
+        one_sided_transaction::{OneSidedTransaction, Recipient},
+    },
 };
 use anyhow::anyhow;
 use async_trait::async_trait;
@@ -31,6 +34,7 @@ pub(crate) struct MinotariApiProvider {
     tapplet_name: String,
     tapplet_public_key: CompressedKey<RistrettoPublicKey>,
     default_amount_for_save: MicroMinotari,
+    fee_per_gram: MicroMinotari,
     seconds_to_lock_utxos: u64,
     db_file: PathBuf,
     password: String,
@@ -90,6 +94,7 @@ impl MinotariApiProvider {
                 default_amount_for_save: MicroMinotari::from(10),
                 seconds_to_lock_utxos: 30,
                 db_file: database_file,
+                fee_per_gram: MicroMinotari::from(1),
                 password,
             })
         }
@@ -119,10 +124,6 @@ impl MinotariTappletApiV1 for MinotariApiProvider {
             None,
         )?;
 
-        let recipients = vec![Recipient {
-            address: tapplet_storage_address.clone(),
-            amount: self.default_amount_for_save,
-        }];
         let payment_id = format!(
             "t:\"{}\",\"{}\"",
             slot.replace("\"", "\\\""),
@@ -134,7 +135,11 @@ impl MinotariTappletApiV1 for MinotariApiProvider {
             tapplet_storage_address.to_base58()
         );
         println!("Creating unsigned one-sided transaction. If this fails, use the above fallback ...");
-
+        let recipients = vec![Recipient {
+            address: tapplet_storage_address.clone(),
+            amount: self.default_amount_for_save,
+            payment_id: Some(payment_id.clone()),
+        }];
         let seconds_to_lock_utxos = self.seconds_to_lock_utxos;
         let path = self.db_file.to_string_lossy();
         let db = SqlitePool::connect(&path).await?;
@@ -148,14 +153,20 @@ impl MinotariTappletApiV1 for MinotariApiProvider {
             .map_err(|e| anyhow::anyhow!("Invalid account type: {}", e))?;
         let one_sided_tx = OneSidedTransaction::new(db.clone(), Network::MainNet, self.password.clone());
 
-        let result = one_sided_tx
-            .create_unsigned_transaction(
-                parent_account,
-                recipients,
-                Some(payment_id.clone()),
-                Some("tapplet_append_data".to_string()),
+        let lock_response = LockAmount::new(db.clone())
+            .lock(
+                &parent_account,
+                self.default_amount_for_save,
+                1,
+                self.fee_per_gram,
+                None,
+                None,
                 seconds_to_lock_utxos,
             )
+            .await?;
+
+        let result = one_sided_tx
+            .create_unsigned_transaction(&parent_account, lock_response, recipients, self.fee_per_gram)
             .await?;
 
         fs::write("unsigned_one_sided_tx.json", serde_json::to_string_pretty(&result)?)?;

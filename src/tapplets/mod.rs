@@ -21,7 +21,11 @@ pub async fn tapplet_command_handler(tapplet_subcommand: TappletCommand) -> Resu
             let results = search::search_tapplets(&query, cache_directory.into()).await?;
             println!("Found {} tapplets matching '{}':", results.len(), query);
             for tapplet in results {
-                println!("- {}: {}", tapplet.name, tapplet.description);
+                println!(
+                    "- {}: {}",
+                    tapplet.name,
+                    tapplet.description.as_ref().unwrap_or(&"No description".to_string())
+                );
             }
         },
         TappletCommand::List { cache_directory } => {
