@@ -1776,6 +1776,7 @@ dependencies = [
 [[package]]
 name = "lightweight_wallet_libs"
 version = "0.2.0"
+source = "git+https://github.com/tari-project/tari-wallet?rev=28a9acca86c4bec5bd5329d2f9f163d22b5d302c#28a9acca86c4bec5bd5329d2f9f163d22b5d302c"
 dependencies = [
  "anyhow",
  "async-trait",
