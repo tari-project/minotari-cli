@@ -11,7 +11,7 @@ path = "src/bin/generate_openapi.rs"
 anyhow = "1.0.99"
 tokio = { version = "1.47.1", features = ["full"] }
 #lightweight_wallet_libs = { path = "../tari-wallet", features = ["grpc","http",] }
-lightweight_wallet_libs = { git = "https://github.com/tari-project/tari-wallet", rev = "28a9acca86c4bec5bd5329d2f9f163d22b5d302c", features = ["grpc","http",] }
+lightweight_wallet_libs = { git = "https://github.com/tari-project/tari-wallet", rev = "fefeeeb205120bd22d5d5b36dcec4a790cd9d0f7", features = ["grpc","http",] }
 clap = { version = "4.5.47", features = ["derive"] }
 hex = "0.4.3"
 chacha20poly1305 = { version = "0.10.1", features = ["rand_core", "std"] }
@@ -28,12 +28,13 @@ tari_crypto = { version = "0.22.1", features = ["borsh"] }
 tari_utilities = { version = "0.8", features = ["std"] }
 chrono = "0.4.42"
 serde = "1.0.225"
-tari_common = { git = "https://github.com/swvheerden/tari/", rev = "19f8b9731663c2f93a99e69bf49ac47bbb8a4eed" }
-tari_common_types = { git = "https://github.com/swvheerden/tari/", rev = "19f8b9731663c2f93a99e69bf49ac47bbb8a4eed" }
-tari_script = { git = "https://github.com/swvheerden/tari/", rev = "19f8b9731663c2f93a99e69bf49ac47bbb8a4eed" }
-tari_transaction_components = { git = "https://github.com/swvheerden/tari/", rev = "19f8b9731663c2f93a99e69bf49ac47bbb8a4eed" }
+tari_common = { git = "https://github.com/tari-project/tari/", rev = "ed473c3c94c2219ac1eebb9345384b6a7245606c" }
+tari_common_types = { git = "https://github.com/tari-project/tari/", rev = "ed473c3c94c2219ac1eebb9345384b6a7245606c" }
+tari_script = { git = "https://github.com/tari-project/tari/", rev = "ed473c3c94c2219ac1eebb9345384b6a7245606c" }
+tari_transaction_components = { git = "https://github.com/tari-project/tari/", rev = "ed473c3c94c2219ac1eebb9345384b6a7245606c" }
 #tari_common = { path = "../tari/common" }
 #tari_common_types = { path = "../tari/base_layer/common_types" }
+#tari_script = { path = "../tari/infrastructure/tari_script" }
 #tari_transaction_components = { path = "../tari/base_layer/transaction_components" }
 thiserror = "2.0.17"
 axum = { version = "0.8.6", features = ["default", "http2", "macros"] }

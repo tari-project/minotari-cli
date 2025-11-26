@@ -1,16 +1,16 @@
+use crate::{api::types::LockFundsResponse, db::AccountRow};
 use anyhow::anyhow;
 use sqlx::SqlitePool;
 use tari_common::configuration::Network;
 use tari_common_types::{tari_address::TariAddress, transaction::TxId};
+use tari_transaction_components::offline_signing::models::PaymentRecipient;
 use tari_transaction_components::{
     TransactionBuilder,
     consensus::ConsensusConstantsBuilder,
-    offline_signing::{models::PrepareOneSidedTransactionForSigningResult, offline_signer::OfflineSigner},
+    offline_signing::{models::PrepareOneSidedTransactionForSigningResult, prepare_one_sided_transaction_for_signing},
     tari_amount::MicroMinotari,
     transaction_components::{MemoField, OutputFeatures, memo_field::TxType},
 };
-
-use crate::{api::types::LockFundsResponse, db::AccountRow};
 
 #[derive(Debug, Clone)]
 pub struct Recipient {
@@ -62,23 +62,20 @@ impl OneSidedTransaction {
             tx_builder.with_input(utxo.clone())?;
         }
 
-        let mut offline_signing = OfflineSigner::new(key_manager);
         let tx_id = TxId::new_random();
         let payment_id = match &recipient.payment_id {
             Some(s) => MemoField::new_open_from_string(s, TxType::PaymentToOther).map_err(|e| anyhow!(e))?,
             None => MemoField::new_empty(),
         };
         let output_features = OutputFeatures::default();
-
-        let result = offline_signing.prepare_one_sided_transaction_for_signing(
-            tx_id,
-            tx_builder,
-            recipient.address.clone(),
-            recipient.amount,
-            output_features,
-            payment_id,
-            sender_address,
-        )?;
+        let recipients = [PaymentRecipient {
+            amount: recipient.amount,
+            output_features: output_features.clone(),
+            address: recipient.address.clone(),
+            payment_id: payment_id.clone(),
+        }];
+        let result =
+            prepare_one_sided_transaction_for_signing(tx_id, tx_builder, &recipients, payment_id, sender_address)?;
 
         Ok(result)
     }
