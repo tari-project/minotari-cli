@@ -2,6 +2,8 @@
 -- This allows child accounts to be stored in the same table as parent accounts
 -- Using create-copy-drop-rename pattern for better compatibility
 
+-- Recreate scanned_tip_blocks without child_account_id and its FK
+PRAGMA foreign_keys=off;
 -- Create new table with additional STI columns
 CREATE TABLE accounts_new (
     id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
@@ -27,9 +29,6 @@ SELECT
     id, 'parent', friendly_name, unencrypted_view_key_hash, encrypted_view_private_key,
     encrypted_spend_public_key, cipher_nonce, birthday, created_at
 FROM accounts;
-
--- Drop old table
-DROP TABLE accounts;
 
 INSERT INTO accounts_new (
     account_type,
@@ -62,39 +61,35 @@ SELECT
     ca.created_at
 FROM child_accounts ca;
 
--- Rename new table to accounts
-ALTER TABLE accounts_new RENAME TO accounts;
 
 
 -- Add indexes for common queries
-CREATE INDEX idx_accounts_parent_account_id ON accounts(parent_account_id);
-CREATE INDEX idx_accounts_account_type ON accounts(account_type);
-CREATE INDEX idx_accounts_for_tapplet_name ON accounts(for_tapplet_name);
+CREATE INDEX idx_accounts_parent_account_id ON accounts_new(parent_account_id);
+CREATE INDEX idx_accounts_account_type ON accounts_new(account_type);
+CREATE INDEX idx_accounts_for_tapplet_name ON accounts_new(for_tapplet_name);
 
 -- Update scanned_tip_blocks to reference the new account IDs
 -- Map child_account_id to the new account_id in the unified accounts table
-UPDATE scanned_tip_blocks
-SET account_id = (
-    SELECT a.id
-    FROM accounts a
-    INNER JOIN child_accounts ca ON ca.child_account_name = a.friendly_name
-        AND ca.parent_account_id = a.parent_account_id
-        AND a.account_type = 'child'
-    WHERE ca.id = scanned_tip_blocks.child_account_id
-);
+-- UPDATE scanned_tip_blocks
+-- SET account_id = (
+--     SELECT a.id
+--     FROM accounts_new a
+--     INNER JOIN child_accounts ca ON ca.child_account_name = a.friendly_name
+--         AND ca.parent_account_id = a.parent_account_id
+--         AND a.account_type = 'child'
+--     WHERE ca.id = scanned_tip_blocks.child_account_id
+-- );
 
 
 
--- Recreate scanned_tip_blocks without child_account_id and its FK
-PRAGMA foreign_keys=off;
 
 CREATE TABLE scanned_tip_blocks_new (
     id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
     account_id INTEGER NOT NULL,
     hash Blob NOT NULL,
     height INTEGER NOT NULL,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (account_id) REFERENCES accounts(id)
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+    -- FOREIGN KEY (account_id) REFERENCES accounts(id)
 );
 
 INSERT INTO scanned_tip_blocks_new (id, account_id, hash, height, created_at)
@@ -104,6 +99,21 @@ FROM scanned_tip_blocks;
 DROP TABLE scanned_tip_blocks;
 
 ALTER TABLE scanned_tip_blocks_new RENAME TO scanned_tip_blocks;
+
+
+
+
+-- Drop old table
+DROP TABLE accounts;
+-- Rename new table to accounts
+ALTER TABLE accounts_new RENAME TO accounts;
+
+
+
+
+alter table scanned_tip_blocks
+ add constraint fk_scanned_tip_blocks_account_id
+ foreign key (account_id) references accounts(id);
 
 PRAGMA foreign_keys=on;
 

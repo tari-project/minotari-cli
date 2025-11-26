@@ -42,7 +42,7 @@ pub enum Commands {
         account_name: Option<String>,
         #[arg(short = 'n', long, help = "Maximum number of blocks to scan", default_value_t = 50)]
         max_blocks_to_scan: u64,
-        #[arg(long, help = "Batch size for scanning", default_value_t = 1)]
+        #[arg(long, help = "Batch size for scanning", default_value_t = 50)]
         batch_size: u64,
     },
     /// Run the daemon to continuously scan the blockchain

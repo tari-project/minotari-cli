@@ -142,6 +142,12 @@ async fn main() -> Result<(), anyhow::Error> {
             max_blocks_to_scan,
             batch_size,
         } => {
+            if batch_size <= 1 {
+                // Batch size 1 doesn't work for some reason. It scans but never
+                // progresses
+                println!("Batch size must be greater than 1.");
+                return Ok(());
+            }
             println!("Scanning blockchain...");
             let events = scan(
                 &password,
