@@ -2,6 +2,7 @@ use chrono::{DateTime, Utc};
 use lightweight_wallet_libs::{HttpBlockchainScanner, ScanConfig, scanning::BlockchainScanner};
 use sqlx::Acquire;
 use std::time::Instant;
+use tracing::info;
 
 use tari_transaction_components::transaction_components::WalletOutput;
 use tari_utilities::byte_array::ByteArray;
@@ -42,6 +43,10 @@ pub async fn scan(
         .await
         .map_err(ScanError::FatalSqlx)?
     {
+        info!(
+            "Starting scan for account: {}",
+            account.friendly_name.as_ref().unwrap_or(&"Unnamed".to_string())
+        );
         let account_type_row = if account.is_parent() {
             let a = account.try_into_parent().map_err(ScanError::Fatal)?;
             AccountTypeRow::from_parent(a)

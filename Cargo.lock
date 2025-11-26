@@ -2402,6 +2402,8 @@ dependencies = [
  "tari_utilities",
  "thiserror 2.0.17",
  "tokio",
+ "tracing",
+ "tracing-subscriber",
  "utoipa",
  "utoipa-swagger-ui",
  "uuid",

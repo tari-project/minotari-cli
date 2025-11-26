@@ -46,6 +46,8 @@ use minotari::tapplets::tapplet_command_handler;
 async fn main() -> Result<(), anyhow::Error> {
     let cli = Cli::parse();
 
+    tracing_subscriber::fmt::init();
+
     match cli.command {
         Commands::CreateAddress { password, output_file } => {
             println!("Creating new address...");
