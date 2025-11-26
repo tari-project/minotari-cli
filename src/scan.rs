@@ -82,7 +82,6 @@ pub async fn scan(
                 .scan_blocks(&scan_config)
                 .await
                 .map_err(|e| ScanError::Intermittent(e.to_string()))?;
-
             total_scanned += scanned_blocks.len() as u64;
             if scanned_blocks.is_empty() || !more_blocks {
                 println!("No more blocks to scan.");
@@ -263,13 +262,6 @@ pub async fn scan(
                     )
                     .await
                     .map_err(ScanError::FatalSqlx)?;
-
-                    // println!(
-                    //     "Output {:?} confirmed at height {} (originally at height {})",
-                    //     hex::encode(&output_hash),
-                    //     scanned_block.height,
-                    //     original_height
-                    // );
                 }
 
                 // Commit transaction for this block's DB changes. If commit fails, return error and
@@ -277,8 +269,6 @@ pub async fn scan(
                 tx.commit().await.map_err(ScanError::FatalSqlx)?;
             }
 
-            // println!("Batch took {:?}.", timer.elapsed());
-            // println!("pruning old scanned tip blocks...");
             db::prune_scanned_tip_blocks(
                 &mut conn,
                 account.id,
@@ -287,7 +277,6 @@ pub async fn scan(
             .await
             .map_err(ScanError::Fatal)?;
 
-            // println!("Cleanup took {:?}.", timer.elapsed());
         }
 
         println!("Scan complete. in {:?}", total_timer.elapsed());
