@@ -88,8 +88,8 @@ CREATE TABLE scanned_tip_blocks_new (
     account_id INTEGER NOT NULL,
     hash Blob NOT NULL,
     height INTEGER NOT NULL,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-    -- FOREIGN KEY (account_id) REFERENCES accounts(id)
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (account_id) REFERENCES accounts_new(id)
 );
 
 INSERT INTO scanned_tip_blocks_new (id, account_id, hash, height, created_at)
@@ -107,13 +107,6 @@ ALTER TABLE scanned_tip_blocks_new RENAME TO scanned_tip_blocks;
 DROP TABLE accounts;
 -- Rename new table to accounts
 ALTER TABLE accounts_new RENAME TO accounts;
-
-
-
-
-alter table scanned_tip_blocks
- add constraint fk_scanned_tip_blocks_account_id
- foreign key (account_id) references accounts(id);
 
 PRAGMA foreign_keys=on;
 
