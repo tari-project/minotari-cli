@@ -276,7 +276,6 @@ pub async fn scan(
             )
             .await
             .map_err(ScanError::Fatal)?;
-
         }
 
         println!("Scan complete. in {:?}", total_timer.elapsed());
