@@ -298,11 +298,11 @@ impl AccountRow {
         })
     }
 
-    pub fn try_into_child(self, parent_row: ParentAccountRow) -> Result<ChildAccountRow, anyhow::Error> {
+    pub fn try_into_child(self, parent_row: ParentAccountRow) -> Result<ChildTappletAccountRow, anyhow::Error> {
         if self.account_type != "child_tapplet" {
             return Err(anyhow::anyhow!("Account is not a child tapplet account"));
         }
-        Ok(ChildAccountRow {
+        Ok(ChildTappletAccountRow {
             id: self.id,
             parent_account_id: self
                 .parent_account_id
@@ -326,15 +326,15 @@ impl AccountRow {
 
 pub enum AccountTypeRow {
     Parent(ParentAccountRow),
-    Child(ChildAccountRow),
+    ChildTapplet(ChildTappletAccountRow),
 }
 
 impl AccountTypeRow {
     pub fn from_parent(parent: ParentAccountRow) -> Self {
         AccountTypeRow::Parent(parent)
     }
-    pub fn from_child(child: ChildAccountRow) -> Self {
-        AccountTypeRow::Child(child)
+    pub fn from_child_tapplet(child: ChildTappletAccountRow) -> Self {
+        AccountTypeRow::ChildTapplet(child)
     }
 
     pub async fn try_from_account(conn: &mut SqliteConnection, account: AccountRow) -> Result<Self, anyhow::Error> {
@@ -371,7 +371,7 @@ impl AccountTypeRow {
                 .await?;
                 let parent_row = parent_account.try_into_parent()?;
                 let child = account.try_into_child(parent_row)?;
-                Ok(AccountTypeRow::Child(child))
+                Ok(AccountTypeRow::ChildTapplet(child))
             },
             _ => Err(anyhow::anyhow!("Unknown account type")),
         }
@@ -383,35 +383,35 @@ impl AccountTypeRow {
     ) -> Result<(RistrettoSecretKey, CompressedKey<RistrettoPublicKey>), anyhow::Error> {
         match self {
             AccountTypeRow::Parent(parent) => parent.decrypt_keys(password),
-            AccountTypeRow::Child(child) => child.parent_account_row.decrypt_keys(password),
+            AccountTypeRow::ChildTapplet(child) => child.parent_account_row.decrypt_keys(password),
         }
     }
 
     pub async fn get_key_manager(&self, password: &str) -> Result<KeyManager, anyhow::Error> {
         match self {
             AccountTypeRow::Parent(parent) => parent.get_key_manager(password).await,
-            AccountTypeRow::Child(child) => child.get_key_manager(password).await,
+            AccountTypeRow::ChildTapplet(child) => child.get_key_manager(password).await,
         }
     }
 
     pub fn account_id(&self) -> i64 {
         match self {
             AccountTypeRow::Parent(parent) => parent.id,
-            AccountTypeRow::Child(child) => child.id,
+            AccountTypeRow::ChildTapplet(child) => child.id,
         }
     }
 
     pub fn friendly_name(&self) -> String {
         match self {
             AccountTypeRow::Parent(parent) => parent.friendly_name.clone(),
-            AccountTypeRow::Child(child) => child.for_tapplet_name.clone(),
+            AccountTypeRow::ChildTapplet(child) => child.for_tapplet_name.clone(),
         }
     }
 
     pub fn birthday(&self) -> i64 {
         match self {
             AccountTypeRow::Parent(parent) => parent.birthday,
-            AccountTypeRow::Child(child) => child.parent_account_row.birthday,
+            AccountTypeRow::ChildTapplet(child) => child.parent_account_row.birthday,
         }
     }
 }
@@ -489,7 +489,7 @@ impl ParentAccountRow {
     }
 }
 
-pub(crate) struct ChildAccountRow {
+pub(crate) struct ChildTappletAccountRow {
     pub id: i64,
     pub parent_account_id: i64,
     pub for_tapplet_name: String,
@@ -498,7 +498,7 @@ pub(crate) struct ChildAccountRow {
     pub parent_account_row: ParentAccountRow,
 }
 
-impl ChildAccountRow {
+impl ChildTappletAccountRow {
     pub async fn get_key_manager(&self, password: &str) -> Result<KeyManager, anyhow::Error> {
         let (mut view_key, spend_key) = self.parent_account_row.decrypt_keys(password)?;
 

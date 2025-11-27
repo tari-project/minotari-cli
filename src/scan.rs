@@ -64,7 +64,7 @@ pub async fn scan(
                 .try_into_parent()?;
             let child = account.try_into_child(a)?;
 
-            AccountTypeRow::from_child(child)
+            AccountTypeRow::from_child_tapplet(child)
         };
 
         let key_manager = account_type_row
