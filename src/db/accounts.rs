@@ -225,7 +225,7 @@ pub async fn get_accounts(
                   version,
                   tapplet_pub_key
                 FROM accounts
-                WHERE parent_account_id = ? AND account_type = 'child'
+                WHERE parent_account_id = ? AND account_type = 'child_tapplet'
                 ORDER BY friendly_name
                 "#,
                     r.id
@@ -244,7 +244,7 @@ pub async fn get_accounts(
 #[derive(sqlx::FromRow, Debug, Clone)]
 pub struct AccountRow {
     pub id: i64,
-    pub account_type: String, // 'parent' or 'child'
+    pub account_type: String, // 'parent' or 'child_tapplet'
     pub friendly_name: Option<String>,
     pub encrypted_view_private_key: Option<Vec<u8>>,
     pub encrypted_spend_public_key: Option<Vec<u8>>,
@@ -263,7 +263,7 @@ impl AccountRow {
     }
 
     pub fn is_child(&self) -> bool {
-        self.account_type == "child"
+        self.account_type == "child_tapplet"
     }
 
     pub fn try_into_parent(self) -> Result<ParentAccountRow, anyhow::Error> {
@@ -299,8 +299,8 @@ impl AccountRow {
     }
 
     pub fn try_into_child(self, parent_row: ParentAccountRow) -> Result<ChildAccountRow, anyhow::Error> {
-        if self.account_type != "child" {
-            return Err(anyhow::anyhow!("Account is not a child account"));
+        if self.account_type != "child_tapplet" {
+            return Err(anyhow::anyhow!("Account is not a child tapplet account"));
         }
         Ok(ChildAccountRow {
             id: self.id,
@@ -343,7 +343,7 @@ impl AccountTypeRow {
                 let parent = account.try_into_parent()?;
                 Ok(AccountTypeRow::Parent(parent))
             },
-            "child" => {
+            "child_tapplet" => {
                 let parent_id = account
                     .parent_account_id
                     .ok_or_else(|| anyhow::anyhow!("Child account missing parent_account_id"))?;
@@ -581,7 +581,7 @@ pub async fn create_child_account_for_tapplet(
     .await?;
 
     let child_account_name = format!("{}::{}@{}", parent_account_name, tapplet_name, tapplet_version);
-    let account_type = "child";
+    let account_type = "child_tapplet";
 
     let id = sqlx::query!(
         r#"
@@ -639,7 +639,7 @@ pub async fn get_child_account(
             version,
             tapplet_pub_key
         FROM accounts
-        WHERE parent_account_id = ? AND for_tapplet_name = ? AND account_type = 'child'
+        WHERE parent_account_id = ? AND for_tapplet_name = ? AND account_type = 'child_tapplet'
        "#,
         parent_account_id,
         tapplet_name
@@ -650,4 +650,4 @@ pub async fn get_child_account(
     Ok(row)
 }
 
-// ChildAccountRow is no longer needed - child accounts are now stored in AccountRow with account_type = 'child'
+// ChildAccountRow is no longer needed - child accounts are now stored in AccountRow with account_type = 'child_tapplet'
