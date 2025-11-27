@@ -12,6 +12,7 @@ use crate::{
 use anyhow::anyhow;
 use async_trait::async_trait;
 use blake2::{Blake2b512, Blake2s, Digest, digest::Update};
+use dialoguer::Confirm;
 use regex::Regex;
 use sqlx::{SqliteConnection, SqlitePool};
 use tari_common::configuration::Network;
@@ -111,9 +112,25 @@ impl MinotariTappletApiV1 for MinotariApiProvider {
         let _view_key = RistrettoSecretKey::from_canonical_bytes(&secret_key_bytes)
             .map_err(|e| anyhow::anyhow!("Failed to create RistrettoSecretKey from bytes: {}", e))?;
 
-        let (nonce, encrypted_view_key, encrypted_spend_key) =
+        // Prompt user for confirmation
+        println!("\n⚠️  WARNING: A tapplet is requesting to add a watched view key!");
+        println!("View Key: {}", view_key);
+        println!("\nThis will allow the tapplet to watch transactions for this view key.");
+
+        let confirmation = Confirm::new()
+            .with_prompt("Do you want to allow adding this view key?")
+            .default(false)
+            .interact()
+            .map_err(|e| anyhow::anyhow!("Failed to get user confirmation: {}", e))?;
+
+        if !confirmation {
+            return Err(anyhow::anyhow!("User denied adding watched view key"));
+        }
+
+        let (_nonce, _encrypted_view_key, _encrypted_spend_key) =
             encrypt_with_password(&self.password, &secret_key_bytes, self.public_spend_key.to_vec())?;
 
+        todo!("Need to implementment properly");
         // let child_account = crate::db::create_account(
         //     &mut db,
         //     account_id,
