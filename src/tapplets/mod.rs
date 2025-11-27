@@ -86,25 +86,14 @@ pub async fn tapplet_command_handler(tapplet_subcommand: TappletCommand) -> Resu
             database_file,
             password,
         } => {
-            // Logic to run a tapplet
-            println!("Running tapplet: {} with method: {} and args: {:?}", name, method, args);
-            let mut args_map = HashMap::new();
-            for arg in args {
-                let parts: Vec<&str> = arg.splitn(2, '=').collect();
-                if parts.len() == 2 {
-                    args_map.insert(parts[0].to_string(), parts[1].to_string());
-                } else {
-                    println!("Ignoring invalid argument: {}", arg);
-                }
-            }
-            run::run_lua(
-                &account_name,
-                &database_file,
-                &password,
-                &name,
-                &method,
-                args_map,
-                cache_directory.into(),
+            run::run_interactive(
+                account_name,
+                name,
+                method,
+                args,
+                cache_directory,
+                database_file,
+                password,
             )
             .await?;
         },

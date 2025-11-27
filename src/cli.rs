@@ -237,12 +237,12 @@ pub enum TappletCommand {
         account_name: String,
         #[arg(short, long, help = "Name of the tapplet to run")]
         name: String,
-        #[arg(short, long, help = "The method to invoke on the tapplet")]
-        method: String,
+        #[arg(short, long, help = "The method to invoke on the tapplet (if not provided, will prompt interactively)")]
+        method: Option<String>,
         #[arg(
             short,
             long,
-            help = "Arguments to pass to the tapplet method",
+            help = "Arguments to pass to the tapplet method in key=value format",
             default_value = "",
             alias = "arg"
         )]

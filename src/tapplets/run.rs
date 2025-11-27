@@ -1,5 +1,6 @@
 use std::{collections::HashMap, path::PathBuf};
 
+use dialoguer::{Input, Select};
 use serde_json::Value;
 use tari_tapplet_lib::{LuaTappletHost, TappletManifest, WasmTappletHost, host::MinotariTappletApiV1};
 
@@ -124,4 +125,121 @@ pub async fn run_lua(
     print_value_as_table(&result, 0);
 
     Ok(())
+}
+
+pub async fn run_interactive(
+    account_name: String,
+    name: String,
+    method: Option<String>,
+    args: Vec<String>,
+    cache_directory: String,
+    database_file: String,
+    password: String,
+) -> Result<(), anyhow::Error> {
+    let installed_dir = PathBuf::from(&cache_directory).join("installed");
+    let tapplet_path = installed_dir.join(&name);
+
+    if !tapplet_path.exists() {
+        println!("Tapplet '{}' is not installed.", name);
+        return Err(anyhow::anyhow!("Tapplet not installed"));
+    }
+
+    // Load the tapplet configuration to get available methods
+    let config = tari_tapplet_lib::parse_tapplet_file(tapplet_path.join("manifest.toml"))?;
+
+    // Determine the method to run
+    let selected_method = if let Some(m) = method {
+        // Method was provided via CLI
+        if !config.api.methods.contains(&m) {
+            println!("Error: Method '{}' not found in tapplet.", m);
+            println!("Available methods: {}", config.api.methods.join(", "));
+            return Err(anyhow::anyhow!("Method not found"));
+        }
+        m
+    } else {
+        // Interactive method selection
+        if config.api.methods.is_empty() {
+            println!("Error: Tapplet '{}' has no available methods.", name);
+            return Err(anyhow::anyhow!("No methods available"));
+        }
+
+        println!("\nAvailable methods for tapplet '{}':", name);
+
+        // Build selection items with descriptions
+        let method_items: Vec<String> = config
+            .api
+            .methods
+            .iter()
+            .map(|method_name| {
+                if let Some(method_def) = config.api.method_definitions.get(method_name) {
+                    format!("{} - {}", method_name, method_def.description)
+                } else {
+                    method_name.clone()
+                }
+            })
+            .collect();
+
+        let selection = Select::new()
+            .with_prompt("Select a method to run")
+            .items(&method_items)
+            .default(0)
+            .interact()
+            .map_err(|e| anyhow::anyhow!("Failed to get method selection: {}", e))?;
+
+        config.api.methods[selection].clone()
+    };
+
+    // Parse arguments from CLI or prompt interactively
+    let mut args_map = HashMap::new();
+
+    // First, parse any arguments provided via CLI
+    for arg in args.iter().filter(|a| !a.is_empty()) {
+        let parts: Vec<&str> = arg.splitn(2, '=').collect();
+        if parts.len() == 2 {
+            args_map.insert(parts[0].to_string(), parts[1].to_string());
+        } else {
+            println!("Warning: Ignoring invalid argument format: {}", arg);
+        }
+    }
+
+    // Check if we need to prompt for missing parameters
+    if let Some(method_def) = config.api.method_definitions.get(&selected_method) {
+        if !method_def.params.is_empty() {
+            println!("\nMethod '{}' requires the following parameters:", selected_method);
+
+            for (param_name, param_def) in &method_def.params {
+                // Skip if already provided via CLI
+                if args_map.contains_key(param_name) {
+                    continue;
+                }
+
+                // Prompt for the parameter
+                let prompt_text = format!(
+                    "{} ({}) - {}",
+                    param_name, param_def.param_type, param_def.description
+                );
+
+                let value: String = Input::new()
+                    .with_prompt(&prompt_text)
+                    .interact_text()
+                    .map_err(|e| anyhow::anyhow!("Failed to get parameter '{}': {}", param_name, e))?;
+
+                args_map.insert(param_name.clone(), value);
+            }
+        }
+    }
+
+    // Run the tapplet
+    println!("\nRunning method '{}' on tapplet '{}'", selected_method, name);
+
+    run_lua(
+        &account_name,
+        &database_file,
+        &password,
+        &name,
+        &selected_method,
+        args_map,
+        cache_directory.into(),
+    )
+    .await
 }
