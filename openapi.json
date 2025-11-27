@@ -130,6 +130,77 @@
           }
         }
       }
+    },
+    "/accounts/{name}/lock_funds": {
+      "post": {
+        "tags": [
+          "accounts"
+        ],
+        "operationId": "api_lock_funds",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Name of the account to lock funds from",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/LockFundsRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Funds locked successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LockFundsResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Account not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
     }
   },
   "components": {
@@ -204,6 +275,17 @@
           {
             "type": "object",
             "required": [
+              "FailedToLockFunds"
+            ],
+            "properties": {
+              "FailedToLockFunds": {
+                "type": "string"
+              }
+            }
+          },
+          {
+            "type": "object",
+            "required": [
               "FailedCreateUnsignedTx"
             ],
             "properties": {
@@ -240,6 +322,91 @@
             "format": "int64",
             "default": "86400",
             "minimum": 0
+          }
+        }
+      },
+      "LockFundsRequest": {
+        "type": "object",
+        "required": [
+          "amount"
+        ],
+        "properties": {
+          "amount": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "estimated_output_size": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "minimum": 0
+          },
+          "fee_per_gram": {
+            "type": "integer",
+            "format": "int64",
+            "default": "5",
+            "minimum": 0
+          },
+          "idempotency_key": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "num_outputs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "default": "1",
+            "minimum": 0
+          },
+          "seconds_to_lock_utxos": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "default": "86400",
+            "minimum": 0
+          }
+        }
+      },
+      "LockFundsResponse": {
+        "type": "object",
+        "required": [
+          "utxos",
+          "requires_change_output",
+          "total_value",
+          "fee_without_change",
+          "fee_with_change"
+        ],
+        "properties": {
+          "fee_with_change": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "fee_without_change": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "requires_change_output": {
+            "type": "boolean"
+          },
+          "total_value": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "utxos": {
+            "type": "array",
+            "items": {
+              "type": "object"
+            }
           }
         }
       },

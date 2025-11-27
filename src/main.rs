@@ -11,12 +11,15 @@ use chacha20poly1305::{
 };
 use clap::{Parser, Subcommand};
 use minotari::{
-    daemon, db,
-    db::{get_accounts, get_balance, init_db},
+    api::accounts::LockFundsRequest,
+    daemon,
+    db::{self, get_accounts, get_balance, init_db},
     models::WalletEvent,
-    scan,
-    scan::ScanError,
-    transactions::one_sided_transaction::{OneSidedTransaction, Recipient},
+    scan::{self, ScanError},
+    transactions::{
+        lock_amount::LockAmount,
+        one_sided_transaction::{OneSidedTransaction, Recipient},
+    },
 };
 use std::str::FromStr;
 use tari_common::configuration::Network;
@@ -151,6 +154,37 @@ enum Commands {
         seconds_to_lock: u64,
         #[arg(long, help = "The Tari network to connect to", default_value_t = Network::MainNet)]
         network: Network,
+    },
+    /// Lock funds
+    LockFunds {
+        #[arg(short, long, help = "Name of the account to send from")]
+        account_name: String,
+        #[arg(
+            short,
+            long,
+            help = "Path to the output file for the unsigned transaction",
+            default_value = "data/locked_funds.json"
+        )]
+        output_file: String,
+        #[arg(short, long, help = "Path to the database file", default_value = "data/wallet.db")]
+        database_file: String,
+        #[arg(short, long, help = "Amount to lock")]
+        amount: MicroMinotari,
+        #[arg(short, long, help = "Optional number of outputs", default_value = "1")]
+        num_outputs: usize,
+        #[arg(short, long, help = "Optional fee per gram", default_value = "5")]
+        fee_per_gram: MicroMinotari,
+        #[arg(short, long, help = "Optional estimated output size")]
+        estimated_output_size: Option<usize>,
+        #[arg(
+            short,
+            long,
+            help = "Optional seconds to lock (will be unlocked if not spent)",
+            default_value = "86400"
+        )]
+        seconds_to_lock_utxos: Option<u64>,
+        #[arg(long, help = "Optional idempotency key")]
+        idempotency_key: Option<String>,
     },
 }
 
@@ -320,6 +354,28 @@ async fn main() -> Result<(), anyhow::Error> {
             )
             .await
         },
+        Commands::LockFunds {
+            account_name,
+            output_file,
+            database_file,
+            amount,
+            num_outputs,
+            fee_per_gram,
+            estimated_output_size,
+            seconds_to_lock_utxos,
+            idempotency_key,
+        } => {
+            println!("Creating unsigned transaction...");
+            let request = LockFundsRequest {
+                amount,
+                num_outputs: Some(num_outputs),
+                fee_per_gram: Some(fee_per_gram),
+                estimated_output_size,
+                seconds_to_lock_utxos,
+                idempotency_key,
+            };
+            handle_lock_funds(database_file, account_name, output_file, request).await
+        },
     }
 }
 
@@ -386,16 +442,68 @@ async fn handle_create_unsigned_transaction(
         .await?
         .ok_or_else(|| anyhow!("Account not found: {}", account_name))?;
 
+    let amount = recipients.iter().map(|r| r.amount).sum();
+    let num_outputs = recipients.len();
+    let fee_per_gram = MicroMinotari(5);
+    let estimated_output_size = None;
+
+    let lock_amount = LockAmount::new(pool.clone());
+    let locked_funds = lock_amount
+        .lock(
+            &account,
+            amount,
+            num_outputs,
+            fee_per_gram,
+            estimated_output_size,
+            idempotency_key,
+            seconds_to_lock,
+        )
+        .await
+        .map_err(|e| anyhow!("Failed to lock funds: {}", e))?;
+
     let one_sided_tx = OneSidedTransaction::new(pool.clone(), network, password.clone());
     let result = one_sided_tx
-        .create_unsigned_transaction(account, recipients, idempotency_key, seconds_to_lock)
+        .create_unsigned_transaction(&account, locked_funds, recipients, fee_per_gram)
         .await
-        .map_err(|e| anyhow!("Failed to create unsigned transaction: {}", e))?;
+        .map_err(|e| anyhow!("Failed to create an unsigned transaction: {}", e))?;
 
     create_dir_all(Path::new(&output_file).parent().unwrap())?;
     fs::write(output_file, serde_json::to_string_pretty(&result)?)?;
 
     println!("Unsigned transaction written to file.");
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_lock_funds(
+    database_file: String,
+    account_name: String,
+    output_file: String,
+    request: LockFundsRequest,
+) -> Result<(), anyhow::Error> {
+    let pool = init_db(&database_file).await?;
+    let mut conn = pool.acquire().await?;
+    let account = db::get_account_by_name(&mut conn, &account_name)
+        .await?
+        .ok_or_else(|| anyhow!("Account not found: {}", account_name))?;
+    let lock_amount = LockAmount::new(pool.clone());
+    let result = lock_amount
+        .lock(
+            &account,
+            request.amount,
+            request.num_outputs.expect("must be present"),
+            request.fee_per_gram.expect("must be present"),
+            request.estimated_output_size,
+            request.idempotency_key,
+            request.seconds_to_lock_utxos.expect("must be present"),
+        )
+        .await
+        .map_err(|e| anyhow!("Failed to lock funds: {}", e))?;
+
+    create_dir_all(Path::new(&output_file).parent().unwrap())?;
+    fs::write(output_file, serde_json::to_string_pretty(&result)?)?;
+
+    println!("Locked funds output written to file.");
     Ok(())
 }
 

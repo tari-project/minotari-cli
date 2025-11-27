@@ -77,11 +77,16 @@ impl InputSelector {
         &self,
         conn: &mut SqliteConnection,
         amount: MicroMinotari,
+        num_outputs: usize,
         fee_per_gram: MicroMinotari,
+        estimated_output_size: Option<usize>,
     ) -> Result<UtxoSelection, UtxoSelectionError> {
         let uo = crate::db::fetch_unspent_outputs(&mut *conn, self.account_id).await?;
 
-        let features_and_scripts_byte_size = self.get_features_and_scripts_byte_size()?;
+        let features_and_scripts_byte_size = match estimated_output_size {
+            Some(sz) => sz,
+            None => self.get_features_and_scripts_byte_size()?,
+        };
 
         let mut sufficient_funds = false;
         let mut utxos = Vec::new();
@@ -89,8 +94,6 @@ impl InputSelector {
         let mut total_value = MicroMinotari::zero();
         let mut fee_without_change = MicroMinotari::zero();
         let mut fee_with_change = MicroMinotari::zero();
-        // Planned output count (not counting change)
-        let num_outputs = 1;
 
         for o in uo {
             total_value += o.output.value();
