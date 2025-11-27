@@ -62,9 +62,24 @@ pub async fn scan(
                 .map_err(ScanError::FatalSqlx)?
                 .ok_or_else(|| ScanError::Fatal(anyhow::anyhow!("Parent account not found")))?
                 .try_into_parent()?;
-            let child = account.try_into_child(a)?;
+            match account.account_type.as_str() {
+                "child_tapplet" => {
+                    let child = account.try_into_child_tapplet(a)?;
 
-            AccountTypeRow::from_child_tapplet(child)
+                    AccountTypeRow::from_child_tapplet(child)
+                },
+                "child_viewkey" => {
+                    let child = account.try_into_child_viewkey()?;
+
+                    AccountTypeRow::from_child_viewkey(child)
+                },
+                other => {
+                    return Err(ScanError::Fatal(anyhow::anyhow!(
+                        "Account type '{}' is not supported for scanning",
+                        other
+                    )));
+                },
+            }
         };
 
         let key_manager = account_type_row

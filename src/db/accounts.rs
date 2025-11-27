@@ -298,7 +298,7 @@ impl AccountRow {
         })
     }
 
-    pub fn try_into_child(self, parent_row: ParentAccountRow) -> Result<ChildTappletAccountRow, anyhow::Error> {
+    pub fn try_into_child_tapplet(self, parent_row: ParentAccountRow) -> Result<ChildTappletAccountRow, anyhow::Error> {
         if self.account_type != "child_tapplet" {
             return Err(anyhow::anyhow!("Account is not a child tapplet account"));
         }
@@ -322,11 +322,47 @@ impl AccountRow {
             parent_account_row: parent_row,
         })
     }
+
+    pub fn try_into_child_viewkey(self) -> Result<ChildViewKeyAccountRow, anyhow::Error> {
+        if self.account_type != "child_viewkey" {
+            return Err(anyhow::anyhow!("Account is not a child viewkey account"));
+        }
+        Ok(ChildViewKeyAccountRow {
+            id: self.id,
+            parent_account_id: self
+                .parent_account_id
+                .ok_or_else(|| anyhow::anyhow!("Child viewkey account missing parent_account_id"))?,
+            friendly_name: self
+                .friendly_name
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("Child viewkey account missing friendly_name"))?,
+            encrypted_view_private_key: self
+                .encrypted_view_private_key
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("Child viewkey account missing encrypted_view_private_key"))?,
+            encrypted_spend_public_key: self
+                .encrypted_spend_public_key
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("Child viewkey account missing encrypted_spend_public_key"))?,
+            cipher_nonce: self
+                .cipher_nonce
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("Child viewkey account missing cipher_nonce"))?,
+            unencrypted_view_key_hash: self
+                .unencrypted_view_key_hash
+                .clone()
+                .ok_or_else(|| anyhow::anyhow!("Child viewkey account missing unencrypted_view_key_hash"))?,
+            birthday: self
+                .birthday
+                .ok_or_else(|| anyhow::anyhow!("Child viewkey account missing birthday"))?,
+        })
+    }
 }
 
 pub enum AccountTypeRow {
     Parent(ParentAccountRow),
     ChildTapplet(ChildTappletAccountRow),
+    ChildViewKey(ChildViewKeyAccountRow),
 }
 
 impl AccountTypeRow {
@@ -335,6 +371,9 @@ impl AccountTypeRow {
     }
     pub fn from_child_tapplet(child: ChildTappletAccountRow) -> Self {
         AccountTypeRow::ChildTapplet(child)
+    }
+    pub fn from_child_viewkey(child: ChildViewKeyAccountRow) -> Self {
+        AccountTypeRow::ChildViewKey(child)
     }
 
     pub async fn try_from_account(conn: &mut SqliteConnection, account: AccountRow) -> Result<Self, anyhow::Error> {
@@ -370,8 +409,12 @@ impl AccountTypeRow {
                 .fetch_one(&mut *conn)
                 .await?;
                 let parent_row = parent_account.try_into_parent()?;
-                let child = account.try_into_child(parent_row)?;
+                let child = account.try_into_child_tapplet(parent_row)?;
                 Ok(AccountTypeRow::ChildTapplet(child))
+            },
+            "child_viewkey" => {
+                let child = account.try_into_child_viewkey()?;
+                Ok(AccountTypeRow::ChildViewKey(child))
             },
             _ => Err(anyhow::anyhow!("Unknown account type")),
         }
@@ -384,6 +427,7 @@ impl AccountTypeRow {
         match self {
             AccountTypeRow::Parent(parent) => parent.decrypt_keys(password),
             AccountTypeRow::ChildTapplet(child) => child.parent_account_row.decrypt_keys(password),
+            AccountTypeRow::ChildViewKey(child) => child.decrypt_keys(password),
         }
     }
 
@@ -391,6 +435,7 @@ impl AccountTypeRow {
         match self {
             AccountTypeRow::Parent(parent) => parent.get_key_manager(password).await,
             AccountTypeRow::ChildTapplet(child) => child.get_key_manager(password).await,
+            AccountTypeRow::ChildViewKey(child) => child.get_key_manager(password).await,
         }
     }
 
@@ -398,6 +443,7 @@ impl AccountTypeRow {
         match self {
             AccountTypeRow::Parent(parent) => parent.id,
             AccountTypeRow::ChildTapplet(child) => child.id,
+            AccountTypeRow::ChildViewKey(child) => child.id,
         }
     }
 
@@ -405,6 +451,7 @@ impl AccountTypeRow {
         match self {
             AccountTypeRow::Parent(parent) => parent.friendly_name.clone(),
             AccountTypeRow::ChildTapplet(child) => child.for_tapplet_name.clone(),
+            AccountTypeRow::ChildViewKey(child) => child.friendly_name.clone(),
         }
     }
 
@@ -412,6 +459,7 @@ impl AccountTypeRow {
         match self {
             AccountTypeRow::Parent(parent) => parent.birthday,
             AccountTypeRow::ChildTapplet(child) => child.parent_account_row.birthday,
+            AccountTypeRow::ChildViewKey(child) => child.birthday,
         }
     }
 }
@@ -516,6 +564,59 @@ impl ChildTappletAccountRow {
             view_key,
             Some(self.parent_account_row.birthday as u16),
         ));
+        let key_manager = KeyManager::new(wallet_type)?;
+        Ok(key_manager)
+    }
+}
+
+pub struct ChildViewKeyAccountRow {
+    pub id: i64,
+    pub parent_account_id: i64,
+    pub friendly_name: String,
+    pub encrypted_view_private_key: Vec<u8>,
+    pub encrypted_spend_public_key: Vec<u8>,
+    pub cipher_nonce: Vec<u8>,
+    pub unencrypted_view_key_hash: Vec<u8>,
+    pub birthday: i64,
+}
+
+impl ChildViewKeyAccountRow {
+    pub fn decrypt_keys(
+        &self,
+        password: &str,
+    ) -> Result<(RistrettoSecretKey, CompressedKey<RistrettoPublicKey>), anyhow::Error> {
+        let password = if password.len() < 32 {
+            format!("{:0<32}", password)
+        } else {
+            password[..32].to_string()
+        };
+        let key_bytes: [u8; 32] = password
+            .as_bytes()
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("Password must be 32 bytes"))?;
+        let key = Key::from(key_bytes);
+        let cipher = XChaCha20Poly1305::new(&key);
+
+        let nonce_bytes: &[u8; 24] = self
+            .cipher_nonce
+            .as_slice()
+            .try_into()
+            .map_err(|_| anyhow::anyhow!("Nonce must be 24 bytes"))?;
+        let nonce = XNonce::from(*nonce_bytes);
+
+        let view_key = cipher.decrypt(&nonce, self.encrypted_view_private_key.as_ref())?;
+        let spend_key = cipher.decrypt(&nonce, self.encrypted_spend_public_key.as_ref())?;
+
+        let view_key = RistrettoSecretKey::from_canonical_bytes(&view_key).map_err(|e| anyhow::anyhow!(e))?;
+        let spend_key =
+            CompressedKey::<RistrettoPublicKey>::from_canonical_bytes(&spend_key).map_err(|e| anyhow::anyhow!(e))?;
+        Ok((view_key, spend_key))
+    }
+
+    pub async fn get_key_manager(&self, password: &str) -> Result<KeyManager, anyhow::Error> {
+        let (view_key, spend_key) = self.decrypt_keys(password)?;
+        let view_wallet = ViewWallet::new(spend_key, view_key, Some(self.birthday as u16));
+        let wallet_type = WalletType::ViewWallet(view_wallet);
         let key_manager = KeyManager::new(wallet_type)?;
         Ok(key_manager)
     }

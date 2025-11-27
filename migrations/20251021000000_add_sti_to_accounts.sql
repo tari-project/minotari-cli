@@ -7,7 +7,7 @@ PRAGMA foreign_keys=off;
 -- Create new table with additional STI columns
 CREATE TABLE accounts_new (
     id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
-    account_type TEXT NOT NULL DEFAULT 'parent' CHECK(account_type IN ('parent', 'child_tapplet')),
+    account_type TEXT NOT NULL DEFAULT 'parent' CHECK(account_type IN ('parent', 'child_tapplet', 'child_viewkey')),
     friendly_name TEXT,
     unencrypted_view_key_hash blob ,
     encrypted_view_private_key blob,
