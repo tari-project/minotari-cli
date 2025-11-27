@@ -227,6 +227,13 @@ pub enum TappletCommand {
     Uninstall {
         #[arg(short, long, help = "Name of the tapplet to uninstall")]
         name: String,
+        #[arg(
+            short,
+            long,
+            help = "Path to the cache directory",
+            default_value = "data/tapplet_cache"
+        )]
+        cache_directory: String,
     },
     Run {
         #[arg(

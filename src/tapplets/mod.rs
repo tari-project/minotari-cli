@@ -10,6 +10,7 @@ mod install;
 mod list;
 mod run;
 mod search;
+mod uninstall;
 
 pub async fn tapplet_command_handler(tapplet_subcommand: TappletCommand) -> Result<()> {
     match tapplet_subcommand {
@@ -73,9 +74,9 @@ pub async fn tapplet_command_handler(tapplet_subcommand: TappletCommand) -> Resu
                 }
             }
         },
-        TappletCommand::Uninstall { name } => {
-            // Logic to remove a tapplet
+        TappletCommand::Uninstall { name, cache_directory } => {
             println!("Uninstalling tapplet: {}", name);
+            uninstall::uninstall_tapplet(&name, cache_directory.into()).await?;
         },
         TappletCommand::Run {
             account_name,
