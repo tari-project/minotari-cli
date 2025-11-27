@@ -1,10 +1,10 @@
 use std::path::PathBuf;
 
-use tari_tapplet_lib::{TappletConfig, TappletRegistry};
+use tari_tapplet_lib::{TappletManifest, TappletRegistry};
 
 use crate::tapplets::default_registries::get_default_registries;
 
-pub async fn search_tapplets(query: &str, cache_directory: PathBuf) -> Result<Vec<TappletConfig>, anyhow::Error> {
+pub async fn search_tapplets(query: &str, cache_directory: PathBuf) -> Result<Vec<TappletManifest>, anyhow::Error> {
     println!("Searching for tapplets matching: {}", query);
     let mut results = Vec::new();
     for (reg_name, reg_url) in get_default_registries() {

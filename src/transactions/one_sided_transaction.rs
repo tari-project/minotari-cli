@@ -12,10 +12,7 @@ use tari_transaction_components::{
     transaction_components::{MemoField, OutputFeatures, memo_field::TxType},
 };
 
-use crate::{
-    api::types::LockFundsResponse,
-    db::{AccountRow, ParentAccountRow},
-};
+use crate::db::ParentAccountRow;
 
 #[derive(Debug, Clone)]
 pub struct Recipient {

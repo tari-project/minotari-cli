@@ -1,7 +1,7 @@
 use std::{collections::HashMap, path::PathBuf};
 
 use serde_json::Value;
-use tari_tapplet_lib::{LuaTappletHost, TappletConfig, WasmTappletHost, host::MinotariTappletApiV1};
+use tari_tapplet_lib::{LuaTappletHost, TappletManifest, WasmTappletHost, host::MinotariTappletApiV1};
 
 use crate::tapplets::api::MinotariApiProvider;
 
@@ -15,29 +15,29 @@ fn print_value_as_table(value: &Value, indent: usize) {
                     Value::Object(_) | Value::Array(_) => {
                         println!("{}{}", prefix, key);
                         print_value_as_table(val, indent + 1);
-                    }
+                    },
                     _ => {
                         println!("{}{}  {}", prefix, key, format_value(val));
-                    }
+                    },
                 }
             }
-        }
+        },
         Value::Array(arr) => {
             for (idx, val) in arr.iter().enumerate() {
                 match val {
                     Value::Object(_) | Value::Array(_) => {
                         println!("{}[{}]", prefix, idx);
                         print_value_as_table(val, indent + 1);
-                    }
+                    },
                     _ => {
                         println!("{}[{}]  {}", prefix, idx, format_value(val));
-                    }
+                    },
                 }
             }
-        }
+        },
         _ => {
             println!("{}{}", prefix, format_value(value));
-        }
+        },
     }
 }
 

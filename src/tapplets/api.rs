@@ -7,6 +7,7 @@ use crate::{
         lock_amount::LockAmount,
         one_sided_transaction::{OneSidedTransaction, Recipient},
     },
+    util::encrypt_with_password,
 };
 use anyhow::anyhow;
 use async_trait::async_trait;
@@ -20,7 +21,7 @@ use tari_crypto::{
     keys::SecretKey,
     ristretto::{RistrettoPublicKey, RistrettoSecretKey},
 };
-use tari_tapplet_lib::{TappletConfig, host::MinotariTappletApiV1};
+use tari_tapplet_lib::{TappletManifest, host::MinotariTappletApiV1};
 use tari_transaction_components::MicroMinotari;
 use tari_utilities::ByteArray;
 
@@ -51,7 +52,7 @@ fn memo_pattern_for_slot(slot: &str) -> String {
 impl MinotariApiProvider {
     pub async fn try_create(
         account_name: String,
-        tapplet_config: &TappletConfig,
+        tapplet_config: &TappletManifest,
         database_file: PathBuf,
         password: String,
     ) -> Result<Self, anyhow::Error> {
@@ -103,6 +104,29 @@ impl MinotariApiProvider {
 
 #[async_trait]
 impl MinotariTappletApiV1 for MinotariApiProvider {
+    async fn add_watched_viewkey(&self, view_key: &str) -> Result<(), anyhow::Error> {
+        let secret_key_bytes =
+            hex::decode(view_key).map_err(|e| anyhow::anyhow!("Failed to decode view key from hex: {}", e))?;
+        // Confirm valid key
+        let _view_key = RistrettoSecretKey::from_canonical_bytes(&secret_key_bytes)
+            .map_err(|e| anyhow::anyhow!("Failed to create RistrettoSecretKey from bytes: {}", e))?;
+
+        let (nonce, encrypted_view_key, encrypted_spend_key) =
+            encrypt_with_password(&self.password, &secret_key_bytes, self.public_spend_key.to_vec())?;
+
+        // let child_account = crate::db::create_account(
+        //     &mut db,
+        //     account_id,
+        //     &self.account_name,
+        //     tapplet_name,
+        //     tapplet_version,
+        //     &tapplet.config.public_key,
+        // )
+        // .await?;
+        // TODO
+        Ok(())
+    }
+
     async fn append_data(&self, slot: &str, value: &str) -> Result<(), anyhow::Error> {
         println!("Appending data to slot '{}': {}", slot, value);
 

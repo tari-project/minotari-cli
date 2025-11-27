@@ -13,3 +13,4 @@ pub use crate::models::WalletEvent;
 pub use crate::scan::ScanError;
 pub mod cli;
 pub mod tapplets;
+pub mod util;

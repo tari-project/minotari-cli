@@ -1,4 +1,5 @@
 use std::{
+    env,
     fs::{self, create_dir_all},
     path::Path,
 };
@@ -10,6 +11,7 @@ use chacha20poly1305::{
     aead::{Aead, OsRng},
 };
 use clap::{Parser, Subcommand};
+use minotari::util::encrypt_with_password;
 use minotari::{
     api::accounts::LockFundsRequest,
     daemon,
@@ -46,7 +48,13 @@ use minotari::tapplets::tapplet_command_handler;
 async fn main() -> Result<(), anyhow::Error> {
     let cli = Cli::parse();
 
-    tracing_subscriber::fmt::init();
+    // Initialize tracing with environment variable support
+    // Set RUST_LOG=lightweight_wallet_libs=warn,minotari=info to see warnings from the library
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            env::var("RUST_LOG").unwrap_or_else(|_| "lightweight_wallet_libs=info,minotari=info".to_string()),
+        )
+        .init();
 
     match cli.command {
         Commands::CreateAddress { password, output_file } => {
@@ -398,21 +406,8 @@ async fn init_with_view_key(
     let view_key_bytes = hex::decode(view_private_key)?;
     let spend_key_bytes = hex::decode(spend_public_key)?;
 
-    let password = if password.len() < 32 {
-        format!("{:0<32}", password)
-    } else {
-        password[..32].to_string()
-    };
-    let key_bytes: [u8; 32] = password
-        .as_bytes()
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("Password must be 32 bytes"))?;
-    let key = Key::from(key_bytes);
-    let cipher = XChaCha20Poly1305::new(&key);
-
-    let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
-    let encrypted_view_key = cipher.encrypt(&nonce, view_key_bytes.as_ref())?;
-    let encrypted_spend_key = cipher.encrypt(&nonce, spend_key_bytes.as_ref())?;
+    let (nonce, encrypted_view_key, encrypted_spend_key) =
+        encrypt_with_password(password, &view_key_bytes, spend_key_bytes)?;
 
     // create a hash of the viewkey to determine duplicate wallets
     let view_key_hash = hash_view_key(&view_key_bytes);
