@@ -28,7 +28,7 @@ use utoipa::ToSchema;
 pub async fn create_account(
     conn: &mut SqliteConnection,
     friendly_name: &str,
-    encryptd_view_private_key: &[u8],
+    encrypted_view_private_key: &[u8],
     encrypted_spend_public_key: &[u8],
     cipher_nonce: &[u8],
     unencrypted_view_key_hash: &[u8],
@@ -45,11 +45,46 @@ pub async fn create_account(
         VALUES (?, ?, ?, ?, ?, ?)
         "#,
         friendly_name,
-        encryptd_view_private_key,
+        encrypted_view_private_key,
         encrypted_spend_public_key,
         cipher_nonce,
         unencrypted_view_key_hash,
         birthday
+    )
+    .execute(&mut *conn)
+    .await?;
+
+    Ok(())
+}
+pub async fn create_child_viewkey_account(
+    conn: &mut SqliteConnection,
+    friendly_name: &str,
+    encrypted_view_private_key: &[u8],
+    encrypted_spend_public_key: &[u8],
+    cipher_nonce: &[u8],
+    unencrypted_view_key_hash: &[u8],
+    parent_account_id: Id,
+    birthday: i64,
+) -> Result<(), sqlx::Error> {
+    sqlx::query!(
+        r#"
+        INSERT INTO accounts (friendly_name, 
+        account_type,
+          encrypted_view_private_key, 
+          encrypted_spend_public_key, 
+          cipher_nonce, 
+          unencrypted_view_key_hash,
+          birthday,
+          parent_account_id)
+        VALUES (?, 'child_viewkey', ?, ?, ?, ?, ?, ?)
+        "#,
+        friendly_name,
+        encrypted_view_private_key,
+        encrypted_spend_public_key,
+        cipher_nonce,
+        unencrypted_view_key_hash,
+        birthday,
+        parent_account_id
     )
     .execute(&mut *conn)
     .await?;

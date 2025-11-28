@@ -1,3 +1,4 @@
+use core::hash;
 use std::{fs, path::PathBuf, sync::Arc};
 
 use crate::{
@@ -7,7 +8,7 @@ use crate::{
         lock_amount::LockAmount,
         one_sided_transaction::{OneSidedTransaction, Recipient},
     },
-    util::encrypt_with_password,
+    util::{encrypt_with_password, hash_view_key},
 };
 use anyhow::anyhow;
 use async_trait::async_trait;
@@ -105,7 +106,7 @@ impl MinotariApiProvider {
 
 #[async_trait]
 impl MinotariTappletApiV1 for MinotariApiProvider {
-    async fn add_watched_viewkey(&self, view_key: &str) -> Result<(), anyhow::Error> {
+    async fn add_watched_viewkey(&self, view_key: &str, birthday: u64) -> Result<(), anyhow::Error> {
         let secret_key_bytes =
             hex::decode(view_key).map_err(|e| anyhow::anyhow!("Failed to decode view key from hex: {}", e))?;
         // Confirm valid key
@@ -127,20 +128,24 @@ impl MinotariTappletApiV1 for MinotariApiProvider {
             return Err(anyhow::anyhow!("User denied adding watched view key"));
         }
 
-        let (_nonce, _encrypted_view_key, _encrypted_spend_key) =
+        let (nonce, encrypted_view_key, encrypted_spend_key) =
             encrypt_with_password(&self.password, &secret_key_bytes, self.public_spend_key.to_vec())?;
 
-        todo!("Need to implementment properly");
-        // let child_account = crate::db::create_account(
-        //     &mut db,
-        //     account_id,
-        //     &self.account_name,
-        //     tapplet_name,
-        //     tapplet_version,
-        //     &tapplet.config.public_key,
-        // )
-        // .await?;
-        // TODO
+        let hashed_view_key = hash_view_key(&secret_key_bytes);
+        let path = self.db_file.to_string_lossy();
+        let db = SqlitePool::connect(&path).await?;
+        let mut conn = db.acquire().await?;
+        let child_account = crate::db::create_child_viewkey_account(
+            &mut conn,
+            "viewkey_account",
+            encrypted_view_key.as_ref(),
+            encrypted_spend_key.as_ref(),
+            nonce.as_ref(),
+            hashed_view_key.as_ref(),
+            self.child_account_id,
+            birthday as i64,
+        )
+        .await?;
         Ok(())
     }
 

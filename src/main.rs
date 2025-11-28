@@ -11,7 +11,7 @@ use chacha20poly1305::{
     aead::{Aead, OsRng},
 };
 use clap::{Parser, Subcommand};
-use minotari::util::encrypt_with_password;
+use minotari::util::{encrypt_with_password, hash_view_key};
 use minotari::{
     api::accounts::LockFundsRequest,
     daemon,
@@ -425,11 +425,4 @@ async fn init_with_view_key(
     .await?;
 
     Ok(())
-}
-
-fn hash_view_key(view_key: &[u8]) -> Vec<u8> {
-    let mut hasher = Blake2s256::new();
-    hasher.update(b"view_key_hash");
-    hasher.update(view_key);
-    hasher.finalize().to_vec()
 }
