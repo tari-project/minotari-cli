@@ -58,6 +58,33 @@ pub enum WalletEventType {
         tx_id: String,
         reason: String,
     },
+    TransactionBroadcast {
+        tx_id: String,
+        kernel_excess: Vec<u8>,
+    },
+    TransactionMined {
+        tx_id: String,
+        block_height: u64,
+        block_hash: Vec<u8>,
+    },
+    TransactionUnconfirmed {
+        tx_id: String,
+        mined_height: u64,
+        confirmations: u64,
+    },
+    TransactionConfirmed {
+        tx_id: String,
+        mined_height: u64,
+        confirmation_height: u64,
+    },
+    TransactionRejected {
+        tx_id: String,
+        reason: String,
+    },
+    TransactionReorged {
+        tx_id: String,
+        original_mined_height: u64,
+    },
 }
 
 impl WalletEventType {
@@ -68,6 +95,12 @@ impl WalletEventType {
             WalletEventType::OutputConfirmed { .. } => "OutputConfirmed".to_string(),
             WalletEventType::OutputRolledBack { .. } => "OutputRolledBack".to_string(),
             WalletEventType::PendingTransactionCancelled { .. } => "PendingTransactionCancelled".to_string(),
+            WalletEventType::TransactionBroadcast { .. } => "TransactionBroadcast".to_string(),
+            WalletEventType::TransactionMined { .. } => "TransactionMined".to_string(),
+            WalletEventType::TransactionUnconfirmed { .. } => "TransactionUnconfirmed".to_string(),
+            WalletEventType::TransactionConfirmed { .. } => "TransactionConfirmed".to_string(),
+            WalletEventType::TransactionRejected { .. } => "TransactionRejected".to_string(),
+            WalletEventType::TransactionReorged { .. } => "TransactionReorged".to_string(),
         }
     }
 }

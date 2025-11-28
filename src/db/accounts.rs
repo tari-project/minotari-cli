@@ -1,7 +1,7 @@
 use chacha20poly1305::{Key, KeyInit, XChaCha20Poly1305, XNonce, aead::Aead};
 use serde::Serialize;
 use sqlx::SqliteConnection;
-use std::sync::{Arc, LazyLock};
+use std::sync::LazyLock;
 use tari_common::configuration::Network;
 use tari_common_types::{
     tari_address::{TariAddress, TariAddressFeatures},

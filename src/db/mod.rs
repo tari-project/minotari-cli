@@ -16,15 +16,27 @@ pub use scanned_tip_blocks::{
 
 mod outputs;
 pub use outputs::{
-    DbWalletOutput, fetch_unspent_outputs, get_output_details_for_balance_change_by_id, get_output_info_by_hash,
-    get_unconfirmed_outputs, insert_output, lock_output, mark_output_confirmed, soft_delete_outputs_from_height,
-    unlock_outputs_for_request, update_output_status,
+    DbWalletOutput, fetch_outputs_by_lock_request_id, fetch_unspent_outputs,
+    get_output_details_for_balance_change_by_id, get_output_info_by_hash, get_unconfirmed_outputs, insert_output,
+    lock_output, mark_output_confirmed, soft_delete_outputs_from_height, unlock_outputs_for_request,
+    unlock_outputs_for_request as unlock_outputs_for_pending_transaction, update_output_status,
 };
 
 mod pending_transactions;
 pub use pending_transactions::{
-    PendingTransaction, cancel_pending_transactions_by_ids, create_pending_transaction,
-    find_expired_pending_transactions, find_pending_transaction_by_idempotency_key, update_pending_transaction_status,
+    PendingTransaction, cancel_pending_transactions_by_ids, check_if_transaction_is_expired_by_idempotency_key,
+    check_if_transaction_was_already_completed_by_idempotency_key, create_pending_transaction,
+    find_expired_pending_transactions, find_pending_transaction_by_idempotency_key,
+    find_pending_transaction_locked_funds_by_idempotency_key, update_pending_transaction_status,
+};
+
+mod completed_transactions;
+pub use completed_transactions::{
+    CompletedTransaction, CompletedTransactionStatus, create_completed_transaction, get_completed_transaction_by_id,
+    get_completed_transactions_by_status, mark_completed_transaction_as_broadcasted,
+    mark_completed_transaction_as_confirmed, mark_completed_transaction_as_mined_unconfirmed,
+    mark_completed_transaction_as_rejected, reset_mined_completed_transactions_from_height,
+    revert_completed_transaction_to_completed, update_completed_transaction_status,
 };
 
 mod events;

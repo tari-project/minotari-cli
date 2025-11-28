@@ -286,7 +286,7 @@ async fn main() -> Result<(), anyhow::Error> {
             batch_size,
         } => {
             println!("Scanning blockchain...");
-            let events = scan(
+            let (events, _more_blocks_to_scan) = scan(
                 &password,
                 &base_url,
                 &database_file,
@@ -450,7 +450,7 @@ async fn handle_create_unsigned_transaction(
     let lock_amount = LockAmount::new(pool.clone());
     let locked_funds = lock_amount
         .lock(
-            &account,
+            account.id,
             amount,
             num_outputs,
             fee_per_gram,
@@ -489,7 +489,7 @@ async fn handle_lock_funds(
     let lock_amount = LockAmount::new(pool.clone());
     let result = lock_amount
         .lock(
-            &account,
+            account.id,
             request.amount,
             request.num_outputs.expect("must be present"),
             request.fee_per_gram.expect("must be present"),
@@ -514,7 +514,7 @@ async fn scan(
     account_name: Option<&str>,
     max_blocks: u64,
     batch_size: u64,
-) -> Result<Vec<WalletEvent>, ScanError> {
+) -> Result<(Vec<WalletEvent>, bool), ScanError> {
     scan::scan(password, base_url, database_file, account_name, max_blocks, batch_size).await
 }
 

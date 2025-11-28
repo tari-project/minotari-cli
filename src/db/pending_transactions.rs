@@ -1,3 +1,5 @@
+use std::str::FromStr;
+
 use crate::models::PendingTransactionStatus;
 use chrono::{DateTime, Utc};
 use sqlx::{Error as SqlxError, SqliteConnection};
@@ -17,7 +19,6 @@ pub enum PendingTransactionError {
 
 pub struct PendingTransaction {
     pub id: Uuid,
-    pub idempotency_key: String,
     pub account_id: i64,
     pub status: PendingTransactionStatus,
     pub requires_change_output: bool,
@@ -39,7 +40,7 @@ pub async fn create_pending_transaction(
     fee_with_change: MicroMinotari,
     expires_at: DateTime<Utc>,
 ) -> Result<String, PendingTransactionError> {
-    let id = Uuid::new_v4().to_string();
+    let id: String = Uuid::new_v4().to_string();
     let status_pending = PendingTransactionStatus::Pending.to_string();
     let total_value = total_value.as_u64() as i64;
     let fee_without_change = fee_without_change.as_u64() as i64;
@@ -129,7 +130,7 @@ pub async fn update_pending_transaction_status(
     Ok(())
 }
 
-pub async fn find_pending_transaction_by_idempotency_key(
+pub async fn find_pending_transaction_locked_funds_by_idempotency_key(
     conn: &mut SqliteConnection,
     idempotency_key: &str,
     account_id: i64,
@@ -167,6 +168,95 @@ pub async fn find_pending_transaction_by_idempotency_key(
         },
         None => Ok(None),
     }
+}
+
+pub async fn find_pending_transaction_by_idempotency_key(
+    conn: &mut SqliteConnection,
+    idempotency_key: &str,
+    account_id: i64,
+) -> Result<Option<PendingTransaction>, SqlxError> {
+    let status_pending = PendingTransactionStatus::Pending.to_string();
+    let res = sqlx::query!(
+        r#"
+        SELECT
+            id,
+            account_id,
+            status,
+            requires_change_output,
+            total_value,
+            fee_without_change,
+            fee_with_change,
+            expires_at,
+            created_at
+        FROM pending_transactions
+        WHERE idempotency_key = ? AND account_id = ? AND status = ?
+        "#,
+        idempotency_key,
+        account_id,
+        status_pending
+    )
+    .fetch_optional(&mut *conn)
+    .await?;
+
+    Ok(res.map(|row| PendingTransaction {
+        id: Uuid::parse_str(&row.id).expect("Invalid UUID stored in database"),
+        account_id: row.account_id,
+        status: PendingTransactionStatus::from_str(&row.status).expect("Invalid status stored in database"),
+        requires_change_output: row.requires_change_output,
+        total_value: MicroMinotari::from(row.total_value as u64),
+        fee_without_change: MicroMinotari::from(row.fee_without_change as u64),
+        fee_with_change: MicroMinotari::from(row.fee_with_change as u64),
+        expires_at: DateTime::<Utc>::from_naive_utc_and_offset(row.expires_at, Utc),
+        created_at: DateTime::<Utc>::from_naive_utc_and_offset(row.created_at, Utc),
+    }))
+}
+
+pub async fn check_if_transaction_was_already_completed_by_idempotency_key(
+    conn: &mut SqliteConnection,
+    idempotency_key: &str,
+    account_id: i64,
+) -> Result<bool, SqlxError> {
+    let status_pending = PendingTransactionStatus::Completed.to_string();
+    let res = sqlx::query!(
+        r#"
+        SELECT
+            id
+        FROM pending_transactions
+        WHERE idempotency_key = ? AND account_id = ? AND status = ?
+        LIMIT 1
+        "#,
+        idempotency_key,
+        account_id,
+        status_pending
+    )
+    .fetch_optional(&mut *conn)
+    .await?;
+
+    Ok(res.is_some())
+}
+
+pub async fn check_if_transaction_is_expired_by_idempotency_key(
+    conn: &mut SqliteConnection,
+    idempotency_key: &str,
+    account_id: i64,
+) -> Result<bool, SqlxError> {
+    let status_pending = PendingTransactionStatus::Pending.to_string();
+    let res = sqlx::query!(
+        r#"
+        SELECT
+            id
+        FROM pending_transactions
+        WHERE idempotency_key = ? AND account_id = ? AND status = ? AND expires_at < CURRENT_TIMESTAMP
+        LIMIT 1
+        "#,
+        idempotency_key,
+        account_id,
+        status_pending
+    )
+    .fetch_optional(&mut *conn)
+    .await?;
+
+    Ok(res.is_some())
 }
 
 pub async fn cancel_pending_transactions_by_ids(

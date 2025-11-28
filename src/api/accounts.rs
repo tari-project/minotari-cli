@@ -129,7 +129,7 @@ pub async fn api_lock_funds(
     let lock_amount = LockAmount::new(app_state.db_pool.clone());
     let response = lock_amount
         .lock(
-            &account,
+            account.id,
             body.amount,
             body.num_outputs.expect("must be defaulted"),
             body.fee_per_gram.expect("must be defaulted"),
@@ -185,7 +185,7 @@ pub async fn api_create_unsigned_transaction(
     let lock_amount = LockAmount::new(app_state.db_pool.clone());
     let locked_funds = lock_amount
         .lock(
-            &account,
+            account.id,
             amount,
             num_outputs,
             fee_per_gram,

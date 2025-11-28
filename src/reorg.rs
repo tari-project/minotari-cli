@@ -144,5 +144,14 @@ async fn rollback_from_height(
     db::soft_delete_outputs_from_height(tx, account_id, reorg_start_height).await?;
     db::delete_scanned_tip_blocks_from_height(tx, account_id, reorg_start_height).await?;
 
+    // 5. Reset completed transactions that were mined at or after reorg height back to Completed status
+    let affected_count = db::reset_mined_completed_transactions_from_height(tx, account_id, reorg_start_height).await?;
+    if affected_count > 0 {
+        println!(
+            "Reset {} completed transaction(s) to Completed status due to reorg",
+            affected_count
+        );
+    }
+
     Ok(())
 }
