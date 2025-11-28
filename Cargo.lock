@@ -1961,7 +1961,6 @@ dependencies = [
  "tari_utilities",
  "thiserror 2.0.17",
  "tokio",
- "tonic",
  "url",
  "utoipa",
  "utoipa-swagger-ui",
