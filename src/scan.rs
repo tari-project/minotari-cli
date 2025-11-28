@@ -30,7 +30,6 @@ pub enum ScanError {
     #[error("Intermittent error: {0}")]
     Intermittent(String),
 }
-/// Returns a vector of wallet events generated during the scan and a boolean indicating if more blocks are available to scan.
 pub async fn scan(
     password: &str,
     base_url: &str,

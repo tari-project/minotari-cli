@@ -62,11 +62,6 @@ pub enum WalletEventType {
         tx_id: String,
         kernel_excess: Vec<u8>,
     },
-    TransactionMined {
-        tx_id: String,
-        block_height: u64,
-        block_hash: Vec<u8>,
-    },
     TransactionUnconfirmed {
         tx_id: String,
         mined_height: u64,
@@ -96,7 +91,6 @@ impl WalletEventType {
             WalletEventType::OutputRolledBack { .. } => "OutputRolledBack".to_string(),
             WalletEventType::PendingTransactionCancelled { .. } => "PendingTransactionCancelled".to_string(),
             WalletEventType::TransactionBroadcast { .. } => "TransactionBroadcast".to_string(),
-            WalletEventType::TransactionMined { .. } => "TransactionMined".to_string(),
             WalletEventType::TransactionUnconfirmed { .. } => "TransactionUnconfirmed".to_string(),
             WalletEventType::TransactionConfirmed { .. } => "TransactionConfirmed".to_string(),
             WalletEventType::TransactionRejected { .. } => "TransactionRejected".to_string(),
@@ -105,8 +99,6 @@ impl WalletEventType {
     }
 }
 
-// Clone used during event notification.
-// Debug used in TU logging
 #[derive(Debug, Clone)]
 pub struct BalanceChange {
     pub account_id: Id,

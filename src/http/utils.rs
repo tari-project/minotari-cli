@@ -28,7 +28,6 @@ impl std::fmt::Display for TransactionTooLargeError {
 
 impl std::error::Error for TransactionTooLargeError {}
 
-/// Verify that the transaction is not too large to be broadcast.
 pub fn check_transaction_size(transaction: &Transaction) -> Result<(), TransactionTooLargeError> {
     let serialized = serde_json::to_vec(transaction).map_err(|_| TransactionTooLargeError {
         got: 0,

@@ -170,23 +170,6 @@ impl TransactionSender {
                 estimated_output_size,
             )
             .await?;
-
-        // ===========================
-
-        //     match res {
-        // Some(row) => {
-        //     let id_str = row.id;
-        //     let utxos = fetch_outputs_by_lock_request_id(conn, &id_str).await?;
-        //     Ok(Some(LockFundsResponse {
-        //         utxos: utxos.into_iter().map(|db_out| db_out.output).collect(),
-        //         requires_change_output: row.requires_change_output,
-        //         total_value: MicroMinotari::from(row.total_value as u64),
-        //         fee_without_change: MicroMinotari::from(row.fee_without_change as u64),
-        //         fee_with_change: MicroMinotari::from(row.fee_with_change as u64),
-        //     }))
-        // },
-        // None => Ok(None),
-
         Ok(utxo_selection)
     }
 
@@ -323,7 +306,7 @@ impl TransactionSender {
         Ok(result)
     }
 
-    pub async fn mark_transaction_as_signed(
+    pub async fn finalize_trasaction_and_broadcast(
         &self,
         signed_transaction: SignedOneSidedTransactionResult,
         grpc_address: String,

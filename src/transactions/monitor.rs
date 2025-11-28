@@ -196,7 +196,6 @@ impl TransactionMonitor {
         if response.accepted {
             Ok(())
         } else if response.rejection_reason == TxSubmissionRejectionReason::AlreadyMined {
-            // Transaction already mined - treat as success, will be picked up by mining check
             Ok(())
         } else {
             Err(format!("Transaction rejected: {}", response.rejection_reason))
@@ -207,7 +206,6 @@ impl TransactionMonitor {
         wallet_client: &WalletHttpClient,
         tx: &CompletedTransaction,
     ) -> Result<Option<(u64, Vec<u8>)>> {
-        // Deserialize the transaction to extract the kernel signature
         let transaction: Transaction =
             serde_json::from_slice(&tx.serialized_transaction).map_err(|e| anyhow!("Deserialization failed: {}", e))?;
 

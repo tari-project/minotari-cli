@@ -304,6 +304,7 @@ pub async fn reset_mined_completed_transactions_from_height(
 ) -> Result<u64, SqlxError> {
     let status_completed = CompletedTransactionStatus::Completed.to_string();
     let status_unconfirmed = CompletedTransactionStatus::MinedUnconfirmed.to_string();
+    let status_confirmed = CompletedTransactionStatus::MinedConfirmed.to_string();
     let height = reorg_height as i64;
     let now = Utc::now();
 
@@ -312,12 +313,13 @@ pub async fn reset_mined_completed_transactions_from_height(
         UPDATE completed_transactions
         SET status = ?, mined_height = NULL, mined_block_hash = NULL, 
             confirmation_height = NULL, broadcast_attempts = 0, updated_at = ?
-        WHERE account_id = ? AND status = ? AND mined_height >= ?
+        WHERE account_id = ? AND (status = ? OR status = ?) AND mined_height >= ?
         "#,
         status_completed,
         now,
         account_id,
         status_unconfirmed,
+        status_confirmed,
         height
     )
     .execute(&mut *conn)
