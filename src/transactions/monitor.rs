@@ -193,9 +193,7 @@ impl TransactionMonitor {
             .await
             .map_err(|e| format!("Broadcast failed: {}", e))?;
 
-        if response.accepted {
-            Ok(())
-        } else if response.rejection_reason == TxSubmissionRejectionReason::AlreadyMined {
+        if response.accepted || response.rejection_reason == TxSubmissionRejectionReason::AlreadyMined {
             Ok(())
         } else {
             Err(format!("Transaction rejected: {}", response.rejection_reason))

@@ -17,13 +17,11 @@ use tari_transaction_components::{
 use tari_utilities::ByteArray;
 
 use crate::{
-    api::types::LockFundsResponse,
-    db::{self, AccountRow, PendingTransaction},
+    db::{self, AccountRow},
     http::{TxSubmissionRejectionReason, WalletHttpClient},
     models::PendingTransactionStatus,
     transactions::{
         input_selector::{InputSelector, UtxoSelection},
-        lock_amount::LockAmount,
         one_sided_transaction::Recipient,
     },
 };
@@ -104,7 +102,7 @@ impl TransactionSender {
     ) -> Result<(), anyhow::Error> {
         let mut conn = self.db_pool.acquire().await?;
         if db::check_if_transaction_was_already_completed_by_idempotency_key(
-            &mut *conn,
+            &mut conn,
             &processed_transaction.idempotency_key,
             self.account.id,
         )
@@ -132,7 +130,7 @@ impl TransactionSender {
     ) -> Result<(), anyhow::Error> {
         let mut conn = self.db_pool.acquire().await?;
         let is_expired = db::check_if_transaction_is_expired_by_idempotency_key(
-            &mut *conn,
+            &mut conn,
             &processed_transaction.idempotency_key,
             self.account.id,
         )
@@ -140,8 +138,8 @@ impl TransactionSender {
 
         if is_expired {
             db::update_pending_transaction_status(
-                &mut *conn,
-                &processed_transaction.id(),
+                &mut conn,
+                processed_transaction.id(),
                 PendingTransactionStatus::Expired,
             )
             .await?;
@@ -180,7 +178,7 @@ impl TransactionSender {
         let mut connection = self.get_connection().await?;
 
         let expires_at = Utc::now() + Duration::seconds(processed_transaction.seconds_to_lock_utxos as i64);
-        let utxo_selection = self.create_utxo_selection(&processed_transaction).await?;
+        let utxo_selection = self.create_utxo_selection(processed_transaction).await?;
 
         let pending_tx_id = db::create_pending_transaction(
             &mut connection,
@@ -217,13 +215,13 @@ impl TransactionSender {
         let mut connection = self.get_connection().await?;
 
         let response = db::find_pending_transaction_by_idempotency_key(
-            &mut *connection,
+            &mut connection,
             &processed_transaction.idempotency_key,
             self.account.id,
         )
         .await?;
         if let Some(pending_tx) = response {
-            return Ok(pending_tx.id.to_string());
+            Ok(pending_tx.id.to_string())
         } else {
             let pending_tx_id = self.create_pending_transaction(processed_transaction).await?;
             Ok(pending_tx_id)
@@ -268,7 +266,7 @@ impl TransactionSender {
         let mut utxo_selection = processed_transaction.selected_utxos.clone();
         if utxo_selection.is_empty() {
             let db_utxo_selection =
-                db::fetch_outputs_by_lock_request_id(&mut connection, &processed_transaction.id()).await?;
+                db::fetch_outputs_by_lock_request_id(&mut connection, processed_transaction.id()).await?;
             utxo_selection = db_utxo_selection.into_iter().map(|db_out| db_out.output).collect();
         }
 
@@ -315,7 +313,7 @@ impl TransactionSender {
         let processed_transaction = &self.processed_transactions;
         let account_id = self.account.id;
 
-        self.check_if_transaction_expired(&processed_transaction).await?;
+        self.check_if_transaction_expired(processed_transaction).await?;
 
         let kernel_excess = signed_transaction
             .signed_transaction
@@ -333,11 +331,11 @@ impl TransactionSender {
             .signed_transaction
             .sent_hashes
             .first()
-            .map(|h| hex::encode(h));
+            .map(hex::encode);
 
         db::update_pending_transaction_status(
             &mut connection,
-            &processed_transaction.id(),
+            processed_transaction.id(),
             crate::models::PendingTransactionStatus::Completed,
         )
         .await?;
@@ -345,7 +343,7 @@ impl TransactionSender {
         let completed_tx_id = db::create_completed_transaction(
             &mut connection,
             account_id,
-            &processed_transaction.id(),
+            processed_transaction.id(),
             &kernel_excess,
             &serialized_transaction,
             sent_payref,

@@ -1,3 +1,6 @@
+use std::fmt;
+use std::str::FromStr;
+
 use chrono::{DateTime, Utc};
 use sqlx::{Error as SqlxError, SqliteConnection};
 use uuid::Uuid;
@@ -12,19 +15,23 @@ pub enum CompletedTransactionStatus {
     Canceled,
 }
 
-impl CompletedTransactionStatus {
-    pub fn to_string(&self) -> String {
+impl fmt::Display for CompletedTransactionStatus {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            CompletedTransactionStatus::Completed => "completed".to_string(),
-            CompletedTransactionStatus::Broadcast => "broadcast".to_string(),
-            CompletedTransactionStatus::MinedUnconfirmed => "mined_unconfirmed".to_string(),
-            CompletedTransactionStatus::MinedConfirmed => "mined_confirmed".to_string(),
-            CompletedTransactionStatus::Rejected => "rejected".to_string(),
-            CompletedTransactionStatus::Canceled => "canceled".to_string(),
+            CompletedTransactionStatus::Completed => write!(f, "completed"),
+            CompletedTransactionStatus::Broadcast => write!(f, "broadcast"),
+            CompletedTransactionStatus::MinedUnconfirmed => write!(f, "mined_unconfirmed"),
+            CompletedTransactionStatus::MinedConfirmed => write!(f, "mined_confirmed"),
+            CompletedTransactionStatus::Rejected => write!(f, "rejected"),
+            CompletedTransactionStatus::Canceled => write!(f, "canceled"),
         }
     }
+}
 
-    pub fn from_str(s: &str) -> Result<Self, String> {
+impl FromStr for CompletedTransactionStatus {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "completed" => Ok(CompletedTransactionStatus::Completed),
             "broadcast" => Ok(CompletedTransactionStatus::Broadcast),

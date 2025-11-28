@@ -4,7 +4,6 @@ use std::{
 };
 
 use anyhow::anyhow;
-use blake2::{Blake2s256, Digest};
 use chacha20poly1305::{
     AeadCore, Key, KeyInit, XChaCha20Poly1305,
     aead::{Aead, OsRng},
