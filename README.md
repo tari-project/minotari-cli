@@ -1,11 +1,15 @@
 # Minotari CLI Wallet Example
 
-A command-line lightweight wallet implementation for the Tari blockchain network. This wallet uses view-only keys to scan the blockchain for transactions without requiring a full node.
+A command-line lightweight wallet implementation for the Tari blockchain
+network. This wallet uses view-only keys to scan the blockchain for
+transactions without requiring a full node.
 
 ## Features
 
-- **View-Only Wallet**: Import and manage wallets using view keys and spend public keys
-- **Blockchain Scanning**: Efficiently scan the blockchain for outputs and track confirmations
+- **View-Only Wallet**: Import and manage wallets using view keys and spend
+  public keys
+- **Blockchain Scanning**: Efficiently scan the blockchain for outputs and track
+  confirmations
 - **Balance Tracking**: Monitor account balances with detailed transaction history
 - **Reorg Detection**: Automatically detects and handles blockchain reorganizations
 - **Encrypted Storage**: Wallet keys are encrypted using XChaCha20-Poly1305
@@ -50,6 +54,7 @@ cargo run --bin minotari -- import-view-key \
 ```
 
 **Parameters:**
+
 - `--view-private-key`: Your view private key in hexadecimal format
 - `--spend-public-key`: Your spend public key in hexadecimal format
 - `--password`: Password to encrypt the wallet (minimum 32 characters recommended)
@@ -70,6 +75,7 @@ cargo run --bin minotari -- scan \
 ```
 
 **Parameters:**
+
 - `--password`: Password used to decrypt the wallet
 - `--base-url`: Tari RPC endpoint URL (default: `https://rpc.tari.com`)
 - `--database-file`: Path to the database file (default: `data/wallet.db`)
@@ -88,12 +94,14 @@ cargo run --bin minotari -- balance \
 ```
 
 **Parameters:**
+
 - `--database-file`: Path to the database file (default: `data/wallet.db`)
 - `--account-name`: Optional account name (shows all accounts if not specified)
 
 ## Database
 
 The wallet uses SQLite to store:
+
 - **Accounts**: Encrypted wallet keys and metadata
 - **Outputs**: Detected outputs with confirmation status
 - **Inputs**: Spent outputs (inputs to transactions)
@@ -172,7 +180,9 @@ sqlx migrate run
 
 ### OpenAPI Specification
 
-The OpenAPI specification (`openapi.json`) is generated from the API definitions. If the API changes, you need to regenerate the `openapi.json` file using the following command:
+The OpenAPI specification (`openapi.json`) is generated from the API
+definitions. If the API changes, you need to regenerate the `openapi.json` file
+using the following command:
 
 ```bash
 cargo run --bin generate-openapi
@@ -187,5 +197,3 @@ cargo run --bin generate-openapi
 - **tokio**: Async runtime
 
 ## Contributing
-
-
