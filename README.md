@@ -13,12 +13,25 @@ A command-line lightweight wallet implementation for the Tari blockchain network
 - **Memo Support**: Parse and display payment memos attached to transactions
 - **Multi-Account**: Support for multiple wallet accounts in a single database
 
+## Build
 
+- A starting database is required to build the application.
+  - [Install the prerequisite tooling.](#prerequisites)
+  - [Create a database file](#create) if you don't have one.
 
-### Build
+Then, you can build as usual:
 
 ```bash
 cargo build --release
+```
+
+### Prerequisites
+
+- Rust toolchain (2024 edition)
+- [SQLx CLI](https://crates.io/crates/sqlx) for database migrations
+
+```bash
+cargo install sqlx-cli --no-default-features --features sqlite
 ```
 
 ## Usage
@@ -88,9 +101,28 @@ The wallet uses SQLite to store:
 - **Wallet Events**: Timeline of wallet activity
 - **Scanned Blocks**: Track scanning progress and detect reorgs
 
+### Create
+
+- A database is required for building the application.
+
+```shell
+mkdir -p data
+sqlx database create
+sqlx migrate run
+```
+
 ### Migrations
 
-Database migrations are located in the `migrations/` directory. To reset the database:
+- Database migrations are located in the `migrations/` directory.
+- It is always recommended that you backup your `data/wallet.db` if it's precious.
+
+```shell
+sqlx migrate run
+```
+
+### Reset
+
+To reset the database via a powershell script:
 
 ```powershell
 # PowerShell
@@ -156,11 +188,4 @@ cargo run --bin generate-openapi
 
 ## Contributing
 
-### Prerequisites
 
-- Rust toolchain (2024 edition)
-- SQLx CLI for database migrations
-
-```bash
-cargo install sqlx-cli --no-default-features --features sqlite
-```
