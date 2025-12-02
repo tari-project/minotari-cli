@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            SELECT output_hash, confirmed_height, status, wallet_output_json\n            FROM outputs\n            WHERE id = ? AND deleted_at IS NULL\n            ",
+  "describe": {
+    "columns": [
+      {
+        "name": "output_hash",
+        "ordinal": 0,
+        "type_info": "Blob"
+      },
+      {
+        "name": "confirmed_height",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "status",
+        "ordinal": 2,
+        "type_info": "Text"
+      },
+      {
+        "name": "wallet_output_json",
+        "ordinal": 3,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      true,
+      false,
+      true
+    ]
+  },
+  "hash": "b326276785642676105efbeb4d077c154f359cbdc677bc2d052230375a163669"
+}

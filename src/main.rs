@@ -14,11 +14,12 @@ use minotari::{
     daemon,
     db::{self, get_accounts, get_balance, init_db},
     models::WalletEvent,
-    scan::{self, ScanError},
+    scan::{self, scan::ScanError},
     transactions::{
         lock_amount::LockAmount,
         one_sided_transaction::{OneSidedTransaction, Recipient},
     },
+    utils,
 };
 use std::str::FromStr;
 use tari_common::configuration::Network;
@@ -514,7 +515,14 @@ async fn scan(
     max_blocks: u64,
     batch_size: u64,
 ) -> Result<(Vec<WalletEvent>, bool), ScanError> {
-    scan::scan(password, base_url, database_file, account_name, max_blocks, batch_size).await
+    let mut scanner =
+        scan::Scanner::new(password, base_url, database_file, batch_size).mode(scan::ScanMode::Partial { max_blocks });
+
+    if let Some(name) = account_name {
+        scanner = scanner.account(name);
+    }
+
+    scanner.run().await
 }
 
 async fn init_with_view_key(
@@ -524,7 +532,7 @@ async fn init_with_view_key(
     database_file: &str,
     birthday: u16,
 ) -> Result<(), anyhow::Error> {
-    scan::init_with_view_key(
+    utils::init_with_view_key(
         view_private_key,
         spend_public_key,
         password,

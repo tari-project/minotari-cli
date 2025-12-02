@@ -21,6 +21,10 @@ use crate::{
     http::{TxSubmissionRejectionReason, WalletHttpClient},
     models::PendingTransactionStatus,
     transactions::{
+        displayed_transaction_processor::{
+            DisplayedTransaction, DisplayedTransactionBuilder, TransactionDirection, TransactionDisplayStatus,
+            TransactionInput, TransactionSource,
+        },
         input_selector::{InputSelector, UtxoSelection},
         one_sided_transaction::Recipient,
     },
@@ -304,16 +308,22 @@ impl TransactionSender {
         Ok(result)
     }
 
-    pub async fn finalize_trasaction_and_broadcast(
+    pub async fn finalize_transaction_and_broadcast(
         &self,
         signed_transaction: SignedOneSidedTransactionResult,
         grpc_address: String,
-    ) -> Result<(), anyhow::Error> {
+    ) -> Result<DisplayedTransaction, anyhow::Error> {
         let mut connection = self.get_connection().await?;
         let processed_transaction = &self.processed_transactions;
         let account_id = self.account.id;
 
         self.check_if_transaction_expired(processed_transaction).await?;
+
+        // Extract transaction info from the signed result for building DisplayedTransaction
+        let tx_info = &signed_transaction.request.info;
+        let actual_fee = tx_info.fee.as_u64();
+        // Get the first recipient's amount (for one-sided transactions there's typically one recipient)
+        let recipient_amount = tx_info.recipients.first().map(|r| r.amount.as_u64()).unwrap_or(0);
 
         let kernel_excess = signed_transaction
             .signed_transaction
@@ -332,6 +342,14 @@ impl TransactionSender {
             .sent_hashes
             .first()
             .map(hex::encode);
+
+        // Collect sent_output_hashes before moving signed_transaction
+        let sent_output_hashes: Vec<String> = signed_transaction
+            .signed_transaction
+            .sent_hashes
+            .iter()
+            .map(hex::encode)
+            .collect();
 
         db::update_pending_transaction_status(
             &mut connection,
@@ -386,6 +404,62 @@ impl TransactionSender {
             },
         }
 
-        Ok(())
+        // Build and return DisplayedTransaction for immediate UI display
+        // Use actual values from signed transaction instead of estimates
+        let displayed_transaction = self.build_pending_displayed_transaction(
+            processed_transaction,
+            sent_output_hashes,
+            &completed_tx_id,
+            recipient_amount,
+            actual_fee,
+        )?;
+
+        Ok(displayed_transaction)
+    }
+
+    /// Build a DisplayedTransaction for a pending (just broadcasted) transaction.
+    ///
+    /// This creates a transaction representation that can be immediately displayed
+    /// in the UI while waiting for the scanner to detect it on-chain.
+    fn build_pending_displayed_transaction(
+        &self,
+        processed_tx: &ProcessedTransaction,
+        sent_output_hashes: Vec<String>,
+        completed_tx_id: &str,
+        amount: u64,
+        fee: u64,
+    ) -> Result<DisplayedTransaction, anyhow::Error> {
+        let recipient = &processed_tx.recipient;
+        let now = Utc::now().naive_utc();
+
+        // Build inputs from selected UTXOs
+        let inputs: Vec<TransactionInput> = processed_tx
+            .selected_utxos
+            .iter()
+            .map(|utxo| TransactionInput {
+                output_hash: hex::encode(utxo.output_hash().as_bytes()),
+                amount: utxo.value().as_u64(),
+                matched_output_id: None,
+                is_matched: false,
+            })
+            .collect();
+
+        let tx = DisplayedTransactionBuilder::new()
+            .id(completed_tx_id)
+            .account_id(self.account.id)
+            .direction(TransactionDirection::Outgoing)
+            .status(TransactionDisplayStatus::Pending)
+            .source(TransactionSource::OneSided)
+            .credits_and_debits(0, amount + fee)
+            .message(recipient.payment_id.clone())
+            .counterparty(Some(recipient.address.to_base58()), None)
+            .blockchain_info(0, now, 0) // No block height yet
+            .fee(Some(fee))
+            .inputs(inputs)
+            .sent_output_hashes(sent_output_hashes)
+            .build()
+            .map_err(|e| anyhow!("Failed to build displayed transaction: {}", e))?;
+
+        Ok(tx)
     }
 }

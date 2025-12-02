@@ -1,0 +1,261 @@
+use sqlx::SqlitePool;
+
+use super::builder::DisplayedTransactionBuilder;
+use super::error::ProcessorError;
+use super::formatting::{address_to_emoji, determine_transaction_source};
+use super::grouping::{BalanceChangeGrouper, GroupedTransaction, build_input_hash_map};
+use super::resolver::{DatabaseResolver, InMemoryResolver, ProcessingContext, TransactionDataResolver};
+use super::types::{
+    DisplayedTransaction, TransactionDisplayStatus, TransactionInput, TransactionOutput, TransactionSource,
+};
+use crate::db;
+use crate::models::{BalanceChange, Id};
+use crate::scan::{DetectedOutput, SpentInput};
+
+/// Processes balance changes into user-displayable transactions.
+pub struct DisplayedTransactionProcessor {
+    current_tip_height: u64,
+}
+
+impl DisplayedTransactionProcessor {
+    pub fn new(current_tip_height: u64) -> Self {
+        Self { current_tip_height }
+    }
+
+    pub async fn process_balance_changes(
+        &self,
+        balance_changes: Vec<BalanceChange>,
+        context: ProcessingContext<'_>,
+    ) -> Result<Vec<DisplayedTransaction>, ProcessorError> {
+        match context {
+            ProcessingContext::Database(pool) => {
+                let resolver = DatabaseResolver::new(pool);
+                self.process_with_resolver(balance_changes, &resolver).await
+            },
+            ProcessingContext::InMemory {
+                detected_outputs,
+                spent_inputs,
+            } => {
+                let resolver = InMemoryResolver::new(detected_outputs, spent_inputs);
+                self.process_with_resolver(balance_changes, &resolver).await
+            },
+        }
+    }
+
+    pub async fn process_with_resolver<R: TransactionDataResolver>(
+        &self,
+        balance_changes: Vec<BalanceChange>,
+        resolver: &R,
+    ) -> Result<Vec<DisplayedTransaction>, ProcessorError> {
+        if balance_changes.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let input_hash_map = build_input_hash_map(&balance_changes, resolver).await?;
+
+        let grouper = BalanceChangeGrouper::new(resolver);
+        let groups = grouper.group(balance_changes, &input_hash_map).await?;
+
+        let mut transactions = Vec::with_capacity(groups.len());
+        for group in groups {
+            let tx = self.build_transaction(group, resolver).await?;
+            transactions.push(tx);
+        }
+
+        self.match_inputs(&mut transactions, resolver).await?;
+
+        Ok(transactions)
+    }
+
+    pub async fn process_all_stored(
+        &self,
+        account_id: Id,
+        db_pool: &SqlitePool,
+    ) -> Result<Vec<DisplayedTransaction>, ProcessorError> {
+        let mut conn = db_pool.acquire().await?;
+        self.process_all_stored_with_conn(account_id, &mut conn, db_pool).await
+    }
+
+    pub async fn process_all_stored_with_conn(
+        &self,
+        account_id: Id,
+        conn: &mut sqlx::SqliteConnection,
+        db_pool: &SqlitePool,
+    ) -> Result<Vec<DisplayedTransaction>, ProcessorError> {
+        let balance_changes = db::get_all_balance_changes_by_account_id(conn, account_id).await?;
+
+        if balance_changes.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        let context = ProcessingContext::Database(db_pool);
+        let mut transactions = self.process_balance_changes(balance_changes, context).await?;
+
+        transactions.sort_by(|a, b| b.blockchain.timestamp.cmp(&a.blockchain.timestamp));
+
+        Ok(transactions)
+    }
+
+    async fn build_transaction<R: TransactionDataResolver>(
+        &self,
+        group: GroupedTransaction,
+        resolver: &R,
+    ) -> Result<DisplayedTransaction, ProcessorError> {
+        let total_credit = group.output_change.as_ref().map(|c| c.balance_credit).unwrap_or(0);
+        let total_debit: u64 = group.input_changes.iter().map(|c| c.balance_debit).sum();
+
+        let (outputs, output_type_str, coinbase_extra, is_coinbase) =
+            self.collect_output_details(&group, resolver).await?;
+
+        let inputs = self.collect_input_details(&group, resolver).await?;
+
+        let source = self.determine_source(&group, is_coinbase);
+        let status = self.determine_status(group.effective_height);
+        let (counterparty_addr, counterparty_emoji) = self.determine_counterparty(&group, total_credit, total_debit);
+
+        let confirmations = self.current_tip_height.saturating_sub(group.effective_height);
+
+        DisplayedTransactionBuilder::new()
+            .account_id(group.account_id)
+            .source(source)
+            .status(status)
+            .credits_and_debits(total_credit, total_debit)
+            .message(group.memo_parsed)
+            .counterparty(counterparty_addr, counterparty_emoji)
+            .blockchain_info(group.effective_height, group.effective_date, confirmations)
+            .fee(group.claimed_fee)
+            .inputs(inputs)
+            .outputs(outputs)
+            .output_type(output_type_str)
+            .coinbase_extra(coinbase_extra)
+            .memo_hex(group.memo_hex)
+            .build()
+    }
+
+    async fn collect_output_details<R: TransactionDataResolver>(
+        &self,
+        group: &GroupedTransaction,
+        resolver: &R,
+    ) -> Result<(Vec<TransactionOutput>, Option<String>, Option<String>, bool), ProcessorError> {
+        let mut outputs = Vec::new();
+        let mut output_type_str: Option<String> = None;
+        let mut coinbase_extra: Option<String> = None;
+        let mut is_coinbase = false;
+
+        if let Some(ref output_change) = group.output_change {
+            if let Some(details) = resolver.get_output_details(output_change).await? {
+                is_coinbase = details.is_coinbase;
+                output_type_str = Some(details.output_type.clone());
+                coinbase_extra = details.coinbase_extra.clone();
+
+                outputs.push(TransactionOutput {
+                    hash: details.hash_hex,
+                    amount: output_change.balance_credit,
+                    status: details.status,
+                    confirmed_height: details.confirmed_height,
+                    output_type: details.output_type,
+                    is_change: false,
+                });
+            }
+        }
+
+        Ok((outputs, output_type_str, coinbase_extra, is_coinbase))
+    }
+
+    async fn collect_input_details<R: TransactionDataResolver>(
+        &self,
+        group: &GroupedTransaction,
+        resolver: &R,
+    ) -> Result<Vec<TransactionInput>, ProcessorError> {
+        let mut inputs = Vec::new();
+
+        for input_change in &group.input_changes {
+            if let Some(output_hash_hex) = resolver.get_input_output_hash(input_change).await? {
+                inputs.push(TransactionInput {
+                    output_hash: output_hash_hex,
+                    amount: input_change.balance_debit,
+                    matched_output_id: None,
+                    is_matched: false,
+                });
+            }
+        }
+
+        Ok(inputs)
+    }
+
+    fn determine_source(&self, group: &GroupedTransaction, is_coinbase: bool) -> TransactionSource {
+        let has_sender = group.sender.is_some();
+        let has_recipient = group.recipient.is_some();
+        determine_transaction_source(is_coinbase, has_sender, has_recipient)
+    }
+
+    fn determine_status(&self, effective_height: u64) -> TransactionDisplayStatus {
+        let confirmations = self.current_tip_height.saturating_sub(effective_height);
+        if confirmations > 0 {
+            TransactionDisplayStatus::Confirmed
+        } else {
+            TransactionDisplayStatus::Pending
+        }
+    }
+
+    fn determine_counterparty(
+        &self,
+        group: &GroupedTransaction,
+        total_credit: u64,
+        total_debit: u64,
+    ) -> (Option<String>, Option<String>) {
+        if total_debit > total_credit {
+            (
+                group.recipient.clone(),
+                group.recipient.as_ref().and_then(|a| address_to_emoji(a)),
+            )
+        } else {
+            (
+                group.sender.clone(),
+                group.sender.as_ref().and_then(|a| address_to_emoji(a)),
+            )
+        }
+    }
+
+    async fn match_inputs<R: TransactionDataResolver>(
+        &self,
+        transactions: &mut [DisplayedTransaction],
+        resolver: &R,
+    ) -> Result<(), ProcessorError> {
+        let output_map = resolver.build_output_hash_map().await?;
+
+        for tx in transactions.iter_mut() {
+            for input in &mut tx.details.inputs {
+                if let Some(&output_id) = output_map.get(&input.output_hash) {
+                    input.matched_output_id = Some(output_id);
+                    input.is_matched = true;
+                }
+            }
+        }
+
+        Ok(())
+    }
+}
+
+#[allow(dead_code)]
+pub async fn process_in_memory(
+    balance_changes: Vec<BalanceChange>,
+    detected_outputs: &[DetectedOutput],
+    spent_inputs: &[SpentInput],
+    tip_height: u64,
+) -> Result<Vec<DisplayedTransaction>, ProcessorError> {
+    let processor = DisplayedTransactionProcessor::new(tip_height);
+    let resolver = InMemoryResolver::new(detected_outputs, spent_inputs);
+    processor.process_with_resolver(balance_changes, &resolver).await
+}
+
+#[allow(dead_code)]
+pub async fn process_from_database(
+    balance_changes: Vec<BalanceChange>,
+    db_pool: &SqlitePool,
+    tip_height: u64,
+) -> Result<Vec<DisplayedTransaction>, ProcessorError> {
+    let processor = DisplayedTransactionProcessor::new(tip_height);
+    let resolver = DatabaseResolver::new(db_pool);
+    processor.process_with_resolver(balance_changes, &resolver).await
+}

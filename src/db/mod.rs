@@ -3,15 +3,12 @@ use std::{env::current_dir, fs};
 use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
 
 mod accounts;
-pub use accounts::{
-    ACCOUNT_CREATION_CHANNEL, AccountBalance, AccountRow, create_account, get_account_by_name, get_accounts,
-    get_balance,
-};
+pub use accounts::{AccountBalance, AccountRow, create_account, get_account_by_name, get_accounts, get_balance};
 
 mod scanned_tip_blocks;
 pub use scanned_tip_blocks::{
-    SCANNED_TIP_BLOCK_CHANNEL, delete_scanned_tip_blocks_from_height, get_latest_scanned_tip_block_by_account,
-    get_scanned_tip_blocks_by_account, insert_scanned_tip_block, prune_scanned_tip_blocks,
+    delete_scanned_tip_blocks_from_height, get_latest_scanned_tip_block_by_account, get_scanned_tip_blocks_by_account,
+    insert_scanned_tip_block, prune_scanned_tip_blocks,
 };
 
 mod outputs;
@@ -40,10 +37,10 @@ pub use completed_transactions::{
 };
 
 mod events;
-pub use events::{EVENT_CHANNEL, insert_wallet_event};
+pub use events::insert_wallet_event;
 
 mod balance_changes;
-pub use balance_changes::{BALANCE_CHANGE_CHANNEL, get_all_balance_changes_by_account_id, insert_balance_change};
+pub use balance_changes::{get_all_balance_changes_by_account_id, insert_balance_change};
 
 mod inputs;
 pub use inputs::{get_input_details_for_balance_change_by_id, insert_input, soft_delete_inputs_from_height};

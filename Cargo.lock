@@ -1940,6 +1940,7 @@ name = "minotari"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
  "blake2",
  "chacha20poly1305",
@@ -1961,6 +1962,7 @@ dependencies = [
  "tari_utilities",
  "thiserror 2.0.17",
  "tokio",
+ "tokio-util",
  "url",
  "utoipa",
  "utoipa-swagger-ui",
@@ -4214,13 +4216,14 @@ dependencies = [
 
 [[package]]
 name = "tokio-util"
-version = "0.7.16"
+version = "0.7.17"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "14307c986784f72ef81c89db7d9e28d6ac26d16213b109ea501696195e6e3ce5"
+checksum = "2efa149fe76073d6e8fd97ef4f4eca7b67f599660115591483572e406e165594"
 dependencies = [
  "bytes 1.10.1",
  "futures-core",
  "futures-sink",
+ "futures-util",
  "pin-project-lite",
  "tokio",
 ]

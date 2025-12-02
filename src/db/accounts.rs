@@ -1,7 +1,6 @@
 use chacha20poly1305::{Key, KeyInit, XChaCha20Poly1305, XNonce, aead::Aead};
 use serde::Serialize;
 use sqlx::SqliteConnection;
-use std::sync::LazyLock;
 use tari_common::configuration::Network;
 use tari_common_types::{
     tari_address::{TariAddress, TariAddressFeatures},
@@ -17,17 +16,7 @@ use tari_transaction_components::key_manager::wallet_types::ViewWallet;
 use tari_transaction_components::key_manager::wallet_types::WalletType;
 
 use tari_utilities::byte_array::ByteArray;
-use tokio::sync::{
-    Mutex,
-    mpsc::{Receiver, Sender},
-};
 use utoipa::ToSchema;
-
-pub static ACCOUNT_CREATION_CHANNEL: LazyLock<(Sender<AccountRow>, Mutex<Receiver<AccountRow>>)> =
-    LazyLock::new(|| {
-        let (tx, rx) = tokio::sync::mpsc::channel(100);
-        (tx, Mutex::new(rx))
-    });
 
 pub async fn create_account(
     conn: &mut SqliteConnection,
@@ -38,7 +27,7 @@ pub async fn create_account(
     unencrypted_view_key_hash: &[u8],
     birthday: i64,
 ) -> Result<(), sqlx::Error> {
-    let query_result = sqlx::query!(
+    sqlx::query!(
         r#"
         INSERT INTO accounts (friendly_name, 
           encrypted_view_private_key, 
@@ -57,22 +46,6 @@ pub async fn create_account(
     )
     .execute(&mut *conn)
     .await?;
-
-    // Notify listeners about the new account
-    // Do not fail because of notification failure
-    let _unused = ACCOUNT_CREATION_CHANNEL
-        .0
-        .send(AccountRow {
-            id: query_result.last_insert_rowid(),
-            friendly_name: friendly_name.to_string(),
-            encrypted_view_private_key: encryptd_view_private_key.to_vec(),
-            encrypted_spend_public_key: encrypted_spend_public_key.to_vec(),
-            cipher_nonce: cipher_nonce.to_vec(),
-            unencrypted_view_key_hash: Some(unencrypted_view_key_hash.to_vec()),
-            birthday,
-        })
-        .await
-        .map_err(|e| sqlx::Error::Protocol(e.to_string()));
 
     Ok(())
 }
