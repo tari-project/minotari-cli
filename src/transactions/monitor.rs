@@ -1,8 +1,11 @@
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+
 use anyhow::{Result, anyhow};
 use sqlx::SqliteConnection;
 
 use crate::db::{
-    self, CompletedTransaction, CompletedTransactionStatus, get_completed_transactions_by_status,
+    self, CompletedTransaction, CompletedTransactionStatus, get_pending_completed_transactions,
     mark_completed_transaction_as_broadcasted, mark_completed_transaction_as_confirmed,
     mark_completed_transaction_as_mined_unconfirmed, mark_completed_transaction_as_rejected,
     revert_completed_transaction_to_completed,
@@ -17,21 +20,161 @@ use tari_utilities::ByteArray;
 const REQUIRED_CONFIRMATIONS: u64 = 6;
 const MAX_BROADCAST_ATTEMPTS: i32 = 10;
 
-pub struct TransactionMonitor;
+#[derive(Clone)]
+pub struct MonitoringState {
+    needs_monitoring: Arc<AtomicBool>,
+}
+
+impl Default for MonitoringState {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MonitoringState {
+    pub fn new() -> Self {
+        Self {
+            needs_monitoring: Arc::new(AtomicBool::new(false)),
+        }
+    }
+
+    pub async fn initialize(&self, conn: &mut SqliteConnection, account_id: i64) -> Result<()> {
+        let pending = get_pending_completed_transactions(conn, account_id).await?;
+        self.needs_monitoring.store(!pending.is_empty(), Ordering::SeqCst);
+        Ok(())
+    }
+
+    pub fn signal_transaction_broadcast(&self) {
+        self.needs_monitoring.store(true, Ordering::SeqCst);
+    }
+
+    pub fn is_monitoring_needed(&self) -> bool {
+        self.needs_monitoring.load(Ordering::SeqCst)
+    }
+
+    fn disable_monitoring(&self) {
+        self.needs_monitoring.store(false, Ordering::SeqCst);
+    }
+}
+
+struct PendingTransactionsByStatus {
+    completed: Vec<CompletedTransaction>,
+    broadcast: Vec<CompletedTransaction>,
+    mined_unconfirmed: Vec<CompletedTransaction>,
+}
+
+impl PendingTransactionsByStatus {
+    fn from_transactions(transactions: Vec<CompletedTransaction>) -> Self {
+        let mut result = Self {
+            completed: Vec::new(),
+            broadcast: Vec::new(),
+            mined_unconfirmed: Vec::new(),
+        };
+
+        for tx in transactions {
+            match tx.status {
+                CompletedTransactionStatus::Completed => result.completed.push(tx),
+                CompletedTransactionStatus::Broadcast => result.broadcast.push(tx),
+                CompletedTransactionStatus::MinedUnconfirmed => result.mined_unconfirmed.push(tx),
+                CompletedTransactionStatus::MinedConfirmed
+                | CompletedTransactionStatus::Rejected
+                | CompletedTransactionStatus::Canceled => {},
+            }
+        }
+
+        result
+    }
+
+    fn remaining_count(&self) -> usize {
+        self.completed.len() + self.broadcast.len() + self.mined_unconfirmed.len()
+    }
+}
+
+pub struct TransactionMonitor {
+    state: MonitoringState,
+}
 
 impl TransactionMonitor {
-    pub async fn monitor_transactions(
+    pub fn new(state: MonitoringState) -> Self {
+        Self { state }
+    }
+
+    pub async fn monitor_if_needed(
+        &self,
         scanner: &mut HttpBlockchainScanner<KeyManager>,
         wallet_client: &WalletHttpClient,
         conn: &mut SqliteConnection,
         account_id: i64,
         current_chain_height: u64,
     ) -> Result<Vec<WalletEvent>> {
+        if !self.state.is_monitoring_needed() {
+            return Ok(Vec::new());
+        }
+
+        let pending_transactions = get_pending_completed_transactions(conn, account_id).await?;
+
+        if pending_transactions.is_empty() {
+            self.state.disable_monitoring();
+            return Ok(Vec::new());
+        }
+
+        let by_status = PendingTransactionsByStatus::from_transactions(pending_transactions);
+        let initial_count = by_status.remaining_count();
+
+        let events = self
+            .process_pending_transactions(
+                scanner,
+                wallet_client,
+                conn,
+                account_id,
+                current_chain_height,
+                by_status,
+            )
+            .await?;
+
+        // If all transactions moved to terminal states, disable monitoring
+        let terminal_transitions = events
+            .iter()
+            .filter(|e| {
+                matches!(
+                    e.event_type,
+                    WalletEventType::TransactionConfirmed { .. } | WalletEventType::TransactionRejected { .. }
+                )
+            })
+            .count();
+
+        if terminal_transitions >= initial_count {
+            self.state.disable_monitoring();
+        }
+
+        Ok(events)
+    }
+
+    async fn process_pending_transactions(
+        &self,
+        scanner: &mut HttpBlockchainScanner<KeyManager>,
+        wallet_client: &WalletHttpClient,
+        conn: &mut SqliteConnection,
+        account_id: i64,
+        current_chain_height: u64,
+        by_status: PendingTransactionsByStatus,
+    ) -> Result<Vec<WalletEvent>> {
         let mut events = Vec::new();
 
-        events.extend(Self::rebroadcast_completed_transactions(wallet_client, conn, account_id).await?);
-        events.extend(Self::check_broadcast_for_mining(wallet_client, conn, account_id).await?);
-        events.extend(Self::check_confirmation_status(scanner, conn, account_id, current_chain_height).await?);
+        events.extend(
+            Self::rebroadcast_completed_transactions(wallet_client, conn, account_id, by_status.completed).await?,
+        );
+        events.extend(Self::check_broadcast_for_mining(wallet_client, conn, account_id, by_status.broadcast).await?);
+        events.extend(
+            Self::check_confirmation_status(
+                scanner,
+                conn,
+                account_id,
+                current_chain_height,
+                by_status.mined_unconfirmed,
+            )
+            .await?,
+        );
 
         Ok(events)
     }
@@ -40,13 +183,11 @@ impl TransactionMonitor {
         wallet_client: &WalletHttpClient,
         conn: &mut SqliteConnection,
         account_id: i64,
+        transactions: Vec<CompletedTransaction>,
     ) -> Result<Vec<WalletEvent>> {
         let mut events = Vec::new();
 
-        let completed_txs =
-            get_completed_transactions_by_status(conn, account_id, CompletedTransactionStatus::Completed).await?;
-
-        for tx in completed_txs {
+        for tx in transactions {
             if tx.broadcast_attempts >= MAX_BROADCAST_ATTEMPTS {
                 let reason = format!("Exceeded {} broadcast attempts", MAX_BROADCAST_ATTEMPTS);
                 mark_completed_transaction_as_rejected(conn, &tx.id, &reason).await?;
@@ -102,13 +243,11 @@ impl TransactionMonitor {
         wallet_client: &WalletHttpClient,
         conn: &mut SqliteConnection,
         account_id: i64,
+        transactions: Vec<CompletedTransaction>,
     ) -> Result<Vec<WalletEvent>> {
         let mut events = Vec::new();
 
-        let broadcast_txs =
-            get_completed_transactions_by_status(conn, account_id, CompletedTransactionStatus::Broadcast).await?;
-
-        for tx in broadcast_txs {
+        for tx in transactions {
             if let Some((block_height, block_hash)) = Self::find_kernel_on_chain(wallet_client, &tx).await? {
                 mark_completed_transaction_as_mined_unconfirmed(conn, &tx.id, block_height as i64, &block_hash).await?;
 
@@ -133,14 +272,11 @@ impl TransactionMonitor {
         conn: &mut SqliteConnection,
         account_id: i64,
         current_height: u64,
+        transactions: Vec<CompletedTransaction>,
     ) -> Result<Vec<WalletEvent>> {
         let mut events = Vec::new();
 
-        let unconfirmed_txs =
-            get_completed_transactions_by_status(conn, account_id, CompletedTransactionStatus::MinedUnconfirmed)
-                .await?;
-
-        for tx in unconfirmed_txs {
+        for tx in transactions {
             let mined_height = match tx.mined_height {
                 Some(h) => h as u64,
                 None => continue,

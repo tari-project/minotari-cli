@@ -10,6 +10,7 @@ use thiserror::Error;
 use crate::{
     db,
     db::AccountRow,
+    http::WalletHttpClient,
     models::WalletEvent,
     scan::{
         block_processor::{BlockProcessor, BlockProcessorError},
@@ -19,6 +20,7 @@ use crate::{
         },
         reorg,
     },
+    transactions::{MonitoringState, TransactionMonitor},
 };
 
 const BIRTHDAY_GENESIS_FROM_UNIX_EPOCH: u64 = 1640995200;
@@ -49,6 +51,8 @@ struct ScanContext {
     account_id: i64,
     scan_config: ScanConfig,
     reorg_check_interval: u64,
+    wallet_client: WalletHttpClient,
+    transaction_monitor: TransactionMonitor,
 }
 
 impl ScanContext {
@@ -144,6 +148,7 @@ async fn prepare_account_scan(
     batch_size: u64,
     processing_threads: usize,
     reorg_check_interval: u64,
+    monitoring_state: MonitoringState,
     conn: &mut SqliteConnection,
 ) -> Result<ScanContext, ScanError> {
     let key_manager = account.get_key_manager(password).await.map_err(ScanError::Fatal)?;
@@ -168,11 +173,27 @@ async fn prepare_account_scan(
         .with_start_height(start_height)
         .with_batch_size(batch_size);
 
+    let wallet_client = WalletHttpClient::new(
+        base_url
+            .parse()
+            .map_err(|e| ScanError::Fatal(anyhow::anyhow!("{}", e)))?,
+    )
+    .map_err(|e| ScanError::Fatal(e.into()))?;
+
+    monitoring_state
+        .initialize(conn, account.id)
+        .await
+        .map_err(ScanError::Fatal)?;
+
+    let transaction_monitor = TransactionMonitor::new(monitoring_state);
+
     Ok(ScanContext {
         scanner,
         account_id: account.id,
         scan_config,
         reorg_check_interval,
+        wallet_client,
+        transaction_monitor,
     })
 }
 
@@ -278,6 +299,21 @@ async fn run_scan_loop<E: EventSender + Clone>(
         if let Some(last_block) = scanned_blocks.last() {
             last_scanned_height = last_block.height;
             blocks_since_reorg_check += scanned_blocks.len() as u64;
+
+            // Monitor pending transactions after processing blocks
+            let monitor_events = scanner_context
+                .transaction_monitor
+                .monitor_if_needed(
+                    &mut scanner_context.scanner,
+                    &scanner_context.wallet_client,
+                    conn,
+                    scanner_context.account_id,
+                    last_scanned_height,
+                )
+                .await
+                .map_err(ScanError::Fatal)?;
+
+            all_events.extend(monitor_events);
         }
 
         if more_blocks && blocks_since_reorg_check >= scanner_context.reorg_check_interval {
@@ -422,6 +458,8 @@ impl Scanner {
         let accounts = db::get_accounts(&mut conn, Some(&account_name)).await?;
 
         for account in accounts {
+            let monitoring_state = MonitoringState::new();
+
             let mut scan_context = prepare_account_scan(
                 &account,
                 &self.password,
@@ -429,6 +467,7 @@ impl Scanner {
                 self.batch_size,
                 self.processing_threads,
                 self.reorg_check_interval,
+                monitoring_state,
                 &mut conn,
             )
             .await?;

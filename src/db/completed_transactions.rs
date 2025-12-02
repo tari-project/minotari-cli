@@ -359,3 +359,48 @@ pub async fn mark_completed_transaction_as_rejected(
 
     Ok(())
 }
+
+pub async fn get_pending_completed_transactions(
+    conn: &mut SqliteConnection,
+    account_id: i64,
+) -> Result<Vec<CompletedTransaction>, SqlxError> {
+    let rows = sqlx::query!(
+        r#"
+        SELECT id, account_id, pending_tx_id, status, last_rejected_reason, kernel_excess,
+               sent_payref, mined_height, mined_block_hash, confirmation_height,
+               broadcast_attempts, serialized_transaction, created_at, updated_at
+        FROM completed_transactions
+        WHERE account_id = ?
+          AND status NOT IN ('mined_confirmed', 'rejected', 'canceled')
+        ORDER BY created_at ASC
+        "#,
+        account_id
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+
+    let mut result = Vec::with_capacity(rows.len());
+    for r in rows {
+        let status = CompletedTransactionStatus::from_str(&r.status)
+            .map_err(|e| SqlxError::Decode(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e))))?;
+
+        result.push(CompletedTransaction {
+            id: r.id,
+            account_id: r.account_id,
+            pending_tx_id: r.pending_tx_id,
+            status,
+            last_rejected_reason: r.last_rejected_reason,
+            kernel_excess: r.kernel_excess,
+            sent_payref: r.sent_payref,
+            mined_height: r.mined_height,
+            mined_block_hash: r.mined_block_hash,
+            confirmation_height: r.confirmation_height,
+            broadcast_attempts: r.broadcast_attempts as i32,
+            serialized_transaction: r.serialized_transaction,
+            created_at: DateTime::<Utc>::from_naive_utc_and_offset(r.created_at, Utc),
+            updated_at: DateTime::<Utc>::from_naive_utc_and_offset(r.updated_at, Utc),
+        });
+    }
+
+    Ok(result)
+}
