@@ -142,21 +142,21 @@ impl DisplayedTransactionProcessor {
         let mut coinbase_extra: Option<String> = None;
         let mut is_coinbase = false;
 
-        if let Some(ref output_change) = group.output_change {
-            if let Some(details) = resolver.get_output_details(output_change).await? {
-                is_coinbase = details.is_coinbase;
-                output_type_str = Some(details.output_type.clone());
-                coinbase_extra = details.coinbase_extra.clone();
+        if let Some(ref output_change) = group.output_change
+            && let Some(details) = resolver.get_output_details(output_change).await?
+        {
+            is_coinbase = details.is_coinbase;
+            output_type_str = Some(details.output_type.clone());
+            coinbase_extra = details.coinbase_extra.clone();
 
-                outputs.push(TransactionOutput {
-                    hash: details.hash_hex,
-                    amount: output_change.balance_credit,
-                    status: details.status,
-                    confirmed_height: details.confirmed_height,
-                    output_type: details.output_type,
-                    is_change: false,
-                });
-            }
+            outputs.push(TransactionOutput {
+                hash: details.hash_hex,
+                amount: output_change.balance_credit,
+                status: details.status,
+                confirmed_height: details.confirmed_height,
+                output_type: details.output_type,
+                is_change: false,
+            });
         }
 
         Ok((outputs, output_type_str, coinbase_extra, is_coinbase))

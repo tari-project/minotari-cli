@@ -1,6 +1,7 @@
 mod block_processor;
 mod events;
 mod reorg;
+#[allow(clippy::module_inception)]
 pub mod scan;
 
 pub use block_processor::BlockProcessor;

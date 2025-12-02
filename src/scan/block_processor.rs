@@ -252,7 +252,7 @@ impl<E: EventSender> BlockProcessor<E> {
         block: &BlockScanResult,
     ) -> Result<BalanceChange, BlockProcessorError> {
         let effective_date = DateTime::<Utc>::from_timestamp(block.mined_timestamp as i64, 0)
-            .unwrap_or_else(|| Utc::now())
+            .unwrap_or_else(Utc::now)
             .naive_utc();
 
         let change = BalanceChange {
@@ -422,7 +422,7 @@ fn make_balance_change_for_output(
     output: &WalletOutput,
 ) -> BalanceChange {
     let effective_date = DateTime::<Utc>::from_timestamp(timestamp as i64, 0)
-        .unwrap_or_else(|| Utc::now())
+        .unwrap_or_else(Utc::now)
         .naive_utc();
 
     if output.features().is_coinbase() {

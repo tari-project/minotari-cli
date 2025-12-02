@@ -47,12 +47,10 @@ pub fn determine_transaction_source(
 ) -> TransactionSource {
     if is_coinbase {
         TransactionSource::Coinbase
-    } else if has_sender_address && !has_recipient_address {
-        TransactionSource::OneSided
-    } else if !has_sender_address && !has_recipient_address {
-        TransactionSource::OneSided
-    } else {
+    } else if has_sender_address && has_recipient_address {
         TransactionSource::Transfer
+    } else {
+        TransactionSource::OneSided
     }
 }
 

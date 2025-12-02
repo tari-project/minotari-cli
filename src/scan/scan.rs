@@ -141,6 +141,7 @@ async fn wait_for_next_poll_cycle<E: EventSender>(
     Ok(ContinuousWaitResult::Continue { resume_height })
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn prepare_account_scan(
     account: &AccountRow,
     password: &str,
@@ -178,7 +179,7 @@ async fn prepare_account_scan(
             .parse()
             .map_err(|e| ScanError::Fatal(anyhow::anyhow!("{}", e)))?,
     )
-    .map_err(|e| ScanError::Fatal(e.into()))?;
+    .map_err(ScanError::Fatal)?;
 
     monitoring_state
         .initialize(conn, account.id)
@@ -220,26 +221,26 @@ async fn run_scan_loop<E: EventSender + Clone>(
     }));
 
     loop {
-        if let ScanMode::Partial { max_blocks } = mode {
-            if total_scanned >= *max_blocks {
-                event_sender.send(ProcessingEvent::ScanStatus(ScanStatusEvent::Paused {
-                    account_id: scanner_context.account_id,
-                    last_scanned_height,
-                    reason: PauseReason::MaxBlocksReached { limit: *max_blocks },
-                }));
-                return Ok((all_events, true));
-            }
+        if let ScanMode::Partial { max_blocks } = mode
+            && total_scanned >= *max_blocks
+        {
+            event_sender.send(ProcessingEvent::ScanStatus(ScanStatusEvent::Paused {
+                account_id: scanner_context.account_id,
+                last_scanned_height,
+                reason: PauseReason::MaxBlocksReached { limit: *max_blocks },
+            }));
+            return Ok((all_events, true));
         }
 
-        if let Some(token) = cancel_token {
-            if token.is_cancelled() {
-                event_sender.send(ProcessingEvent::ScanStatus(ScanStatusEvent::Paused {
-                    account_id: scanner_context.account_id,
-                    last_scanned_height,
-                    reason: PauseReason::Cancelled,
-                }));
-                return Ok((all_events, true));
-            }
+        if let Some(token) = cancel_token
+            && token.is_cancelled()
+        {
+            event_sender.send(ProcessingEvent::ScanStatus(ScanStatusEvent::Paused {
+                account_id: scanner_context.account_id,
+                last_scanned_height,
+                reason: PauseReason::Cancelled,
+            }));
+            return Ok((all_events, true));
         }
 
         let (scanned_blocks, more_blocks) = scanner_context
@@ -428,6 +429,7 @@ impl Scanner {
     }
 
     /// Run the scan with real-time event streaming.
+    #[allow(clippy::type_complexity)]
     pub fn run_with_events(
         self,
     ) -> (

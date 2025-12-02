@@ -43,7 +43,7 @@ impl ParsedWalletOutput {
 
         let output_type = features
             .and_then(|f| f.get("output_type"))
-            .map(|t| Self::parse_output_type(t))
+            .map(Self::parse_output_type)
             .unwrap_or_else(|| "Standard".to_string());
 
         let is_coinbase = output_type.eq_ignore_ascii_case("coinbase");

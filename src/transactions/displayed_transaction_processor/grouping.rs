@@ -280,10 +280,8 @@ impl<'a, R: TransactionDataResolver> BalanceChangeGrouper<'a, R> {
                 }
             }
 
-            if !assigned {
-                if let Some(&group_idx) = non_coinbase_indices.first() {
-                    groups[group_idx].input_changes.push(input.clone());
-                }
+            if !assigned && let Some(&group_idx) = non_coinbase_indices.first() {
+                groups[group_idx].input_changes.push(input.clone());
             }
         }
     }
@@ -315,10 +313,10 @@ pub async fn build_input_hash_map<R: TransactionDataResolver>(
     let mut map: HashMap<String, BalanceChange> = HashMap::new();
 
     for change in balance_changes {
-        if change.balance_debit > 0 {
-            if let Some(output_hash) = resolver.get_input_output_hash(change).await? {
-                map.insert(output_hash, change.clone());
-            }
+        if change.balance_debit > 0
+            && let Some(output_hash) = resolver.get_input_output_hash(change).await?
+        {
+            map.insert(output_hash, change.clone());
         }
     }
 
