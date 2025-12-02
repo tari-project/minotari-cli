@@ -8,12 +8,9 @@ use crate::db::{
     self, CompletedTransaction, CompletedTransactionStatus, get_pending_completed_transactions,
     mark_completed_transaction_as_broadcasted, mark_completed_transaction_as_confirmed,
     mark_completed_transaction_as_mined_unconfirmed, mark_completed_transaction_as_rejected,
-    revert_completed_transaction_to_completed,
 };
 use crate::http::{TxLocation, TxSubmissionRejectionReason, WalletHttpClient};
 use crate::models::{WalletEvent, WalletEventType};
-use lightweight_wallet_libs::HttpBlockchainScanner;
-use tari_transaction_components::key_manager::KeyManager;
 use tari_transaction_components::transaction_components::Transaction;
 use tari_utilities::ByteArray;
 
@@ -101,7 +98,6 @@ impl TransactionMonitor {
 
     pub async fn monitor_if_needed(
         &self,
-        scanner: &mut HttpBlockchainScanner<KeyManager>,
         wallet_client: &WalletHttpClient,
         conn: &mut SqliteConnection,
         account_id: i64,
@@ -122,14 +118,7 @@ impl TransactionMonitor {
         let initial_count = by_status.remaining_count();
 
         let events = self
-            .process_pending_transactions(
-                scanner,
-                wallet_client,
-                conn,
-                account_id,
-                current_chain_height,
-                by_status,
-            )
+            .process_pending_transactions(wallet_client, conn, account_id, current_chain_height, by_status)
             .await?;
 
         // If all transactions moved to terminal states, disable monitoring
@@ -152,7 +141,6 @@ impl TransactionMonitor {
 
     async fn process_pending_transactions(
         &self,
-        scanner: &mut HttpBlockchainScanner<KeyManager>,
         wallet_client: &WalletHttpClient,
         conn: &mut SqliteConnection,
         account_id: i64,
@@ -166,14 +154,8 @@ impl TransactionMonitor {
         );
         events.extend(Self::check_broadcast_for_mining(wallet_client, conn, account_id, by_status.broadcast).await?);
         events.extend(
-            Self::check_confirmation_status(
-                scanner,
-                conn,
-                account_id,
-                current_chain_height,
-                by_status.mined_unconfirmed,
-            )
-            .await?,
+            Self::check_confirmation_status(conn, account_id, current_chain_height, by_status.mined_unconfirmed)
+                .await?,
         );
 
         Ok(events)
@@ -268,7 +250,6 @@ impl TransactionMonitor {
     }
 
     async fn check_confirmation_status(
-        scanner: &mut HttpBlockchainScanner<KeyManager>,
         conn: &mut SqliteConnection,
         account_id: i64,
         current_height: u64,
@@ -281,24 +262,6 @@ impl TransactionMonitor {
                 Some(h) => h as u64,
                 None => continue,
             };
-
-            let is_on_main_chain =
-                Self::verify_block_on_chain(scanner, mined_height, tx.mined_block_hash.as_ref()).await?;
-
-            if !is_on_main_chain {
-                revert_completed_transaction_to_completed(conn, &tx.id).await?;
-
-                events.push(WalletEvent {
-                    id: 0,
-                    account_id,
-                    event_type: WalletEventType::TransactionReorged {
-                        tx_id: tx.id.clone(),
-                        original_mined_height: mined_height,
-                    },
-                    description: format!("Transaction {} reorged from height {}", tx.id, mined_height),
-                });
-                continue;
-            }
 
             let confirmations = current_height.saturating_sub(mined_height);
             if confirmations >= REQUIRED_CONFIRMATIONS {
@@ -368,25 +331,6 @@ impl TransactionMonitor {
                 Ok(Some((height, hash)))
             },
             _ => Ok(None),
-        }
-    }
-
-    async fn verify_block_on_chain(
-        scanner: &mut HttpBlockchainScanner<KeyManager>,
-        height: u64,
-        expected_hash: Option<&Vec<u8>>,
-    ) -> Result<bool> {
-        use lightweight_wallet_libs::scanning::BlockchainScanner;
-
-        let expected = match expected_hash {
-            Some(h) => h,
-            None => return Ok(false),
-        };
-
-        match scanner.get_header_by_height(height).await {
-            Ok(Some(header)) => Ok(&header.hash == expected),
-            Ok(None) => Ok(false),
-            Err(e) => Err(anyhow!("Failed to verify block: {}", e)),
         }
     }
 }

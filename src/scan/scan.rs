@@ -304,7 +304,6 @@ async fn run_scan_loop<E: EventSender + Clone>(
             let monitor_events = scanner_context
                 .transaction_monitor
                 .monitor_if_needed(
-                    &mut scanner_context.scanner,
                     &scanner_context.wallet_client,
                     conn,
                     scanner_context.account_id,
