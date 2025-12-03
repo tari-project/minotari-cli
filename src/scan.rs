@@ -2,7 +2,7 @@ use chrono::{DateTime, Utc};
 use lightweight_wallet_libs::{HttpBlockchainScanner, ScanConfig, scanning::BlockchainScanner};
 use sqlx::Acquire;
 use std::time::Instant;
-use tracing::info;
+use tracing::{debug, info};
 
 use tari_transaction_components::transaction_components::WalletOutput;
 use tari_utilities::byte_array::ByteArray;
@@ -256,6 +256,12 @@ pub async fn scan(
                         }
                     }
                 }
+
+                debug!(
+                    "Inserting scanned tip block for acccount:  {}, height: {}",
+                    account_type_row.account_id(),
+                    scanned_block.height
+                );
                 db::insert_scanned_tip_block(
                     &mut tx,
                     account_type_row.account_id(),
