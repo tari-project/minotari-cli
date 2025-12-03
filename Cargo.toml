@@ -7,11 +7,22 @@ edition = "2024"
 name = "generate-openapi"
 path = "src/bin/generate_openapi.rs"
 
+[features]
+default = []
+tapplets = []
+
 [dependencies]
 anyhow = "1.0.99"
 tokio = { version = "1.47.1", features = ["full"] }
-#lightweight_wallet_libs = { path = "../tari-wallet", features = ["grpc","http",] }
-lightweight_wallet_libs = { git = "https://github.com/tari-project/tari-wallet", rev = "fefeeeb205120bd22d5d5b36dcec4a790cd9d0f7", features = ["grpc","http",] }
+lightweight_wallet_libs = { path = "../tari-wallet", features = [
+    "grpc",
+    "http",
+] }
+tari-tapplet-lib = { path = "../tari-tapplet-lib", features = ["host"] }
+# lightweight_wallet_libs = { git = "https://github.com/tari-project/tari-wallet", rev = "8d8ef9da5b7436420663d20c81ca29a323253f2a", features = [
+#     "grpc",
+#     "http",
+# ] }
 clap = { version = "4.5.47", features = ["derive"] }
 hex = "0.4.3"
 chacha20poly1305 = { version = "0.10.1", features = ["rand_core", "std"] }
@@ -41,3 +52,8 @@ axum = { version = "0.8.6", features = ["default", "http2", "macros"] }
 utoipa = "5.4.0"
 utoipa-swagger-ui = { version = "9.0.2", features = ["axum"] }
 uuid = { version = "1", features = ["v4"] }
+async-trait = "0.1.89"
+regex = "1.12.2"
+tracing = "0.1.41"
+tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
+dialoguer = "0.11"

@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::{
     api::types::LockFundsResponse,
-    db::{self, AccountRow},
+    db::{self, AccountRow, ParentAccountRow},
     transactions::input_selector::InputSelector,
 };
 
@@ -21,7 +21,7 @@ impl LockAmount {
     #[allow(clippy::too_many_arguments)]
     pub async fn lock(
         &self,
-        account: &AccountRow,
+        account: &ParentAccountRow,
         amount: MicroMinotari,
         num_outputs: usize,
         fee_per_gram: MicroMinotari,

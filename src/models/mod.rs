@@ -13,7 +13,6 @@ pub type Id = i64;
 #[derive(Debug, Clone)]
 pub struct ScannedTipBlock {
     pub id: Id,
-    #[allow(dead_code)]
     pub account_id: Id,
     pub height: u64,
     pub hash: Vec<u8>,

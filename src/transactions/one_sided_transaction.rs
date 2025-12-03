@@ -12,6 +12,8 @@ use tari_transaction_components::{
     transaction_components::{MemoField, OutputFeatures, memo_field::TxType},
 };
 
+use crate::db::ParentAccountRow;
+
 #[derive(Debug, Clone)]
 pub struct Recipient {
     pub address: TariAddress,
@@ -36,7 +38,7 @@ impl OneSidedTransaction {
 
     pub async fn create_unsigned_transaction(
         &self,
-        account: &AccountRow,
+        account: &ParentAccountRow,
         locked_funds: LockFundsResponse,
         recipients: Vec<Recipient>,
         fee_per_gram: MicroMinotari,

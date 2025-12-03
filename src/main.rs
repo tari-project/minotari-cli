@@ -1,4 +1,5 @@
 use std::{
+    env,
     fs::{self, create_dir_all},
     path::Path,
 };
@@ -10,6 +11,7 @@ use chacha20poly1305::{
     aead::{Aead, OsRng},
 };
 use clap::{Parser, Subcommand};
+use minotari::util::{encrypt_with_password, hash_view_key};
 use minotari::{
     api::accounts::LockFundsRequest,
     daemon,
@@ -38,159 +40,21 @@ use tari_transaction_components::key_manager::wallet_types::WalletType;
 use tari_transaction_components::tari_amount::MicroMinotari;
 use tari_utilities::byte_array::ByteArray;
 
-#[derive(Parser)]
-#[command(name = "tari")]
-#[command(about = "Tari wallet CLI", long_about = None)]
-struct Cli {
-    #[command(subcommand)]
-    command: Commands,
-}
+use minotari::cli::{Cli, Commands};
 
-#[derive(Subcommand)]
-enum Commands {
-    /// Create a new address, and returns a file with the
-    /// seed words, address, birthday, private view key and public spend key,
-    /// optionally encrypting the file with a password
-    CreateAddress {
-        #[arg(short, long, help = "Password to encrypt the wallet file")]
-        password: Option<String>,
-        #[arg(short, long, help = "Path to the output file", default_value = "data/output.json")]
-        output_file: String,
-    },
-    /// Scan the blockchain for transactions
-    Scan {
-        #[arg(short, long, help = "Password to decrypt the wallet file")]
-        password: String,
-        #[arg(
-            short = 'u',
-            long,
-            default_value = "https://rpc.tari.com",
-            help = "The base URL of the Tari HTTP API"
-        )]
-        base_url: String,
-        #[arg(short, long, help = "Path to the database file", default_value = "data/wallet.db")]
-        database_file: String,
-        #[arg(
-            short,
-            long,
-            help = "Optional account name to scan. If not provided, all accounts will be used"
-        )]
-        account_name: Option<String>,
-        #[arg(short = 'n', long, help = "Maximum number of blocks to scan", default_value_t = 50)]
-        max_blocks_to_scan: u64,
-        #[arg(long, help = "Batch size for scanning", default_value_t = 1)]
-        batch_size: u64,
-    },
-    /// Run the daemon to continuously scan the blockchain
-    Daemon {
-        #[arg(short, long, help = "Password to decrypt the wallet file")]
-        password: String,
-        #[arg(
-            short = 'u',
-            long,
-            default_value = "https://rpc.tari.com",
-            help = "The base URL of the Tari HTTP API"
-        )]
-        base_url: String,
-        #[arg(short, long, help = "Path to the database file", default_value = "data/wallet.db")]
-        database_file: String,
-        #[arg(long, help = "Batch size for scanning", default_value_t = 100)]
-        batch_size: u64,
-        #[arg(short, long, help = "Interval between scans in seconds", default_value_t = 60)]
-        scan_interval_secs: u64,
-        #[arg(long, help = "Port for the API server", default_value_t = 9000)]
-        api_port: u16,
-        #[arg(long, help = "The Tari network to connect to", default_value_t = Network::MainNet)]
-        network: Network,
-    },
-    /// Show wallet balance
-    Balance {
-        #[arg(short, long, help = "Path to the database file", default_value = "data/wallet.db")]
-        database_file: String,
-        #[arg(
-            short,
-            long,
-            help = "Optional account name to show balance for. If not provided, all accounts will be used"
-        )]
-        account_name: Option<String>,
-    },
-    /// Import a wallet from a view key
-    ImportViewKey {
-        #[arg(short, long, alias = "view_key", help = "The view key in hex format")]
-        view_private_key: String,
-        #[arg(short, long, alias = "spend_key", help = "The spend public key in hex format")]
-        spend_public_key: String,
-        #[arg(short, long, help = "Password to encrypt the wallet file")]
-        password: String,
-        #[arg(short, long, help = "Path to the database file", default_value = "data/wallet.db")]
-        database_file: String,
-        #[arg(short, long, help = "The wallet birthday (block height)", default_value = "0")]
-        birthday: u16,
-    },
-    /// Create an unsigned transaction
-    CreateUnsignedTransaction {
-        #[arg(short, long, help = "Name of the account to send from")]
-        account_name: String,
-        #[arg(
-            short,
-            long,
-            help = "Recipient address, amount and optional payment id (e.g., address::amount or address::amount::payment_id). Can be specified multiple times."
-        )]
-        recipient: Vec<String>,
-        #[arg(
-            short,
-            long,
-            help = "Path to the output file for the unsigned transaction",
-            default_value = "data/unsigned_transaction.json"
-        )]
-        output_file: String,
-        #[arg(short, long, help = "Password to decrypt the wallet file")]
-        password: String,
-        #[arg(short, long, help = "Path to the database file", default_value = "data/wallet.db")]
-        database_file: String,
-        #[arg(long, help = "Optional idempotency key")]
-        idempotency_key: Option<String>,
-        #[arg(long, help = "Optional seconds to lock UTXOs", default_value_t = 86400)]
-        seconds_to_lock: u64,
-        #[arg(long, help = "The Tari network to connect to", default_value_t = Network::MainNet)]
-        network: Network,
-    },
-    /// Lock funds
-    LockFunds {
-        #[arg(short, long, help = "Name of the account to send from")]
-        account_name: String,
-        #[arg(
-            short,
-            long,
-            help = "Path to the output file for the unsigned transaction",
-            default_value = "data/locked_funds.json"
-        )]
-        output_file: String,
-        #[arg(short, long, help = "Path to the database file", default_value = "data/wallet.db")]
-        database_file: String,
-        #[arg(short, long, help = "Amount to lock")]
-        amount: MicroMinotari,
-        #[arg(short, long, help = "Optional number of outputs", default_value = "1")]
-        num_outputs: usize,
-        #[arg(short, long, help = "Optional fee per gram", default_value = "5")]
-        fee_per_gram: MicroMinotari,
-        #[arg(short, long, help = "Optional estimated output size")]
-        estimated_output_size: Option<usize>,
-        #[arg(
-            short,
-            long,
-            help = "Optional seconds to lock (will be unlocked if not spent)",
-            default_value = "86400"
-        )]
-        seconds_to_lock_utxos: Option<u64>,
-        #[arg(long, help = "Optional idempotency key")]
-        idempotency_key: Option<String>,
-    },
-}
+use minotari::tapplets::tapplet_command_handler;
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
     let cli = Cli::parse();
+
+    // Initialize tracing with environment variable support
+    // Set RUST_LOG=lightweight_wallet_libs=warn,minotari=info to see warnings from the library
+    tracing_subscriber::fmt()
+        .with_env_filter(
+            env::var("RUST_LOG").unwrap_or_else(|_| "lightweight_wallet_libs=info,minotari=info".to_string()),
+        )
+        .init();
 
     match cli.command {
         Commands::CreateAddress { password, output_file } => {
@@ -208,7 +72,7 @@ async fn main() -> Result<(), anyhow::Error> {
             let public_view_key = CompressedKey::from_secret_key(&view_key);
 
             let tari_address = TariAddress::new_dual_address(
-                public_view_key,
+                public_view_key.clone(),
                 spend_key.pub_key.clone(),
                 Network::MainNet,
                 TariAddressFeatures::create_one_sided_only(),
@@ -247,6 +111,7 @@ async fn main() -> Result<(), anyhow::Error> {
                 serde_json::json!({
                     "address": tari_address.to_base58(),
                     "view_key": hex::encode(view_key.as_bytes()),
+                    "public_view_key": hex::encode(public_view_key.as_bytes()),
                     "spend_key": hex::encode(spend_key.pub_key.as_bytes()),
                     "seed_words": seed_words.reveal().clone(),
                     "birthday": birthday,
@@ -285,6 +150,12 @@ async fn main() -> Result<(), anyhow::Error> {
             max_blocks_to_scan,
             batch_size,
         } => {
+            if batch_size <= 1 {
+                // Batch size 1 doesn't work for some reason. It scans but never
+                // progresses
+                println!("Batch size must be greater than 1.");
+                return Ok(());
+            }
             println!("Scanning blockchain...");
             let events = scan(
                 &password,
@@ -376,13 +247,17 @@ async fn main() -> Result<(), anyhow::Error> {
             };
             handle_lock_funds(database_file, account_name, output_file, request).await
         },
+        Commands::Tapplet { tapplet_subcommand } => {
+            tapplet_command_handler(tapplet_subcommand).await?;
+            Ok(())
+        },
     }
 }
 
 async fn handle_balance(database_file: &str, account_name: Option<&str>) -> Result<(), anyhow::Error> {
     let pool = init_db(database_file).await?;
     let mut conn = pool.acquire().await?;
-    let accounts = get_accounts(&mut conn, account_name).await?;
+    let accounts = get_accounts(&mut conn, account_name, false).await?;
     for account in accounts {
         let agg_result = get_balance(&mut conn, account.id).await?;
         let credits = agg_result.total_credits.unwrap_or(0) as u64;
@@ -441,6 +316,9 @@ async fn handle_create_unsigned_transaction(
     let account = db::get_account_by_name(&mut conn, &account_name)
         .await?
         .ok_or_else(|| anyhow!("Account not found: {}", account_name))?;
+    let account = account
+        .try_into_parent()
+        .map_err(|e| anyhow!("Invalid account type: {}", e))?;
 
     let amount = recipients.iter().map(|r| r.amount).sum();
     let num_outputs = recipients.len();
@@ -483,7 +361,7 @@ async fn handle_lock_funds(
 ) -> Result<(), anyhow::Error> {
     let pool = init_db(&database_file).await?;
     let mut conn = pool.acquire().await?;
-    let account = db::get_account_by_name(&mut conn, &account_name)
+    let account = db::get_parent_account_by_name(&mut conn, &account_name)
         .await?
         .ok_or_else(|| anyhow!("Account not found: {}", account_name))?;
     let lock_amount = LockAmount::new(pool.clone());
@@ -528,21 +406,8 @@ async fn init_with_view_key(
     let view_key_bytes = hex::decode(view_private_key)?;
     let spend_key_bytes = hex::decode(spend_public_key)?;
 
-    let password = if password.len() < 32 {
-        format!("{:0<32}", password)
-    } else {
-        password[..32].to_string()
-    };
-    let key_bytes: [u8; 32] = password
-        .as_bytes()
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("Password must be 32 bytes"))?;
-    let key = Key::from(key_bytes);
-    let cipher = XChaCha20Poly1305::new(&key);
-
-    let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
-    let encrypted_view_key = cipher.encrypt(&nonce, view_key_bytes.as_ref())?;
-    let encrypted_spend_key = cipher.encrypt(&nonce, spend_key_bytes.as_ref())?;
+    let (nonce, encrypted_view_key, encrypted_spend_key) =
+        encrypt_with_password(password, &view_key_bytes, spend_key_bytes)?;
 
     // create a hash of the viewkey to determine duplicate wallets
     let view_key_hash = hash_view_key(&view_key_bytes);
@@ -560,11 +425,4 @@ async fn init_with_view_key(
     .await?;
 
     Ok(())
-}
-
-fn hash_view_key(view_key: &[u8]) -> Vec<u8> {
-    let mut hasher = Blake2s256::new();
-    hasher.update(b"view_key_hash");
-    hasher.update(view_key);
-    hasher.finalize().to_vec()
 }

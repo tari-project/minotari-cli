@@ -1,9 +1,13 @@
-use std::{env::current_dir, fs};
+use std::{env::current_dir, fs, path::Path};
 
 use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
 
 mod accounts;
-pub use accounts::{AccountBalance, AccountRow, create_account, get_account_by_name, get_accounts, get_balance};
+pub use accounts::{
+    AccountBalance, AccountRow, AccountTypeRow, ParentAccountRow, create_account, create_child_account_for_tapplet,
+    create_child_viewkey_account, get_account_by_id, get_account_by_name, get_accounts, get_balance, get_child_account,
+    get_parent_account_by_name,
+};
 
 mod scanned_tip_blocks;
 pub use scanned_tip_blocks::{
@@ -13,9 +17,9 @@ pub use scanned_tip_blocks::{
 
 mod outputs;
 pub use outputs::{
-    DbWalletOutput, fetch_unspent_outputs, get_output_info_by_hash, get_unconfirmed_outputs, insert_output,
-    lock_output, mark_output_confirmed, soft_delete_outputs_from_height, unlock_outputs_for_request,
-    update_output_status,
+    DbWalletOutput, fetch_unspent_outputs, get_output_info_by_hash, get_output_memos_for_account,
+    get_unconfirmed_outputs, insert_output, lock_output, mark_output_confirmed, soft_delete_outputs_from_height,
+    unlock_outputs_for_request, update_output_status,
 };
 
 mod pending_transactions;
@@ -33,8 +37,8 @@ pub use balance_changes::insert_balance_change;
 mod inputs;
 pub use inputs::{insert_input, soft_delete_inputs_from_height};
 
-pub async fn init_db(db_path: &str) -> Result<SqlitePool, anyhow::Error> {
-    let mut path = std::path::Path::new(db_path).to_path_buf();
+pub async fn init_db<P: AsRef<Path>>(db_path: P) -> Result<SqlitePool, anyhow::Error> {
+    let mut path = db_path.as_ref().to_path_buf();
     if path.is_relative() {
         path = current_dir()?.to_path_buf().join(path);
     }
@@ -47,7 +51,6 @@ pub async fn init_db(db_path: &str) -> Result<SqlitePool, anyhow::Error> {
             .map_err(|e| sqlx::Error::Io(std::io::Error::other(format!("Failed to create database file: {}", e))))?;
     }
     let db_url = format!("sqlite:///{}", path.display().to_string().replace("\\", "/"));
-    dbg!(&db_url);
     let pool = SqlitePoolOptions::new().max_connections(5).connect(&db_url).await?;
 
     // Run migrations
