@@ -10,8 +10,6 @@ use super::types::{
 };
 use crate::db;
 use crate::models::{BalanceChange, Id};
-use crate::scan::{DetectedOutput, SpentInput};
-
 /// Processes balance changes into user-displayable transactions.
 pub struct DisplayedTransactionProcessor {
     current_tip_height: u64,
@@ -235,27 +233,4 @@ impl DisplayedTransactionProcessor {
 
         Ok(())
     }
-}
-
-#[allow(dead_code)]
-pub async fn process_in_memory(
-    balance_changes: Vec<BalanceChange>,
-    detected_outputs: &[DetectedOutput],
-    spent_inputs: &[SpentInput],
-    tip_height: u64,
-) -> Result<Vec<DisplayedTransaction>, ProcessorError> {
-    let processor = DisplayedTransactionProcessor::new(tip_height);
-    let resolver = InMemoryResolver::new(detected_outputs, spent_inputs);
-    processor.process_with_resolver(balance_changes, &resolver).await
-}
-
-#[allow(dead_code)]
-pub async fn process_from_database(
-    balance_changes: Vec<BalanceChange>,
-    db_pool: &SqlitePool,
-    tip_height: u64,
-) -> Result<Vec<DisplayedTransaction>, ProcessorError> {
-    let processor = DisplayedTransactionProcessor::new(tip_height);
-    let resolver = DatabaseResolver::new(db_pool);
-    processor.process_with_resolver(balance_changes, &resolver).await
 }
