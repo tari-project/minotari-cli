@@ -12,7 +12,10 @@ use crate::{
         BalanceChangeSummary, BlockProcessedEvent, ConfirmedOutput, DetectedOutput, DisplayedTransactionsEvent,
         EventSender, NoopEventSender, ProcessingEvent, ScanStatusEvent, SpentInput,
     },
-    transactions::displayed_transaction_processor::{DisplayedTransactionProcessor, ProcessingContext},
+    transactions::{
+        DisplayedTransaction, TransactionDirection, TransactionDisplayStatus,
+        displayed_transaction_processor::{DisplayedTransactionProcessor, ProcessingContext},
+    },
 };
 
 pub(crate) const REQUIRED_CONFIRMATIONS: u64 = 6;
@@ -32,6 +35,7 @@ pub struct BlockProcessor<E: EventSender = NoopEventSender> {
     event_sender: E,
     current_block: Option<BlockEventAccumulator>,
     current_tip_height: u64,
+    has_pending_outbound: bool,
 }
 
 impl BlockProcessor<NoopEventSender> {
@@ -42,19 +46,25 @@ impl BlockProcessor<NoopEventSender> {
             event_sender: NoopEventSender,
             current_block: None,
             current_tip_height: 0,
+            has_pending_outbound: false,
         }
     }
 }
 
 impl<E: EventSender> BlockProcessor<E> {
-    pub fn with_event_sender(account_id: i64, event_sender: E) -> Self {
+    pub fn with_event_sender(account_id: i64, event_sender: E, has_pending_outbound: bool) -> Self {
         Self {
             account_id,
             wallet_events: Vec::new(),
             event_sender,
             current_block: None,
             current_tip_height: 0,
+            has_pending_outbound,
         }
+    }
+
+    pub fn set_has_pending_outbound(&mut self, value: bool) {
+        self.has_pending_outbound = value;
     }
 
     pub async fn process_block(
@@ -77,7 +87,8 @@ impl<E: EventSender> BlockProcessor<E> {
 
         if let Some(acc) = self.current_block.take() {
             if !acc.outputs.is_empty() || !acc.inputs.is_empty() {
-                self.emit_displayed_transactions(block.height, &acc).await;
+                self.save_and_emit_displayed_transactions(tx, block.height, &acc)
+                    .await?;
             }
 
             let block_event = acc.build();
@@ -87,9 +98,14 @@ impl<E: EventSender> BlockProcessor<E> {
         Ok(())
     }
 
-    async fn emit_displayed_transactions(&self, block_height: u64, accumulator: &BlockEventAccumulator) {
+    async fn save_and_emit_displayed_transactions(
+        &self,
+        tx: &mut SqliteConnection,
+        block_height: u64,
+        accumulator: &BlockEventAccumulator,
+    ) -> Result<(), BlockProcessorError> {
         if accumulator.full_balance_changes.is_empty() {
-            return;
+            return Ok(());
         }
 
         let processor = DisplayedTransactionProcessor::new(self.current_tip_height);
@@ -103,10 +119,25 @@ impl<E: EventSender> BlockProcessor<E> {
             .await
         {
             Ok(transactions) if !transactions.is_empty() => {
+                let mut transactions_to_emit = Vec::new();
+
+                for transaction in transactions {
+                    // Check if this is a scanned version of an existing pending outbound transaction
+                    if let Some(existing_pending) = self.find_matching_pending_outbound(tx, &transaction).await? {
+                        // Update the existing pending transaction with blockchain info
+                        let updated = self.merge_pending_with_scanned(existing_pending, &transaction, block_height);
+                        db::update_displayed_transaction_mined(tx, &updated).await?;
+                        transactions_to_emit.push(updated);
+                    } else {
+                        db::insert_displayed_transaction(tx, &transaction).await?;
+                        transactions_to_emit.push(transaction);
+                    }
+                }
+
                 self.event_sender
                     .send(ProcessingEvent::TransactionsReady(DisplayedTransactionsEvent {
                         account_id: self.account_id,
-                        transactions,
+                        transactions: transactions_to_emit,
                         block_height: Some(block_height),
                         is_initial_sync: false,
                     }));
@@ -119,6 +150,59 @@ impl<E: EventSender> BlockProcessor<E> {
                 );
             },
         }
+
+        Ok(())
+    }
+
+    async fn find_matching_pending_outbound(
+        &self,
+        tx: &mut SqliteConnection,
+        scanned_transaction: &DisplayedTransaction,
+    ) -> Result<Option<DisplayedTransaction>, BlockProcessorError> {
+        // Skip DB lookup if no pending outbound transactions exist
+        if !self.has_pending_outbound {
+            return Ok(None);
+        }
+
+        // Only match for outgoing transactions (spent inputs)
+        if scanned_transaction.direction != TransactionDirection::Outgoing {
+            return Ok(None);
+        }
+
+        // Check if any of the scanned transaction's inputs match a pending outbound transaction
+        for input in &scanned_transaction.details.inputs {
+            if let Some(pending) =
+                db::find_pending_outbound_by_output_hash(tx, self.account_id, &input.output_hash).await?
+            {
+                return Ok(Some(pending));
+            }
+        }
+
+        Ok(None)
+    }
+
+    fn merge_pending_with_scanned(
+        &self,
+        mut pending: DisplayedTransaction,
+        scanned: &DisplayedTransaction,
+        block_height: u64,
+    ) -> DisplayedTransaction {
+        // Update blockchain info from the scanned transaction
+        pending.blockchain.block_height = block_height;
+        pending.blockchain.timestamp = scanned.blockchain.timestamp;
+        pending.blockchain.confirmations = scanned.blockchain.confirmations;
+
+        // Update status based on confirmations
+        if pending.blockchain.confirmations >= 6 {
+            pending.status = TransactionDisplayStatus::Confirmed;
+        } else if pending.blockchain.confirmations > 0 {
+            pending.status = TransactionDisplayStatus::Unconfirmed;
+        }
+
+        // Merge any additional details from scanned transaction
+        pending.details.outputs = scanned.details.outputs.clone();
+
+        pending
     }
 
     pub fn emit_status(&self, status: ScanStatusEvent) {

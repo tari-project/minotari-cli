@@ -404,8 +404,7 @@ impl TransactionSender {
             },
         }
 
-        // Build and return DisplayedTransaction for immediate UI display
-        // Use actual values from signed transaction instead of estimates
+        // Build and save DisplayedTransaction for immediate UI display
         let displayed_transaction = self.build_pending_displayed_transaction(
             processed_transaction,
             sent_output_hashes,
@@ -413,6 +412,8 @@ impl TransactionSender {
             recipient_amount,
             actual_fee,
         )?;
+
+        db::insert_displayed_transaction(&mut connection, &displayed_transaction).await?;
 
         Ok(displayed_transaction)
     }

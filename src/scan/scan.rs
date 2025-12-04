@@ -3,6 +3,7 @@ use sqlx::{Acquire, Sqlite, SqliteConnection, pool::PoolConnection};
 use std::time::Duration;
 use tari_transaction_components::key_manager::KeyManager;
 use tokio::sync::mpsc;
+use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
 use thiserror::Error;
@@ -16,7 +17,7 @@ use crate::{
         block_processor::{BlockProcessor, BlockProcessorError},
         events::{
             ChannelEventSender, EventSender, NoopEventSender, PauseReason, ProcessingEvent, ReorgDetectedEvent,
-            ScanStatusEvent,
+            ScanStatusEvent, TransactionsUpdatedEvent,
         },
         reorg,
     },
@@ -25,6 +26,8 @@ use crate::{
 
 const BIRTHDAY_GENESIS_FROM_UNIX_EPOCH: u64 = 1640995200;
 const MAINNET_GENESIS_DATE: u64 = 1746489644;
+const DEFAULT_SCAN_TIMEOUT: Duration = Duration::from_secs(60 * 5); // 5 minutes
+const DEFAULT_MAX_SCAN_RETRIES: u32 = 3;
 
 #[derive(Debug, Error)]
 pub enum ScanError {
@@ -32,6 +35,8 @@ pub enum ScanError {
     Fatal(#[from] anyhow::Error),
     #[error("Intermittent error: {0}")]
     Intermittent(String),
+    #[error("Scan timed out after {0} retries")]
+    Timeout(u32),
 }
 
 impl From<sqlx::Error> for ScanError {
@@ -59,6 +64,46 @@ impl ScanContext {
     fn set_start_height(&mut self, height: u64) {
         self.scan_config = self.scan_config.clone().with_start_height(height);
     }
+
+    async fn scan_blocks_with_timeout(
+        &mut self,
+        timeout_config: &ScanTimeoutConfig,
+    ) -> Result<(Vec<lightweight_wallet_libs::BlockScanResult>, bool), ScanError> {
+        let mut retries = 0;
+
+        loop {
+            match timeout(timeout_config.timeout, self.scanner.scan_blocks(&self.scan_config)).await {
+                Ok(Ok(result)) => return Ok(result),
+                Ok(Err(e)) => return Err(ScanError::Intermittent(e.to_string())),
+                Err(_elapsed) => {
+                    retries += 1;
+                    println!(
+                        "scan_blocks timed out after {:?}, retry {}/{}",
+                        timeout_config.timeout, retries, timeout_config.max_retries
+                    );
+
+                    if retries >= timeout_config.max_retries {
+                        return Err(ScanError::Timeout(retries));
+                    }
+                },
+            }
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ScanTimeoutConfig {
+    pub timeout: Duration,
+    pub max_retries: u32,
+}
+
+impl Default for ScanTimeoutConfig {
+    fn default() -> Self {
+        Self {
+            timeout: DEFAULT_SCAN_TIMEOUT,
+            max_retries: DEFAULT_MAX_SCAN_RETRIES,
+        }
+    }
 }
 
 fn emit_reorg_event<E: EventSender>(
@@ -74,6 +119,7 @@ fn emit_reorg_event<E: EventSender>(
         blocks_rolled_back: reorg_info.rolled_back_blocks_count,
         invalidated_output_hashes: reorg_info.invalidated_output_hashes,
         cancelled_transaction_ids: reorg_info.cancelled_transaction_ids,
+        reorganized_displayed_transactions: reorg_info.reorganized_displayed_transactions,
     }));
     resume_height
 }
@@ -203,6 +249,7 @@ async fn run_scan_loop<E: EventSender + Clone>(
     conn: &mut PoolConnection<Sqlite>,
     event_sender: E,
     mode: &ScanMode,
+    timeout_config: &ScanTimeoutConfig,
     cancel_token: Option<&CancellationToken>,
 ) -> Result<(Vec<WalletEvent>, bool), ScanError> {
     println!(
@@ -243,11 +290,7 @@ async fn run_scan_loop<E: EventSender + Clone>(
             return Ok((all_events, true));
         }
 
-        let (scanned_blocks, more_blocks) = scanner_context
-            .scanner
-            .scan_blocks(&scanner_context.scan_config)
-            .await
-            .map_err(|e| ScanError::Intermittent(e.to_string()))?;
+        let (scanned_blocks, more_blocks) = scanner_context.scan_blocks_with_timeout(timeout_config).await?;
 
         total_scanned += scanned_blocks.len() as u64;
 
@@ -286,10 +329,15 @@ async fn run_scan_loop<E: EventSender + Clone>(
             scanned_blocks.len(),
             scanner_context.account_id
         );
+        let has_pending_outbound = scanner_context.transaction_monitor.has_pending_outbound();
         for scanned_block in &scanned_blocks {
             let mut tx = conn.begin().await?;
 
-            let mut processor = BlockProcessor::with_event_sender(scanner_context.account_id, event_sender.clone());
+            let mut processor = BlockProcessor::with_event_sender(
+                scanner_context.account_id,
+                event_sender.clone(),
+                has_pending_outbound,
+            );
             processor.process_block(&mut tx, scanned_block).await?;
 
             all_events.extend(processor.into_wallet_events());
@@ -301,8 +349,7 @@ async fn run_scan_loop<E: EventSender + Clone>(
             last_scanned_height = last_block.height;
             blocks_since_reorg_check += scanned_blocks.len() as u64;
 
-            // Monitor pending transactions after processing blocks
-            let monitor_events = scanner_context
+            let monitor_result = scanner_context
                 .transaction_monitor
                 .monitor_if_needed(
                     &scanner_context.wallet_client,
@@ -313,7 +360,14 @@ async fn run_scan_loop<E: EventSender + Clone>(
                 .await
                 .map_err(ScanError::Fatal)?;
 
-            all_events.extend(monitor_events);
+            all_events.extend(monitor_result.wallet_events);
+
+            if !monitor_result.updated_displayed_transactions.is_empty() {
+                event_sender.send(ProcessingEvent::TransactionsUpdated(TransactionsUpdatedEvent {
+                    account_id: scanner_context.account_id,
+                    updated_transactions: monitor_result.updated_displayed_transactions,
+                }));
+            }
         }
 
         if more_blocks && blocks_since_reorg_check >= scanner_context.reorg_check_interval {
@@ -364,7 +418,6 @@ pub enum ScanMode {
     Continuous { poll_interval: Duration },
 }
 
-/// Builder for configuring and running blockchain scans.
 pub struct Scanner {
     password: String,
     base_url: String,
@@ -374,6 +427,7 @@ pub struct Scanner {
     processing_threads: usize,
     reorg_check_interval: u64,
     mode: ScanMode,
+    timeout_config: ScanTimeoutConfig,
     cancel_token: Option<CancellationToken>,
 }
 
@@ -388,6 +442,7 @@ impl Scanner {
             processing_threads: 8,
             reorg_check_interval: 1000,
             mode: ScanMode::Full,
+            timeout_config: ScanTimeoutConfig::default(),
             cancel_token: None,
         }
     }
@@ -397,11 +452,6 @@ impl Scanner {
         self
     }
 
-    /// Set the scan mode.
-    ///
-    /// Partial mode scans up to a maximum number of blocks.
-    /// Full mode scans all available blocks once.
-    /// Continuous mode keeps scanning for new blocks at regular intervals after hitting the chain tip.
     pub fn mode(mut self, mode: ScanMode) -> Self {
         self.mode = mode;
         self
@@ -412,9 +462,23 @@ impl Scanner {
         self
     }
 
-    /// Set how often (in blocks) to check for reorgs during scanning.
     pub fn reorg_check_interval(mut self, interval: u64) -> Self {
         self.reorg_check_interval = interval;
+        self
+    }
+
+    pub fn timeout_config(mut self, config: ScanTimeoutConfig) -> Self {
+        self.timeout_config = config;
+        self
+    }
+
+    pub fn scan_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout_config.timeout = timeout;
+        self
+    }
+
+    pub fn max_scan_retries(mut self, retries: u32) -> Self {
+        self.timeout_config.max_retries = retries;
         self
     }
 
@@ -423,12 +487,10 @@ impl Scanner {
         self
     }
 
-    /// Run the scan without real-time event streaming.
     pub async fn run(self) -> Result<(Vec<WalletEvent>, bool), ScanError> {
         self.run_internal(NoopEventSender).await
     }
 
-    /// Run the scan with real-time event streaming.
     #[allow(clippy::type_complexity)]
     pub fn run_with_events(
         self,
@@ -478,6 +540,7 @@ impl Scanner {
                 &mut conn,
                 event_sender.clone(),
                 &self.mode,
+                &self.timeout_config,
                 self.cancel_token.as_ref(),
             )
             .await?;

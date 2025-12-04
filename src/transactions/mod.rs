@@ -11,5 +11,5 @@ pub use displayed_transaction_processor::{
     FeeInfo, ProcessingContext, ProcessorError, TransactionDetails, TransactionDirection, TransactionDisplayStatus,
     TransactionInput, TransactionOutput, TransactionSource,
 };
-pub use monitor::{MonitoringState, TransactionMonitor};
+pub use monitor::{MonitoringResult, MonitoringState, TransactionMonitor};
 pub use transaction_history::{TransactionHistoryError, TransactionHistoryService};

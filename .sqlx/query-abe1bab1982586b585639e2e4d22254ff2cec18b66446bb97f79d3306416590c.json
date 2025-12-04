@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT transaction_json\n        FROM displayed_transactions\n        WHERE account_id = ? AND status = ?\n        ORDER BY block_height DESC, timestamp DESC\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "transaction_json",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "abe1bab1982586b585639e2e4d22254ff2cec18b66446bb97f79d3306416590c"
+}

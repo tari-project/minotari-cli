@@ -150,6 +150,10 @@ impl Daemon {
                                 println!("An intermittent error occurred during the scan cycle: {}", err_msg);
                                 sleep(self.scan_interval).await;
                             },
+                            ScanError::Timeout(retries) => {
+                                println!("Scan timed out after {} retries, will retry after interval", retries);
+                                sleep(self.scan_interval).await;
+                            },
                         }
                     }
                 }

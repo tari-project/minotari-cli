@@ -43,16 +43,22 @@ impl TransactionSource {
 #[serde(rename_all = "lowercase")]
 pub enum TransactionDisplayStatus {
     Pending,
+    Unconfirmed,
     Confirmed,
     Cancelled,
+    Reorganized,
+    Rejected,
 }
 
 impl TransactionDisplayStatus {
     pub fn as_label(&self) -> &'static str {
         match self {
             Self::Pending => "Pending",
+            Self::Unconfirmed => "Unconfirmed",
             Self::Confirmed => "Confirmed",
             Self::Cancelled => "Cancelled",
+            Self::Reorganized => "Reorganized",
+            Self::Rejected => "Rejected",
         }
     }
 }

@@ -3,7 +3,9 @@ use sqlx::SqlitePool;
 use crate::db;
 use crate::models::Id;
 use crate::scan::DisplayedTransactionsEvent;
-use crate::transactions::{DisplayedTransaction, DisplayedTransactionProcessor, ProcessorError};
+use crate::transactions::{
+    DisplayedTransaction, DisplayedTransactionProcessor, ProcessorError, TransactionDisplayStatus,
+};
 
 #[derive(Debug, thiserror::Error)]
 pub enum TransactionHistoryError {
@@ -14,7 +16,6 @@ pub enum TransactionHistoryError {
     ProcessingError(#[from] ProcessorError),
 }
 
-/// Service for managing transaction history.
 pub struct TransactionHistoryService {
     db_pool: SqlitePool,
 }
@@ -24,27 +25,55 @@ impl TransactionHistoryService {
         Self { db_pool }
     }
 
-    /// Load all transaction history for an account, sorted by timestamp (newest first).
     pub async fn load_all_transactions(
         &self,
         account_id: Id,
     ) -> Result<Vec<DisplayedTransaction>, TransactionHistoryError> {
         let mut conn = self.db_pool.acquire().await?;
-
-        let tip_height = db::get_latest_scanned_tip_block_by_account(&mut conn, account_id)
-            .await?
-            .map(|block| block.height)
-            .unwrap_or(0);
-
-        let processor = DisplayedTransactionProcessor::new(tip_height);
-        let transactions = processor
-            .process_all_stored_with_conn(account_id, &mut conn, &self.db_pool)
-            .await?;
-
+        let transactions = db::get_displayed_transactions_by_account(&mut conn, account_id).await?;
         Ok(transactions)
     }
 
-    /// Load transactions and emit them via the provided callback.
+    /// Excludes reorganized transactions - preferred for user-facing display.
+    pub async fn load_transactions_excluding_reorged(
+        &self,
+        account_id: Id,
+    ) -> Result<Vec<DisplayedTransaction>, TransactionHistoryError> {
+        let mut conn = self.db_pool.acquire().await?;
+        let transactions = db::get_displayed_transactions_excluding_reorged(&mut conn, account_id).await?;
+        Ok(transactions)
+    }
+
+    pub async fn load_transactions_by_status(
+        &self,
+        account_id: Id,
+        status: TransactionDisplayStatus,
+    ) -> Result<Vec<DisplayedTransaction>, TransactionHistoryError> {
+        let mut conn = self.db_pool.acquire().await?;
+        let transactions = db::get_displayed_transactions_by_status(&mut conn, account_id, status).await?;
+        Ok(transactions)
+    }
+
+    pub async fn load_transaction_by_id(
+        &self,
+        id: &str,
+    ) -> Result<Option<DisplayedTransaction>, TransactionHistoryError> {
+        let mut conn = self.db_pool.acquire().await?;
+        let transaction = db::get_displayed_transaction_by_id(&mut conn, id).await?;
+        Ok(transaction)
+    }
+
+    pub async fn load_transactions_paginated(
+        &self,
+        account_id: Id,
+        limit: i64,
+        offset: i64,
+    ) -> Result<Vec<DisplayedTransaction>, TransactionHistoryError> {
+        let mut conn = self.db_pool.acquire().await?;
+        let transactions = db::get_displayed_transactions_paginated(&mut conn, account_id, limit, offset).await?;
+        Ok(transactions)
+    }
+
     pub async fn load_and_emit<F>(&self, account_id: Id, emit_fn: F) -> Result<usize, TransactionHistoryError>
     where
         F: FnOnce(DisplayedTransactionsEvent),
@@ -64,7 +93,6 @@ impl TransactionHistoryService {
         Ok(count)
     }
 
-    /// Load transactions and emit them in chunks for large histories.
     pub async fn emit_in_chunks<F>(
         &self,
         account_id: Id,
@@ -89,5 +117,24 @@ impl TransactionHistoryService {
         Ok(total)
     }
 
-    // TODO: Add method like "load_in_batches" that uses pagination for loading transaction from database and process in batches
+    /// Fallback for legacy data migration.
+    #[allow(dead_code)]
+    pub async fn rebuild_from_balance_changes(
+        &self,
+        account_id: Id,
+    ) -> Result<Vec<DisplayedTransaction>, TransactionHistoryError> {
+        let mut conn = self.db_pool.acquire().await?;
+
+        let tip_height = db::get_latest_scanned_tip_block_by_account(&mut conn, account_id)
+            .await?
+            .map(|block| block.height)
+            .unwrap_or(0);
+
+        let processor = DisplayedTransactionProcessor::new(tip_height);
+        let transactions = processor
+            .process_all_stored_with_conn(account_id, &mut conn, &self.db_pool)
+            .await?;
+
+        Ok(transactions)
+    }
 }

@@ -46,6 +46,17 @@ pub use balance_changes::{get_all_balance_changes_by_account_id, insert_balance_
 mod inputs;
 pub use inputs::{get_input_details_for_balance_change_by_id, insert_input, soft_delete_inputs_from_height};
 
+mod displayed_transactions;
+pub use displayed_transactions::{
+    find_pending_outbound_by_output_hash, get_displayed_transaction_by_id, get_displayed_transactions_by_account,
+    get_displayed_transactions_by_status, get_displayed_transactions_excluding_reorged,
+    get_displayed_transactions_from_height, get_displayed_transactions_needing_confirmation_update,
+    get_displayed_transactions_paginated, insert_displayed_transaction, mark_displayed_transaction_rejected,
+    mark_displayed_transactions_reorganized, mark_displayed_transactions_reorganized_and_return,
+    update_displayed_transaction_confirmations, update_displayed_transaction_mined,
+    update_displayed_transaction_status,
+};
+
 pub async fn init_db(db_path: &str) -> Result<SqlitePool, anyhow::Error> {
     let mut path = std::path::Path::new(db_path).to_path_buf();
     if path.is_relative() {

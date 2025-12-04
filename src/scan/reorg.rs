@@ -1,6 +1,7 @@
 use crate::{
     db,
     models::{PendingTransactionStatus, WalletEvent, WalletEventType},
+    transactions::DisplayedTransaction,
 };
 use anyhow::anyhow;
 use lightweight_wallet_libs::{HttpBlockchainScanner, scanning::BlockchainScanner};
@@ -23,6 +24,7 @@ pub struct ReorgInformation {
     pub rolled_back_blocks_count: u64,
     pub invalidated_output_hashes: Vec<FixedHash>,
     pub cancelled_transaction_ids: Vec<String>,
+    pub reorganized_displayed_transactions: Vec<DisplayedTransaction>,
 }
 
 pub async fn handle_reorgs(
@@ -174,7 +176,9 @@ async fn rollback_from_height(
     db::soft_delete_outputs_from_height(tx, account_id, reorg_start_height).await?;
     db::delete_scanned_tip_blocks_from_height(tx, account_id, reorg_start_height).await?;
 
-    // 5. Reset completed transactions that were mined at or after reorg height back to Completed status
+    let reorganized_displayed_transactions =
+        db::mark_displayed_transactions_reorganized_and_return(tx, account_id, reorg_start_height).await?;
+
     let affected_count = db::reset_mined_completed_transactions_from_height(tx, account_id, reorg_start_height).await?;
     if affected_count > 0 {
         println!(
@@ -188,5 +192,6 @@ async fn rollback_from_height(
         rolled_back_blocks_count: blocks_rolled_back,
         invalidated_output_hashes,
         cancelled_transaction_ids,
+        reorganized_displayed_transactions,
     })
 }

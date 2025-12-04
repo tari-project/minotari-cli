@@ -9,6 +9,7 @@ pub enum ProcessingEvent {
     BlockProcessed(BlockProcessedEvent),
     ScanStatus(ScanStatusEvent),
     TransactionsReady(DisplayedTransactionsEvent),
+    TransactionsUpdated(TransactionsUpdatedEvent),
     ReorgDetected(ReorgDetectedEvent),
 }
 
@@ -18,6 +19,12 @@ pub struct DisplayedTransactionsEvent {
     pub transactions: Vec<DisplayedTransaction>,
     pub block_height: Option<u64>,
     pub is_initial_sync: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct TransactionsUpdatedEvent {
+    pub account_id: i64,
+    pub updated_transactions: Vec<DisplayedTransaction>,
 }
 
 #[derive(Debug, Clone)]
@@ -104,6 +111,7 @@ pub struct ReorgDetectedEvent {
     pub blocks_rolled_back: u64,
     pub invalidated_output_hashes: Vec<FixedHash>,
     pub cancelled_transaction_ids: Vec<String>,
+    pub reorganized_displayed_transactions: Vec<DisplayedTransaction>,
 }
 
 pub trait EventSender: Send + Sync {
