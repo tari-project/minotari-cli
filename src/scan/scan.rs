@@ -27,7 +27,9 @@ use crate::{
 const BIRTHDAY_GENESIS_FROM_UNIX_EPOCH: u64 = 1640995200;
 const MAINNET_GENESIS_DATE: u64 = 1746489644;
 const DEFAULT_SCAN_TIMEOUT: Duration = Duration::from_secs(60 * 5); // 5 minutes
-const DEFAULT_MAX_SCAN_RETRIES: u32 = 3;
+const DEFAULT_MAX_TIMEOUT_RETRIES: u32 = 3;
+const DEFAULT_MAX_ERROR_RETRIES: u32 = 3;
+const DEFAULT_ERROR_BACKOFF_BASE_SECS: u64 = 2;
 
 #[derive(Debug, Error)]
 pub enum ScanError {
@@ -67,23 +69,40 @@ impl ScanContext {
 
     async fn scan_blocks_with_timeout(
         &mut self,
-        timeout_config: &ScanTimeoutConfig,
+        retry_config: &ScanRetryConfig,
     ) -> Result<(Vec<lightweight_wallet_libs::BlockScanResult>, bool), ScanError> {
-        let mut retries = 0;
+        let mut timeout_retries = 0;
+        let mut error_retries = 0;
 
         loop {
-            match timeout(timeout_config.timeout, self.scanner.scan_blocks(&self.scan_config)).await {
+            match timeout(retry_config.timeout, self.scanner.scan_blocks(&self.scan_config)).await {
                 Ok(Ok(result)) => return Ok(result),
-                Ok(Err(e)) => return Err(ScanError::Intermittent(e.to_string())),
-                Err(_elapsed) => {
-                    retries += 1;
+                Ok(Err(e)) => {
+                    error_retries += 1;
+                    let error_msg = e.to_string();
                     println!(
-                        "scan_blocks timed out after {:?}, retry {}/{}",
-                        timeout_config.timeout, retries, timeout_config.max_retries
+                        "Blockchain scan failed: {}, retry {}/{}",
+                        error_msg, error_retries, retry_config.max_error_retries
                     );
 
-                    if retries >= timeout_config.max_retries {
-                        return Err(ScanError::Timeout(retries));
+                    if error_retries >= retry_config.max_error_retries {
+                        return Err(ScanError::Intermittent(error_msg));
+                    }
+
+                    // Exponential backoff for error retries
+                    let backoff_secs = retry_config.error_backoff_base_secs.pow(error_retries.min(5));
+                    println!("Waiting {} seconds before retrying...", backoff_secs);
+                    tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
+                },
+                Err(_elapsed) => {
+                    timeout_retries += 1;
+                    println!(
+                        "scan_blocks timed out after {:?}, retry {}/{}",
+                        retry_config.timeout, timeout_retries, retry_config.max_timeout_retries
+                    );
+
+                    if timeout_retries >= retry_config.max_timeout_retries {
+                        return Err(ScanError::Timeout(timeout_retries));
                     }
                 },
             }
@@ -101,7 +120,37 @@ impl Default for ScanTimeoutConfig {
     fn default() -> Self {
         Self {
             timeout: DEFAULT_SCAN_TIMEOUT,
-            max_retries: DEFAULT_MAX_SCAN_RETRIES,
+            max_retries: DEFAULT_MAX_TIMEOUT_RETRIES,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct ScanRetryConfig {
+    pub timeout: Duration,
+    pub max_timeout_retries: u32,
+    pub max_error_retries: u32,
+    pub error_backoff_base_secs: u64,
+}
+
+impl Default for ScanRetryConfig {
+    fn default() -> Self {
+        Self {
+            timeout: DEFAULT_SCAN_TIMEOUT,
+            max_timeout_retries: DEFAULT_MAX_TIMEOUT_RETRIES,
+            max_error_retries: DEFAULT_MAX_ERROR_RETRIES,
+            error_backoff_base_secs: DEFAULT_ERROR_BACKOFF_BASE_SECS,
+        }
+    }
+}
+
+impl From<ScanTimeoutConfig> for ScanRetryConfig {
+    fn from(config: ScanTimeoutConfig) -> Self {
+        Self {
+            timeout: config.timeout,
+            max_timeout_retries: config.max_retries,
+            max_error_retries: DEFAULT_MAX_ERROR_RETRIES,
+            error_backoff_base_secs: DEFAULT_ERROR_BACKOFF_BASE_SECS,
         }
     }
 }
@@ -249,7 +298,7 @@ async fn run_scan_loop<E: EventSender + Clone>(
     conn: &mut PoolConnection<Sqlite>,
     event_sender: E,
     mode: &ScanMode,
-    timeout_config: &ScanTimeoutConfig,
+    retry_config: &ScanRetryConfig,
     cancel_token: Option<&CancellationToken>,
 ) -> Result<(Vec<WalletEvent>, bool), ScanError> {
     println!(
@@ -290,7 +339,7 @@ async fn run_scan_loop<E: EventSender + Clone>(
             return Ok((all_events, true));
         }
 
-        let (scanned_blocks, more_blocks) = scanner_context.scan_blocks_with_timeout(timeout_config).await?;
+        let (scanned_blocks, more_blocks) = scanner_context.scan_blocks_with_timeout(retry_config).await?;
 
         total_scanned += scanned_blocks.len() as u64;
 
@@ -427,7 +476,7 @@ pub struct Scanner {
     processing_threads: usize,
     reorg_check_interval: u64,
     mode: ScanMode,
-    timeout_config: ScanTimeoutConfig,
+    retry_config: ScanRetryConfig,
     cancel_token: Option<CancellationToken>,
 }
 
@@ -442,7 +491,7 @@ impl Scanner {
             processing_threads: 8,
             reorg_check_interval: 1000,
             mode: ScanMode::Full,
-            timeout_config: ScanTimeoutConfig::default(),
+            retry_config: ScanRetryConfig::default(),
             cancel_token: None,
         }
     }
@@ -468,17 +517,37 @@ impl Scanner {
     }
 
     pub fn timeout_config(mut self, config: ScanTimeoutConfig) -> Self {
-        self.timeout_config = config;
+        self.retry_config = config.into();
+        self
+    }
+
+    pub fn retry_config(mut self, config: ScanRetryConfig) -> Self {
+        self.retry_config = config;
         self
     }
 
     pub fn scan_timeout(mut self, timeout: Duration) -> Self {
-        self.timeout_config.timeout = timeout;
+        self.retry_config.timeout = timeout;
         self
     }
 
     pub fn max_scan_retries(mut self, retries: u32) -> Self {
-        self.timeout_config.max_retries = retries;
+        self.retry_config.max_timeout_retries = retries;
+        self
+    }
+
+    pub fn max_timeout_retries(mut self, retries: u32) -> Self {
+        self.retry_config.max_timeout_retries = retries;
+        self
+    }
+
+    pub fn max_error_retries(mut self, retries: u32) -> Self {
+        self.retry_config.max_error_retries = retries;
+        self
+    }
+
+    pub fn error_backoff_base_secs(mut self, secs: u64) -> Self {
+        self.retry_config.error_backoff_base_secs = secs;
         self
     }
 
@@ -540,7 +609,7 @@ impl Scanner {
                 &mut conn,
                 event_sender.clone(),
                 &self.mode,
-                &self.timeout_config,
+                &self.retry_config,
                 self.cancel_token.as_ref(),
             )
             .await?;

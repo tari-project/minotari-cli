@@ -11,4 +11,4 @@ pub use events::{
     ScanStatusEvent, SpentInput,
 };
 pub use reorg::{ReorgInformation, ReorgResult};
-pub use scan::{ScanMode, Scanner};
+pub use scan::{ScanMode, ScanRetryConfig, ScanTimeoutConfig, Scanner};
