@@ -15,10 +15,9 @@ use crate::{
     transactions::{
         DisplayedTransaction, TransactionDirection, TransactionDisplayStatus,
         displayed_transaction_processor::{DisplayedTransactionProcessor, ProcessingContext},
+        monitor::REQUIRED_CONFIRMATIONS,
     },
 };
-
-pub(crate) const REQUIRED_CONFIRMATIONS: u64 = 6;
 
 #[derive(Debug, Error)]
 pub enum BlockProcessorError {
@@ -193,7 +192,7 @@ impl<E: EventSender> BlockProcessor<E> {
         pending.blockchain.confirmations = scanned.blockchain.confirmations;
 
         // Update status based on confirmations
-        if pending.blockchain.confirmations >= 6 {
+        if pending.blockchain.confirmations >= REQUIRED_CONFIRMATIONS {
             pending.status = TransactionDisplayStatus::Confirmed;
         } else if pending.blockchain.confirmations > 0 {
             pending.status = TransactionDisplayStatus::Unconfirmed;
