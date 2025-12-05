@@ -508,6 +508,9 @@ fn make_balance_change_for_output(
         .unwrap_or_else(Utc::now)
         .naive_utc();
 
+    let payment_info = output.payment_id();
+    let memo_bytes = payment_info.get_payment_id();
+
     if output.features().is_coinbase() {
         return BalanceChange {
             account_id,
@@ -520,15 +523,12 @@ fn make_balance_change_for_output(
             effective_height: height,
             claimed_recipient_address: None,
             claimed_sender_address: None,
-            memo_parsed: None,
-            memo_hex: None,
-            claimed_fee: None,
-            claimed_amount: None,
+            memo_parsed: Some(String::from_utf8_lossy(&memo_bytes).to_string()),
+            memo_hex: Some(hex::encode(&memo_bytes)),
+            claimed_fee: payment_info.get_fee().map(|v| v.0),
+            claimed_amount: payment_info.get_amount().map(|v| v.0),
         };
     }
-
-    let payment_info = output.payment_id();
-    let memo_bytes = payment_info.get_payment_id();
 
     BalanceChange {
         account_id,
