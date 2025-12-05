@@ -313,14 +313,16 @@ pub async fn unlock_outputs_for_request(
     locked_by_request_id: &str,
 ) -> Result<(), sqlx::Error> {
     let unspent_status = OutputStatus::Unspent.to_string();
+    let locked_status = OutputStatus::Locked.to_string();
     sqlx::query!(
         r#"
         UPDATE outputs
         SET status = ?, locked_at = NULL, locked_by_request_id = NULL
-        WHERE locked_by_request_id = ?
+        WHERE locked_by_request_id = ? AND status = ?
         "#,
         unspent_status,
         locked_by_request_id,
+        locked_status
     )
     .execute(&mut *conn)
     .await?;
