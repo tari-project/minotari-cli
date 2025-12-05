@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        INSERT INTO pending_transactions (\n            id,\n            idempotency_key,\n            account_id,\n            status,\n            requires_change_output,\n            total_value,\n            fee_without_change,\n            fee_with_change,\n            expires_at\n        )\n        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 9
+    },
+    "nullable": []
+  },
+  "hash": "f84689e31e4c6737f86b59103151a08f4a8ab888fe21059e0d201059c55ab0c5"
+}

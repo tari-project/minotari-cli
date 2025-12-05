@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT transaction_json\n        FROM displayed_transactions\n        WHERE account_id = ?\n        ORDER BY block_height DESC, timestamp DESC\n        LIMIT ? OFFSET ?\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "transaction_json",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "74d885ba09435634d4036772e203fea60ba8f946a650fcc74a1842db4100ea5e"
+}

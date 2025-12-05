@@ -7,7 +7,7 @@ use tari_common::configuration::Network;
 
 use crate::{
     api, db,
-    scan::{self, ScanError},
+    scan::{self, ScanMode, scan::ScanError},
     tasks::unlocker::TransactionUnlocker,
 };
 
@@ -111,18 +111,15 @@ impl Daemon {
 
     async fn scan_and_sleep(&self) -> Result<(), ScanError> {
         println!("Starting wallet scan...");
-        let result = scan::scan(
-            &self.password,
-            &self.base_url,
-            &self.database_file,
-            None, // Scan all accounts
-            self.max_blocks,
-            self.batch_size,
-        )
-        .await;
+        let result = scan::Scanner::new(&self.password, &self.base_url, &self.database_file, self.batch_size)
+            .mode(ScanMode::Partial {
+                max_blocks: self.max_blocks,
+            })
+            .run()
+            .await;
 
         match result {
-            Ok(events) => {
+            Ok((events, _are_there_more_blocks_to_scan)) => {
                 println!("Scan completed successfully. Found {} events.", events.len());
             },
             Err(e) => {
@@ -145,12 +142,16 @@ impl Daemon {
                 res = self.scan_and_sleep() => {
                     if let Err(e) = res {
                         match e {
-                            ScanError::Fatal(_) | ScanError::FatalSqlx(_) => {
+                            ScanError::Fatal(_) => {
                                 println!("A fatal error occurred during the scan cycle: {}", e);
                                 return Err(e);
                             },
                             ScanError::Intermittent(err_msg) => {
                                 println!("An intermittent error occurred during the scan cycle: {}", err_msg);
+                                sleep(self.scan_interval).await;
+                            },
+                            ScanError::Timeout(retries) => {
+                                println!("Scan timed out after {} retries, will retry after interval", retries);
                                 sleep(self.scan_interval).await;
                             },
                         }

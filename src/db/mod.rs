@@ -7,31 +7,55 @@ pub use accounts::{AccountBalance, AccountRow, create_account, get_account_by_na
 
 mod scanned_tip_blocks;
 pub use scanned_tip_blocks::{
-    delete_scanned_tip_blocks_from_height, get_scanned_tip_blocks_by_account, insert_scanned_tip_block,
-    prune_scanned_tip_blocks,
+    delete_scanned_tip_blocks_from_height, get_latest_scanned_tip_block_by_account, get_scanned_tip_blocks_by_account,
+    insert_scanned_tip_block, prune_scanned_tip_blocks,
 };
 
 mod outputs;
 pub use outputs::{
-    DbWalletOutput, fetch_unspent_outputs, get_output_info_by_hash, get_unconfirmed_outputs, insert_output,
+    DbWalletOutput, fetch_outputs_by_lock_request_id, fetch_unspent_outputs,
+    get_output_details_for_balance_change_by_id, get_output_info_by_hash, get_unconfirmed_outputs, insert_output,
     lock_output, mark_output_confirmed, soft_delete_outputs_from_height, unlock_outputs_for_request,
-    update_output_status,
+    unlock_outputs_for_request as unlock_outputs_for_pending_transaction, update_output_status,
 };
 
 mod pending_transactions;
 pub use pending_transactions::{
-    PendingTransaction, cancel_pending_transactions_by_ids, create_pending_transaction,
-    find_expired_pending_transactions, find_pending_transaction_by_idempotency_key, update_pending_transaction_status,
+    PendingTransaction, cancel_pending_transactions_by_ids, check_if_transaction_is_expired_by_idempotency_key,
+    check_if_transaction_was_already_completed_by_idempotency_key, create_pending_transaction,
+    find_expired_pending_transactions, find_pending_transaction_by_idempotency_key,
+    find_pending_transaction_locked_funds_by_idempotency_key, update_pending_transaction_status,
+};
+
+mod completed_transactions;
+pub use completed_transactions::{
+    CompletedTransaction, CompletedTransactionStatus, create_completed_transaction, get_completed_transaction_by_id,
+    get_completed_transactions_by_status, get_pending_completed_transactions,
+    mark_completed_transaction_as_broadcasted, mark_completed_transaction_as_confirmed,
+    mark_completed_transaction_as_mined_unconfirmed, mark_completed_transaction_as_rejected,
+    reset_mined_completed_transactions_from_height, revert_completed_transaction_to_completed,
+    update_completed_transaction_status,
 };
 
 mod events;
 pub use events::insert_wallet_event;
 
 mod balance_changes;
-pub use balance_changes::insert_balance_change;
+pub use balance_changes::{get_all_balance_changes_by_account_id, insert_balance_change};
 
 mod inputs;
-pub use inputs::{insert_input, soft_delete_inputs_from_height};
+pub use inputs::{get_input_details_for_balance_change_by_id, insert_input, soft_delete_inputs_from_height};
+
+mod displayed_transactions;
+pub use displayed_transactions::{
+    find_pending_outbound_by_output_hash, get_displayed_transaction_by_id, get_displayed_transactions_by_account,
+    get_displayed_transactions_by_status, get_displayed_transactions_excluding_reorged,
+    get_displayed_transactions_from_height, get_displayed_transactions_needing_confirmation_update,
+    get_displayed_transactions_paginated, insert_displayed_transaction, mark_displayed_transaction_rejected,
+    mark_displayed_transactions_reorganized, mark_displayed_transactions_reorganized_and_return,
+    update_displayed_transaction_confirmations, update_displayed_transaction_mined,
+    update_displayed_transaction_status,
+};
 
 pub async fn init_db(db_path: &str) -> Result<SqlitePool, anyhow::Error> {
     let mut path = std::path::Path::new(db_path).to_path_buf();

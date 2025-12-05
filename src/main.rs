@@ -4,7 +4,6 @@ use std::{
 };
 
 use anyhow::anyhow;
-use blake2::{Blake2s256, Digest};
 use chacha20poly1305::{
     AeadCore, Key, KeyInit, XChaCha20Poly1305,
     aead::{Aead, OsRng},
@@ -15,11 +14,12 @@ use minotari::{
     daemon,
     db::{self, get_accounts, get_balance, init_db},
     models::WalletEvent,
-    scan::{self, ScanError},
+    scan::{self, scan::ScanError},
     transactions::{
         lock_amount::LockAmount,
         one_sided_transaction::{OneSidedTransaction, Recipient},
     },
+    utils,
 };
 use num_format::{Locale, ToFormattedString};
 use std::str::FromStr;
@@ -287,7 +287,7 @@ async fn main() -> Result<(), anyhow::Error> {
             batch_size,
         } => {
             println!("Scanning blockchain...");
-            let events = scan(
+            let (events, _more_blocks_to_scan) = scan(
                 &password,
                 &base_url,
                 &database_file,
@@ -453,7 +453,7 @@ async fn handle_create_unsigned_transaction(
     let lock_amount = LockAmount::new(pool.clone());
     let locked_funds = lock_amount
         .lock(
-            &account,
+            account.id,
             amount,
             num_outputs,
             fee_per_gram,
@@ -492,7 +492,7 @@ async fn handle_lock_funds(
     let lock_amount = LockAmount::new(pool.clone());
     let result = lock_amount
         .lock(
-            &account,
+            account.id,
             request.amount,
             request.num_outputs.expect("must be present"),
             request.fee_per_gram.expect("must be present"),
@@ -517,8 +517,15 @@ async fn scan(
     account_name: Option<&str>,
     max_blocks: u64,
     batch_size: u64,
-) -> Result<Vec<WalletEvent>, ScanError> {
-    scan::scan(password, base_url, database_file, account_name, max_blocks, batch_size).await
+) -> Result<(Vec<WalletEvent>, bool), ScanError> {
+    let mut scanner =
+        scan::Scanner::new(password, base_url, database_file, batch_size).mode(scan::ScanMode::Partial { max_blocks });
+
+    if let Some(name) = account_name {
+        scanner = scanner.account(name);
+    }
+
+    scanner.run().await
 }
 
 async fn init_with_view_key(
@@ -528,46 +535,13 @@ async fn init_with_view_key(
     database_file: &str,
     birthday: u16,
 ) -> Result<(), anyhow::Error> {
-    let view_key_bytes = hex::decode(view_private_key)?;
-    let spend_key_bytes = hex::decode(spend_public_key)?;
-
-    let password = if password.len() < 32 {
-        format!("{:0<32}", password)
-    } else {
-        password[..32].to_string()
-    };
-    let key_bytes: [u8; 32] = password
-        .as_bytes()
-        .try_into()
-        .map_err(|_| anyhow::anyhow!("Password must be 32 bytes"))?;
-    let key = Key::from(key_bytes);
-    let cipher = XChaCha20Poly1305::new(&key);
-
-    let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
-    let encrypted_view_key = cipher.encrypt(&nonce, view_key_bytes.as_ref())?;
-    let encrypted_spend_key = cipher.encrypt(&nonce, spend_key_bytes.as_ref())?;
-
-    // create a hash of the viewkey to determine duplicate wallets
-    let view_key_hash = hash_view_key(&view_key_bytes);
-    let pool = init_db(database_file).await?;
-    let mut conn = pool.acquire().await?;
-    db::create_account(
-        &mut conn,
-        "default",
-        &encrypted_view_key,
-        &encrypted_spend_key,
-        &nonce,
-        &view_key_hash,
-        birthday as i64,
+    utils::init_with_view_key(
+        view_private_key,
+        spend_public_key,
+        password,
+        database_file,
+        birthday,
+        None,
     )
-    .await?;
-
-    Ok(())
-}
-
-fn hash_view_key(view_key: &[u8]) -> Vec<u8> {
-    let mut hasher = Blake2s256::new();
-    hasher.update(b"view_key_hash");
-    hasher.update(view_key);
-    hasher.finalize().to_vec()
+    .await
 }

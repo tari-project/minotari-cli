@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        INSERT INTO displayed_transactions (id, account_id, direction, source, status, amount, block_height, timestamp, transaction_json, created_at, updated_at)\n        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)\n        ON CONFLICT(id) DO UPDATE SET\n            status = excluded.status,\n            transaction_json = excluded.transaction_json,\n            updated_at = excluded.updated_at\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 11
+    },
+    "nullable": []
+  },
+  "hash": "644b38aa2ad1081c0a3fb55aba879955044bf1f6de606911fa0387d12f373cc5"
+}

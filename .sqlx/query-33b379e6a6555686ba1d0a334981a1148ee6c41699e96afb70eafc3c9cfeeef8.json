@@ -1,0 +1,32 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT output_hash, mined_in_block_height, locked_by_request_id\n        FROM outputs\n        WHERE account_id = ? AND mined_in_block_height >= ? AND deleted_at IS NULL\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "output_hash",
+        "ordinal": 0,
+        "type_info": "Blob"
+      },
+      {
+        "name": "mined_in_block_height",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "locked_by_request_id",
+        "ordinal": 2,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": [
+      false,
+      false,
+      true
+    ]
+  },
+  "hash": "33b379e6a6555686ba1d0a334981a1148ee6c41699e96afb70eafc3c9cfeeef8"
+}

@@ -40,6 +40,32 @@ pub async fn get_scanned_tip_blocks_by_account(
         .collect())
 }
 
+pub async fn get_latest_scanned_tip_block_by_account(
+    conn: &mut SqliteConnection,
+    account_id: i64,
+) -> Result<Option<ScannedTipBlock>, sqlx::Error> {
+    let row = sqlx::query_as!(
+        ScannedTipBlockRow,
+        r#"
+        SELECT id, account_id, height, hash
+        FROM scanned_tip_blocks
+        WHERE account_id = ?
+        ORDER BY height DESC
+        LIMIT 1
+        "#,
+        account_id
+    )
+    .fetch_optional(&mut *conn)
+    .await?;
+
+    Ok(row.map(|r| ScannedTipBlock {
+        id: r.id,
+        account_id: r.account_id,
+        height: r.height as u64,
+        hash: r.hash,
+    }))
+}
+
 pub async fn insert_scanned_tip_block(
     conn: &mut SqliteConnection,
     account_id: i64,

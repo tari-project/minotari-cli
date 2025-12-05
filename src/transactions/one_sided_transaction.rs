@@ -12,7 +12,7 @@ use tari_transaction_components::{
     transaction_components::{MemoField, OutputFeatures, memo_field::TxType},
 };
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct Recipient {
     pub address: TariAddress,
     pub amount: MicroMinotari,

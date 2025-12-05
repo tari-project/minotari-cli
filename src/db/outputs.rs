@@ -1,3 +1,5 @@
+use std::str::FromStr;
+
 use crate::models::OutputStatus;
 use chrono::{DateTime, Utc};
 use serde_json;
@@ -82,6 +84,29 @@ pub async fn get_output_info_by_hash(
     .await?;
 
     Ok(row.map(|r| (r.id, r.value as u64)))
+}
+// Retrieve wallet_output.json | confirmed_height and status for a given output ID
+pub async fn get_output_details_for_balance_change_by_id(
+    conn: &mut SqliteConnection,
+    output_id: i64,
+) -> Result<(Option<u64>, Option<OutputStatus>, Option<String>), sqlx::Error> {
+    let row = sqlx::query!(
+        r#"
+        SELECT confirmed_height, status, wallet_output_json
+        FROM outputs
+        WHERE id = ? AND deleted_at IS NULL
+        "#,
+        output_id
+    )
+    .fetch_optional(&mut *conn)
+    .await?;
+
+    let confirmed_height = row.as_ref().map(|r| r.confirmed_height.unwrap_or(0) as u64);
+    let status = row.as_ref().map(|r| r.status.clone());
+    let status = status.and_then(|s| OutputStatus::from_str(&s).ok());
+    let wallet_output_json = row.as_ref().and_then(|r| r.wallet_output_json.clone());
+
+    Ok((confirmed_height, status, wallet_output_json))
 }
 
 pub async fn get_unconfirmed_outputs(

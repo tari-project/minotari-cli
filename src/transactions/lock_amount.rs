@@ -5,7 +5,7 @@ use uuid::Uuid;
 
 use crate::{
     api::types::LockFundsResponse,
-    db::{self, AccountRow},
+    db::{self},
     transactions::input_selector::InputSelector,
 };
 
@@ -21,7 +21,7 @@ impl LockAmount {
     #[allow(clippy::too_many_arguments)]
     pub async fn lock(
         &self,
-        account: &AccountRow,
+        account_id: i64,
         amount: MicroMinotari,
         num_outputs: usize,
         fee_per_gram: MicroMinotari,
@@ -32,12 +32,13 @@ impl LockAmount {
         let mut conn = self.db_pool.acquire().await?;
         if let Some(idempotency_key_str) = &idempotency_key
             && let Some(response) =
-                db::find_pending_transaction_by_idempotency_key(&mut conn, idempotency_key_str, account.id).await?
+                db::find_pending_transaction_locked_funds_by_idempotency_key(&mut conn, idempotency_key_str, account_id)
+                    .await?
         {
             return Ok(response);
         }
 
-        let input_selector = InputSelector::new(account.id);
+        let input_selector = InputSelector::new(account_id);
         let utxo_selection = input_selector
             .fetch_unspent_outputs(&mut conn, amount, num_outputs, fee_per_gram, estimated_output_size)
             .await?;
@@ -49,7 +50,7 @@ impl LockAmount {
         let pending_tx_id = db::create_pending_transaction(
             &mut transaction,
             &idempotency_key,
-            account.id,
+            account_id,
             utxo_selection.requires_change_output,
             utxo_selection.total_value,
             utxo_selection.fee_without_change,

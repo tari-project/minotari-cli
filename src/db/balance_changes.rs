@@ -1,3 +1,4 @@
+use chrono::NaiveDateTime;
 use sqlx::SqliteConnection;
 
 use crate::models::BalanceChange;
@@ -48,4 +49,38 @@ pub async fn insert_balance_change(conn: &mut SqliteConnection, change: &Balance
     .await?;
 
     Ok(())
+}
+
+pub async fn get_all_balance_changes_by_account_id(
+    conn: &mut SqliteConnection,
+    account_id: i64,
+) -> Result<Vec<BalanceChange>, sqlx::Error> {
+    let rows = sqlx::query_as!(
+        BalanceChange,
+        r#"
+        SELECT 
+            account_id as "account_id: i64",
+            caused_by_output_id as "caused_by_output_id: _",
+            caused_by_input_id as "caused_by_input_id: _",
+            description,
+            balance_credit as "balance_credit: u64",
+            balance_debit as "balance_debit: u64",
+            effective_date as "effective_date: NaiveDateTime",
+            effective_height as "effective_height: u64",
+            claimed_recipient_address as "claimed_recipient_address: _",
+            claimed_sender_address as "claimed_sender_address: _",
+            memo_parsed,
+            memo_hex,
+            claimed_fee as "claimed_fee: _",
+            claimed_amount as "claimed_amount: _"
+        FROM balance_changes
+        WHERE account_id = ?
+        ORDER BY effective_height ASC, id ASC
+        "#,
+        account_id
+    )
+    .fetch_all(&mut *conn)
+    .await?;
+
+    Ok(rows)
 }
