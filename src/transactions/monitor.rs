@@ -15,7 +15,7 @@ use crate::transactions::{DisplayedTransaction, TransactionDisplayStatus};
 use tari_transaction_components::transaction_components::Transaction;
 use tari_utilities::ByteArray;
 
-const REQUIRED_CONFIRMATIONS: u64 = 6;
+const REQUIRED_CONFIRMATIONS: u64 = 3;
 const MAX_BROADCAST_ATTEMPTS: i32 = 10;
 
 #[derive(Debug, Default)]
