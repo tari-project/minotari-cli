@@ -21,6 +21,7 @@ use minotari::{
         one_sided_transaction::{OneSidedTransaction, Recipient},
     },
 };
+use num_format::{Locale, ToFormattedString};
 use std::str::FromStr;
 use tari_common::configuration::Network;
 use tari_common_types::{
@@ -387,14 +388,16 @@ async fn handle_balance(database_file: &str, account_name: Option<&str>) -> Resu
         let agg_result = get_balance(&mut conn, account.id).await?;
         let credits = agg_result.total_credits.unwrap_or(0) as u64;
         let debits = agg_result.total_debits.unwrap_or(0) as u64;
-        let micro_tari_balance = credits.saturating_sub(debits) as f64;
-        let tari_balance = micro_tari_balance / 1_000_000.0;
+        let micro_tari_balance = credits.saturating_sub(debits);
+        let tari_balance = micro_tari_balance / 1_000_000;
+        let remainder = micro_tari_balance % 1_000_000;
         println!(
-            "Balance at height {}({}): {} microTari ({} Tari)",
+            "Balance at height {}({}): {} microTari ({}.{} Tari)",
             agg_result.max_height.unwrap_or(0),
             agg_result.max_date.unwrap_or_else(|| "N/A".to_string()),
-            micro_tari_balance,
-            tari_balance
+            micro_tari_balance.to_formatted_string(&Locale::en),
+            tari_balance.to_formatted_string(&Locale::en),
+            remainder.to_formatted_string(&Locale::en),
         );
     }
     Ok(())
