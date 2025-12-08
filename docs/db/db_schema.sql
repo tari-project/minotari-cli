@@ -78,21 +78,65 @@ CREATE TABLE inputs (
 );
 CREATE INDEX idx_scanned_tip_blocks_account_height ON scanned_tip_blocks(account_id, height DESC);
 CREATE UNIQUE INDEX idx_scanned_tip_blocks_account_height_hash ON scanned_tip_blocks(account_id, height, hash);
-CREATE TABLE pending_transactions (
-    id TEXT PRIMARY KEY NOT NULL,
-    account_id INTEGER NOT NULL,
-    idempotency_key TEXT NOT NULL,
-    status TEXT NOT NULL,
-    unsigned_tx_json TEXT NOT NULL,
-    expires_at TIMESTAMP NOT NULL,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    FOREIGN KEY (account_id) REFERENCES accounts(id),
-    UNIQUE (account_id, idempotency_key)
-);
-CREATE INDEX idx_pending_transactions_status_expires_at ON pending_transactions(status, expires_at);
 CREATE INDEX idx_balance_changes_account_height ON balance_changes(account_id, effective_height);
 CREATE UNIQUE INDEX idx_outputs_output_hash_active ON outputs(output_hash) WHERE deleted_at IS NULL;
 CREATE INDEX idx_outputs_account_mined_height_active ON outputs(account_id, mined_in_block_height) WHERE deleted_at IS NULL;
 CREATE INDEX idx_outputs_status_active ON outputs(status) WHERE deleted_at IS NULL;
 CREATE UNIQUE INDEX idx_inputs_output_id_unique_active ON inputs(output_id) WHERE deleted_at IS NULL;
 CREATE INDEX idx_inputs_account_mined_height_active ON inputs(account_id, mined_in_block_height) WHERE deleted_at IS NULL;
+CREATE TABLE pending_transactions (
+    id TEXT PRIMARY KEY NOT NULL,
+    account_id INTEGER NOT NULL,
+    idempotency_key TEXT NOT NULL,
+    status TEXT NOT NULL,
+    requires_change_output BOOLEAN NOT NULL DEFAULT FALSE,
+    total_value INTEGER NOT NULL DEFAULT 0,
+    fee_without_change INTEGER NOT NULL DEFAULT 0,
+    fee_with_change INTEGER NOT NULL DEFAULT 0,
+    expires_at TIMESTAMP NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (account_id) REFERENCES accounts(id),
+    UNIQUE (account_id, idempotency_key)
+);
+CREATE INDEX idx_pending_transactions_status_expires_at ON pending_transactions(status, expires_at);
+CREATE TABLE completed_transactions (
+    id TEXT PRIMARY KEY NOT NULL,
+    account_id INTEGER NOT NULL,
+    pending_tx_id TEXT NOT NULL,
+    status TEXT NOT NULL,
+    last_rejected_reason TEXT,
+    kernel_excess BLOB NOT NULL,
+    sent_payref TEXT,
+    mined_height INTEGER,
+    mined_block_hash BLOB,
+    confirmation_height INTEGER,
+    broadcast_attempts INTEGER NOT NULL DEFAULT 0,
+    serialized_transaction BLOB NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    FOREIGN KEY (account_id) REFERENCES accounts(id),
+    FOREIGN KEY (pending_tx_id) REFERENCES pending_transactions(id)
+);
+CREATE INDEX idx_completed_transactions_account_id ON completed_transactions(account_id);
+CREATE INDEX idx_completed_transactions_pending_tx_id ON completed_transactions(pending_tx_id);
+CREATE INDEX idx_completed_transactions_status ON completed_transactions(status);
+CREATE INDEX idx_completed_transactions_account_status ON completed_transactions(account_id, status);
+CREATE INDEX idx_completed_transactions_mined_height ON completed_transactions(mined_height);
+CREATE TABLE displayed_transactions (
+    id TEXT PRIMARY KEY NOT NULL,
+    account_id INTEGER NOT NULL,
+    direction TEXT NOT NULL,
+    source TEXT NOT NULL,
+    status TEXT NOT NULL,
+    amount INTEGER NOT NULL,
+    block_height INTEGER NOT NULL,
+    timestamp TEXT NOT NULL,
+    transaction_json TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+CREATE INDEX idx_displayed_transactions_account_id ON displayed_transactions(account_id);
+CREATE INDEX idx_displayed_transactions_status ON displayed_transactions(status);
+CREATE INDEX idx_displayed_transactions_block_height ON displayed_transactions(block_height);
+CREATE INDEX idx_displayed_transactions_account_status ON displayed_transactions(account_id, status);
+CREATE INDEX idx_displayed_transactions_account_height ON displayed_transactions(account_id, block_height DESC);

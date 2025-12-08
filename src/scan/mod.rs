@@ -10,5 +10,5 @@ pub use events::{
     DisplayedTransactionsEvent, EventSender, NoopEventSender, PauseReason, ProcessingEvent, ReorgDetectedEvent,
     ScanStatusEvent, SpentInput,
 };
-pub use reorg::{ReorgInformation, ReorgResult};
+pub use reorg::{ReorgInformation, ReorgResult, rollback_from_height};
 pub use scan::{ScanMode, ScanRetryConfig, ScanTimeoutConfig, Scanner};

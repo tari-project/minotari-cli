@@ -1,4 +1,4 @@
-use crate::{api::types::LockFundsResponse, db::AccountRow};
+use crate::{api::types::LockFundsResult, db::AccountRow};
 use anyhow::anyhow;
 use sqlx::SqlitePool;
 use tari_common::configuration::Network;
@@ -37,7 +37,7 @@ impl OneSidedTransaction {
     pub async fn create_unsigned_transaction(
         &self,
         account: &AccountRow,
-        locked_funds: LockFundsResponse,
+        locked_funds: LockFundsResult,
         recipients: Vec<Recipient>,
         fee_per_gram: MicroMinotari,
     ) -> Result<PrepareOneSidedTransactionForSigningResult, anyhow::Error> {

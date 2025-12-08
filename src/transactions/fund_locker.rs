@@ -4,16 +4,16 @@ use tari_transaction_components::tari_amount::MicroMinotari;
 use uuid::Uuid;
 
 use crate::{
-    api::types::LockFundsResponse,
+    api::types::LockFundsResult,
     db::{self},
     transactions::input_selector::InputSelector,
 };
 
-pub struct LockAmount {
+pub struct FundLocker {
     db_pool: SqlitePool,
 }
 
-impl LockAmount {
+impl FundLocker {
     pub fn new(db_pool: SqlitePool) -> Self {
         Self { db_pool }
     }
@@ -28,7 +28,7 @@ impl LockAmount {
         estimated_output_size: Option<usize>,
         idempotency_key: Option<String>,
         seconds_to_lock_utxos: u64,
-    ) -> Result<LockFundsResponse, anyhow::Error> {
+    ) -> Result<LockFundsResult, anyhow::Error> {
         let mut conn = self.db_pool.acquire().await?;
         if let Some(idempotency_key_str) = &idempotency_key
             && let Some(response) =
@@ -65,7 +65,7 @@ impl LockAmount {
 
         transaction.commit().await?;
 
-        Ok(LockFundsResponse {
+        Ok(LockFundsResult {
             utxos: utxo_selection.utxos.iter().map(|utxo| utxo.output.clone()).collect(),
             requires_change_output: utxo_selection.requires_change_output,
             total_value: utxo_selection.total_value,
