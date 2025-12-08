@@ -164,7 +164,7 @@
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/LockFundsResponse"
+                  "$ref": "#/components/schemas/LockFundsResult"
                 }
               }
             }
@@ -374,7 +374,7 @@
           }
         }
       },
-      "LockFundsResponse": {
+      "LockFundsResult": {
         "type": "object",
         "required": [
           "utxos",
