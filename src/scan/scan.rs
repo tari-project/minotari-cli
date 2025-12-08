@@ -1,7 +1,8 @@
 use lightweight_wallet_libs::{HttpBlockchainScanner, ScanConfig, scanning::BlockchainScanner};
 use sqlx::{Acquire, Sqlite, SqliteConnection, pool::PoolConnection};
 use std::time::Duration;
-use tari_transaction_components::key_manager::KeyManager;
+use tari_transaction_components::key_manager::{KeyManager, TransactionKeyManagerInterface};
+use tari_utilities::ByteArray;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
@@ -56,6 +57,7 @@ impl From<BlockProcessorError> for ScanError {
 struct ScanContext {
     scanner: HttpBlockchainScanner<KeyManager>,
     account_id: i64,
+    mac_key: Vec<u8>,
     scan_config: ScanConfig,
     reorg_check_interval: u64,
     wallet_client: WalletHttpClient,
@@ -248,6 +250,7 @@ async fn prepare_account_scan(
     conn: &mut SqliteConnection,
 ) -> Result<ScanContext, ScanError> {
     let key_manager = account.get_key_manager(password).await.map_err(ScanError::Fatal)?;
+    let mac_key = key_manager.get_private_view_key().as_bytes().to_vec();
 
     let mut scanner = HttpBlockchainScanner::new(base_url.to_string(), key_manager.clone(), processing_threads)
         .await
@@ -286,6 +289,7 @@ async fn prepare_account_scan(
     Ok(ScanContext {
         scanner,
         account_id: account.id,
+        mac_key,
         scan_config,
         reorg_check_interval,
         wallet_client,
@@ -384,6 +388,7 @@ async fn run_scan_loop<E: EventSender + Clone>(
 
             let mut processor = BlockProcessor::with_event_sender(
                 scanner_context.account_id,
+                scanner_context.mac_key.clone(),
                 event_sender.clone(),
                 has_pending_outbound,
             );
