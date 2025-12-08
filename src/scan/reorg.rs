@@ -83,7 +83,7 @@ pub async fn handle_reorgs(
     }
 }
 
-async fn rollback_from_height(
+pub async fn rollback_from_height(
     tx: &mut SqliteConnection,
     account_id: i64,
     reorg_start_height: u64,

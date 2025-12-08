@@ -14,7 +14,7 @@ use minotari::{
     daemon,
     db::{self, get_accounts, get_balance, init_db},
     models::WalletEvent,
-    scan::{self, scan::ScanError},
+    scan::{self, rollback_from_height, scan::ScanError},
     transactions::{
         fund_locker::FundLocker,
         one_sided_transaction::{OneSidedTransaction, Recipient},
@@ -79,7 +79,27 @@ enum Commands {
         account_name: Option<String>,
         #[arg(short = 'n', long, help = "Maximum number of blocks to scan", default_value_t = 50)]
         max_blocks_to_scan: u64,
-        #[arg(long, help = "Batch size for scanning", default_value_t = 1)]
+        #[arg(long, help = "Batch size for scanning", default_value_t = 100)]
+        batch_size: u64,
+    },
+    /// Re-scan the blockchain from a certain height
+    ReScan {
+        #[arg(short, long, help = "Password to decrypt the wallet file")]
+        password: String,
+        #[arg(
+            short = 'u',
+            long,
+            default_value = "https://rpc.tari.com",
+            help = "The base URL of the Tari HTTP API"
+        )]
+        base_url: String,
+        #[arg(short, long, help = "Path to the database file", default_value = "data/wallet.db")]
+        database_file: String,
+        #[arg(short, long, help = "Account name to re-scan")]
+        account_name: String,
+        #[arg(short = 'r', long, help = "Re-scan from height")]
+        rescan_from_height: u64,
+        #[arg(long, help = "Batch size for scanning", default_value_t = 100)]
         batch_size: u64,
     },
     /// Run the daemon to continuously scan the blockchain
@@ -298,7 +318,30 @@ async fn main() -> Result<(), anyhow::Error> {
             .await?;
             println!("Scan complete. Events: {}", events.len());
             Ok(())
-            // Add scanning logic here
+        },
+        Commands::ReScan {
+            password,
+            base_url,
+            database_file,
+            account_name,
+            rescan_from_height,
+            batch_size,
+        } => {
+            println!(
+                "Rolling back to block {} and scanning blockchain...",
+                rescan_from_height
+            );
+            let (events, _more_blocks_to_scan) = rescan(
+                &password,
+                &base_url,
+                &database_file,
+                &account_name,
+                rescan_from_height,
+                batch_size,
+            )
+            .await?;
+            println!("Re-scan complete. Events: {}", events.len());
+            Ok(())
         },
         Commands::Daemon {
             password,
@@ -525,6 +568,30 @@ async fn scan(
         scanner = scanner.account(name);
     }
 
+    scanner.run().await
+}
+
+async fn rescan(
+    password: &str,
+    base_url: &str,
+    database_file: &str,
+    account_name: &str,
+    rescan_from_height: u64,
+    batch_size: u64,
+) -> Result<(Vec<WalletEvent>, bool), ScanError> {
+    let pool = init_db(database_file).await?;
+    let mut conn = pool.acquire().await?;
+
+    let account = db::get_account_by_name(&mut conn, account_name)
+        .await?
+        .ok_or_else(|| anyhow!("Account not found: {}", account_name))?;
+    let _ = rollback_from_height(&mut conn, account.id, rescan_from_height).await?;
+
+    let max_blocks_to_scan = u64::MAX;
+    let mut scanner = scan::Scanner::new(password, base_url, database_file, batch_size).mode(scan::ScanMode::Partial {
+        max_blocks: max_blocks_to_scan,
+    });
+    scanner = scanner.account(account_name);
     scanner.run().await
 }
 
