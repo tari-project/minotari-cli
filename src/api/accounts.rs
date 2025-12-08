@@ -9,11 +9,11 @@ use super::error::ApiError;
 use crate::{
     api::{
         AppState,
-        types::{LockFundsResponse, TariAddressBase58},
+        types::{LockFundsResult, TariAddressBase58},
     },
     db::{AccountBalance, get_account_by_name, get_balance},
     transactions::{
-        lock_amount::LockAmount,
+        fund_locker::FundLocker,
         one_sided_transaction::{OneSidedTransaction, Recipient},
     },
 };
@@ -107,7 +107,7 @@ pub async fn api_get_balance(
     path = "/accounts/{name}/lock_funds",
     request_body = LockFundsRequest,
     responses(
-        (status = 200, description = "Funds locked successfully", body = LockFundsResponse),
+        (status = 200, description = "Funds locked successfully", body = LockFundsResult),
         (status = 400, description = "Bad request", body = ApiError),
         (status = 404, description = "Account not found", body = ApiError),
         (status = 500, description = "Internal server error", body = ApiError),
@@ -120,13 +120,13 @@ pub async fn api_lock_funds(
     State(app_state): State<AppState>,
     Path(WalletParams { name }): Path<WalletParams>,
     Json(body): Json<LockFundsRequest>,
-) -> Result<Json<LockFundsResponse>, ApiError> {
+) -> Result<Json<LockFundsResult>, ApiError> {
     let mut conn = app_state.db_pool.acquire().await?;
     let account = get_account_by_name(&mut conn, &name)
         .await?
         .ok_or_else(|| ApiError::AccountNotFound(name.clone()))?;
 
-    let lock_amount = LockAmount::new(app_state.db_pool.clone());
+    let lock_amount = FundLocker::new(app_state.db_pool.clone());
     let response = lock_amount
         .lock(
             account.id,
@@ -182,7 +182,7 @@ pub async fn api_create_unsigned_transaction(
     let estimated_output_size = None;
     let seconds_to_lock_utxos = body.seconds_to_lock_utxos.unwrap_or(86400); // 24 hours
 
-    let lock_amount = LockAmount::new(app_state.db_pool.clone());
+    let lock_amount = FundLocker::new(app_state.db_pool.clone());
     let locked_funds = lock_amount
         .lock(
             account.id,

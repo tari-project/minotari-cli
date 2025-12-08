@@ -6,7 +6,7 @@ use sqlx::{Error as SqlxError, SqliteConnection};
 use thiserror::Error;
 use uuid::Uuid;
 
-use crate::{api::types::LockFundsResponse, db::outputs::fetch_outputs_by_lock_request_id};
+use crate::{api::types::LockFundsResult, db::outputs::fetch_outputs_by_lock_request_id};
 use tari_transaction_components::tari_amount::MicroMinotari;
 
 #[derive(Debug, Error)]
@@ -134,7 +134,7 @@ pub async fn find_pending_transaction_locked_funds_by_idempotency_key(
     conn: &mut SqliteConnection,
     idempotency_key: &str,
     account_id: i64,
-) -> Result<Option<LockFundsResponse>, SqlxError> {
+) -> Result<Option<LockFundsResult>, SqlxError> {
     let status_pending = PendingTransactionStatus::Pending.to_string();
     let res = sqlx::query!(
         r#"
@@ -158,7 +158,7 @@ pub async fn find_pending_transaction_locked_funds_by_idempotency_key(
         Some(row) => {
             let id_str = row.id;
             let utxos = fetch_outputs_by_lock_request_id(conn, &id_str).await?;
-            Ok(Some(LockFundsResponse {
+            Ok(Some(LockFundsResult {
                 utxos: utxos.into_iter().map(|db_out| db_out.output).collect(),
                 requires_change_output: row.requires_change_output,
                 total_value: MicroMinotari::from(row.total_value as u64),

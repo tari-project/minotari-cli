@@ -36,7 +36,7 @@ impl FromRef<AppState> for SqlitePool {
             accounts::LockFundsRequest,
             accounts::CreateTransactionRequest,
             accounts::RecipientRequest,
-            crate::api::types::LockFundsResponse,
+            crate::api::types::LockFundsResult,
             crate::api::types::TariAddressBase58,
         )
     ),

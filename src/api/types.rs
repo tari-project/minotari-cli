@@ -8,7 +8,7 @@ use tari_transaction_components::{tari_amount::MicroMinotari, transaction_compon
 pub struct TariAddressBase58(pub TariAddress);
 
 #[derive(Debug, serde::Serialize, utoipa::ToSchema)]
-pub struct LockFundsResponse {
+pub struct LockFundsResult {
     #[schema(value_type = Vec<Object>)]
     pub utxos: Vec<WalletOutput>,
 

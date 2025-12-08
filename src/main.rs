@@ -16,7 +16,7 @@ use minotari::{
     models::WalletEvent,
     scan::{self, scan::ScanError},
     transactions::{
-        lock_amount::LockAmount,
+        fund_locker::FundLocker,
         one_sided_transaction::{OneSidedTransaction, Recipient},
     },
     utils,
@@ -450,7 +450,7 @@ async fn handle_create_unsigned_transaction(
     let fee_per_gram = MicroMinotari(5);
     let estimated_output_size = None;
 
-    let lock_amount = LockAmount::new(pool.clone());
+    let lock_amount = FundLocker::new(pool.clone());
     let locked_funds = lock_amount
         .lock(
             account.id,
@@ -489,7 +489,7 @@ async fn handle_lock_funds(
     let account = db::get_account_by_name(&mut conn, &account_name)
         .await?
         .ok_or_else(|| anyhow!("Account not found: {}", account_name))?;
-    let lock_amount = LockAmount::new(pool.clone());
+    let lock_amount = FundLocker::new(pool.clone());
     let result = lock_amount
         .lock(
             account.id,
