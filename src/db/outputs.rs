@@ -11,7 +11,7 @@ use tari_transaction_components::transaction_components::WalletOutput;
 pub async fn insert_output(
     conn: &mut SqliteConnection,
     account_id: i64,
-    mac_key: &[u8],
+    account_view_key: &[u8],
     output_hash: Vec<u8>,
     output: &WalletOutput,
     block_height: u64,
@@ -20,7 +20,7 @@ pub async fn insert_output(
     memo_parsed: Option<String>,
     memo_hex: Option<String>,
 ) -> Result<(i64, bool), sqlx::Error> {
-    let id = TxId::new_deterministic(mac_key, &output.output_hash()).as_i64_wrapped();
+    let id = TxId::new_deterministic(account_view_key, &output.output_hash()).as_i64_wrapped();
     let output_json = serde_json::to_string(&output).map_err(|e| {
         sqlx::Error::Io(std::io::Error::other(format!(
             "Failed to serialize output to JSON: {}",

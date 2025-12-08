@@ -30,7 +30,7 @@ pub enum BlockProcessorError {
 /// Processes scanned blocks and persists wallet data.
 pub struct BlockProcessor<E: EventSender = NoopEventSender> {
     account_id: i64,
-    mac_key: Vec<u8>,
+    account_view_key: Vec<u8>,
     wallet_events: Vec<WalletEvent>,
     event_sender: E,
     current_block: Option<BlockEventAccumulator>,
@@ -39,10 +39,10 @@ pub struct BlockProcessor<E: EventSender = NoopEventSender> {
 }
 
 impl BlockProcessor<NoopEventSender> {
-    pub fn new(account_id: i64, mac_key: Vec<u8>) -> Self {
+    pub fn new(account_id: i64, account_view_key: Vec<u8>) -> Self {
         Self {
             account_id,
-            mac_key,
+            account_view_key,
             wallet_events: Vec::new(),
             event_sender: NoopEventSender,
             current_block: None,
@@ -53,10 +53,15 @@ impl BlockProcessor<NoopEventSender> {
 }
 
 impl<E: EventSender> BlockProcessor<E> {
-    pub fn with_event_sender(account_id: i64, mac_key: Vec<u8>, event_sender: E, has_pending_outbound: bool) -> Self {
+    pub fn with_event_sender(
+        account_id: i64,
+        account_view_key: Vec<u8>,
+        event_sender: E,
+        has_pending_outbound: bool,
+    ) -> Self {
         Self {
             account_id,
-            mac_key,
+            account_view_key,
             wallet_events: Vec::new(),
             event_sender,
             current_block: None,
@@ -233,7 +238,7 @@ impl<E: EventSender> BlockProcessor<E> {
             let (output_id, is_new) = db::insert_output(
                 tx,
                 self.account_id,
-                &self.mac_key,
+                &self.account_view_key,
                 hash.to_vec(),
                 output,
                 block.height,
