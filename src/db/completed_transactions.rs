@@ -53,6 +53,7 @@ pub struct CompletedTransaction {
     pub last_rejected_reason: Option<String>,
     pub kernel_excess: Vec<u8>,
     pub sent_payref: Option<String>,
+    pub sent_output_hash: Option<String>,
     pub mined_height: Option<i64>,
     pub mined_block_hash: Option<Vec<u8>>,
     pub confirmation_height: Option<i64>,
@@ -68,14 +69,14 @@ pub async fn create_completed_transaction(
     pending_tx_id: &str,
     kernel_excess: &[u8],
     serialized_transaction: &[u8],
-    sent_payref: Option<String>,
+    sent_output_hash: Option<String>,
 ) -> Result<String, SqlxError> {
     let id = Uuid::new_v4().to_string();
     let status_str = CompletedTransactionStatus::Completed.to_string();
 
     sqlx::query!(
         r#"
-        INSERT INTO completed_transactions (id, account_id, pending_tx_id, status, kernel_excess, serialized_transaction, sent_payref)
+        INSERT INTO completed_transactions (id, account_id, pending_tx_id, status, kernel_excess, serialized_transaction, sent_output_hash)
         VALUES (?, ?, ?, ?, ?, ?, ?)
         "#,
         id,
@@ -84,7 +85,7 @@ pub async fn create_completed_transaction(
         status_str,
         kernel_excess,
         serialized_transaction,
-        sent_payref
+        sent_output_hash
     )
     .execute(&mut *conn)
     .await?;
@@ -99,7 +100,7 @@ pub async fn get_completed_transaction_by_id(
     let row = sqlx::query!(
         r#"
         SELECT id, account_id, pending_tx_id, status, last_rejected_reason, kernel_excess, 
-               sent_payref, mined_height, mined_block_hash, confirmation_height, 
+               sent_payref, sent_output_hash, mined_height, mined_block_hash, confirmation_height, 
                broadcast_attempts, serialized_transaction, created_at, updated_at
         FROM completed_transactions
         WHERE id = ?
@@ -122,6 +123,7 @@ pub async fn get_completed_transaction_by_id(
                 last_rejected_reason: r.last_rejected_reason,
                 kernel_excess: r.kernel_excess,
                 sent_payref: r.sent_payref,
+                sent_output_hash: r.sent_output_hash,
                 mined_height: r.mined_height,
                 mined_block_hash: r.mined_block_hash,
                 confirmation_height: r.confirmation_height,
@@ -145,7 +147,7 @@ pub async fn get_completed_transactions_by_status(
     let rows = sqlx::query!(
         r#"
         SELECT id, account_id, pending_tx_id, status, last_rejected_reason, kernel_excess, 
-               sent_payref, mined_height, mined_block_hash, confirmation_height, 
+               sent_payref, sent_output_hash, mined_height, mined_block_hash, confirmation_height, 
                broadcast_attempts, serialized_transaction, created_at, updated_at
         FROM completed_transactions
         WHERE account_id = ? AND status = ?
@@ -169,6 +171,7 @@ pub async fn get_completed_transactions_by_status(
             last_rejected_reason: r.last_rejected_reason,
             kernel_excess: r.kernel_excess,
             sent_payref: r.sent_payref,
+            sent_output_hash: r.sent_output_hash,
             mined_height: r.mined_height,
             mined_block_hash: r.mined_block_hash,
             confirmation_height: r.confirmation_height,
@@ -262,6 +265,7 @@ pub async fn mark_completed_transaction_as_confirmed(
     conn: &mut SqliteConnection,
     id: &str,
     confirmation_height: i64,
+    sent_payref: String,
 ) -> Result<(), SqlxError> {
     let status = CompletedTransactionStatus::MinedConfirmed.to_string();
     let now = Utc::now();
@@ -269,11 +273,12 @@ pub async fn mark_completed_transaction_as_confirmed(
     sqlx::query!(
         r#"
         UPDATE completed_transactions
-        SET status = ?, confirmation_height = ?, updated_at = ?
+        SET status = ?, confirmation_height = ?, sent_payref = ?, updated_at = ?
         WHERE id = ?
         "#,
         status,
         confirmation_height,
+        sent_payref,
         now,
         id
     )
@@ -367,7 +372,7 @@ pub async fn get_pending_completed_transactions(
     let rows = sqlx::query!(
         r#"
         SELECT id, account_id, pending_tx_id, status, last_rejected_reason, kernel_excess,
-               sent_payref, mined_height, mined_block_hash, confirmation_height,
+               sent_payref, sent_output_hash, mined_height, mined_block_hash, confirmation_height,
                broadcast_attempts, serialized_transaction, created_at, updated_at
         FROM completed_transactions
         WHERE account_id = ?
@@ -392,6 +397,7 @@ pub async fn get_pending_completed_transactions(
             last_rejected_reason: r.last_rejected_reason,
             kernel_excess: r.kernel_excess,
             sent_payref: r.sent_payref,
+            sent_output_hash: r.sent_output_hash,
             mined_height: r.mined_height,
             mined_block_hash: r.mined_block_hash,
             confirmation_height: r.confirmation_height,

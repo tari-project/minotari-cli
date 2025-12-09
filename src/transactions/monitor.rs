@@ -3,6 +3,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Result, anyhow};
 use sqlx::SqliteConnection;
+use tari_common_types::payment_reference::generate_payment_reference;
+use tari_common_types::types::FixedHash;
 
 use crate::db::{
     self, CompletedTransaction, CompletedTransactionStatus, get_pending_completed_transactions,
@@ -356,7 +358,21 @@ impl TransactionMonitor {
 
             let confirmations = current_height.saturating_sub(mined_height);
             if confirmations >= REQUIRED_CONFIRMATIONS {
-                mark_completed_transaction_as_confirmed(conn, &tx.id, current_height as i64).await?;
+                let mined_block_hash = tx
+                    .mined_block_hash
+                    .ok_or_else(|| anyhow!("Block hash missing for a mined tx: {}", tx.id))
+                    .and_then(|b| FixedHash::try_from(b).map_err(|e| e.into()))?;
+
+                let sent_output_hash = tx
+                    .sent_output_hash
+                    .as_ref()
+                    .ok_or_else(|| anyhow!("Sent output hash missing for a mined tx: {}", tx.id))
+                    .and_then(|h| hex::decode(h).map_err(|e| e.into()))
+                    .and_then(|b| FixedHash::try_from(b).map_err(|e| e.into()))?;
+
+                let payref = hex::encode(generate_payment_reference(&mined_block_hash, &sent_output_hash));
+
+                mark_completed_transaction_as_confirmed(conn, &tx.id, current_height as i64, payref).await?;
 
                 events.push(WalletEvent {
                     id: 0,
