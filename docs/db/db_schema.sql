@@ -117,7 +117,7 @@ CREATE TABLE completed_transactions (
     broadcast_attempts INTEGER NOT NULL DEFAULT 0,
     serialized_transaction BLOB NOT NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, sent_output_hash TEXT,
     FOREIGN KEY (account_id) REFERENCES accounts(id),
     FOREIGN KEY (pending_tx_id) REFERENCES pending_transactions(id)
 );

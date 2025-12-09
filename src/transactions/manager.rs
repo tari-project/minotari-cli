@@ -337,7 +337,7 @@ impl TransactionSender {
         let serialized_transaction = serde_json::to_vec(&signed_transaction.signed_transaction.transaction)
             .map_err(|e| anyhow!("Failed to serialize transaction: {}", e))?;
 
-        let sent_payref = signed_transaction
+        let sent_output_hash = signed_transaction
             .signed_transaction
             .sent_hashes
             .first()
@@ -364,7 +364,7 @@ impl TransactionSender {
             processed_transaction.id(),
             &kernel_excess,
             &serialized_transaction,
-            sent_payref,
+            sent_output_hash,
         )
         .await?;
 
