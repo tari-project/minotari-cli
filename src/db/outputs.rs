@@ -4,12 +4,14 @@ use crate::models::OutputStatus;
 use chrono::{DateTime, Utc};
 use serde_json;
 use sqlx::SqliteConnection;
+use tari_common_types::transaction::TxId;
 use tari_transaction_components::transaction_components::WalletOutput;
 
 #[allow(clippy::too_many_arguments)]
 pub async fn insert_output(
     conn: &mut SqliteConnection,
     account_id: i64,
+    account_view_key: &[u8],
     output_hash: Vec<u8>,
     output: &WalletOutput,
     block_height: u64,
@@ -18,6 +20,7 @@ pub async fn insert_output(
     memo_parsed: Option<String>,
     memo_hex: Option<String>,
 ) -> Result<(i64, bool), sqlx::Error> {
+    let id = TxId::new_deterministic(account_view_key, &output.output_hash()).as_i64_wrapped();
     let output_json = serde_json::to_string(&output).map_err(|e| {
         sqlx::Error::Io(std::io::Error::other(format!(
             "Failed to serialize output to JSON: {}",
@@ -36,9 +39,10 @@ pub async fn insert_output(
     let value = output.value().as_u64() as i64;
     let insert_result = sqlx::query!(
         r#"
-       INSERT OR IGNORE INTO outputs (account_id, output_hash, mined_in_block_height, mined_in_block_hash, value, mined_timestamp, wallet_output_json, memo_parsed, memo_hex)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+       INSERT OR IGNORE INTO outputs (id, account_id, output_hash, mined_in_block_height, mined_in_block_hash, value, mined_timestamp, wallet_output_json, memo_parsed, memo_hex)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         "#,
+        id,
         account_id,
         output_hash,
         block_height,
@@ -54,18 +58,7 @@ pub async fn insert_output(
 
     let rows_affected = insert_result.rows_affected();
 
-    // Now fetch the ID, which is guaranteed to exist
-    let output_id = sqlx::query!(
-        r#"
-        SELECT id FROM outputs WHERE output_hash = ? AND deleted_at IS NULL
-        "#,
-        output_hash
-    )
-    .fetch_one(&mut *conn)
-    .await?
-    .id;
-
-    Ok((output_id, rows_affected > 0))
+    Ok((id, rows_affected > 0))
 }
 
 pub async fn get_output_info_by_hash(
