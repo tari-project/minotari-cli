@@ -587,12 +587,7 @@ impl Scanner {
         let mut all_events = Vec::new();
         let mut any_more_blocks = false;
 
-        let account_name = self
-            .account_name
-            .clone()
-            .ok_or_else(|| ScanError::Fatal(anyhow::anyhow!("Account name must be set")))?;
-
-        let accounts = db::get_accounts(&mut conn, Some(&account_name)).await?;
+        let accounts = db::get_accounts(&mut conn, self.account_name.as_deref()).await?;
 
         for account in accounts {
             let monitoring_state = MonitoringState::new();
