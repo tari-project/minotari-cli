@@ -1,3 +1,47 @@
+//! Database layer for wallet data persistence using SQLite.
+//!
+//! This module provides the complete database interface for the Minotari wallet,
+//! handling all persistent storage including accounts, outputs, transactions,
+//! and blockchain scanning state.
+//!
+//! # Database Schema
+//!
+//! The database consists of several interconnected tables:
+//!
+//! - **accounts** - Encrypted wallet keys and account metadata
+//! - **outputs** - Detected UTXOs with confirmation status
+//! - **inputs** - Spent outputs (transaction inputs)
+//! - **balance_changes** - Transaction history with credits and debits
+//! - **wallet_events** - Timeline of wallet activity
+//! - **scanned_tip_blocks** - Scanning progress and reorg detection
+//! - **pending_transactions** - Transactions being constructed
+//! - **completed_transactions** - Broadcasted transactions and their status
+//! - **displayed_transactions** - User-friendly transaction view
+//!
+//! # Migrations
+//!
+//! Database migrations are managed by SQLx and automatically applied on initialization.
+//! Migration files are located in the `migrations/` directory.
+//!
+//! # Usage Example
+//!
+//! ```no_run
+//! use minotari::db::{init_db, get_accounts, get_balance};
+//!
+//! # async fn example() -> Result<(), anyhow::Error> {
+//! // Initialize database and run migrations
+//! let pool = init_db("wallet.db").await?;
+//!
+//! // Query accounts
+//! let accounts = get_accounts(&pool, None).await?;
+//!
+//! // Check balance
+//! let balance = get_balance(&pool, "default").await?;
+//! println!("Available: {} µT", balance.available);
+//! # Ok(())
+//! # }
+//! ```
+
 use std::{env::current_dir, fs};
 
 use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
@@ -57,6 +101,42 @@ pub use displayed_transactions::{
     update_displayed_transaction_status,
 };
 
+/// Initializes the SQLite database and runs migrations.
+///
+/// This function:
+/// 1. Resolves the database path (handles relative paths)
+/// 2. Creates parent directories if they don't exist
+/// 3. Creates the database file if it doesn't exist
+/// 4. Creates a connection pool with up to 5 connections
+/// 5. Runs all pending migrations from `migrations/` directory
+///
+/// # Parameters
+///
+/// * `db_path` - Path to the SQLite database file (relative or absolute)
+///
+/// # Returns
+///
+/// Returns a `SqlitePool` ready for use, or an error if:
+/// - The path is invalid
+/// - Directory creation fails
+/// - Database file creation fails
+/// - Connection fails
+/// - Migrations fail
+///
+/// # Example
+///
+/// ```no_run
+/// use minotari::db::init_db;
+///
+/// # async fn example() -> Result<(), anyhow::Error> {
+/// // Initialize database in current directory
+/// let pool = init_db("wallet.db").await?;
+///
+/// // Or use absolute path
+/// let pool = init_db("/path/to/wallet.db").await?;
+/// # Ok(())
+/// # }
+/// ```
 pub async fn init_db(db_path: &str) -> Result<SqlitePool, anyhow::Error> {
     let mut path = std::path::Path::new(db_path).to_path_buf();
     if path.is_relative() {

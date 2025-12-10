@@ -1,3 +1,8 @@
+//! Core blockchain scanner implementation.
+//!
+//! This module contains the [`Scanner`] builder and the main scanning loop logic
+//! for synchronizing wallet state with the blockchain.
+
 use lightweight_wallet_libs::{HttpBlockchainScanner, ScanConfig, scanning::BlockchainScanner};
 use sqlx::{Acquire, Sqlite, SqliteConnection, pool::PoolConnection};
 use std::time::Duration;
@@ -25,19 +30,47 @@ use crate::{
     transactions::{MonitoringState, TransactionMonitor},
 };
 
+/// Unix timestamp for the genesis epoch used in birthday calculations.
 const BIRTHDAY_GENESIS_FROM_UNIX_EPOCH: u64 = 1640995200;
+
+/// Unix timestamp of the Tari mainnet genesis block.
 const MAINNET_GENESIS_DATE: u64 = 1746489644;
-const DEFAULT_SCAN_TIMEOUT: Duration = Duration::from_secs(60 * 5); // 5 minutes
+
+/// Default timeout for individual scan operations (5 minutes).
+const DEFAULT_SCAN_TIMEOUT: Duration = Duration::from_secs(60 * 5);
+
+/// Default number of retries after timeout before giving up.
 const DEFAULT_MAX_TIMEOUT_RETRIES: u32 = 3;
+
+/// Default number of retries after errors before giving up.
 const DEFAULT_MAX_ERROR_RETRIES: u32 = 3;
+
+/// Default base for exponential backoff on errors (in seconds).
 const DEFAULT_ERROR_BACKOFF_BASE_SECS: u64 = 2;
 
+/// Errors that can occur during blockchain scanning operations.
+///
+/// This enum distinguishes between different error severities to enable
+/// appropriate retry and recovery strategies.
 #[derive(Debug, Error)]
 pub enum ScanError {
+    /// An unrecoverable error that should stop scanning entirely.
+    ///
+    /// Examples include database corruption, invalid cryptographic keys,
+    /// or critical configuration errors.
     #[error("Fatal error: {0}")]
     Fatal(#[from] anyhow::Error),
+
+    /// A temporary error that may resolve with retries.
+    ///
+    /// Examples include network connectivity issues, temporary server
+    /// unavailability, or rate limiting responses.
     #[error("Intermittent error: {0}")]
     Intermittent(String),
+
+    /// The scan operation exceeded the configured timeout after all retry attempts.
+    ///
+    /// The contained value indicates the number of retry attempts made.
     #[error("Scan timed out after {0} retries")]
     Timeout(u32),
 }
@@ -54,21 +87,47 @@ impl From<BlockProcessorError> for ScanError {
     }
 }
 
+/// Internal context holding state for an active scanning session.
+///
+/// This struct aggregates all the components needed during a scan operation,
+/// including the blockchain scanner, account information, and monitoring state.
 struct ScanContext {
+    /// The HTTP-based blockchain scanner for fetching blocks.
     scanner: HttpBlockchainScanner<KeyManager>,
+    /// Database ID of the account being scanned.
     account_id: i64,
+    /// The account's view key bytes for output detection.
     account_view_key: Vec<u8>,
+    /// Configuration for the scan operation (start height, batch size).
     scan_config: ScanConfig,
+    /// Number of blocks between reorg checks during scanning.
     reorg_check_interval: u64,
+    /// HTTP client for additional wallet operations.
     wallet_client: WalletHttpClient,
+    /// Monitor for tracking pending transaction confirmations.
     transaction_monitor: TransactionMonitor,
 }
 
 impl ScanContext {
+    /// Updates the starting height for the next scan batch.
     fn set_start_height(&mut self, height: u64) {
         self.scan_config = self.scan_config.clone().with_start_height(height);
     }
 
+    /// Scans blocks with timeout and retry handling.
+    ///
+    /// This method wraps the underlying scanner's `scan_blocks` operation with
+    /// configurable timeout and retry logic. It handles both timeout errors
+    /// (retries immediately) and scan errors (exponential backoff).
+    ///
+    /// # Returns
+    ///
+    /// Returns a tuple of (scanned_blocks, more_blocks_available) on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ScanError::Timeout`] if max timeout retries exceeded, or
+    /// [`ScanError::Intermittent`] if max error retries exceeded.
     async fn scan_blocks_with_timeout(
         &mut self,
         retry_config: &ScanRetryConfig,
@@ -112,9 +171,27 @@ impl ScanContext {
     }
 }
 
+/// Configuration for scan operation timeouts.
+///
+/// This is a simplified configuration struct for controlling timeout behavior.
+/// For more comprehensive retry control, use [`ScanRetryConfig`] instead.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use std::time::Duration;
+/// use crate::scan::ScanTimeoutConfig;
+///
+/// let config = ScanTimeoutConfig {
+///     timeout: Duration::from_secs(120),
+///     max_retries: 5,
+/// };
+/// ```
 #[derive(Debug, Clone)]
 pub struct ScanTimeoutConfig {
+    /// Maximum duration for a single scan batch operation.
     pub timeout: Duration,
+    /// Maximum number of retry attempts after timeout.
     pub max_retries: u32,
 }
 
@@ -127,11 +204,41 @@ impl Default for ScanTimeoutConfig {
     }
 }
 
+/// Comprehensive configuration for scan retry behavior.
+///
+/// Controls how the scanner handles both timeouts and errors during blockchain
+/// scanning operations. Uses exponential backoff for error retries to avoid
+/// overwhelming recovering servers.
+///
+/// # Retry Strategy
+///
+/// - **Timeout retries**: Immediate retry when a scan batch times out
+/// - **Error retries**: Exponential backoff (base^retry_count seconds) for errors
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use std::time::Duration;
+/// use crate::scan::ScanRetryConfig;
+///
+/// let config = ScanRetryConfig {
+///     timeout: Duration::from_secs(300),
+///     max_timeout_retries: 3,
+///     max_error_retries: 5,
+///     error_backoff_base_secs: 2, // 2s, 4s, 8s, 16s, 32s
+/// };
+/// ```
 #[derive(Debug, Clone)]
 pub struct ScanRetryConfig {
+    /// Maximum duration for a single scan batch operation.
     pub timeout: Duration,
+    /// Maximum number of retry attempts after timeout before returning [`ScanError::Timeout`].
     pub max_timeout_retries: u32,
+    /// Maximum number of retry attempts after errors before returning [`ScanError::Intermittent`].
     pub max_error_retries: u32,
+    /// Base value (in seconds) for exponential backoff calculation on errors.
+    ///
+    /// The actual delay is calculated as `base^min(retry_count, 5)` seconds.
     pub error_backoff_base_secs: u64,
 }
 
@@ -157,6 +264,10 @@ impl From<ScanTimeoutConfig> for ScanRetryConfig {
     }
 }
 
+/// Emits a reorg detection event and returns the new resume height.
+///
+/// This helper function constructs and sends a [`ReorgDetectedEvent`] through
+/// the provided event sender, encapsulating all relevant reorg information.
 fn emit_reorg_event<E: EventSender>(
     event_sender: &E,
     account_id: i64,
@@ -175,11 +286,33 @@ fn emit_reorg_event<E: EventSender>(
     resume_height
 }
 
+/// Result of waiting for the next poll cycle in continuous scanning mode.
 enum ContinuousWaitResult {
+    /// Continue scanning from the specified height.
     Continue { resume_height: u64 },
+    /// Scanning was cancelled via the cancellation token.
     Cancelled,
 }
 
+/// Waits for the next poll cycle in continuous scanning mode.
+///
+/// This function handles the inter-poll waiting period, checking for reorgs
+/// at the start of each new cycle. It respects cancellation tokens for graceful
+/// shutdown support.
+///
+/// # Arguments
+///
+/// * `scanner_context` - Mutable reference to the scan context
+/// * `conn` - Database connection for reorg checks
+/// * `event_sender` - Event sender for status updates
+/// * `poll_interval` - Duration to wait between scan cycles
+/// * `last_scanned_height` - The height of the last successfully scanned block
+/// * `cancel_token` - Optional cancellation token for shutdown
+///
+/// # Returns
+///
+/// Returns [`ContinuousWaitResult::Continue`] with the height to resume from,
+/// or [`ContinuousWaitResult::Cancelled`] if cancellation was requested.
 async fn wait_for_next_poll_cycle<E: EventSender>(
     scanner_context: &mut ScanContext,
     conn: &mut PoolConnection<Sqlite>,
@@ -238,6 +371,26 @@ async fn wait_for_next_poll_cycle<E: EventSender>(
     Ok(ContinuousWaitResult::Continue { resume_height })
 }
 
+/// Prepares a scan context for an account.
+///
+/// Initializes the blockchain scanner, handles any pending reorgs, calculates
+/// the starting height based on wallet birthday, and sets up transaction monitoring.
+///
+/// # Arguments
+///
+/// * `account` - The account row from the database
+/// * `password` - Password for decrypting the account's key manager
+/// * `base_url` - Base URL for the blockchain node HTTP API
+/// * `batch_size` - Number of blocks to fetch per scan batch
+/// * `processing_threads` - Number of parallel threads for output detection
+/// * `reorg_check_interval` - Blocks between reorg checks
+/// * `monitoring_state` - State for transaction monitoring
+/// * `conn` - Database connection
+///
+/// # Errors
+///
+/// Returns [`ScanError::Fatal`] for key decryption or database errors,
+/// or [`ScanError::Intermittent`] for scanner initialization failures.
 #[allow(clippy::too_many_arguments)]
 async fn prepare_account_scan(
     account: &AccountRow,
@@ -297,6 +450,34 @@ async fn prepare_account_scan(
     })
 }
 
+/// Executes the main scanning loop for an account.
+///
+/// This is the core scanning logic that iterates through blocks, processes them,
+/// handles reorgs, and manages continuous polling. It coordinates between the
+/// block processor, transaction monitor, and event system.
+///
+/// # Arguments
+///
+/// * `scanner_context` - Mutable context for the scanning session
+/// * `conn` - Database connection pool
+/// * `event_sender` - Channel for emitting scan events
+/// * `mode` - The scanning mode (Full, Partial, or Continuous)
+/// * `retry_config` - Configuration for retry behavior
+/// * `cancel_token` - Optional token for cancellation support
+///
+/// # Returns
+///
+/// Returns a tuple of (wallet_events, more_blocks_available). The `more_blocks`
+/// flag indicates whether scanning was paused before reaching chain tip.
+///
+/// # Event Emission
+///
+/// This function emits various events during execution:
+/// - `ScanStatus::Started` at the beginning
+/// - `ScanStatus::Progress` after each batch
+/// - `ScanStatus::Completed` when reaching tip
+/// - `ScanStatus::Paused` when stopping early
+/// - `ScanStatus::MoreBlocksAvailable` when more blocks exist
 async fn run_scan_loop<E: EventSender + Clone>(
     scanner_context: &mut ScanContext,
     conn: &mut PoolConnection<Sqlite>,
@@ -465,27 +646,137 @@ async fn run_scan_loop<E: EventSender + Clone>(
     }
 }
 
+/// Specifies the operational mode for blockchain scanning.
+///
+/// The scan mode determines how the scanner behaves after processing blocks
+/// and whether it should continue polling for new blocks.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use std::time::Duration;
+/// use crate::scan::ScanMode;
+///
+/// // Scan at most 1000 blocks
+/// let partial = ScanMode::Partial { max_blocks: 1000 };
+///
+/// // Scan all blocks to chain tip
+/// let full = ScanMode::Full;
+///
+/// // Continuously monitor with 30-second polling
+/// let continuous = ScanMode::Continuous {
+///     poll_interval: Duration::from_secs(30),
+/// };
+/// ```
 #[derive(Debug, Clone)]
 pub enum ScanMode {
-    Partial { max_blocks: u64 },
+    /// Scan a limited number of blocks, then stop.
+    ///
+    /// Useful for incremental synchronization or testing. The scanner will
+    /// return `more_blocks = true` if the chain tip was not reached.
+    Partial {
+        /// Maximum number of blocks to scan before stopping.
+        max_blocks: u64,
+    },
+
+    /// Scan all blocks from the starting height to the chain tip, then stop.
+    ///
+    /// This is the default mode for initial wallet synchronization.
     Full,
-    Continuous { poll_interval: Duration },
+
+    /// Scan to chain tip, then poll for new blocks at regular intervals.
+    ///
+    /// This mode is designed for real-time wallet monitoring. After reaching
+    /// the chain tip, the scanner waits for the specified interval before
+    /// checking for new blocks. Supports graceful cancellation via
+    /// [`CancellationToken`].
+    Continuous {
+        /// Duration to wait between scan cycles after reaching chain tip.
+        poll_interval: Duration,
+    },
 }
 
+/// Builder for configuring and executing blockchain scanning operations.
+///
+/// The `Scanner` provides a fluent API for configuring all aspects of blockchain
+/// scanning, from basic parameters to advanced retry and timeout settings.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// use std::time::Duration;
+/// use crate::scan::{Scanner, ScanMode};
+/// use tokio_util::sync::CancellationToken;
+///
+/// let cancel_token = CancellationToken::new();
+///
+/// let scanner = Scanner::new("wallet_password", "http://localhost:18142", "wallet.db", 100)
+///     .account("primary")
+///     .mode(ScanMode::Continuous {
+///         poll_interval: Duration::from_secs(30),
+///     })
+///     .processing_threads(4)
+///     .reorg_check_interval(500)
+///     .scan_timeout(Duration::from_secs(300))
+///     .max_timeout_retries(5)
+///     .cancel_token(cancel_token.clone());
+///
+/// // Run without events
+/// let (events, more_blocks) = scanner.run().await?;
+///
+/// // Or run with real-time events
+/// let (event_rx, scan_future) = scanner.run_with_events();
+/// ```
+///
+/// # Thread Safety
+///
+/// The `Scanner` is not designed to be shared across threads. Create separate
+/// scanner instances for concurrent scanning of different accounts.
 pub struct Scanner {
+    /// Password for decrypting account key managers.
     password: String,
+    /// Base URL for the blockchain node HTTP API.
     base_url: String,
+    /// Path to the SQLite database file.
     database_file: String,
+    /// Optional account name filter. If `None`, scans all accounts.
     account_name: Option<String>,
+    /// Number of blocks to fetch per scan batch.
     batch_size: u64,
+    /// Number of parallel threads for output detection.
     processing_threads: usize,
+    /// Number of blocks between periodic reorg checks.
     reorg_check_interval: u64,
+    /// Scanning mode (Full, Partial, or Continuous).
     mode: ScanMode,
+    /// Retry configuration for timeouts and errors.
     retry_config: ScanRetryConfig,
+    /// Optional cancellation token for graceful shutdown.
     cancel_token: Option<CancellationToken>,
 }
 
 impl Scanner {
+    /// Creates a new scanner with essential configuration.
+    ///
+    /// # Arguments
+    ///
+    /// * `password` - Password for decrypting account key managers
+    /// * `base_url` - Base URL for the blockchain node HTTP API (e.g., "http://localhost:18142")
+    /// * `database_file` - Path to the SQLite database file
+    /// * `batch_size` - Number of blocks to fetch per scan batch (recommended: 50-200)
+    ///
+    /// # Defaults
+    ///
+    /// - Processing threads: 8
+    /// - Reorg check interval: 1000 blocks
+    /// - Mode: [`ScanMode::Full`]
+    /// - Retry config: Default values
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let scanner = Scanner::new("password", "http://localhost:18142", "wallet.db", 100);
+    /// ```
     pub fn new(password: &str, base_url: &str, database_file: &str, batch_size: u64) -> Self {
         Self {
             password: password.to_string(),
@@ -501,70 +792,180 @@ impl Scanner {
         }
     }
 
+    /// Restricts scanning to a specific account by name.
+    ///
+    /// If not called, all accounts in the database will be scanned sequentially.
+    ///
+    /// # Arguments
+    ///
+    /// * `name` - The account name to scan
     pub fn account(mut self, name: &str) -> Self {
         self.account_name = Some(name.to_string());
         self
     }
 
+    /// Sets the scanning mode.
+    ///
+    /// See [`ScanMode`] for available options.
     pub fn mode(mut self, mode: ScanMode) -> Self {
         self.mode = mode;
         self
     }
 
+    /// Sets the number of parallel threads for output detection.
+    ///
+    /// Higher values can improve scan speed but increase CPU usage.
+    /// Recommended range: 4-16 threads depending on hardware.
+    ///
+    /// # Arguments
+    ///
+    /// * `threads` - Number of parallel processing threads
     pub fn processing_threads(mut self, threads: usize) -> Self {
         self.processing_threads = threads;
         self
     }
 
+    /// Sets the interval (in blocks) between reorg checks during scanning.
+    ///
+    /// Lower values detect reorgs faster but may increase overhead.
+    /// Higher values are more efficient but may process more blocks before
+    /// detecting a reorg.
+    ///
+    /// # Arguments
+    ///
+    /// * `interval` - Number of blocks between reorg checks
     pub fn reorg_check_interval(mut self, interval: u64) -> Self {
         self.reorg_check_interval = interval;
         self
     }
 
+    /// Sets timeout configuration using the simplified [`ScanTimeoutConfig`].
+    ///
+    /// This is converted to a [`ScanRetryConfig`] internally.
     pub fn timeout_config(mut self, config: ScanTimeoutConfig) -> Self {
         self.retry_config = config.into();
         self
     }
 
+    /// Sets the full retry configuration.
+    ///
+    /// For comprehensive control over timeout and error retry behavior.
     pub fn retry_config(mut self, config: ScanRetryConfig) -> Self {
         self.retry_config = config;
         self
     }
 
+    /// Sets the timeout duration for individual scan batch operations.
+    ///
+    /// # Arguments
+    ///
+    /// * `timeout` - Maximum duration for a single scan batch
     pub fn scan_timeout(mut self, timeout: Duration) -> Self {
         self.retry_config.timeout = timeout;
         self
     }
 
+    /// Sets the maximum number of timeout retries.
+    ///
+    /// # Deprecated
+    ///
+    /// Use [`max_timeout_retries`](Self::max_timeout_retries) instead.
     pub fn max_scan_retries(mut self, retries: u32) -> Self {
         self.retry_config.max_timeout_retries = retries;
         self
     }
 
+    /// Sets the maximum number of retry attempts after timeouts.
+    ///
+    /// When a scan batch exceeds the configured timeout, it will be retried
+    /// up to this many times before returning [`ScanError::Timeout`].
     pub fn max_timeout_retries(mut self, retries: u32) -> Self {
         self.retry_config.max_timeout_retries = retries;
         self
     }
 
+    /// Sets the maximum number of retry attempts after errors.
+    ///
+    /// When a scan batch fails with an error, it will be retried with
+    /// exponential backoff up to this many times before returning
+    /// [`ScanError::Intermittent`].
     pub fn max_error_retries(mut self, retries: u32) -> Self {
         self.retry_config.max_error_retries = retries;
         self
     }
 
+    /// Sets the base value for exponential backoff on error retries.
+    ///
+    /// The actual delay is calculated as `base^min(retry_count, 5)` seconds.
+    ///
+    /// # Arguments
+    ///
+    /// * `secs` - Base value in seconds for backoff calculation
     pub fn error_backoff_base_secs(mut self, secs: u64) -> Self {
         self.retry_config.error_backoff_base_secs = secs;
         self
     }
 
+    /// Sets a cancellation token for graceful shutdown support.
+    ///
+    /// When the token is cancelled, the scanner will stop at the next
+    /// convenient point and return with the results processed so far.
+    ///
+    /// # Arguments
+    ///
+    /// * `token` - A [`CancellationToken`] for shutdown signaling
     pub fn cancel_token(mut self, token: CancellationToken) -> Self {
         self.cancel_token = Some(token);
         self
     }
 
+    /// Runs the scanner without real-time event streaming.
+    ///
+    /// # Returns
+    ///
+    /// Returns a tuple of:
+    /// - `Vec<WalletEvent>` - All wallet events detected during scanning
+    /// - `bool` - `true` if more blocks are available (scanning was paused early)
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ScanError`] on fatal errors, timeout exhaustion, or
+    /// intermittent errors after max retries.
     pub async fn run(self) -> Result<(Vec<WalletEvent>, bool), ScanError> {
         self.run_internal(NoopEventSender).await
     }
 
+    /// Runs the scanner with real-time event streaming.
+    ///
+    /// Returns an unbounded channel receiver for events and a future that
+    /// drives the scan. The caller should spawn a task to consume events
+    /// from the receiver while awaiting the scan future.
+    ///
+    /// # Returns
+    ///
+    /// A tuple of:
+    /// - `UnboundedReceiver<ProcessingEvent>` - Channel for receiving scan events
+    /// - `Future` - The scan operation future
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let (event_rx, scan_future) = scanner.run_with_events();
+    ///
+    /// // Spawn event handler
+    /// tokio::spawn(async move {
+    ///     while let Some(event) = event_rx.recv().await {
+    ///         match event {
+    ///             ProcessingEvent::BlockProcessed(e) => println!("Block {}", e.height),
+    ///             ProcessingEvent::ScanStatus(s) => println!("Status: {:?}", s),
+    ///             _ => {}
+    ///         }
+    ///     }
+    /// });
+    ///
+    /// // Run the scan
+    /// let result = scan_future.await?;
+    /// ```
     #[allow(clippy::type_complexity)]
     pub fn run_with_events(
         self,
@@ -578,6 +979,7 @@ impl Scanner {
         (rx, future)
     }
 
+    /// Internal implementation that accepts any event sender.
     async fn run_internal<E: EventSender + Clone>(
         self,
         event_sender: E,

@@ -1,3 +1,61 @@
+//! Transaction monitoring for broadcast, mining, and confirmation.
+//!
+//! This module provides infrastructure for tracking outbound transactions
+//! through their lifecycle from broadcast to final confirmation. It handles:
+//!
+//! - Rebroadcasting transactions that haven't been picked up
+//! - Detecting when transactions are mined
+//! - Tracking confirmation progress
+//! - Updating transaction display status for UI
+//!
+//! # Transaction States
+//!
+//! Transactions progress through these states:
+//!
+//! ```text
+//! Completed --> Broadcast --> MinedUnconfirmed --> MinedConfirmed
+//!     |             |
+//!     +-> Rejected <+
+//! ```
+//!
+//! - **Completed**: Transaction is signed and ready for broadcast
+//! - **Broadcast**: Transaction has been submitted to the network
+//! - **MinedUnconfirmed**: Transaction found in a block but not yet confirmed
+//! - **MinedConfirmed**: Transaction has sufficient confirmations
+//! - **Rejected**: Transaction was rejected by the network
+//!
+//! # Confirmation Requirements
+//!
+//! Transactions require [`REQUIRED_CONFIRMATIONS`] (currently 3) blocks
+//! before being considered confirmed. This provides protection against
+//! short chain reorganizations.
+//!
+//! # Usage
+//!
+//! ```rust,ignore
+//! use minotari::transactions::monitor::{TransactionMonitor, MonitoringState};
+//!
+//! // Initialize monitoring state
+//! let state = MonitoringState::new();
+//! state.initialize(&mut conn, account_id).await?;
+//!
+//! // Create monitor
+//! let monitor = TransactionMonitor::new(state.clone());
+//!
+//! // Check and update transactions during each sync cycle
+//! let result = monitor.monitor_if_needed(
+//!     &wallet_client,
+//!     &mut conn,
+//!     account_id,
+//!     current_chain_height,
+//! ).await?;
+//!
+//! // Handle events
+//! for event in result.wallet_events {
+//!     handle_wallet_event(event);
+//! }
+//! ```
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
@@ -17,16 +75,29 @@ use crate::transactions::{DisplayedTransaction, TransactionDisplayStatus};
 use tari_transaction_components::transaction_components::Transaction;
 use tari_utilities::ByteArray;
 
-pub(crate) const REQUIRED_CONFIRMATIONS: u64 = 3;
+/// Number of confirmations required before a transaction is considered final.
+///
+/// This provides protection against short chain reorganizations. A transaction
+/// must be buried under this many blocks before it is marked as confirmed.
+pub const REQUIRED_CONFIRMATIONS: u64 = 3;
+
+/// Maximum number of times to attempt broadcasting a transaction before giving up.
 const MAX_BROADCAST_ATTEMPTS: i32 = 10;
 
+/// Results from a monitoring cycle.
+///
+/// Contains both wallet events (for logging/notifications) and updated
+/// displayed transactions (for UI updates).
 #[derive(Debug, Default)]
 pub struct MonitoringResult {
+    /// Wallet events generated during monitoring (broadcasts, confirmations, rejections).
     pub wallet_events: Vec<WalletEvent>,
+    /// Transactions whose display status was updated.
     pub updated_displayed_transactions: Vec<DisplayedTransaction>,
 }
 
 impl MonitoringResult {
+    /// Extends this result with events and transactions from another result.
     fn extend(&mut self, other: MonitoringResult) {
         self.wallet_events.extend(other.wallet_events);
         self.updated_displayed_transactions
@@ -34,6 +105,35 @@ impl MonitoringResult {
     }
 }
 
+/// Thread-safe state tracking for pending outbound transactions.
+///
+/// `MonitoringState` tracks whether there are pending outbound transactions
+/// that need monitoring. It uses atomic operations for thread-safe access
+/// and can be shared across multiple tasks via cloning.
+///
+/// # Usage Pattern
+///
+/// 1. Initialize on startup by checking the database for pending transactions
+/// 2. Signal when a new transaction is broadcast
+/// 3. Check before running monitoring to avoid unnecessary work
+/// 4. Clear when all pending transactions reach terminal states
+///
+/// # Example
+///
+/// ```rust,ignore
+/// let state = MonitoringState::new();
+///
+/// // Initialize from database
+/// state.initialize(&mut conn, account_id).await?;
+///
+/// // Signal when broadcasting a new transaction
+/// state.signal_transaction_broadcast();
+///
+/// // Check if monitoring is needed
+/// if state.has_pending_outbound() {
+///     // Run monitoring...
+/// }
+/// ```
 #[derive(Clone)]
 pub struct MonitoringState {
     has_pending_outbound: Arc<AtomicBool>,
@@ -46,38 +146,77 @@ impl Default for MonitoringState {
 }
 
 impl MonitoringState {
+    /// Creates a new `MonitoringState` with no pending transactions.
+    ///
+    /// Call [`initialize`](Self::initialize) to sync with database state.
     pub fn new() -> Self {
         Self {
             has_pending_outbound: Arc::new(AtomicBool::new(false)),
         }
     }
 
+    /// Initializes the state from the database.
+    ///
+    /// Checks for any pending completed transactions and sets the internal
+    /// flag accordingly. Should be called on startup.
+    ///
+    /// # Arguments
+    ///
+    /// * `conn` - Database connection
+    /// * `account_id` - The account to check for pending transactions
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the database query fails.
     pub async fn initialize(&self, conn: &mut SqliteConnection, account_id: i64) -> Result<()> {
         let pending = get_pending_completed_transactions(conn, account_id).await?;
         self.has_pending_outbound.store(!pending.is_empty(), Ordering::SeqCst);
         Ok(())
     }
 
+    /// Signals that a new transaction has been broadcast.
+    ///
+    /// Call this after successfully broadcasting a transaction to ensure
+    /// the monitor will check for its confirmation.
     pub fn signal_transaction_broadcast(&self) {
         self.has_pending_outbound.store(true, Ordering::SeqCst);
     }
 
+    /// Returns whether there are pending outbound transactions.
+    ///
+    /// If `false`, monitoring can be skipped to save resources.
     pub fn has_pending_outbound(&self) -> bool {
         self.has_pending_outbound.load(Ordering::SeqCst)
     }
 
+    /// Clears the pending outbound flag.
+    ///
+    /// Called internally when all pending transactions have reached
+    /// terminal states (confirmed or rejected).
     fn clear_pending_outbound(&self) {
         self.has_pending_outbound.store(false, Ordering::SeqCst);
     }
 }
 
+/// Groups pending transactions by their current status.
+///
+/// Used internally to process transactions in the appropriate order:
+/// completed transactions need broadcasting, broadcast transactions need
+/// mining detection, and mined transactions need confirmation tracking.
 struct PendingTransactionsByStatus {
+    /// Transactions that are signed but not yet broadcast.
     completed: Vec<CompletedTransaction>,
+    /// Transactions that have been broadcast but not yet mined.
     broadcast: Vec<CompletedTransaction>,
+    /// Transactions that are mined but not yet confirmed.
     mined_unconfirmed: Vec<CompletedTransaction>,
 }
 
 impl PendingTransactionsByStatus {
+    /// Categorizes transactions by their status.
+    ///
+    /// Filters out terminal states (confirmed, rejected, canceled) as
+    /// they don't need further monitoring.
     fn from_transactions(transactions: Vec<CompletedTransaction>) -> Self {
         let mut result = Self {
             completed: Vec::new(),
@@ -99,24 +238,115 @@ impl PendingTransactionsByStatus {
         result
     }
 
+    /// Returns the total count of transactions still needing monitoring.
     fn remaining_count(&self) -> usize {
         self.completed.len() + self.broadcast.len() + self.mined_unconfirmed.len()
     }
 }
 
+/// Monitors pending transactions through broadcast, mining, and confirmation.
+///
+/// `TransactionMonitor` is responsible for tracking outbound transactions
+/// and updating their status as they progress through the blockchain.
+/// It coordinates with the network to:
+///
+/// - Rebroadcast transactions that haven't been picked up by miners
+/// - Detect when transactions appear in blocks
+/// - Track confirmation depth until transactions are considered final
+/// - Handle rejections and update displayed transactions
+///
+/// # Usage
+///
+/// The monitor should be called periodically during sync cycles:
+///
+/// ```rust,ignore
+/// let monitor = TransactionMonitor::new(monitoring_state);
+///
+/// // During each sync cycle
+/// let result = monitor.monitor_if_needed(
+///     &wallet_client,
+///     &mut conn,
+///     account_id,
+///     current_chain_height,
+/// ).await?;
+///
+/// // Process results
+/// for event in result.wallet_events {
+///     log::info!("Transaction event: {:?}", event);
+/// }
+///
+/// for tx in result.updated_displayed_transactions {
+///     ui.update_transaction(tx);
+/// }
+/// ```
+///
+/// # Performance
+///
+/// The monitor checks [`MonitoringState::has_pending_outbound`] before doing
+/// expensive network queries. When no pending transactions exist, monitoring
+/// is essentially a no-op.
 pub struct TransactionMonitor {
     state: MonitoringState,
 }
 
 impl TransactionMonitor {
+    /// Creates a new `TransactionMonitor` with the given state.
+    ///
+    /// # Arguments
+    ///
+    /// * `state` - Shared monitoring state for tracking pending transactions
     pub fn new(state: MonitoringState) -> Self {
         Self { state }
     }
 
+    /// Returns whether there are pending outbound transactions to monitor.
+    ///
+    /// Delegates to [`MonitoringState::has_pending_outbound`].
     pub fn has_pending_outbound(&self) -> bool {
         self.state.has_pending_outbound()
     }
 
+    /// Monitors pending transactions and returns status updates.
+    ///
+    /// This is the main entry point for transaction monitoring. It performs:
+    ///
+    /// 1. Updates confirmation counts for displayed transactions
+    /// 2. If pending outbound transactions exist:
+    ///    - Rebroadcasts completed transactions
+    ///    - Checks broadcast transactions for mining
+    ///    - Checks mined transactions for confirmation
+    ///
+    /// # Arguments
+    ///
+    /// * `wallet_client` - HTTP client for network queries
+    /// * `conn` - Database connection
+    /// * `account_id` - The account to monitor
+    /// * `current_chain_height` - Current blockchain height for confirmation calculations
+    ///
+    /// # Returns
+    ///
+    /// Returns a [`MonitoringResult`] containing:
+    /// - Wallet events for broadcasts, confirmations, and rejections
+    /// - Updated displayed transactions for UI refresh
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if database or network operations fail.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let result = monitor.monitor_if_needed(
+    ///     &wallet_client,
+    ///     &mut conn,
+    ///     account_id,
+    ///     chain_height,
+    /// ).await?;
+    ///
+    /// if !result.wallet_events.is_empty() {
+    ///     log::info!("Processed {} transaction events", result.wallet_events.len());
+    /// }
+    /// ```
     pub async fn monitor_if_needed(
         &self,
         wallet_client: &WalletHttpClient,
@@ -165,6 +395,10 @@ impl TransactionMonitor {
         Ok(result)
     }
 
+    /// Updates confirmation counts for displayed transactions.
+    ///
+    /// Finds transactions that need confirmation updates and recalculates
+    /// their confirmation depth based on the current chain height.
     async fn update_displayed_transaction_confirmations(
         &self,
         conn: &mut SqliteConnection,
@@ -210,6 +444,11 @@ impl TransactionMonitor {
         Ok(updated_transactions)
     }
 
+    /// Determines the display status based on confirmation count.
+    ///
+    /// - 0 confirmations: Pending
+    /// - 1 to REQUIRED_CONFIRMATIONS-1: Unconfirmed
+    /// - REQUIRED_CONFIRMATIONS or more: Confirmed
     fn determine_status_from_confirmations(confirmations: u64) -> TransactionDisplayStatus {
         if confirmations >= REQUIRED_CONFIRMATIONS {
             TransactionDisplayStatus::Confirmed
@@ -220,6 +459,12 @@ impl TransactionMonitor {
         }
     }
 
+    /// Processes all pending transactions grouped by status.
+    ///
+    /// Handles each category appropriately:
+    /// - Completed: Attempt to broadcast
+    /// - Broadcast: Check if mined
+    /// - MinedUnconfirmed: Check confirmation depth
     async fn process_pending_transactions(
         &self,
         wallet_client: &WalletHttpClient,
