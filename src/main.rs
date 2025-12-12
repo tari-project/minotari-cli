@@ -79,7 +79,7 @@ enum Commands {
         account_name: Option<String>,
         #[arg(short = 'n', long, help = "Maximum number of blocks to scan", default_value_t = 50)]
         max_blocks_to_scan: u64,
-        #[arg(long, help = "Batch size for scanning", default_value_t = 100)]
+        #[arg(long, help = "Batch size for scanning", default_value_t = 25)]
         batch_size: u64,
     },
     /// Re-scan the blockchain from a certain height
@@ -99,7 +99,7 @@ enum Commands {
         account_name: String,
         #[arg(short = 'r', long, help = "Re-scan from height")]
         rescan_from_height: u64,
-        #[arg(long, help = "Batch size for scanning", default_value_t = 100)]
+        #[arg(long, help = "Batch size for scanning", default_value_t = 25)]
         batch_size: u64,
     },
     /// Run the daemon to continuously scan the blockchain
@@ -115,7 +115,7 @@ enum Commands {
         base_url: String,
         #[arg(short, long, help = "Path to the database file", default_value = "data/wallet.db")]
         database_file: String,
-        #[arg(long, help = "Batch size for scanning", default_value_t = 100)]
+        #[arg(long, help = "Batch size for scanning", default_value_t = 25)]
         batch_size: u64,
         #[arg(short, long, help = "Interval between scans in seconds", default_value_t = 60)]
         scan_interval_secs: u64,
