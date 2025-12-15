@@ -173,6 +173,8 @@ enum Commands {
         idempotency_key: Option<String>,
         #[arg(long, help = "Optional seconds to lock UTXOs", default_value_t = 86400)]
         seconds_to_lock: u64,
+        #[arg(long, help = "Confirmation window", default_value_t = 3)]
+        confirmation_window: u64,
         #[arg(long, help = "The Tari network to connect to", default_value_t = Network::MainNet)]
         network: Network,
     },
@@ -206,6 +208,8 @@ enum Commands {
         seconds_to_lock_utxos: Option<u64>,
         #[arg(long, help = "Optional idempotency key")]
         idempotency_key: Option<String>,
+        #[arg(long, help = "Confirmation window", default_value_t = 3)]
+        confirmation_window: u64,
     },
 }
 
@@ -384,6 +388,7 @@ async fn main() -> Result<(), anyhow::Error> {
             idempotency_key,
             seconds_to_lock,
             network,
+            confirmation_window,
         } => {
             println!("Creating unsigned transaction...");
             handle_create_unsigned_transaction(
@@ -394,6 +399,7 @@ async fn main() -> Result<(), anyhow::Error> {
                 password,
                 idempotency_key,
                 seconds_to_lock,
+                confirmation_window,
                 output_file,
             )
             .await
@@ -408,6 +414,7 @@ async fn main() -> Result<(), anyhow::Error> {
             estimated_output_size,
             seconds_to_lock_utxos,
             idempotency_key,
+            confirmation_window,
         } => {
             println!("Creating unsigned transaction...");
             let request = LockFundsRequest {
@@ -417,6 +424,7 @@ async fn main() -> Result<(), anyhow::Error> {
                 estimated_output_size,
                 seconds_to_lock_utxos,
                 idempotency_key,
+                confirmation_window: Some(confirmation_window),
             };
             handle_lock_funds(database_file, account_name, output_file, request).await
         },
@@ -452,6 +460,7 @@ async fn handle_create_unsigned_transaction(
     password: String,
     idempotency_key: Option<String>,
     seconds_to_lock: u64,
+    confirmation_window: u64,
     output_file: String,
 ) -> Result<(), anyhow::Error> {
     let recipients: Result<Vec<Recipient>, anyhow::Error> = recipient
@@ -500,6 +509,7 @@ async fn handle_create_unsigned_transaction(
             estimated_output_size,
             idempotency_key,
             seconds_to_lock,
+            confirmation_window,
         )
         .await
         .map_err(|e| anyhow!("Failed to lock funds: {}", e))?;
@@ -539,6 +549,7 @@ async fn handle_lock_funds(
             request.estimated_output_size,
             request.idempotency_key,
             request.seconds_to_lock_utxos.expect("must be present"),
+            request.confirmation_window.expect("must be present"),
         )
         .await
         .map_err(|e| anyhow!("Failed to lock funds: {}", e))?;

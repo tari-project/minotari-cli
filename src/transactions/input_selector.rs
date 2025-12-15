@@ -9,7 +9,7 @@ use tari_transaction_components::{
 };
 use thiserror::Error;
 
-use crate::db::DbWalletOutput;
+use crate::db::{DbWalletOutput, get_latest_scanned_tip_block_by_account};
 
 #[derive(Debug, Error)]
 pub enum UtxoSelectionError {
@@ -45,13 +45,15 @@ impl UtxoSelection {
 
 pub struct InputSelector {
     account_id: i64,
+    confirmation_window: u64,
     fee_calc: Fee,
 }
 
 impl InputSelector {
-    pub fn new(account_id: i64) -> Self {
+    pub fn new(account_id: i64, confirmation_window: u64) -> Self {
         Self {
             account_id,
+            confirmation_window,
             fee_calc: Fee::new(TransactionWeight::latest()),
         }
     }
@@ -81,7 +83,13 @@ impl InputSelector {
         fee_per_gram: MicroMinotari,
         estimated_output_size: Option<usize>,
     ) -> Result<UtxoSelection, UtxoSelectionError> {
-        let uo = crate::db::fetch_unspent_outputs(&mut *conn, self.account_id).await?;
+        let tip = get_latest_scanned_tip_block_by_account(conn, self.account_id).await?;
+        let min_height = tip
+            .map(|b| b.height)
+            .unwrap_or(0)
+            .saturating_sub(self.confirmation_window);
+
+        let uo = crate::db::fetch_unspent_outputs(&mut *conn, self.account_id, min_height).await?;
 
         let features_and_scripts_byte_size = match estimated_output_size {
             Some(sz) => sz,

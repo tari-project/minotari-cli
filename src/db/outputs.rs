@@ -278,10 +278,25 @@ pub struct DbWalletOutput {
 pub async fn fetch_unspent_outputs(
     conn: &mut SqliteConnection,
     account_id: i64,
+    min_height: u64,
 ) -> Result<Vec<DbWalletOutput>, sqlx::Error> {
+    let unspent_status = OutputStatus::Unspent.to_string();
+    let min_height_i64 = min_height as i64;
     let rows = sqlx::query!(
-        "SELECT id, wallet_output_json FROM outputs WHERE account_id = ? AND status = 'UNSPENT' AND wallet_output_json IS NOT NULL AND deleted_at IS NULL ORDER BY value DESC",
-        account_id
+        r#"
+        SELECT id, wallet_output_json
+          FROM outputs
+        WHERE
+          account_id = ? AND
+          status = ? AND
+          confirmed_height > ? AND
+          wallet_output_json IS NOT NULL AND
+          deleted_at IS NULL
+        ORDER BY value DESC
+        "#,
+        account_id,
+        unspent_status,
+        min_height_i64
     )
     .fetch_all(&mut *conn)
     .await?;

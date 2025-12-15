@@ -14,6 +14,7 @@ use crate::{
     db::{AccountBalance, get_account_by_name, get_balance},
     transactions::{
         fund_locker::FundLocker,
+        monitor::REQUIRED_CONFIRMATIONS,
         one_sided_transaction::{OneSidedTransaction, Recipient},
     },
 };
@@ -29,6 +30,10 @@ fn default_num_outputs() -> Option<usize> {
 
 fn default_fee_per_gram() -> Option<MicroMinotari> {
     Some(MicroMinotari(5))
+}
+
+fn default_confirmation_window() -> Option<u64> {
+    Some(REQUIRED_CONFIRMATIONS)
 }
 
 #[derive(Debug, serde::Deserialize, IntoParams, utoipa::ToSchema)]
@@ -57,6 +62,10 @@ pub struct LockFundsRequest {
     pub seconds_to_lock_utxos: Option<u64>,
 
     pub idempotency_key: Option<String>,
+
+    #[serde(default = "default_confirmation_window")]
+    #[schema(default = "3")]
+    pub confirmation_window: Option<u64>,
 }
 
 #[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
@@ -70,10 +79,16 @@ pub struct RecipientRequest {
 #[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
 pub struct CreateTransactionRequest {
     recipients: Vec<RecipientRequest>,
+
     #[serde(default = "default_seconds_to_lock_utxos")]
     #[schema(default = "86400")]
     seconds_to_lock_utxos: Option<u64>,
+
     idempotency_key: Option<String>,
+
+    #[serde(default = "default_confirmation_window")]
+    #[schema(default = "3")]
+    pub confirmation_window: Option<u64>,
 }
 
 #[utoipa::path(
@@ -136,6 +151,7 @@ pub async fn api_lock_funds(
             body.estimated_output_size,
             body.idempotency_key,
             body.seconds_to_lock_utxos.expect("must be defaulted"),
+            body.confirmation_window.expect("must be defaulted"),
         )
         .await
         .map_err(|e| ApiError::FailedToLockFunds(e.to_string()))?;
@@ -192,6 +208,7 @@ pub async fn api_create_unsigned_transaction(
             estimated_output_size,
             body.idempotency_key,
             seconds_to_lock_utxos,
+            body.confirmation_window.expect("must be defaulted"),
         )
         .await
         .map_err(|e| ApiError::FailedToLockFunds(e.to_string()))?;
