@@ -191,7 +191,7 @@ enum Commands {
         output_file: String,
         #[arg(short, long, help = "Path to the database file", default_value = "data/wallet.db")]
         database_file: String,
-        #[arg(short, long, help = "Amount to lock")]
+        #[arg(short = 'm', long, help = "Amount to lock")]
         amount: MicroMinotari,
         #[arg(short, long, help = "Optional number of outputs", default_value = "1")]
         num_outputs: usize,
@@ -416,7 +416,7 @@ async fn main() -> Result<(), anyhow::Error> {
             idempotency_key,
             confirmation_window,
         } => {
-            println!("Creating unsigned transaction...");
+            println!("Locking funds...");
             let request = LockFundsRequest {
                 amount,
                 num_outputs: Some(num_outputs),
