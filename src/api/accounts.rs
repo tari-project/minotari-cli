@@ -2,8 +2,11 @@ use axum::{
     Json,
     extract::{Path, State},
 };
-use serde_json::Value as JsonValue;
-use utoipa::IntoParams;
+use serde_json::{Value as JsonValue, json};
+use utoipa::{
+    IntoParams,
+    openapi::{ObjectBuilder, Schema, Type, schema::SchemaType},
+};
 
 use super::error::ApiError;
 use crate::{
@@ -36,6 +39,15 @@ fn default_confirmation_window() -> Option<u64> {
     Some(REQUIRED_CONFIRMATIONS)
 }
 
+fn confirmation_window_schema() -> Schema {
+    ObjectBuilder::new()
+        .schema_type(SchemaType::new(Type::Integer))
+        .default(Some(json!(REQUIRED_CONFIRMATIONS)))
+        .description(Some("Number of confirmations required"))
+        .build()
+        .into()
+}
+
 #[derive(Debug, serde::Deserialize, IntoParams, utoipa::ToSchema)]
 pub struct WalletParams {
     name: String,
@@ -64,7 +76,7 @@ pub struct LockFundsRequest {
     pub idempotency_key: Option<String>,
 
     #[serde(default = "default_confirmation_window")]
-    #[schema(default = "3")]
+    #[schema(schema_with = confirmation_window_schema)]
     pub confirmation_window: Option<u64>,
 }
 
@@ -87,7 +99,7 @@ pub struct CreateTransactionRequest {
     idempotency_key: Option<String>,
 
     #[serde(default = "default_confirmation_window")]
-    #[schema(default = "3")]
+    #[schema(schema_with = confirmation_window_schema)]
     pub confirmation_window: Option<u64>,
 }
 
