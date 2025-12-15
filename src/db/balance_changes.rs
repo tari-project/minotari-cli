@@ -84,3 +84,34 @@ pub async fn get_all_balance_changes_by_account_id(
 
     Ok(rows)
 }
+
+#[derive(Debug, Default)]
+pub struct BalanceAggregates {
+    pub total_credits: Option<i64>,
+    pub total_debits: Option<i64>,
+    pub max_height: Option<i64>,
+    pub max_date: Option<String>,
+}
+
+pub async fn get_balance_aggregates_for_account(
+    conn: &mut SqliteConnection,
+    account_id: i64,
+) -> Result<BalanceAggregates, sqlx::Error> {
+    let agg_result = sqlx::query_as!(
+        BalanceAggregates,
+        r#"
+            SELECT
+              SUM(balance_credit) as "total_credits: _",
+              SUM(balance_debit) as "total_debits: _",
+              MAX(effective_height) as "max_height: _",
+              strftime('%Y-%m-%d %H:%M:%S', MAX(effective_date)) as "max_date: _"
+            FROM balance_changes
+            WHERE account_id = ?
+            "#,
+        account_id
+    )
+    .fetch_one(&mut *conn)
+    .await?;
+
+    Ok(agg_result)
+}
