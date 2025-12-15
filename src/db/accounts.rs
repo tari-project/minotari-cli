@@ -194,7 +194,6 @@ pub struct AccountBalance {
     /// The total balance of the account (Total Credits - Total Debits).
     pub total: u64,
     /// The portion of the total balance that is currently spendable.
-    /// Calculated as: total - locked - unconfirmed.
     pub available: u64,
     /// The portion of the balance that is locked.
     pub locked: u64,
@@ -217,13 +216,15 @@ pub struct AccountBalance {
 
 pub async fn get_balance(conn: &mut SqliteConnection, account_id: i64) -> Result<AccountBalance, sqlx::Error> {
     let history_agg = get_balance_aggregates_for_account(conn, account_id).await?;
-    let (locked_amount, unconfirmed_amount) = get_output_totals_for_account(conn, account_id).await?;
+    let (locked_amount, unconfirmed_amount, locked_and_unconfirmed_amount) =
+        get_output_totals_for_account(conn, account_id).await?;
     let total_credits = history_agg.total_credits.unwrap_or(0) as u64;
     let total_debits = history_agg.total_debits.unwrap_or(0) as u64;
     let total_balance = total_credits.saturating_sub(total_debits);
-    let available_balance = total_balance
-        .saturating_sub(locked_amount)
-        .saturating_sub(unconfirmed_amount);
+    let unavailable_balance = locked_amount
+        .saturating_add(unconfirmed_amount)
+        .saturating_sub(locked_and_unconfirmed_amount);
+    let available_balance = total_balance.saturating_sub(unavailable_balance);
 
     Ok(AccountBalance {
         total: total_balance,

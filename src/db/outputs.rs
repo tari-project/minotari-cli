@@ -349,21 +349,22 @@ pub async fn fetch_outputs_by_lock_request_id(
     Ok(outputs)
 }
 
-/// Retrieves the sum of LOCKED values and the sum of UNCONFIRMED values for an account.
-/// Returns (locked_balance, unconfirmed_balance)
+/// Retrieves the sum of LOCKED values, the sum of UNCONFIRMED values, and the sum of values that are both LOCKED and UNCONFIRMED for an account.
+/// Returns (locked_balance, unconfirmed_balance, locked_and_unconfirmed_balance)
 pub async fn get_output_totals_for_account(
     conn: &mut SqliteConnection,
     account_id: i64,
-) -> Result<(u64, u64), sqlx::Error> {
+) -> Result<(u64, u64, u64), sqlx::Error> {
     let locked_status = OutputStatus::Locked.to_string();
 
     let row = sqlx::query!(
         r#"
         SELECT
-            COALESCE(SUM(CASE WHEN status = ? THEN value ELSE 0 END), 0) as "locked_val: i64",
-            COALESCE(SUM(CASE WHEN confirmed_height IS NULL THEN value ELSE 0 END), 0) as "unconfirmed_val: i64"
+            COALESCE(SUM(CASE WHEN status = ?1 THEN value ELSE 0 END), 0) as "locked_val: i64",
+            COALESCE(SUM(CASE WHEN confirmed_height IS NULL THEN value ELSE 0 END), 0) as "unconfirmed_val: i64",
+            COALESCE(SUM(CASE WHEN status = ?1 AND confirmed_height IS NULL THEN value ELSE 0 END), 0) as "locked_and_unconfirmed_val: i64"
         FROM outputs
-        WHERE account_id = ? AND deleted_at IS NULL
+        WHERE account_id = ?2 AND deleted_at IS NULL
         "#,
         locked_status,
         account_id
@@ -371,5 +372,9 @@ pub async fn get_output_totals_for_account(
     .fetch_one(&mut *conn)
     .await?;
 
-    Ok((row.locked_val as u64, row.unconfirmed_val as u64))
+    Ok((
+        row.locked_val as u64,
+        row.unconfirmed_val as u64,
+        row.locked_and_unconfirmed_val as u64,
+    ))
 }
