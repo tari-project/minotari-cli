@@ -336,6 +336,15 @@
           "recipients"
         ],
         "properties": {
+          "confirmation_window": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "default": "3",
+            "minimum": 0
+          },
           "idempotency_key": {
             "type": [
               "string",
@@ -368,6 +377,15 @@
           "amount": {
             "type": "integer",
             "format": "int64",
+            "minimum": 0
+          },
+          "confirmation_window": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "default": "3",
             "minimum": 0
           },
           "estimated_output_size": {
