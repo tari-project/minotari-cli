@@ -337,13 +337,9 @@
         ],
         "properties": {
           "confirmation_window": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
-            "default": "3",
-            "minimum": 0
+            "type": "integer",
+            "description": "Number of confirmations required",
+            "default": 3
           },
           "idempotency_key": {
             "type": [
@@ -380,13 +376,9 @@
             "minimum": 0
           },
           "confirmation_window": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
-            "default": "3",
-            "minimum": 0
+            "type": "integer",
+            "description": "Number of confirmations required",
+            "default": 3
           },
           "estimated_output_size": {
             "type": [
