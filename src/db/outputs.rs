@@ -289,7 +289,7 @@ pub async fn fetch_unspent_outputs(
         WHERE
           account_id = ? AND
           status = ? AND
-          confirmed_height < ? AND
+          confirmed_height <= ? AND
           wallet_output_json IS NOT NULL AND
           deleted_at IS NULL
         ORDER BY value DESC
