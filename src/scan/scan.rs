@@ -48,6 +48,7 @@ const DEFAULT_MAX_ERROR_RETRIES: u32 = 3;
 /// Default base for exponential backoff on errors (in seconds).
 const DEFAULT_ERROR_BACKOFF_BASE_SECS: u64 = 2;
 
+const MAX_BACKOFF_EXPONENT: u32 = 5;
 const MAX_BACKOFF_SECONDS: u64 = 60;
 /// Errors that can occur during blockchain scanning operations.
 ///
