@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        UPDATE completed_transactions\n        SET status = ?, mined_height = NULL, mined_block_hash = NULL, \n            confirmation_height = NULL, broadcast_attempts = 0, updated_at = ?\n        WHERE account_id = ? AND (status = ? OR status = ?) AND mined_height >= ?\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 6
+    },
+    "nullable": []
+  },
+  "hash": "b9f449dd3fb47015d6c2616b79b6f567d6bcb22dfafda735cddc0d19727f1265"
+}

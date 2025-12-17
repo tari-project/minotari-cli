@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n       INSERT INTO balance_changes (\n         account_id, \n         caused_by_output_id, \n         caused_by_input_id, \n         description, \n         balance_credit, \n         balance_debit, \n         effective_date, \n         effective_height, \n         claimed_recipient_address,\n         claimed_sender_address,\n         memo_parsed,\n         memo_hex,\n         claimed_fee,\n         claimed_amount)\n         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,?,?)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 14
+    },
+    "nullable": []
+  },
+  "hash": "562ea20c3d3bc116fc3666aabfc56e68744b39b19ada5ddb5fd0f4d5975eb5ff"
+}

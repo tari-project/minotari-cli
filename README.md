@@ -1,11 +1,15 @@
 # Minotari CLI Wallet Example
 
-A command-line lightweight wallet implementation for the Tari blockchain network. This wallet uses view-only keys to scan the blockchain for transactions without requiring a full node.
+A command-line lightweight wallet implementation for the Tari blockchain
+network. This wallet uses view-only keys to scan the blockchain for
+transactions without requiring a full node.
 
 ## Features
 
-- **View-Only Wallet**: Import and manage wallets using view keys and spend public keys
-- **Blockchain Scanning**: Efficiently scan the blockchain for outputs and track confirmations
+- **View-Only Wallet**: Import and manage wallets using view keys and spend
+  public keys
+- **Blockchain Scanning**: Efficiently scan the blockchain for outputs and track
+  confirmations
 - **Balance Tracking**: Monitor account balances with detailed transaction history
 - **Reorg Detection**: Automatically detects and handles blockchain reorganizations
 - **Encrypted Storage**: Wallet keys are encrypted using XChaCha20-Poly1305
@@ -13,12 +17,25 @@ A command-line lightweight wallet implementation for the Tari blockchain network
 - **Memo Support**: Parse and display payment memos attached to transactions
 - **Multi-Account**: Support for multiple wallet accounts in a single database
 
+## Build
 
+- A starting database is required to build the application.
+  - [Install the prerequisite tooling.](#prerequisites)
+  - [Create a database file](#create) if you don't have one.
 
-### Build
+Then, you can build as usual:
 
 ```bash
 cargo build --release
+```
+
+### Prerequisites
+
+- Rust toolchain (2024 edition)
+- [SQLx CLI](https://crates.io/crates/sqlx) for database migrations
+
+```bash
+cargo install sqlx-cli --no-default-features --features sqlite
 ```
 
 ## Usage
@@ -37,6 +54,7 @@ cargo run --bin minotari -- import-view-key \
 ```
 
 **Parameters:**
+
 - `--view-private-key`: Your view private key in hexadecimal format
 - `--spend-public-key`: Your spend public key in hexadecimal format
 - `--password`: Password to encrypt the wallet (minimum 32 characters recommended)
@@ -57,6 +75,7 @@ cargo run --bin minotari -- scan \
 ```
 
 **Parameters:**
+
 - `--password`: Password used to decrypt the wallet
 - `--base-url`: Tari RPC endpoint URL (default: `https://rpc.tari.com`)
 - `--database-file`: Path to the database file (default: `data/wallet.db`)
@@ -75,12 +94,14 @@ cargo run --bin minotari -- balance \
 ```
 
 **Parameters:**
+
 - `--database-file`: Path to the database file (default: `data/wallet.db`)
 - `--account-name`: Optional account name (shows all accounts if not specified)
 
 ## Database
 
 The wallet uses SQLite to store:
+
 - **Accounts**: Encrypted wallet keys and metadata
 - **Outputs**: Detected outputs with confirmation status
 - **Inputs**: Spent outputs (inputs to transactions)
@@ -88,9 +109,28 @@ The wallet uses SQLite to store:
 - **Wallet Events**: Timeline of wallet activity
 - **Scanned Blocks**: Track scanning progress and detect reorgs
 
+### Create
+
+- A database is required for building the application.
+
+```shell
+mkdir -p data
+sqlx database create
+sqlx migrate run
+```
+
 ### Migrations
 
-Database migrations are located in the `migrations/` directory. To reset the database:
+- Database migrations are located in the `migrations/` directory.
+- It is always recommended that you backup your `data/wallet.db` if it's precious.
+
+```shell
+sqlx migrate run
+```
+
+### Reset
+
+To reset the database via a powershell script:
 
 ```powershell
 # PowerShell
@@ -140,7 +180,9 @@ sqlx migrate run
 
 ### OpenAPI Specification
 
-The OpenAPI specification (`openapi.json`) is generated from the API definitions. If the API changes, you need to regenerate the `openapi.json` file using the following command:
+The OpenAPI specification (`openapi.json`) is generated from the API
+definitions. If the API changes, you need to regenerate the `openapi.json` file
+using the following command:
 
 ```bash
 cargo run --bin generate-openapi
@@ -155,12 +197,3 @@ cargo run --bin generate-openapi
 - **tokio**: Async runtime
 
 ## Contributing
-
-### Prerequisites
-
-- Rust toolchain (2024 edition)
-- SQLx CLI for database migrations
-
-```bash
-cargo install sqlx-cli --no-default-features --features sqlite
-```

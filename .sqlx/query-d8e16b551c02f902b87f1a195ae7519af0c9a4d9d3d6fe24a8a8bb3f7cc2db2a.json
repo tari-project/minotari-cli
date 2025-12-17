@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        UPDATE completed_transactions\n        SET status = ?, mined_height = NULL, mined_block_hash = NULL, \n            confirmation_height = NULL, broadcast_attempts = 0, updated_at = ?\n        WHERE id = ?\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "d8e16b551c02f902b87f1a195ae7519af0c9a4d9d3d6fe24a8a8bb3f7cc2db2a"
+}

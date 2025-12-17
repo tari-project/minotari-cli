@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT transaction_json\n        FROM displayed_transactions\n        WHERE account_id = ? AND status = ? AND direction = ?\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "transaction_json",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "f1dc9f85cc38e2ba8ac79563c8a8c5dc0cad0227d294569680b477603ea6c35f"
+}

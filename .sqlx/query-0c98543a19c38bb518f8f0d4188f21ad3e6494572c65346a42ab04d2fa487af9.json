@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "\n            SELECT output_id\n            FROM inputs\n            WHERE id = ? AND deleted_at IS NULL\n            ",
+  "describe": {
+    "columns": [
+      {
+        "name": "output_id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "0c98543a19c38bb518f8f0d4188f21ad3e6494572c65346a42ab04d2fa487af9"
+}

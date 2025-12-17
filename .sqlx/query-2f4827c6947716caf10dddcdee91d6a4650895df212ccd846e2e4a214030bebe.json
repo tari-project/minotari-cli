@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        UPDATE displayed_transactions\n        SET status = ?, block_height = ?, transaction_json = ?, updated_at = ?\n        WHERE id = ?\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 5
+    },
+    "nullable": []
+  },
+  "hash": "2f4827c6947716caf10dddcdee91d6a4650895df212ccd846e2e4a214030bebe"
+}

@@ -50,6 +50,25 @@ pub async fn insert_input(
     Ok((input_id, rows_affected > 0))
 }
 
+// retrieve output_id
+pub async fn get_input_details_for_balance_change_by_id(
+    conn: &mut SqliteConnection,
+    input_id: i64,
+) -> Result<Option<i64>, sqlx::Error> {
+    let row = sqlx::query!(
+        r#"
+        SELECT output_id
+        FROM inputs
+        WHERE id = ? AND deleted_at IS NULL
+        "#,
+        input_id
+    )
+    .fetch_optional(&mut *conn)
+    .await?;
+
+    Ok(row.map(|r| r.output_id))
+}
+
 pub async fn soft_delete_inputs_from_height(
     conn: &mut SqliteConnection,
     account_id: i64,

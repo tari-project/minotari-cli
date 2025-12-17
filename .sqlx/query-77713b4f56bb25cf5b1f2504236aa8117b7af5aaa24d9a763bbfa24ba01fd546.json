@@ -1,0 +1,38 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT id, account_id, height, hash\n        FROM scanned_tip_blocks\n        WHERE account_id = ?\n        ORDER BY height DESC\n        LIMIT 1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Integer"
+      },
+      {
+        "name": "account_id",
+        "ordinal": 1,
+        "type_info": "Integer"
+      },
+      {
+        "name": "height",
+        "ordinal": 2,
+        "type_info": "Integer"
+      },
+      {
+        "name": "hash",
+        "ordinal": 3,
+        "type_info": "Blob"
+      }
+    ],
+    "parameters": {
+      "Right": 1
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false
+    ]
+  },
+  "hash": "77713b4f56bb25cf5b1f2504236aa8117b7af5aaa24d9a763bbfa24ba01fd546"
+}

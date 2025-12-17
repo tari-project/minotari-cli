@@ -1,0 +1,20 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        SELECT\n            id\n        FROM pending_transactions\n        WHERE idempotency_key = ? AND account_id = ? AND status = ? AND expires_at < CURRENT_TIMESTAMP\n        LIMIT 1\n        ",
+  "describe": {
+    "columns": [
+      {
+        "name": "id",
+        "ordinal": 0,
+        "type_info": "Text"
+      }
+    ],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": [
+      false
+    ]
+  },
+  "hash": "3bacaffc3878c653d568e3e48392930c6ebef3b5d281404dbf1501785bbe6240"
+}

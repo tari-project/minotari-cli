@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        UPDATE completed_transactions\n        SET status = ?, broadcast_attempts = ?, updated_at = ?\n        WHERE id = ?\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 4
+    },
+    "nullable": []
+  },
+  "hash": "cac0b049a25c486e5f1fd239dbff47bbd97c922924604a78bbd4cc4f3e200693"
+}

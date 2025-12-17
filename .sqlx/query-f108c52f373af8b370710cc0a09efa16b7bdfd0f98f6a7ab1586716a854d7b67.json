@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        UPDATE outputs\n        SET status = ?, locked_at = NULL, locked_by_request_id = NULL\n        WHERE locked_by_request_id = ?\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 2
+    },
+    "nullable": []
+  },
+  "hash": "f108c52f373af8b370710cc0a09efa16b7bdfd0f98f6a7ab1586716a854d7b67"
+}

@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        INSERT OR IGNORE INTO scanned_tip_blocks (account_id, height, hash)\n        VALUES (?, ?, ?)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 3
+    },
+    "nullable": []
+  },
+  "hash": "af3dedb759a5e302fd8b29f24fc947d2bbc6d64fc3a832dba49cbd17fd8d35d0"
+}

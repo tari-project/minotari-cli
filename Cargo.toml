@@ -2,6 +2,7 @@
 name = "minotari"
 version = "0.1.0"
 edition = "2024"
+default-run = "minotari"
 
 [[bin]]
 name = "generate-openapi"
@@ -14,7 +15,8 @@ tapplets = []
 [dependencies]
 anyhow = "1.0.99"
 tokio = { version = "1.47.1", features = ["full"] }
-lightweight_wallet_libs = { path = "../tari-wallet", features = [
+#lightweight_wallet_libs = { path = "../tari-wallet", features = ["grpc","http",] }
+lightweight_wallet_libs = { git = "https://github.com/tari-project/tari-wallet", rev = "3e2807b1731074b6c1c2d166ef72c9085afff5fb", features = [
     "grpc",
     "http",
 ] }
@@ -39,10 +41,10 @@ tari_crypto = { version = "0.22.1", features = ["borsh"] }
 tari_utilities = { version = "0.8", features = ["std"] }
 chrono = "0.4.42"
 serde = "1.0.225"
-tari_common = { git = "https://github.com/tari-project/tari/", rev = "ed473c3c94c2219ac1eebb9345384b6a7245606c" }
-tari_common_types = { git = "https://github.com/tari-project/tari/", rev = "ed473c3c94c2219ac1eebb9345384b6a7245606c" }
-tari_script = { git = "https://github.com/tari-project/tari/", rev = "ed473c3c94c2219ac1eebb9345384b6a7245606c" }
-tari_transaction_components = { git = "https://github.com/tari-project/tari/", rev = "ed473c3c94c2219ac1eebb9345384b6a7245606c" }
+tari_common = { git = "https://github.com/tari-project/tari/", rev = "32b2e748cc1800823aebfa1d32799d2d9fee3bf5" }
+tari_common_types = { git = "https://github.com/tari-project/tari/", rev = "32b2e748cc1800823aebfa1d32799d2d9fee3bf5" }
+tari_script = { git = "https://github.com/tari-project/tari/", rev = "32b2e748cc1800823aebfa1d32799d2d9fee3bf5" }
+tari_transaction_components = { git = "https://github.com/tari-project/tari/", rev = "32b2e748cc1800823aebfa1d32799d2d9fee3bf5" }
 #tari_common = { path = "../tari/common" }
 #tari_common_types = { path = "../tari/base_layer/common_types" }
 #tari_script = { path = "../tari/infrastructure/tari_script" }
@@ -57,3 +59,9 @@ regex = "1.12.2"
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter"] }
 dialoguer = "0.11"
+reqwest = { version = "0.12", features = ["json"] }
+reqwest-middleware = "0.4"
+reqwest-retry = "0.7"
+url = "2.5"
+tokio-util = { version = "0.7.17", features = ["rt"] }
+num-format = "0.4.4"

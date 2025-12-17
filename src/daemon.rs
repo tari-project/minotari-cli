@@ -1,3 +1,49 @@
+//! Background daemon mode for continuous blockchain scanning.
+//!
+//! This module provides the [`Daemon`] struct that orchestrates long-running wallet operations,
+//! including periodic blockchain scanning, API server hosting, and background task management.
+//!
+//! # Features
+//!
+//! - **Periodic Scanning**: Automatically scans the blockchain at configurable intervals
+//! - **API Server**: Runs an HTTP API server for wallet operations
+//! - **Background Tasks**: Manages transaction unlocker and other periodic tasks
+//! - **Graceful Shutdown**: Handles Ctrl+C signals and coordinates shutdown across all tasks
+//! - **Error Recovery**: Distinguishes between fatal and intermittent errors, retrying when appropriate
+//!
+//! # Usage Example
+//!
+//! ```no_run
+//! use minotari::daemon::Daemon;
+//! use tari_common::configuration::Network;
+//!
+//! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
+//! let daemon = Daemon::new(
+//!     "password".to_string(),
+//!     "https://rpc.tari.com".to_string(),
+//!     "wallet.db".to_string(),
+//!     100,    // max_blocks per scan
+//!     10,     // batch_size
+//!     60,     // scan_interval_secs
+//!     3000,   // api_port
+//!     Network::Esmeralda,
+//! );
+//!
+//! daemon.run().await?;
+//! # Ok(())
+//! # }
+//! ```
+//!
+//! # Architecture
+//!
+//! The daemon coordinates three main components:
+//!
+//! 1. **Scanner Loop**: Periodically scans the blockchain for new outputs
+//! 2. **API Server**: Serves HTTP endpoints for wallet operations
+//! 3. **Transaction Unlocker**: Automatically unlocks expired transaction locks
+//!
+//! All components listen for shutdown signals and terminate gracefully.
+
 use std::time::Duration;
 
 use anyhow::anyhow;
@@ -7,10 +53,15 @@ use tari_common::configuration::Network;
 
 use crate::{
     api, db,
-    scan::{self, ScanError},
+    scan::{self, ScanMode, scan::ScanError},
     tasks::unlocker::TransactionUnlocker,
 };
 
+/// Daemon for running the wallet in continuous background mode.
+///
+/// The daemon orchestrates multiple concurrent tasks including blockchain scanning,
+/// API server hosting, and transaction management. It handles graceful shutdown
+/// and error recovery for long-running operation.
 pub struct Daemon {
     password: String,
     base_url: String,
@@ -23,6 +74,18 @@ pub struct Daemon {
 }
 
 impl Daemon {
+    /// Creates a new daemon instance with the specified configuration.
+    ///
+    /// # Parameters
+    ///
+    /// * `password` - Password for decrypting wallet keys
+    /// * `base_url` - Base URL of the Tari RPC endpoint (e.g., "<https://rpc.tari.com>")
+    /// * `database_file` - Path to the SQLite database file
+    /// * `max_blocks` - Maximum number of blocks to scan per iteration
+    /// * `batch_size` - Number of blocks to scan per batch
+    /// * `scan_interval_secs` - Seconds to wait between scan cycles
+    /// * `api_port` - Port to bind the HTTP API server to
+    /// * `network` - Tari network configuration (Esmeralda, Nextnet, Mainnet, etc.)
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         password: String,
@@ -46,6 +109,24 @@ impl Daemon {
         }
     }
 
+    /// Runs the daemon until a shutdown signal is received.
+    ///
+    /// This method starts all daemon components and blocks until Ctrl+C is pressed
+    /// or a fatal error occurs. It coordinates:
+    ///
+    /// - Blockchain scanner loop (periodic scanning)
+    /// - HTTP API server (wallet operations)
+    /// - Transaction unlocker task (background cleanup)
+    /// - Graceful shutdown on SIGINT (Ctrl+C)
+    ///
+    /// # Returns
+    ///
+    /// Returns `Ok(())` on graceful shutdown or `Err(ScanError)` if a fatal error occurs.
+    ///
+    /// # Errors
+    ///
+    /// - `ScanError::Fatal` - Database connection failures, API binding errors, or task panics
+    /// - Scanner errors are handled internally with retry logic for intermittent failures
     pub async fn run(&self) -> Result<(), ScanError> {
         println!("Daemon started. Press Ctrl+C to stop.");
 
@@ -109,20 +190,27 @@ impl Daemon {
         Ok(())
     }
 
+    /// Performs a single scan cycle followed by a sleep interval.
+    ///
+    /// Scans up to `max_blocks` in batches of `batch_size`, then sleeps for
+    /// `scan_interval` before returning. This method is called repeatedly by
+    /// the scan loop.
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(())` - Scan completed successfully and sleep finished
+    /// - `Err(ScanError)` - Scan failed with a fatal or intermittent error
     async fn scan_and_sleep(&self) -> Result<(), ScanError> {
         println!("Starting wallet scan...");
-        let result = scan::scan(
-            &self.password,
-            &self.base_url,
-            &self.database_file,
-            None, // Scan all accounts
-            self.max_blocks,
-            self.batch_size,
-        )
-        .await;
+        let result = scan::Scanner::new(&self.password, &self.base_url, &self.database_file, self.batch_size)
+            .mode(ScanMode::Partial {
+                max_blocks: self.max_blocks,
+            })
+            .run()
+            .await;
 
         match result {
-            Ok(events) => {
+            Ok((events, _are_there_more_blocks_to_scan)) => {
                 println!("Scan completed successfully. Found {} events.", events.len());
             },
             Err(e) => {
@@ -135,6 +223,23 @@ impl Daemon {
         Ok(())
     }
 
+    /// Main scanning loop that runs until shutdown or fatal error.
+    ///
+    /// This loop continuously calls `scan_and_sleep()` while listening for shutdown signals.
+    /// It distinguishes between error types:
+    ///
+    /// - **Fatal errors**: Immediately propagate and trigger shutdown
+    /// - **Intermittent errors**: Log and retry after the scan interval
+    /// - **Timeout errors**: Log retry count and continue after interval
+    ///
+    /// # Parameters
+    ///
+    /// * `shutdown_rx` - Broadcast receiver for shutdown signals from other tasks
+    ///
+    /// # Returns
+    ///
+    /// - `Ok(())` - Shutdown signal received, exiting gracefully
+    /// - `Err(ScanError::Fatal)` - Fatal error occurred, daemon should stop
     async fn scan_and_sleep_loop(&self, mut shutdown_rx: broadcast::Receiver<()>) -> Result<(), ScanError> {
         loop {
             tokio::select! {
@@ -145,12 +250,16 @@ impl Daemon {
                 res = self.scan_and_sleep() => {
                     if let Err(e) = res {
                         match e {
-                            ScanError::Fatal(_) | ScanError::FatalSqlx(_) => {
+                            ScanError::Fatal(_) => {
                                 println!("A fatal error occurred during the scan cycle: {}", e);
                                 return Err(e);
                             },
                             ScanError::Intermittent(err_msg) => {
                                 println!("An intermittent error occurred during the scan cycle: {}", err_msg);
+                                sleep(self.scan_interval).await;
+                            },
+                            ScanError::Timeout(retries) => {
+                                println!("Scan timed out after {} retries, will retry after interval", retries);
                                 sleep(self.scan_interval).await;
                             },
                         }

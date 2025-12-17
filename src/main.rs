@@ -1,3 +1,50 @@
+//! Minotari Wallet CLI Application
+//!
+//! A command-line interface for managing Tari wallets with support for view-key
+//! based operations, blockchain scanning, and transaction creation.
+//!
+//! # Overview
+//!
+//! This application provides a lightweight wallet implementation for the Tari
+//! cryptocurrency network. It supports:
+//!
+//! - **Wallet Creation**: Generate new wallets with optional password encryption
+//! - **View Key Import**: Import existing wallets using view and spend keys
+//! - **Blockchain Scanning**: Detect incoming transactions and track wallet balance
+//! - **Transaction Creation**: Build unsigned one-sided transactions
+//! - **Fund Locking**: Reserve UTXOs for pending transactions
+//! - **Daemon Mode**: Continuous blockchain monitoring with REST API
+//!
+//! # Security Model
+//!
+//! The wallet uses view-key based scanning, which allows detecting incoming
+//! transactions without exposing spending capability. Sensitive data (view keys,
+//! seed words) can be encrypted using XChaCha20-Poly1305 with a user-provided
+//! password.
+//!
+//! # Usage Examples
+//!
+//! Create a new encrypted wallet:
+//! ```bash
+//! tari create-address --password "my_secure_password" --output-file wallet.json
+//! ```
+//!
+//! Scan the blockchain for transactions:
+//! ```bash
+//! tari scan --password "my_password" --database-file wallet.db
+//! ```
+//!
+//! Run the wallet daemon with API server:
+//! ```bash
+//! tari daemon --password "my_password" --api-port 9000
+//! ```
+//!
+//! # Data Storage
+//!
+//! - Wallet credentials are stored in JSON files (optionally encrypted)
+//! - Transaction and balance data is stored in a SQLite database
+//! - Default data directory is `./data/`
+
 use std::{
     env,
     fs::{self, create_dir_all},
@@ -5,7 +52,6 @@ use std::{
 };
 
 use anyhow::anyhow;
-use blake2::{Blake2s256, Digest};
 use chacha20poly1305::{
     AeadCore, Key, KeyInit, XChaCha20Poly1305,
     aead::{Aead, OsRng},
@@ -17,12 +63,14 @@ use minotari::{
     daemon,
     db::{self, get_accounts, get_balance, init_db},
     models::WalletEvent,
-    scan::{self, ScanError},
+    scan::{self, rollback_from_height, scan::ScanError},
     transactions::{
-        lock_amount::LockAmount,
+        fund_locker::FundLocker,
         one_sided_transaction::{OneSidedTransaction, Recipient},
     },
+    utils,
 };
+use num_format::{Locale, ToFormattedString};
 use std::str::FromStr;
 use tari_common::configuration::Network;
 use tari_common_types::{
@@ -40,9 +88,402 @@ use tari_transaction_components::key_manager::wallet_types::WalletType;
 use tari_transaction_components::tari_amount::MicroMinotari;
 use tari_utilities::byte_array::ByteArray;
 
-use minotari::cli::{Cli, Commands};
+/// Command-line interface definition for the Tari wallet.
+///
+/// This struct is the root of the CLI argument parser, containing all available
+/// subcommands for wallet operations. It uses the `clap` crate for argument parsing.
+///
+/// # Subcommands
+///
+/// - [`Commands::CreateAddress`] - Generate a new wallet address
+/// - [`Commands::ImportViewKey`] - Import an existing wallet by view key
+/// - [`Commands::Scan`] - Scan blockchain for transactions
+/// - [`Commands::ReScan`] - Re-scan from a specific block height
+/// - [`Commands::Daemon`] - Run continuous scanning daemon
+/// - [`Commands::Balance`] - Display wallet balance
+/// - [`Commands::CreateUnsignedTransaction`] - Build an unsigned transaction
+/// - [`Commands::LockFunds`] - Lock UTXOs for a pending transaction
+#[derive(Parser)]
+#[command(name = "tari")]
+#[command(about = "Tari wallet CLI", long_about = None)]
+struct Cli {
+    /// The subcommand to execute
+    #[command(subcommand)]
+    command: Commands,
+}
 
-use minotari::tapplets::tapplet_command_handler;
+/// Available CLI subcommands for wallet operations.
+///
+/// Each variant represents a distinct operation that can be performed on the wallet.
+/// Commands are organized by their primary function: wallet management, blockchain
+/// scanning, balance queries, and transaction operations.
+///
+/// # Wallet Management Commands
+///
+/// - [`Commands::CreateAddress`] - Generate a brand new wallet
+/// - [`Commands::ImportViewKey`] - Import an existing wallet using keys
+///
+/// # Scanning Commands
+///
+/// - [`Commands::Scan`] - One-time blockchain scan
+/// - [`Commands::ReScan`] - Re-scan from a specific height (useful for recovery)
+/// - [`Commands::Daemon`] - Continuous scanning with REST API
+///
+/// # Query Commands
+///
+/// - [`Commands::Balance`] - View current wallet balance
+///
+/// # Transaction Commands
+///
+/// - [`Commands::CreateUnsignedTransaction`] - Create a transaction for offline signing
+/// - [`Commands::LockFunds`] - Reserve UTXOs for pending operations
+#[derive(Subcommand)]
+enum Commands {
+    /// Create a new wallet address with optional encryption.
+    ///
+    /// Generates a new wallet with:
+    /// - Random cipher seed
+    /// - Mnemonic seed words (English)
+    /// - View key (private) and spend key (public)
+    /// - Tari address for receiving funds
+    ///
+    /// The output file can be encrypted with a password using XChaCha20-Poly1305.
+    /// If no password is provided, keys are stored in plaintext (not recommended
+    /// for production use).
+    ///
+    /// # Output Format
+    ///
+    /// The generated JSON file contains:
+    /// - `address`: Base58-encoded Tari address
+    /// - `view_key` / `encrypted_view_key`: Private view key
+    /// - `spend_key` / `encrypted_spend_key`: Public spend key
+    /// - `seed_words` / `encrypted_seed_words`: Mnemonic recovery phrase
+    /// - `birthday`: Block height when wallet was created
+    /// - `nonce`: (encrypted only) Encryption nonce
+    CreateAddress {
+        /// Password to encrypt the wallet file (optional but recommended).
+        /// If provided, will be padded or truncated to 32 bytes.
+        #[arg(short, long, help = "Password to encrypt the wallet file")]
+        password: Option<String>,
+        /// Path to write the wallet credentials JSON file.
+        #[arg(short, long, help = "Path to the output file", default_value = "data/output.json")]
+        output_file: String,
+    },
+    /// Scan the blockchain for incoming transactions.
+    ///
+    /// Performs a partial scan of the blockchain starting from the last scanned
+    /// height, looking for outputs that belong to the wallet. Detected outputs
+    /// are recorded in the database and can be viewed with the `balance` command.
+    ///
+    /// # Scanning Process
+    ///
+    /// 1. Fetches blocks from the Tari HTTP API
+    /// 2. Decrypts output commitments using the view key
+    /// 3. Records detected outputs in the SQLite database
+    /// 4. Updates the scanned tip height
+    ///
+    /// # Performance Tuning
+    ///
+    /// - `max_blocks_to_scan`: Limits scan duration (default: 50)
+    /// - `batch_size`: Number of blocks per API request (default: 100)
+    Scan {
+        /// Password to decrypt the wallet view key from the database.
+        #[arg(short, long, help = "Password to decrypt the wallet file")]
+        password: String,
+        /// Base URL of the Tari HTTP RPC API endpoint.
+        #[arg(
+            short = 'u',
+            long,
+            default_value = "https://rpc.tari.com",
+            help = "The base URL of the Tari HTTP API"
+        )]
+        base_url: String,
+        /// Path to the SQLite database file storing wallet state.
+        #[arg(short, long, help = "Path to the database file", default_value = "data/wallet.db")]
+        database_file: String,
+        /// Specific account to scan. If omitted, all accounts are scanned.
+        #[arg(
+            short,
+            long,
+            help = "Optional account name to scan. If not provided, all accounts will be used"
+        )]
+        account_name: Option<String>,
+        /// Maximum number of blocks to scan in this invocation.
+        #[arg(short = 'n', long, help = "Maximum number of blocks to scan", default_value_t = 50)]
+        max_blocks_to_scan: u64,
+        /// Number of blocks to fetch per API request for efficiency.
+        #[arg(long, help = "Batch size for scanning", default_value_t = 25)]
+        batch_size: u64,
+    },
+    /// Re-scan the blockchain from a specific height.
+    ///
+    /// Rolls back the wallet state to a specified block height and re-scans
+    /// from that point. This is useful for:
+    ///
+    /// - Recovering from database corruption
+    /// - Handling blockchain reorganizations
+    /// - Debugging missing transactions
+    ///
+    /// # Warning
+    ///
+    /// This operation modifies the database by removing outputs detected
+    /// after the specified height. Make a backup before re-scanning.
+    ReScan {
+        /// Password to decrypt the wallet view key.
+        #[arg(short, long, help = "Password to decrypt the wallet file")]
+        password: String,
+        /// Base URL of the Tari HTTP RPC API endpoint.
+        #[arg(
+            short = 'u',
+            long,
+            default_value = "https://rpc.tari.com",
+            help = "The base URL of the Tari HTTP API"
+        )]
+        base_url: String,
+        /// Path to the SQLite database file.
+        #[arg(short, long, help = "Path to the database file", default_value = "data/wallet.db")]
+        database_file: String,
+        /// Name of the account to re-scan (required).
+        #[arg(short, long, help = "Account name to re-scan")]
+        account_name: String,
+        /// Block height to roll back to before re-scanning.
+        #[arg(short = 'r', long, help = "Re-scan from height")]
+        rescan_from_height: u64,
+        /// Number of blocks to fetch per API request.
+        #[arg(long, help = "Batch size for scanning", default_value_t = 25)]
+        batch_size: u64,
+    },
+    /// Run the wallet daemon for continuous blockchain monitoring.
+    ///
+    /// Starts a long-running process that:
+    /// - Continuously scans the blockchain at regular intervals
+    /// - Exposes a REST API for wallet operations
+    /// - Automatically unlocks expired UTXO locks
+    /// - Handles graceful shutdown on Ctrl+C
+    ///
+    /// # API Endpoints
+    ///
+    /// The daemon exposes endpoints for:
+    /// - Balance queries: `GET /accounts/{name}/balance`
+    /// - Fund locking: `POST /accounts/{name}/lock_funds`
+    /// - Transaction creation: `POST /accounts/{name}/create_unsigned_transaction`
+    ///
+    /// API documentation is available at `/swagger-ui/` when the daemon is running.
+    ///
+    /// # Shutdown
+    ///
+    /// Press Ctrl+C to initiate graceful shutdown. The daemon will:
+    /// 1. Stop accepting new API requests
+    /// 2. Complete the current scan cycle
+    /// 3. Close database connections
+    Daemon {
+        /// Password to decrypt wallet credentials.
+        #[arg(short, long, help = "Password to decrypt the wallet file")]
+        password: String,
+        /// Base URL of the Tari HTTP RPC API endpoint.
+        #[arg(
+            short = 'u',
+            long,
+            default_value = "https://rpc.tari.com",
+            help = "The base URL of the Tari HTTP API"
+        )]
+        base_url: String,
+        /// Path to the SQLite database file.
+        #[arg(short, long, help = "Path to the database file", default_value = "data/wallet.db")]
+        database_file: String,
+        /// Number of blocks to fetch per API request.
+        #[arg(long, help = "Batch size for scanning", default_value_t = 25)]
+        batch_size: u64,
+        /// Seconds to wait between scan cycles.
+        #[arg(short, long, help = "Interval between scans in seconds", default_value_t = 60)]
+        scan_interval_secs: u64,
+        /// TCP port for the REST API server.
+        #[arg(long, help = "Port for the API server", default_value_t = 9000)]
+        api_port: u16,
+        /// Tari network to connect to (MainNet, StageNet, NextNet, LocalNet).
+        #[arg(long, help = "The Tari network to connect to", default_value_t = Network::MainNet)]
+        network: Network,
+    },
+    /// Display the wallet balance.
+    ///
+    /// Shows the current balance for one or all accounts in the wallet.
+    /// Balance is calculated as the sum of confirmed outputs minus spent inputs.
+    ///
+    /// # Output Format
+    ///
+    /// Displays balance in both microTari (base units) and Tari with proper
+    /// formatting and thousand separators for readability.
+    Balance {
+        /// Path to the SQLite database file.
+        #[arg(short, long, help = "Path to the database file", default_value = "data/wallet.db")]
+        database_file: String,
+        /// Specific account to show balance for. If omitted, shows all accounts.
+        #[arg(
+            short,
+            long,
+            help = "Optional account name to show balance for. If not provided, all accounts will be used"
+        )]
+        account_name: Option<String>,
+    },
+    /// Import a wallet using view and spend keys.
+    ///
+    /// Creates a new account in the database using existing cryptographic keys.
+    /// This is useful for:
+    ///
+    /// - Restoring a wallet from backed-up keys
+    /// - Creating a watch-only wallet (view key only)
+    /// - Importing a wallet generated by another application
+    ///
+    /// # Key Format
+    ///
+    /// Both keys should be provided as hex-encoded strings:
+    /// - `view_private_key`: 64 hex characters (32 bytes)
+    /// - `spend_public_key`: 64 hex characters (32 bytes, compressed)
+    ///
+    /// # Birthday
+    ///
+    /// The birthday is the block height when the wallet was created. Setting
+    /// this correctly avoids scanning unnecessary historical blocks.
+    ImportViewKey {
+        /// Private view key in hexadecimal format.
+        #[arg(short, long, alias = "view_key", help = "The view key in hex format")]
+        view_private_key: String,
+        /// Public spend key in hexadecimal format (compressed point).
+        #[arg(short, long, alias = "spend_key", help = "The spend public key in hex format")]
+        spend_public_key: String,
+        /// Password to encrypt the stored credentials.
+        #[arg(short, long, help = "Password to encrypt the wallet file")]
+        password: String,
+        /// Path to the SQLite database file.
+        #[arg(short, long, help = "Path to the database file", default_value = "data/wallet.db")]
+        database_file: String,
+        /// Block height when the wallet was created (for scan optimization).
+        #[arg(short, long, help = "The wallet birthday (block height)", default_value = "0")]
+        birthday: u16,
+    },
+    /// Create an unsigned one-sided transaction.
+    ///
+    /// Builds a transaction that can be signed offline. The transaction sends
+    /// funds to one or more recipients using one-sided (non-interactive) payments.
+    ///
+    /// # Recipient Format
+    ///
+    /// Recipients are specified as `address::amount` or `address::amount::payment_id`:
+    /// - `address`: Base58-encoded Tari address
+    /// - `amount`: Amount in microTari
+    /// - `payment_id`: Optional memo/reference (max 48 characters)
+    ///
+    /// # UTXO Locking
+    ///
+    /// Input UTXOs are automatically locked to prevent double-spending. If the
+    /// transaction is not broadcast within `seconds_to_lock`, the UTXOs are
+    /// automatically released.
+    ///
+    /// # Example
+    ///
+    /// ```bash
+    /// tari create-unsigned-transaction \
+    ///     --account-name main \
+    ///     --recipient "f2ABC...123::1000000" \
+    ///     --password secret
+    /// ```
+    CreateUnsignedTransaction {
+        /// Name of the account to spend from.
+        #[arg(short, long, help = "Name of the account to send from")]
+        account_name: String,
+        /// Recipients in `address::amount[::payment_id]` format. Repeatable.
+        #[arg(
+            short,
+            long,
+            help = "Recipient address, amount and optional payment id (e.g., address::amount or address::amount::payment_id). Can be specified multiple times."
+        )]
+        recipient: Vec<String>,
+        /// Path to write the unsigned transaction JSON.
+        #[arg(
+            short,
+            long,
+            help = "Path to the output file for the unsigned transaction",
+            default_value = "data/unsigned_transaction.json"
+        )]
+        output_file: String,
+        /// Password to decrypt wallet credentials.
+        #[arg(short, long, help = "Password to decrypt the wallet file")]
+        password: String,
+        /// Path to the SQLite database file.
+        #[arg(short, long, help = "Path to the database file", default_value = "data/wallet.db")]
+        database_file: String,
+        /// Unique key to prevent duplicate transactions.
+        #[arg(long, help = "Optional idempotency key")]
+        idempotency_key: Option<String>,
+        /// Duration in seconds to lock input UTXOs (default: 24 hours).
+        #[arg(long, help = "Optional seconds to lock UTXOs", default_value_t = 86400)]
+        seconds_to_lock: u64,
+        /// The number of blocks to consider an output confirmed in order to be included as spendable
+        #[arg(long, help = "Confirmation window", default_value_t = 3)]
+        confirmation_window: u64,
+        /// Tari network for address validation and consensus rules.
+        #[arg(long, help = "The Tari network to connect to", default_value_t = Network::MainNet)]
+        network: Network,
+    },
+    /// Lock funds (reserve UTXOs) for a pending transaction.
+    ///
+    /// Reserves a set of UTXOs totaling at least the specified amount plus
+    /// estimated fees. Locked UTXOs cannot be used for other transactions
+    /// until they are either spent or the lock expires.
+    ///
+    /// # Use Case
+    ///
+    /// This is useful when you need to:
+    /// - Reserve funds before creating a complex multi-step transaction
+    /// - Ensure sufficient funds are available for a future payment
+    /// - Coordinate multiple transactions without double-spending
+    ///
+    /// # Automatic Unlock
+    ///
+    /// If the locked funds are not spent within `seconds_to_lock_utxos`,
+    /// they are automatically unlocked and become available again.
+    LockFunds {
+        /// Name of the account to lock funds from.
+        #[arg(short, long, help = "Name of the account to send from")]
+        account_name: String,
+        /// Path to write the locked funds details JSON.
+        #[arg(
+            short,
+            long,
+            help = "Path to the output file for the unsigned transaction",
+            default_value = "data/locked_funds.json"
+        )]
+        output_file: String,
+        /// Path to the SQLite database file.
+        #[arg(short, long, help = "Path to the database file", default_value = "data/wallet.db")]
+        database_file: String,
+        /// Amount to lock in microTari.
+        #[arg(short = 'm', long, help = "Amount to lock")]
+        amount: MicroMinotari,
+        /// Number of output UTXOs to create (for splitting).
+        #[arg(short, long, help = "Optional number of outputs", default_value = "1")]
+        num_outputs: usize,
+        /// Fee rate in microTari per gram of transaction weight.
+        #[arg(short, long, help = "Optional fee per gram", default_value = "5")]
+        fee_per_gram: MicroMinotari,
+        /// Estimated size of outputs for fee calculation.
+        #[arg(short, long, help = "Optional estimated output size")]
+        estimated_output_size: Option<usize>,
+        /// Duration in seconds before locked UTXOs are released (default: 24h).
+        #[arg(
+            short,
+            long,
+            help = "Optional seconds to lock (will be unlocked if not spent)",
+            default_value = "86400"
+        )]
+        seconds_to_lock_utxos: Option<u64>,
+        /// Unique key to prevent duplicate lock operations.
+        #[arg(long, help = "Optional idempotency key")]
+        idempotency_key: Option<String>,
+        #[arg(long, help = "Confirmation window", default_value_t = 3)]
+        confirmation_window: u64,
+    },
+}
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
@@ -157,7 +598,7 @@ async fn main() -> Result<(), anyhow::Error> {
                 return Ok(());
             }
             println!("Scanning blockchain...");
-            let events = scan(
+            let (events, _more_blocks_to_scan) = scan(
                 &password,
                 &base_url,
                 &database_file,
@@ -168,7 +609,30 @@ async fn main() -> Result<(), anyhow::Error> {
             .await?;
             println!("Scan complete. Events: {}", events.len());
             Ok(())
-            // Add scanning logic here
+        },
+        Commands::ReScan {
+            password,
+            base_url,
+            database_file,
+            account_name,
+            rescan_from_height,
+            batch_size,
+        } => {
+            println!(
+                "Rolling back to block {} and scanning blockchain...",
+                rescan_from_height
+            );
+            let (events, _more_blocks_to_scan) = rescan(
+                &password,
+                &base_url,
+                &database_file,
+                &account_name,
+                rescan_from_height,
+                batch_size,
+            )
+            .await?;
+            println!("Re-scan complete. Events: {}", events.len());
+            Ok(())
         },
         Commands::Daemon {
             password,
@@ -211,6 +675,7 @@ async fn main() -> Result<(), anyhow::Error> {
             idempotency_key,
             seconds_to_lock,
             network,
+            confirmation_window,
         } => {
             println!("Creating unsigned transaction...");
             handle_create_unsigned_transaction(
@@ -221,6 +686,7 @@ async fn main() -> Result<(), anyhow::Error> {
                 password,
                 idempotency_key,
                 seconds_to_lock,
+                confirmation_window,
                 output_file,
             )
             .await
@@ -235,8 +701,9 @@ async fn main() -> Result<(), anyhow::Error> {
             estimated_output_size,
             seconds_to_lock_utxos,
             idempotency_key,
+            confirmation_window,
         } => {
-            println!("Creating unsigned transaction...");
+            println!("Locking funds...");
             let request = LockFundsRequest {
                 amount,
                 num_outputs: Some(num_outputs),
@@ -244,6 +711,7 @@ async fn main() -> Result<(), anyhow::Error> {
                 estimated_output_size,
                 seconds_to_lock_utxos,
                 idempotency_key,
+                confirmation_window: Some(confirmation_window),
             };
             handle_lock_funds(database_file, account_name, output_file, request).await
         },
@@ -260,16 +728,15 @@ async fn handle_balance(database_file: &str, account_name: Option<&str>) -> Resu
     let accounts = get_accounts(&mut conn, account_name, false).await?;
     for account in accounts {
         let agg_result = get_balance(&mut conn, account.id).await?;
-        let credits = agg_result.total_credits.unwrap_or(0) as u64;
-        let debits = agg_result.total_debits.unwrap_or(0) as u64;
-        let micro_tari_balance = credits.saturating_sub(debits) as f64;
-        let tari_balance = micro_tari_balance / 1_000_000.0;
+        let tari_balance = agg_result.total / 1_000_000;
+        let remainder = agg_result.total % 1_000_000;
         println!(
-            "Balance at height {}({}): {} microTari ({} Tari)",
+            "Balance at height {}({}): {} microTari ({}.{} Tari)",
             agg_result.max_height.unwrap_or(0),
             agg_result.max_date.unwrap_or_else(|| "N/A".to_string()),
-            micro_tari_balance,
-            tari_balance
+            agg_result.total.to_formatted_string(&Locale::en),
+            tari_balance.to_formatted_string(&Locale::en),
+            remainder.to_formatted_string(&Locale::en),
         );
     }
     Ok(())
@@ -284,6 +751,7 @@ async fn handle_create_unsigned_transaction(
     password: String,
     idempotency_key: Option<String>,
     seconds_to_lock: u64,
+    confirmation_window: u64,
     output_file: String,
 ) -> Result<(), anyhow::Error> {
     let recipients: Result<Vec<Recipient>, anyhow::Error> = recipient
@@ -325,16 +793,17 @@ async fn handle_create_unsigned_transaction(
     let fee_per_gram = MicroMinotari(5);
     let estimated_output_size = None;
 
-    let lock_amount = LockAmount::new(pool.clone());
+    let lock_amount = FundLocker::new(pool.clone());
     let locked_funds = lock_amount
         .lock(
-            &account,
+            account.id,
             amount,
             num_outputs,
             fee_per_gram,
             estimated_output_size,
             idempotency_key,
             seconds_to_lock,
+            confirmation_window,
         )
         .await
         .map_err(|e| anyhow!("Failed to lock funds: {}", e))?;
@@ -364,16 +833,17 @@ async fn handle_lock_funds(
     let account = db::get_parent_account_by_name(&mut conn, &account_name)
         .await?
         .ok_or_else(|| anyhow!("Account not found: {}", account_name))?;
-    let lock_amount = LockAmount::new(pool.clone());
+    let lock_amount = FundLocker::new(pool.clone());
     let result = lock_amount
         .lock(
-            &account,
+            account.id,
             request.amount,
             request.num_outputs.expect("must be present"),
             request.fee_per_gram.expect("must be present"),
             request.estimated_output_size,
             request.idempotency_key,
             request.seconds_to_lock_utxos.expect("must be present"),
+            request.confirmation_window.expect("must be present"),
         )
         .await
         .map_err(|e| anyhow!("Failed to lock funds: {}", e))?;
@@ -392,8 +862,39 @@ async fn scan(
     account_name: Option<&str>,
     max_blocks: u64,
     batch_size: u64,
-) -> Result<Vec<WalletEvent>, ScanError> {
-    scan::scan(password, base_url, database_file, account_name, max_blocks, batch_size).await
+) -> Result<(Vec<WalletEvent>, bool), ScanError> {
+    let mut scanner =
+        scan::Scanner::new(password, base_url, database_file, batch_size).mode(scan::ScanMode::Partial { max_blocks });
+
+    if let Some(name) = account_name {
+        scanner = scanner.account(name);
+    }
+
+    scanner.run().await
+}
+
+async fn rescan(
+    password: &str,
+    base_url: &str,
+    database_file: &str,
+    account_name: &str,
+    rescan_from_height: u64,
+    batch_size: u64,
+) -> Result<(Vec<WalletEvent>, bool), ScanError> {
+    let pool = init_db(database_file).await?;
+    let mut conn = pool.acquire().await?;
+
+    let account = db::get_account_by_name(&mut conn, account_name)
+        .await?
+        .ok_or_else(|| anyhow!("Account not found: {}", account_name))?;
+    let _ = rollback_from_height(&mut conn, account.id, rescan_from_height).await?;
+
+    let max_blocks_to_scan = u64::MAX;
+    let mut scanner = scan::Scanner::new(password, base_url, database_file, batch_size).mode(scan::ScanMode::Partial {
+        max_blocks: max_blocks_to_scan,
+    });
+    scanner = scanner.account(account_name);
+    scanner.run().await
 }
 
 async fn init_with_view_key(
@@ -403,26 +904,13 @@ async fn init_with_view_key(
     database_file: &str,
     birthday: u16,
 ) -> Result<(), anyhow::Error> {
-    let view_key_bytes = hex::decode(view_private_key)?;
-    let spend_key_bytes = hex::decode(spend_public_key)?;
-
-    let (nonce, encrypted_view_key, encrypted_spend_key) =
-        encrypt_with_password(password, &view_key_bytes, spend_key_bytes)?;
-
-    // create a hash of the viewkey to determine duplicate wallets
-    let view_key_hash = hash_view_key(&view_key_bytes);
-    let pool = init_db(database_file).await?;
-    let mut conn = pool.acquire().await?;
-    db::create_account(
-        &mut conn,
-        "default",
-        &encrypted_view_key,
-        &encrypted_spend_key,
-        &nonce,
-        &view_key_hash,
-        birthday as i64,
+    utils::init_with_view_key(
+        view_private_key,
+        spend_public_key,
+        password,
+        database_file,
+        birthday,
+        None,
     )
-    .await?;
-
-    Ok(())
+    .await
 }

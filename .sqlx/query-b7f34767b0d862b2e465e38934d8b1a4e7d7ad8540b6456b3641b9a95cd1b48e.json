@@ -1,0 +1,12 @@
+{
+  "db_name": "SQLite",
+  "query": "\n        INSERT INTO completed_transactions (id, account_id, pending_tx_id, status, kernel_excess, serialized_transaction, sent_payref)\n        VALUES (?, ?, ?, ?, ?, ?, ?)\n        ",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Right": 7
+    },
+    "nullable": []
+  },
+  "hash": "b7f34767b0d862b2e465e38934d8b1a4e7d7ad8540b6456b3641b9a95cd1b48e"
+}
