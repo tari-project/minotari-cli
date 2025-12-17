@@ -197,6 +197,7 @@ pub struct TransactionSender {
     pub processed_transactions: ProcessedTransaction,
     /// Fee rate for this transaction.
     pub fee_per_gram: MicroMinotari,
+    pub confirmation_window: u64,
 }
 
 impl TransactionSender {
@@ -237,6 +238,7 @@ impl TransactionSender {
         account_name: String,
         password: String,
         network: Network,
+        confirmation_window: u64,
     ) -> Result<Self, anyhow::Error> {
         let mut connection = db_pool.acquire().await?;
         let account_of_processed_transaction: AccountRow = db::get_account_by_name(&mut connection, &account_name)
@@ -250,6 +252,7 @@ impl TransactionSender {
             password,
             processed_transactions: ProcessedTransaction::default(),
             fee_per_gram: MicroMinotari(5),
+            confirmation_window,
         })
     }
 
@@ -323,7 +326,7 @@ impl TransactionSender {
         let num_outputs = 1;
         let estimated_output_size = None;
 
-        let input_selector = InputSelector::new(self.account.id);
+        let input_selector = InputSelector::new(self.account.id, self.confirmation_window);
         let utxo_selection = input_selector
             .fetch_unspent_outputs(
                 &mut connection,

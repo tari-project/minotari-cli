@@ -210,7 +210,7 @@ enum Commands {
         #[arg(short = 'n', long, help = "Maximum number of blocks to scan", default_value_t = 50)]
         max_blocks_to_scan: u64,
         /// Number of blocks to fetch per API request for efficiency.
-        #[arg(long, help = "Batch size for scanning", default_value_t = 100)]
+        #[arg(long, help = "Batch size for scanning", default_value_t = 25)]
         batch_size: u64,
     },
     /// Re-scan the blockchain from a specific height.
@@ -248,7 +248,7 @@ enum Commands {
         #[arg(short = 'r', long, help = "Re-scan from height")]
         rescan_from_height: u64,
         /// Number of blocks to fetch per API request.
-        #[arg(long, help = "Batch size for scanning", default_value_t = 100)]
+        #[arg(long, help = "Batch size for scanning", default_value_t = 25)]
         batch_size: u64,
     },
     /// Run the wallet daemon for continuous blockchain monitoring.
@@ -290,7 +290,7 @@ enum Commands {
         #[arg(short, long, help = "Path to the database file", default_value = "data/wallet.db")]
         database_file: String,
         /// Number of blocks to fetch per API request.
-        #[arg(long, help = "Batch size for scanning", default_value_t = 100)]
+        #[arg(long, help = "Batch size for scanning", default_value_t = 25)]
         batch_size: u64,
         /// Seconds to wait between scan cycles.
         #[arg(short, long, help = "Interval between scans in seconds", default_value_t = 60)]
@@ -416,6 +416,9 @@ enum Commands {
         /// Duration in seconds to lock input UTXOs (default: 24 hours).
         #[arg(long, help = "Optional seconds to lock UTXOs", default_value_t = 86400)]
         seconds_to_lock: u64,
+        /// The number of blocks to consider an output confirmed in order to be included as spendable
+        #[arg(long, help = "Confirmation window", default_value_t = 3)]
+        confirmation_window: u64,
         /// Tari network for address validation and consensus rules.
         #[arg(long, help = "The Tari network to connect to", default_value_t = Network::MainNet)]
         network: Network,
@@ -453,7 +456,7 @@ enum Commands {
         #[arg(short, long, help = "Path to the database file", default_value = "data/wallet.db")]
         database_file: String,
         /// Amount to lock in microTari.
-        #[arg(short, long, help = "Amount to lock")]
+        #[arg(short = 'm', long, help = "Amount to lock")]
         amount: MicroMinotari,
         /// Number of output UTXOs to create (for splitting).
         #[arg(short, long, help = "Optional number of outputs", default_value = "1")]
@@ -475,6 +478,8 @@ enum Commands {
         /// Unique key to prevent duplicate lock operations.
         #[arg(long, help = "Optional idempotency key")]
         idempotency_key: Option<String>,
+        #[arg(long, help = "Confirmation window", default_value_t = 3)]
+        confirmation_window: u64,
     },
 }
 
@@ -653,6 +658,7 @@ async fn main() -> Result<(), anyhow::Error> {
             idempotency_key,
             seconds_to_lock,
             network,
+            confirmation_window,
         } => {
             println!("Creating unsigned transaction...");
             handle_create_unsigned_transaction(
@@ -663,6 +669,7 @@ async fn main() -> Result<(), anyhow::Error> {
                 password,
                 idempotency_key,
                 seconds_to_lock,
+                confirmation_window,
                 output_file,
             )
             .await
@@ -677,8 +684,9 @@ async fn main() -> Result<(), anyhow::Error> {
             estimated_output_size,
             seconds_to_lock_utxos,
             idempotency_key,
+            confirmation_window,
         } => {
-            println!("Creating unsigned transaction...");
+            println!("Locking funds...");
             let request = LockFundsRequest {
                 amount,
                 num_outputs: Some(num_outputs),
@@ -686,6 +694,7 @@ async fn main() -> Result<(), anyhow::Error> {
                 estimated_output_size,
                 seconds_to_lock_utxos,
                 idempotency_key,
+                confirmation_window: Some(confirmation_window),
             };
             handle_lock_funds(database_file, account_name, output_file, request).await
         },
@@ -698,16 +707,13 @@ async fn handle_balance(database_file: &str, account_name: Option<&str>) -> Resu
     let accounts = get_accounts(&mut conn, account_name).await?;
     for account in accounts {
         let agg_result = get_balance(&mut conn, account.id).await?;
-        let credits = agg_result.total_credits.unwrap_or(0) as u64;
-        let debits = agg_result.total_debits.unwrap_or(0) as u64;
-        let micro_tari_balance = credits.saturating_sub(debits);
-        let tari_balance = micro_tari_balance / 1_000_000;
-        let remainder = micro_tari_balance % 1_000_000;
+        let tari_balance = agg_result.total / 1_000_000;
+        let remainder = agg_result.total % 1_000_000;
         println!(
             "Balance at height {}({}): {} microTari ({}.{} Tari)",
             agg_result.max_height.unwrap_or(0),
             agg_result.max_date.unwrap_or_else(|| "N/A".to_string()),
-            micro_tari_balance.to_formatted_string(&Locale::en),
+            agg_result.total.to_formatted_string(&Locale::en),
             tari_balance.to_formatted_string(&Locale::en),
             remainder.to_formatted_string(&Locale::en),
         );
@@ -724,6 +730,7 @@ async fn handle_create_unsigned_transaction(
     password: String,
     idempotency_key: Option<String>,
     seconds_to_lock: u64,
+    confirmation_window: u64,
     output_file: String,
 ) -> Result<(), anyhow::Error> {
     let recipients: Result<Vec<Recipient>, anyhow::Error> = recipient
@@ -772,6 +779,7 @@ async fn handle_create_unsigned_transaction(
             estimated_output_size,
             idempotency_key,
             seconds_to_lock,
+            confirmation_window,
         )
         .await
         .map_err(|e| anyhow!("Failed to lock funds: {}", e))?;
@@ -811,6 +819,7 @@ async fn handle_lock_funds(
             request.estimated_output_size,
             request.idempotency_key,
             request.seconds_to_lock_utxos.expect("must be present"),
+            request.confirmation_window.expect("must be present"),
         )
         .await
         .map_err(|e| anyhow!("Failed to lock funds: {}", e))?;

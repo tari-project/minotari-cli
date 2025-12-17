@@ -18,6 +18,9 @@ use tari_transaction_components::key_manager::wallet_types::WalletType;
 use tari_utilities::byte_array::ByteArray;
 use utoipa::ToSchema;
 
+use crate::db::balance_changes::get_balance_aggregates_for_account;
+use crate::db::outputs::get_output_totals_for_account;
+
 pub async fn create_account(
     conn: &mut SqliteConnection,
     friendly_name: &str,
@@ -188,27 +191,49 @@ impl AccountRow {
 
 #[derive(Debug, Clone, ToSchema, Serialize)]
 pub struct AccountBalance {
+    /// The total balance of the account (Total Credits - Total Debits).
+    pub total: u64,
+    /// The portion of the total balance that is currently spendable.
+    pub available: u64,
+    /// The portion of the balance that is locked.
+    pub locked: u64,
+    /// The amount from incoming transactions that have not yet been confirmed.
+    pub unconfirmed: u64,
+    /// The total sum of all incoming (credit) transactions.
     pub total_credits: Option<i64>,
+    /// The total sum of all outgoing (debit) transactions.
     pub total_debits: Option<i64>,
+    /// The maximum blockchain height among all transactions for this account.
+    ///
+    /// Will be `None` if the account has no transactions.
     pub max_height: Option<i64>,
+    /// The timestamp of the most recent transaction.
+    ///
+    /// The string is in ISO 8601 format. Will be `None` if the
+    /// account has no transactions.
     pub max_date: Option<String>,
 }
 
 pub async fn get_balance(conn: &mut SqliteConnection, account_id: i64) -> Result<AccountBalance, sqlx::Error> {
-    let agg_result = sqlx::query_as!(
-        AccountBalance,
-        r#"
-            SELECT 
-              SUM(balance_credit) as "total_credits: _",
-              Sum(balance_debit) as "total_debits: _",
-              max(effective_height) as "max_height: _",
-              strftime('%Y-%m-%d %H:%M:%S', max(effective_date))  as "max_date: _"
-            FROM balance_changes
-            WHERE account_id = ?
-            "#,
-        account_id
-    )
-    .fetch_one(&mut *conn)
-    .await?;
-    Ok(agg_result)
+    let history_agg = get_balance_aggregates_for_account(conn, account_id).await?;
+    let (locked_amount, unconfirmed_amount, locked_and_unconfirmed_amount) =
+        get_output_totals_for_account(conn, account_id).await?;
+    let total_credits = history_agg.total_credits.unwrap_or(0) as u64;
+    let total_debits = history_agg.total_debits.unwrap_or(0) as u64;
+    let total_balance = total_credits.saturating_sub(total_debits);
+    let unavailable_balance = locked_amount
+        .saturating_add(unconfirmed_amount)
+        .saturating_sub(locked_and_unconfirmed_amount);
+    let available_balance = total_balance.saturating_sub(unavailable_balance);
+
+    Ok(AccountBalance {
+        total: total_balance,
+        available: available_balance,
+        locked: locked_amount,
+        unconfirmed: unconfirmed_amount,
+        total_credits: history_agg.total_credits,
+        total_debits: history_agg.total_debits,
+        max_height: history_agg.max_height,
+        max_date: history_agg.max_date,
+    })
 }

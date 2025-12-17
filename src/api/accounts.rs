@@ -34,8 +34,11 @@ use axum::{
     Json,
     extract::{Path, State},
 };
-use serde_json::Value as JsonValue;
-use utoipa::IntoParams;
+use serde_json::{Value as JsonValue, json};
+use utoipa::{
+    IntoParams,
+    openapi::{ObjectBuilder, Schema, Type, schema::SchemaType},
+};
 
 use super::error::ApiError;
 use crate::{
@@ -46,6 +49,7 @@ use crate::{
     db::{AccountBalance, get_account_by_name, get_balance},
     transactions::{
         fund_locker::FundLocker,
+        monitor::REQUIRED_CONFIRMATIONS,
         one_sided_transaction::{OneSidedTransaction, Recipient},
     },
 };
@@ -73,6 +77,19 @@ fn default_num_outputs() -> Option<usize> {
 /// balance between transaction confirmation speed and cost.
 fn default_fee_per_gram() -> Option<MicroMinotari> {
     Some(MicroMinotari(5))
+}
+
+fn default_confirmation_window() -> Option<u64> {
+    Some(REQUIRED_CONFIRMATIONS)
+}
+
+fn confirmation_window_schema() -> Schema {
+    ObjectBuilder::new()
+        .schema_type(SchemaType::new(Type::Integer))
+        .default(Some(json!(REQUIRED_CONFIRMATIONS)))
+        .description(Some("Number of confirmations required"))
+        .build()
+        .into()
 }
 
 /// Path parameters for wallet/account identification.
@@ -163,6 +180,11 @@ pub struct LockFundsRequest {
     /// cached result from the original request rather than locking additional
     /// funds.
     pub idempotency_key: Option<String>,
+
+    /// Number of confirmations required before spending locked UTXOs.
+    #[serde(default = "default_confirmation_window")]
+    #[schema(schema_with = confirmation_window_schema)]
+    pub confirmation_window: Option<u64>,
 }
 
 /// Represents a single recipient in a transaction request.
@@ -243,6 +265,7 @@ pub struct CreateTransactionRequest {
     /// Defaults to 86,400 seconds (24 hours). The lock prevents the same UTXOs
     /// from being used in multiple transactions while the unsigned transaction
     /// is being signed and broadcast.
+
     #[serde(default = "default_seconds_to_lock_utxos")]
     #[schema(default = "86400")]
     seconds_to_lock_utxos: Option<u64>,
@@ -252,6 +275,10 @@ pub struct CreateTransactionRequest {
     /// If the same key is used in multiple requests, subsequent requests will
     /// return the original transaction rather than creating a new one.
     idempotency_key: Option<String>,
+
+    #[serde(default = "default_confirmation_window")]
+    #[schema(schema_with = confirmation_window_schema)]
+    pub confirmation_window: Option<u64>,
 }
 
 /// Retrieves the current balance for a specified account.
@@ -387,6 +414,7 @@ pub async fn api_lock_funds(
             body.estimated_output_size,
             body.idempotency_key,
             body.seconds_to_lock_utxos.expect("must be defaulted"),
+            body.confirmation_window.expect("must be defaulted"),
         )
         .await
         .map_err(|e| ApiError::FailedToLockFunds(e.to_string()))?;
@@ -498,6 +526,7 @@ pub async fn api_create_unsigned_transaction(
             estimated_output_size,
             body.idempotency_key,
             seconds_to_lock_utxos,
+            body.confirmation_window.expect("must be defaulted"),
         )
         .await
         .map_err(|e| ApiError::FailedToLockFunds(e.to_string()))?;
