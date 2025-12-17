@@ -1,3 +1,59 @@
+//! High-level transaction management and broadcasting.
+//!
+//! This module provides the [`TransactionSender`] which orchestrates the complete
+//! transaction lifecycle from creation through broadcast. It handles:
+//!
+//! - Transaction validation and idempotency
+//! - UTXO selection and locking
+//! - Transaction building and preparation for signing
+//! - Broadcasting signed transactions to the network
+//! - Creating displayable transaction records for UI
+//!
+//! # Transaction Flow
+//!
+//! The typical transaction flow using `TransactionSender` is:
+//!
+//! 1. Create a `TransactionSender` for an account
+//! 2. Call [`start_new_transaction`](TransactionSender::start_new_transaction) to prepare an unsigned transaction
+//! 3. Sign the transaction externally (e.g., with a hardware wallet)
+//! 4. Call [`finalize_transaction_and_broadcast`](TransactionSender::finalize_transaction_and_broadcast) to submit
+//!
+//! # Idempotency
+//!
+//! Transactions are identified by idempotency keys, allowing safe retries.
+//! If a transaction with the same idempotency key exists, the existing
+//! transaction data is returned rather than creating a duplicate.
+//!
+//! # Example
+//!
+//! ```rust,ignore
+//! use minotari::transactions::manager::TransactionSender;
+//!
+//! // Create sender for an account
+//! let mut sender = TransactionSender::new(
+//!     db_pool,
+//!     "my_account".to_string(),
+//!     password,
+//!     Network::MainNet,
+//! ).await?;
+//!
+//! // Start a new transaction
+//! let unsigned = sender.start_new_transaction(
+//!     "idempotency-key-123".to_string(),
+//!     recipient,
+//!     300, // 5 minute lock
+//! ).await?;
+//!
+//! // Sign externally...
+//! let signed = sign_transaction(unsigned)?;
+//!
+//! // Broadcast to network
+//! let displayed_tx = sender.finalize_transaction_and_broadcast(
+//!     signed,
+//!     grpc_address,
+//! ).await?;
+//! ```
+
 use anyhow::anyhow;
 use chrono::{Duration, Utc};
 use sqlx::{Pool, Sqlite, pool::PoolConnection};
@@ -30,16 +86,41 @@ use crate::{
     },
 };
 
+/// Represents a transaction being processed through the send flow.
+///
+/// `ProcessedTransaction` tracks the state of a transaction as it moves
+/// through the creation, signing, and broadcast phases. It holds the
+/// idempotency key, recipient details, and selected UTXOs.
+///
+/// # Lifecycle
+///
+/// 1. Created with [`new`](Self::new) when starting a transaction
+/// 2. Updated with transaction ID once pending transaction is created
+/// 3. UTXOs are populated during selection
+/// 4. Used to build the final [`DisplayedTransaction`] after broadcast
 #[derive(Default)]
 pub struct ProcessedTransaction {
+    /// The database ID of the pending transaction (set after creation).
     id: Option<String>,
+    /// Unique key for idempotent transaction handling.
     idempotency_key: String,
+    /// The recipient of this transaction.
     recipient: Recipient,
+    /// How long to lock UTXOs before they expire.
     seconds_to_lock_utxos: u64,
+    /// The UTXOs selected for this transaction.
     selected_utxos: Vec<WalletOutput>,
 }
 
 impl ProcessedTransaction {
+    /// Creates a new `ProcessedTransaction` with the given parameters.
+    ///
+    /// # Arguments
+    ///
+    /// * `id` - Optional existing transaction ID (for resuming)
+    /// * `idempotency_key` - Unique key for this transaction
+    /// * `recipient` - The transaction recipient
+    /// * `seconds_to_lock_utxos` - Lock duration for selected UTXOs
     pub fn new(id: Option<String>, idempotency_key: String, recipient: Recipient, seconds_to_lock_utxos: u64) -> Self {
         Self {
             id,
@@ -50,29 +131,108 @@ impl ProcessedTransaction {
         }
     }
 
+    /// Returns the transaction ID, or an empty string if not yet assigned.
     pub fn id(&self) -> &str {
         self.id.as_deref().unwrap_or("")
     }
 
+    /// Updates the transaction ID after the pending transaction is created.
     pub fn update_id(&mut self, id: String) {
         self.id = Some(id);
     }
 }
 
+/// Orchestrates the complete transaction send flow.
+///
+/// `TransactionSender` handles the full lifecycle of sending a transaction:
+/// validation, UTXO selection, transaction building, and broadcasting.
+/// It maintains state across the multi-step process and supports idempotent
+/// operations for safe retries.
+///
+/// # Architecture
+///
+/// The sender coordinates several components:
+/// - [`InputSelector`]: Selects UTXOs and calculates fees
+/// - Database: Stores pending transactions and locks
+/// - [`WalletHttpClient`]: Broadcasts to the network
+///
+/// # Thread Safety
+///
+/// `TransactionSender` is not thread-safe due to mutable internal state.
+/// Use a single sender per transaction flow.
+///
+/// # Example
+///
+/// ```rust,ignore
+/// let mut sender = TransactionSender::new(
+///     db_pool,
+///     "account_name".to_string(),
+///     password,
+///     Network::MainNet,
+/// ).await?;
+///
+/// // Prepare unsigned transaction
+/// let unsigned = sender.start_new_transaction(
+///     idempotency_key,
+///     recipient,
+///     lock_duration,
+/// ).await?;
+///
+/// // After signing externally...
+/// let result = sender.finalize_transaction_and_broadcast(
+///     signed,
+///     grpc_address,
+/// ).await?;
+/// ```
 pub struct TransactionSender {
-    // Configuration
+    /// Database connection pool.
     pub db_pool: Pool<Sqlite>,
+    /// The network for consensus rules.
     pub network: Network,
-    // Accpount
+    /// The sender's account.
     pub account: AccountRow,
+    /// Password for key manager access.
     pub password: String,
-
+    /// The transaction currently being processed.
     pub processed_transactions: ProcessedTransaction,
+    /// Fee rate for this transaction.
     pub fee_per_gram: MicroMinotari,
     pub confirmation_window: u64,
 }
 
 impl TransactionSender {
+    /// Creates a new `TransactionSender` for the specified account.
+    ///
+    /// Loads the account from the database and initializes the sender
+    /// with default fee settings.
+    ///
+    /// # Arguments
+    ///
+    /// * `db_pool` - SQLite connection pool
+    /// * `account_name` - Name of the sending account
+    /// * `password` - Password to decrypt the account's key manager
+    /// * `network` - The Tari network (MainNet, TestNet, etc.)
+    ///
+    /// # Returns
+    ///
+    /// Returns a configured `TransactionSender` ready to process transactions.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - Database connection fails
+    /// - Account with the given name is not found
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let sender = TransactionSender::new(
+    ///     db_pool,
+    ///     "my_wallet".to_string(),
+    ///     "secure_password".to_string(),
+    ///     Network::MainNet,
+    /// ).await?;
+    /// ```
     pub async fn new(
         db_pool: Pool<Sqlite>,
         account_name: String,
@@ -96,6 +256,7 @@ impl TransactionSender {
         })
     }
 
+    /// Acquires a database connection from the pool.
     async fn get_connection(&self) -> Result<PoolConnection<Sqlite>, anyhow::Error> {
         self.db_pool
             .acquire()
@@ -251,6 +412,47 @@ impl TransactionSender {
         Ok(tx_builder)
     }
 
+    /// Starts a new transaction and returns an unsigned transaction for signing.
+    ///
+    /// This method performs the complete preparation phase:
+    /// 1. Validates the transaction request (idempotency, address capabilities)
+    /// 2. Creates or finds an existing pending transaction
+    /// 3. Selects and locks UTXOs
+    /// 4. Builds the transaction for offline signing
+    ///
+    /// # Arguments
+    ///
+    /// * `idempotency_key` - Unique key for this transaction; retries with the
+    ///   same key will return the existing transaction
+    /// * `recipient` - The payment recipient details
+    /// * `seconds_to_lock_utxo` - How long to lock the selected UTXOs
+    ///
+    /// # Returns
+    ///
+    /// Returns a [`PrepareOneSidedTransactionForSigningResult`] containing the
+    /// unsigned transaction ready for external signing.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - A completed transaction with the same idempotency key exists
+    /// - The sender address does not support one-sided transactions
+    /// - Insufficient funds are available
+    /// - Transaction building fails
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// let unsigned = sender.start_new_transaction(
+    ///     "payment-123".to_string(),
+    ///     Recipient {
+    ///         address: recipient_address,
+    ///         amount: MicroMinotari(1_000_000),
+    ///         payment_id: Some("Invoice #456".to_string()),
+    ///     },
+    ///     300, // 5 minute lock
+    /// ).await?;
+    /// ```
     pub async fn start_new_transaction(
         &mut self,
         idempotency_key: String,
@@ -311,6 +513,49 @@ impl TransactionSender {
         Ok(result)
     }
 
+    /// Finalizes a signed transaction and broadcasts it to the network.
+    ///
+    /// This method completes the transaction flow by:
+    /// 1. Verifying the transaction hasn't expired
+    /// 2. Recording the completed transaction in the database
+    /// 3. Broadcasting to the network via the wallet HTTP client
+    /// 4. Creating a [`DisplayedTransaction`] for immediate UI display
+    ///
+    /// # Arguments
+    ///
+    /// * `signed_transaction` - The signed transaction result from external signing
+    /// * `grpc_address` - Address of the wallet gRPC server for broadcasting
+    ///
+    /// # Returns
+    ///
+    /// Returns a [`DisplayedTransaction`] representing the broadcasted transaction,
+    /// suitable for immediate display in the UI while awaiting confirmation.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if:
+    /// - The transaction lock has expired
+    /// - Transaction serialization fails
+    /// - The network rejects the transaction
+    /// - Database operations fail
+    ///
+    /// # Network Rejection
+    ///
+    /// If the network rejects the transaction, the error reason is recorded
+    /// and the transaction is marked as rejected in the database. The locked
+    /// UTXOs are also released.
+    ///
+    /// # Example
+    ///
+    /// ```rust,ignore
+    /// // After signing the transaction externally
+    /// let displayed_tx = sender.finalize_transaction_and_broadcast(
+    ///     signed_result,
+    ///     "http://localhost:18080".to_string(),
+    /// ).await?;
+    ///
+    /// println!("Transaction {} broadcasted!", displayed_tx.id);
+    /// ```
     pub async fn finalize_transaction_and_broadcast(
         &self,
         signed_transaction: SignedOneSidedTransactionResult,

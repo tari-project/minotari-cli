@@ -14,6 +14,8 @@
         "tags": [
           "accounts"
         ],
+        "summary": "Retrieves the current balance for a specified account.",
+        "description": "Returns the account's available balance, pending incoming transactions,\nand locked funds. This endpoint is useful for displaying wallet status\nor checking available funds before initiating a transaction.\n\n# Path Parameters\n\n- `name`: The unique account name to query\n\n# Response\n\nReturns an [`AccountBalance`] object containing:\n- Available (spendable) balance\n- Pending incoming balance\n- Locked balance (reserved for pending transactions)\n\n# Errors\n\n- [`ApiError::AccountNotFound`]: The specified account does not exist\n- [`ApiError::DbError`]: Database connection or query failure\n\n# Example Response\n\n```json\n{\n  \"available\": 10000000,\n  \"pending_incoming\": 500000,\n  \"locked\": 200000\n}\n```",
         "operationId": "api_get_balance",
         "parameters": [
           {
@@ -65,6 +67,8 @@
         "tags": [
           "accounts"
         ],
+        "summary": "Creates an unsigned one-sided transaction for external signing.",
+        "description": "This endpoint constructs a complete transaction ready for signing, including\ninput selection, output creation, and fee calculation. The transaction is\nreturned in an unsigned state, allowing it to be signed by an external\nkey management system or hardware wallet.\n\n# Path Parameters\n\n- `name`: The account name to send funds from\n\n# Request Body\n\nSee [`CreateTransactionRequest`] for the complete request schema.\n\n# Response\n\nReturns a JSON object containing the unsigned transaction data, including:\n- Transaction inputs (selected UTXOs)\n- Transaction outputs (recipient outputs and change)\n- Fee information\n- Data required for signing\n\n# Errors\n\n- [`ApiError::AccountNotFound`]: The specified account does not exist\n- [`ApiError::FailedToLockFunds`]: Insufficient funds or UTXO selection failure\n- [`ApiError::FailedCreateUnsignedTx`]: Transaction construction failure\n- [`ApiError::DbError`]: Database connection or query failure\n\n# Example\n\n```bash\ncurl -X POST http://localhost:8080/accounts/default/create_unsigned_transaction \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\n    \"recipients\": [\n      {\"address\": \"f4FxMqKAPDMqAjh6hTpC...\", \"amount\": 1000000}\n    ]\n  }'\n```\n\n# Workflow\n\n1. Client calls this endpoint to create an unsigned transaction\n2. Server locks required UTXOs and constructs the transaction\n3. Client signs the transaction externally\n4. Client broadcasts the signed transaction to the network\n\n# Notes\n\n- This creates a one-sided transaction (no recipient interaction required)\n- UTXOs are automatically locked for the configured duration\n- Fee is calculated at 5 MicroMinotari per gram\n- Change outputs are created automatically when necessary",
         "operationId": "api_create_unsigned_transaction",
         "parameters": [
           {
@@ -136,6 +140,8 @@
         "tags": [
           "accounts"
         ],
+        "summary": "Locks funds from an account for transaction preparation.",
+        "description": "This endpoint reserves UTXOs totaling at least the requested amount,\npreventing them from being used in other transactions. This is typically\nthe first step in creating a transaction, ensuring funds are available\nand reserved before constructing the transaction.\n\n# Path Parameters\n\n- `name`: The account name to lock funds from\n\n# Request Body\n\nSee [`LockFundsRequest`] for the complete request schema.\n\n# Response\n\nReturns a [`LockFundsResult`] containing:\n- The selected UTXOs to use as inputs\n- Whether a change output is required\n- Total value of locked UTXOs\n- Fee estimates with and without change\n\n# Errors\n\n- [`ApiError::AccountNotFound`]: The specified account does not exist\n- [`ApiError::FailedToLockFunds`]: Insufficient funds or UTXO selection failure\n- [`ApiError::DbError`]: Database connection or query failure\n\n# Example\n\n```bash\ncurl -X POST http://localhost:8080/accounts/default/lock_funds \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\"amount\": 1000000, \"num_outputs\": 1}'\n```\n\n# Notes\n\n- Locked UTXOs are automatically released after the configured timeout\n- Use the `idempotency_key` to safely retry failed requests\n- The actual locked amount may exceed the requested amount due to UTXO granularity",
         "operationId": "api_lock_funds",
         "parameters": [
           {
@@ -275,63 +281,75 @@
         "oneOf": [
           {
             "type": "object",
+            "description": "A general internal server error with a descriptive message.\n\nUsed for unexpected errors that don't fit other categories.\nReturns HTTP 500 Internal Server Error.",
             "required": [
               "InternalServerError"
             ],
             "properties": {
               "InternalServerError": {
-                "type": "string"
+                "type": "string",
+                "description": "A general internal server error with a descriptive message.\n\nUsed for unexpected errors that don't fit other categories.\nReturns HTTP 500 Internal Server Error."
               }
             }
           },
           {
             "type": "object",
+            "description": "A database operation failed.\n\nThis includes connection failures, query errors, and constraint\nviolations. Returns HTTP 500 Internal Server Error.\n\n# Example Causes\n\n- Database connection pool exhausted\n- SQL query syntax error\n- Foreign key constraint violation",
             "required": [
               "DbError"
             ],
             "properties": {
               "DbError": {
-                "type": "string"
+                "type": "string",
+                "description": "A database operation failed.\n\nThis includes connection failures, query errors, and constraint\nviolations. Returns HTTP 500 Internal Server Error.\n\n# Example Causes\n\n- Database connection pool exhausted\n- SQL query syntax error\n- Foreign key constraint violation"
               }
             }
           },
           {
             "type": "object",
+            "description": "The requested account was not found.\n\nThe contained string is the account name that was not found.\nReturns HTTP 404 Not Found.\n\n# Example\n\n```json\n{\n  \"error\": \"Account 'nonexistent' not found\"\n}\n```",
             "required": [
               "AccountNotFound"
             ],
             "properties": {
               "AccountNotFound": {
-                "type": "string"
+                "type": "string",
+                "description": "The requested account was not found.\n\nThe contained string is the account name that was not found.\nReturns HTTP 404 Not Found.\n\n# Example\n\n```json\n{\n  \"error\": \"Account 'nonexistent' not found\"\n}\n```"
               }
             }
           },
           {
             "type": "object",
+            "description": "Failed to lock funds for a transaction.\n\nThis typically occurs when there are insufficient available funds\nor when UTXO selection fails. Returns HTTP 500 Internal Server Error.\n\n# Common Causes\n\n- Insufficient balance in the account\n- All UTXOs are already locked by other pending transactions\n- UTXO selection algorithm could not find suitable inputs",
             "required": [
               "FailedToLockFunds"
             ],
             "properties": {
               "FailedToLockFunds": {
-                "type": "string"
+                "type": "string",
+                "description": "Failed to lock funds for a transaction.\n\nThis typically occurs when there are insufficient available funds\nor when UTXO selection fails. Returns HTTP 500 Internal Server Error.\n\n# Common Causes\n\n- Insufficient balance in the account\n- All UTXOs are already locked by other pending transactions\n- UTXO selection algorithm could not find suitable inputs"
               }
             }
           },
           {
             "type": "object",
+            "description": "Failed to create an unsigned transaction.\n\nThis occurs during transaction construction after funds have been\nlocked. Returns HTTP 500 Internal Server Error.\n\n# Common Causes\n\n- Invalid recipient address format\n- Transaction size exceeds limits\n- Cryptographic operation failure",
             "required": [
               "FailedCreateUnsignedTx"
             ],
             "properties": {
               "FailedCreateUnsignedTx": {
-                "type": "string"
+                "type": "string",
+                "description": "Failed to create an unsigned transaction.\n\nThis occurs during transaction construction after funds have been\nlocked. Returns HTTP 500 Internal Server Error.\n\n# Common Causes\n\n- Invalid recipient address format\n- Transaction size exceeds limits\n- Cryptographic operation failure"
               }
             }
           }
-        ]
+        ],
+        "description": "Represents all possible errors returned by the REST API.\n\nEach variant corresponds to a specific error condition that can occur\nduring API request processing. The error type automatically converts\nto an appropriate HTTP response with a JSON error body.\n\n# Error Handling Pattern\n\nAPI handlers typically use the `?` operator with this error type:\n\n```rust,ignore\npub async fn handler() -> Result<Json<Data>, ApiError> {\n    let data = fetch_data().await?; // Errors automatically convert to ApiError\n    Ok(Json(data))\n}\n```\n\n# Serialization\n\nWhen serialized to JSON for API responses, errors produce:\n\n```json\n{\n  \"error\": \"Error message here\"\n}\n```"
       },
       "CreateTransactionRequest": {
         "type": "object",
+        "description": "Request body for creating an unsigned transaction.\n\nCreates a one-sided transaction that can be signed externally. This is\nuseful for cold wallet setups or multi-signature workflows where the\nsigning key is not available on the server.\n\n# JSON Example\n\n```json\n{\n  \"recipients\": [\n    {\n      \"address\": \"f4FxMqKAPDMqAjh6hTpC...\",\n      \"amount\": 500000,\n      \"payment_id\": \"order-123\"\n    },\n    {\n      \"address\": \"f5GxNrLBPEMrBki7iTqD...\",\n      \"amount\": 300000\n    }\n  ],\n  \"seconds_to_lock_utxos\": 7200,\n  \"idempotency_key\": \"tx-request-abc123\"\n}\n```\n\n# Notes\n\n- The total amount sent equals the sum of all recipient amounts\n- Transaction fees are calculated automatically based on transaction size\n- UTXOs are locked during transaction creation to prevent double-spending",
         "required": [
           "recipients"
         ],
@@ -345,13 +363,15 @@
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "Optional idempotency key to prevent duplicate transactions.\n\nIf the same key is used in multiple requests, subsequent requests will\nreturn the original transaction rather than creating a new one."
           },
           "recipients": {
             "type": "array",
             "items": {
               "$ref": "#/components/schemas/RecipientRequest"
-            }
+            },
+            "description": "List of recipients for the transaction.\n\nAt least one recipient must be specified. Each recipient includes an\naddress and amount, with an optional payment ID."
           },
           "seconds_to_lock_utxos": {
             "type": [
@@ -359,6 +379,7 @@
               "null"
             ],
             "format": "int64",
+            "description": "Duration in seconds to keep the input UTXOs locked.\n\nDefaults to 86,400 seconds (24 hours). The lock prevents the same UTXOs\nfrom being used in multiple transactions while the unsigned transaction\nis being signed and broadcast.",
             "default": "86400",
             "minimum": 0
           }
@@ -366,6 +387,7 @@
       },
       "LockFundsRequest": {
         "type": "object",
+        "description": "Request body for locking funds in preparation for a transaction.\n\nThis request reserves (locks) a specified amount of funds from the account's\navailable UTXOs. Locked funds cannot be used in other transactions until\neither the lock expires or the transaction is completed/cancelled.\n\n# JSON Example\n\n```json\n{\n  \"amount\": 1000000,\n  \"num_outputs\": 2,\n  \"fee_per_gram\": 5,\n  \"estimated_output_size\": 1024,\n  \"seconds_to_lock_utxos\": 3600,\n  \"idempotency_key\": \"unique-request-id-12345\"\n}\n```\n\n# Minimal Request\n\nOnly `amount` is required; all other fields have sensible defaults:\n\n```json\n{\n  \"amount\": 1000000\n}\n```",
         "required": [
           "amount"
         ],
@@ -373,6 +395,7 @@
           "amount": {
             "type": "integer",
             "format": "int64",
+            "description": "The total amount to lock in MicroMinotari (1 Minotari = 1,000,000 MicroMinotari).\n\nThis should cover the intended transaction amount plus any expected fees.",
             "minimum": 0
           },
           "confirmation_window": {
@@ -385,11 +408,13 @@
               "integer",
               "null"
             ],
+            "description": "Estimated size of each output in bytes.\n\nUsed for fee calculation. If not provided, a default estimate is used\nbased on standard output sizes.",
             "minimum": 0
           },
           "fee_per_gram": {
             "type": "integer",
             "format": "int64",
+            "description": "Fee per gram for the transaction in MicroMinotari.\n\nDefaults to 5 MicroMinotari. Higher fees may result in faster confirmation\nduring periods of high network congestion.",
             "default": "5",
             "minimum": 0
           },
@@ -397,13 +422,15 @@
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "Optional idempotency key to prevent duplicate requests.\n\nIf provided, subsequent requests with the same key will return the\ncached result from the original request rather than locking additional\nfunds."
           },
           "num_outputs": {
             "type": [
               "integer",
               "null"
             ],
+            "description": "Number of outputs to create in the transaction.\n\nDefaults to 1. Increase this when sending to multiple recipients or when\nthe transaction requires multiple output UTXOs.",
             "default": "1",
             "minimum": 0
           },
@@ -413,6 +440,7 @@
               "null"
             ],
             "format": "int64",
+            "description": "Duration in seconds to keep the UTXOs locked.\n\nDefaults to 86,400 seconds (24 hours). After this period, locked UTXOs\nare automatically released if the transaction was not completed.",
             "default": "86400",
             "minimum": 0
           }
@@ -420,6 +448,7 @@
       },
       "LockFundsResult": {
         "type": "object",
+        "description": "Result of a successful fund locking operation.\n\nThis structure is returned by the `/accounts/{name}/lock_funds` endpoint\nand contains all the information needed to construct a transaction using\nthe locked UTXOs.\n\n# JSON Example\n\n```json\n{\n  \"utxos\": [...],\n  \"requires_change_output\": true,\n  \"total_value\": 1500000,\n  \"fee_without_change\": 250,\n  \"fee_with_change\": 500\n}\n```\n\n# Usage\n\nThe locked UTXOs should be used as inputs for the transaction. If\n`requires_change_output` is `true`, a change output must be created\nto return excess funds. The appropriate fee (`fee_with_change` or\n`fee_without_change`) should be used based on whether a change output\nis included.",
         "required": [
           "utxos",
           "requires_change_output",
@@ -431,64 +460,76 @@
           "fee_with_change": {
             "type": "integer",
             "format": "int64",
+            "description": "The transaction fee if a change output is included.\n\nThis fee is higher than `fee_without_change` because the change\noutput adds to the transaction size. Use this fee when\n`requires_change_output` is `true`.",
             "minimum": 0
           },
           "fee_without_change": {
             "type": "integer",
             "format": "int64",
+            "description": "The transaction fee if no change output is created.\n\nUse this fee when `requires_change_output` is `false`, or when\nintentionally burning the excess as a donation to miners.",
             "minimum": 0
           },
           "requires_change_output": {
-            "type": "boolean"
+            "type": "boolean",
+            "description": "Indicates whether a change output is required.\n\nIf `true`, the total value of locked UTXOs exceeds the requested\namount plus fees, and a change output should be created to return\nthe excess to the wallet."
           },
           "total_value": {
             "type": "integer",
             "format": "int64",
+            "description": "The total value of all locked UTXOs in MicroMinotari.\n\nThis is the sum of the values of all UTXOs in the `utxos` field.\nIt will be greater than or equal to the requested amount plus the\napplicable fee.",
             "minimum": 0
           },
           "utxos": {
             "type": "array",
             "items": {
               "type": "object"
-            }
+            },
+            "description": "The UTXOs that have been locked for this transaction.\n\nThese outputs are reserved and cannot be used by other transactions\nuntil the lock expires or is released. Each UTXO contains the\ncryptographic data needed to spend it."
           }
         }
       },
       "RecipientRequest": {
         "type": "object",
+        "description": "Represents a single recipient in a transaction request.\n\nEach recipient specifies a destination address and the amount to send.\nAn optional payment ID can be included for tracking or identification\npurposes.\n\n# JSON Example\n\n```json\n{\n  \"address\": \"f4FxMqKAPDMqAjh6hTpC...\",\n  \"amount\": 500000,\n  \"payment_id\": \"invoice-2024-001\"\n}\n```",
         "required": [
           "address",
           "amount"
         ],
         "properties": {
           "address": {
-            "$ref": "#/components/schemas/TariAddressBase58"
+            "$ref": "#/components/schemas/TariAddressBase58",
+            "description": "The recipient's Tari address in Base58 encoding.\n\nMust be a valid Tari address for the current network (mainnet, testnet, etc.)."
           },
           "amount": {
             "type": "integer",
             "format": "int64",
+            "description": "The amount to send to this recipient in MicroMinotari.",
             "minimum": 0
           },
           "payment_id": {
             "type": [
               "string",
               "null"
-            ]
+            ],
+            "description": "Optional payment identifier for transaction tracking.\n\nThis can be used to associate the payment with an invoice, order, or\nother business reference. The payment ID is included in the transaction\nmetadata."
           }
         }
       },
       "TariAddressBase58": {
-        "type": "string"
+        "type": "string",
+        "description": "A wrapper type for [`TariAddress`] with Base58 serialization.\n\nThis type provides JSON serialization and deserialization of Tari addresses\nusing Base58 encoding, which is the standard human-readable format for\nTari addresses.\n\n# Serialization\n\nWhen serialized to JSON, the address is represented as a Base58-encoded string:\n\n```json\n\"f4FxMqKAPDMqAjh6hTpCnLKfEu3MmS7NRu2YmKZPvZHc2K\"\n```\n\n# Deserialization\n\nWhen deserializing from JSON, the string is parsed as a Base58-encoded\nTari address. Invalid addresses will result in a deserialization error.\n\n# Example\n\n```rust,ignore\nuse crate::api::types::TariAddressBase58;\n\n#[derive(Deserialize)]\nstruct Request {\n    recipient: TariAddressBase58,\n}\n\n// JSON: {\"recipient\": \"f4FxMqKAPDMqAjh6hTpC...\"}\n```"
       },
       "Value": {},
       "WalletParams": {
         "type": "object",
+        "description": "Path parameters for wallet/account identification.\n\nUsed to extract the account name from URL path segments in account-related\nendpoints.\n\n# Example\n\nFor a request to `/accounts/my_wallet/balance`, the `name` field would\ncontain `\"my_wallet\"`.",
         "required": [
           "name"
         ],
         "properties": {
           "name": {
-            "type": "string"
+            "type": "string",
+            "description": "The unique name identifying the wallet account."
           }
         }
       }

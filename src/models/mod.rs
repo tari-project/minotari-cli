@@ -1,3 +1,25 @@
+//! Data models and type definitions for the wallet.
+//!
+//! This module contains the core data structures used throughout the wallet,
+//! including wallet events, balance changes, and transaction statuses.
+//!
+//! # Key Types
+//!
+//! - [`WalletEvent`] - Events generated during wallet operations (outputs, confirmations, reorgs)
+//! - [`WalletEventType`] - Enum of all possible wallet event types
+//! - [`ScannedTipBlock`] - Represents a scanned blockchain tip for reorg detection
+//! - [`BalanceChange`] - Represents a credit or debit to the wallet balance
+//! - [`OutputStatus`] - Status of a UTXO (unconfirmed, confirmed, locked, spent)
+//! - [`PendingTransactionStatus`] - Status of transactions being constructed
+//!
+//! # Event System
+//!
+//! Wallet events provide a timeline of all wallet activity and are used for:
+//! - Tracking output detection and confirmation
+//! - Detecting and handling blockchain reorganizations
+//! - Monitoring transaction lifecycle (broadcast, mined, confirmed, rejected)
+//! - Providing audit trail and transaction history
+
 use chrono::NaiveDateTime;
 use serde::{Deserialize, Serialize};
 use tari_common_types::types::FixedHash;
@@ -7,9 +29,13 @@ pub use output_status::OutputStatus;
 pub mod pending_transactions_status;
 pub use pending_transactions_status::PendingTransactionStatus;
 
-// Change depending on sql type.
+/// Database primary key type (SQLite integer).
 pub type Id = i64;
 
+/// Represents a scanned blockchain tip for reorg detection.
+///
+/// Each account maintains a history of recently scanned block hashes
+/// to detect blockchain reorganizations.
 #[derive(Debug, Clone)]
 pub struct ScannedTipBlock {
     pub id: Id,
@@ -19,16 +45,26 @@ pub struct ScannedTipBlock {
     pub hash: Vec<u8>,
 }
 
+/// A wallet event representing a significant occurrence in the wallet's history.
+///
+/// Events are stored in the database and provide an audit trail of all
+/// wallet activity including outputs, transactions, and blockchain events.
 #[derive(Debug, Clone)]
 pub struct WalletEvent {
     #[allow(dead_code)]
     pub id: Id,
     #[allow(dead_code)]
     pub account_id: Id,
+    /// The specific type and details of the event
     pub event_type: WalletEventType,
+    /// Human-readable description of the event
     pub description: String,
 }
 
+/// Types of events that can occur in the wallet.
+///
+/// Each variant contains relevant data for that event type, such as
+/// block heights, hashes, transaction IDs, and memos.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum WalletEventType {
     BlockRolledBack {
@@ -83,6 +119,9 @@ pub enum WalletEventType {
 }
 
 impl WalletEventType {
+    /// Returns a string key representing the event type (without data).
+    ///
+    /// This is useful for filtering and categorizing events in the database.
     pub fn to_key_string(&self) -> String {
         match &self {
             WalletEventType::BlockRolledBack { .. } => "BlockRolledBack".to_string(),
@@ -99,20 +138,44 @@ impl WalletEventType {
     }
 }
 
+/// Represents a change to the wallet balance (credit or debit).
+///
+/// Balance changes are created when:
+/// - Outputs are detected (credit)
+/// - Outputs are confirmed (updates)
+/// - Inputs are spent (debit)
+/// - Transactions are broadcasted (fee debit)
+///
+/// Each balance change links to either an output or input and includes
+/// metadata like memos, addresses, and claimed amounts from the transaction.
 #[derive(Debug, Clone)]
 pub struct BalanceChange {
+    /// Account this balance change belongs to
     pub account_id: Id,
+    /// ID of the output that caused this change (for credits)
     pub caused_by_output_id: Option<Id>,
+    /// ID of the input that caused this change (for debits)
     pub caused_by_input_id: Option<Id>,
+    /// Human-readable description of the change
     pub description: String,
+    /// Amount credited to the balance (in µT)
     pub balance_credit: u64,
+    /// Amount debited from the balance (in µT)
     pub balance_debit: u64,
+    /// Timestamp when the change becomes effective
     pub effective_date: NaiveDateTime,
+    /// Block height when the change becomes effective
     pub effective_height: u64,
+    /// Recipient address from transaction metadata
     pub claimed_recipient_address: Option<String>,
+    /// Sender address from transaction metadata
     pub claimed_sender_address: Option<String>,
+    /// Parsed memo text
     pub memo_parsed: Option<String>,
+    /// Raw memo in hexadecimal
     pub memo_hex: Option<String>,
+    /// Transaction fee from metadata
     pub claimed_fee: Option<u64>,
+    /// Transaction amount from metadata
     pub claimed_amount: Option<u64>,
 }

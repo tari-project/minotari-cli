@@ -1,15 +1,68 @@
+//! Event types and traits for blockchain scanning notifications.
+//!
+//! This module defines the event system used by the scanner to communicate
+//! progress, detected activity, and status changes to subscribers. Events
+//! are emitted through implementations of the [`EventSender`] trait.
+//!
+//! # Event Categories
+//!
+//! - **Block Events** ([`BlockProcessedEvent`]): Emitted after each block is processed
+//! - **Status Events** ([`ScanStatusEvent`]): Progress updates and lifecycle changes
+//! - **Transaction Events** ([`DisplayedTransactionsEvent`], [`TransactionsUpdatedEvent`]):
+//!   Newly detected or updated transactions
+//! - **Reorg Events** ([`ReorgDetectedEvent`]): Chain reorganization notifications
+//!
+//! # Example Usage
+//!
+//! ```rust,ignore
+//! use tokio::sync::mpsc;
+//! use crate::scan::{ChannelEventSender, ProcessingEvent};
+//!
+//! let (tx, mut rx) = mpsc::unbounded_channel();
+//! let sender = ChannelEventSender::new(tx);
+//!
+//! // In event handler
+//! while let Some(event) = rx.recv().await {
+//!     match event {
+//!         ProcessingEvent::BlockProcessed(e) => {
+//!             println!("Block {} processed: {} outputs", e.height, e.outputs_detected.len());
+//!         }
+//!         ProcessingEvent::ScanStatus(s) => {
+//!             println!("Status: {:?}", s);
+//!         }
+//!         ProcessingEvent::ReorgDetected(r) => {
+//!             println!("Reorg! Rolled back {} blocks", r.blocks_rolled_back);
+//!         }
+//!         _ => {}
+//!     }
+//! }
+//! ```
+
 use std::time::Duration;
 
 use tari_common_types::types::FixedHash;
 
 use crate::transactions::DisplayedTransaction;
 
+/// Top-level event enum for all scanner notifications.
+///
+/// This enum wraps all possible events emitted during blockchain scanning,
+/// allowing consumers to handle them uniformly through a single channel.
 #[derive(Debug, Clone)]
 pub enum ProcessingEvent {
+    /// A block has been fully processed.
     BlockProcessed(BlockProcessedEvent),
+
+    /// Scan status has changed (started, progress, completed, paused, etc.).
     ScanStatus(ScanStatusEvent),
+
+    /// New transactions are ready for display.
     TransactionsReady(DisplayedTransactionsEvent),
+
+    /// Existing transactions have been updated (e.g., confirmations).
     TransactionsUpdated(TransactionsUpdatedEvent),
+
+    /// A blockchain reorganization was detected and handled.
     ReorgDetected(ReorgDetectedEvent),
 }
 
