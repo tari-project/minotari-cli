@@ -336,6 +336,11 @@
           "recipients"
         ],
         "properties": {
+          "confirmation_window": {
+            "type": "integer",
+            "description": "Number of confirmations required",
+            "default": 3
+          },
           "idempotency_key": {
             "type": [
               "string",
@@ -369,6 +374,11 @@
             "type": "integer",
             "format": "int64",
             "minimum": 0
+          },
+          "confirmation_window": {
+            "type": "integer",
+            "description": "Number of confirmations required",
+            "default": 3
           },
           "estimated_output_size": {
             "type": [

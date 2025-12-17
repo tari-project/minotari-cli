@@ -3,11 +3,7 @@ use sqlx::SqlitePool;
 use tari_transaction_components::tari_amount::MicroMinotari;
 use uuid::Uuid;
 
-use crate::{
-    api::types::LockFundsResult,
-    db::{self},
-    transactions::input_selector::InputSelector,
-};
+use crate::{api::types::LockFundsResult, db, transactions::input_selector::InputSelector};
 
 pub struct FundLocker {
     db_pool: SqlitePool,
@@ -28,6 +24,7 @@ impl FundLocker {
         estimated_output_size: Option<usize>,
         idempotency_key: Option<String>,
         seconds_to_lock_utxos: u64,
+        confirmation_window: u64,
     ) -> Result<LockFundsResult, anyhow::Error> {
         let mut conn = self.db_pool.acquire().await?;
         if let Some(idempotency_key_str) = &idempotency_key
@@ -38,7 +35,7 @@ impl FundLocker {
             return Ok(response);
         }
 
-        let input_selector = InputSelector::new(account_id);
+        let input_selector = InputSelector::new(account_id, confirmation_window);
         let utxo_selection = input_selector
             .fetch_unspent_outputs(&mut conn, amount, num_outputs, fee_per_gram, estimated_output_size)
             .await?;
