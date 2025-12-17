@@ -53,6 +53,7 @@ use sqlx::SqlitePool;
 use tari_common::configuration::Network;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
+use zeroize::Zeroizing;
 
 pub mod accounts;
 mod error;
@@ -67,12 +68,12 @@ pub mod types;
 ///
 /// * `db_pool` - SQLite connection pool for database operations
 /// * `network` - Tari network configuration (Esmeralda, Nextnet, Mainnet, etc.)
-/// * `password` - Password for decrypting wallet keys (stored in memory)
+/// * `password` - Password for decrypting wallet keys (securely zeroized on drop)
 #[derive(Clone)]
 pub struct AppState {
     pub db_pool: SqlitePool,
     pub network: Network,
-    pub password: String,
+    pub password: Zeroizing<String>,
 }
 
 impl FromRef<AppState> for SqlitePool {
@@ -168,7 +169,7 @@ pub fn create_router(db_pool: SqlitePool, network: Network, password: String) ->
     let app_state = AppState {
         db_pool,
         network,
-        password,
+        password: Zeroizing::new(password),
     };
 
     Router::new()

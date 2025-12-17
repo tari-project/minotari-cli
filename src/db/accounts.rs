@@ -14,6 +14,7 @@ use tari_crypto::{
 use tari_transaction_components::key_manager::KeyManager;
 use tari_transaction_components::key_manager::wallet_types::ViewWallet;
 use tari_transaction_components::key_manager::wallet_types::WalletType;
+use zeroize::Zeroizing;
 
 use tari_utilities::byte_array::ByteArray;
 use utoipa::ToSchema;
@@ -138,13 +139,17 @@ pub struct AccountRow {
 impl AccountRow {
     pub fn decrypt_keys(
         &self,
-        password: &str,
+        password: &Zeroizing<String>,
     ) -> Result<(RistrettoSecretKey, CompressedKey<RistrettoPublicKey>), anyhow::Error> {
-        let password = if password.len() < 32 {
-            format!("{:0<32}", password)
+        let password = Zeroizing::new(if password.len() < 32 {
+            format!("{:0<32}", password.as_str())
         } else {
-            password[..32].to_string()
-        };
+            if password.len() > 32 {
+                return Err(anyhow::anyhow!("Password must be at most 32 bytes"));
+            } else {
+                password[..].to_string()
+            }
+        });
         let key_bytes: [u8; 32] = password
             .as_bytes()
             .try_into()
@@ -168,7 +173,7 @@ impl AccountRow {
         Ok((view_key, spend_key))
     }
 
-    pub fn get_address(&self, network: Network, password: &str) -> Result<TariAddress, anyhow::Error> {
+    pub fn get_address(&self, network: Network, password: &Zeroizing<String>) -> Result<TariAddress, anyhow::Error> {
         let (view_key, spend_key) = self.decrypt_keys(password)?;
         let address = TariAddress::new_dual_address(
             CompressedPublicKey::new_from_pk(RistrettoPublicKey::from_secret_key(&view_key)),
@@ -180,7 +185,7 @@ impl AccountRow {
         Ok(address)
     }
 
-    pub async fn get_key_manager(&self, password: &str) -> Result<KeyManager, anyhow::Error> {
+    pub async fn get_key_manager(&self, password: &Zeroizing<String>) -> Result<KeyManager, anyhow::Error> {
         let (view_key, spend_key) = self.decrypt_keys(password)?;
         let view_wallet = ViewWallet::new(spend_key, view_key, Some(self.birthday as u16));
         let wallet_type = WalletType::ViewWallet(view_wallet);

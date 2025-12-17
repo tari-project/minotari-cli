@@ -71,6 +71,7 @@ use tari_transaction_components::{
     transaction_components::{MemoField, OutputFeatures, WalletOutput, memo_field::TxType},
 };
 use tari_utilities::ByteArray;
+use zeroize::Zeroizing;
 
 use crate::{
     db::{self, AccountRow},
@@ -191,8 +192,8 @@ pub struct TransactionSender {
     pub network: Network,
     /// The sender's account.
     pub account: AccountRow,
-    /// Password for key manager access.
-    pub password: String,
+    /// Password for key manager access (securely zeroized on drop).
+    pub password: Zeroizing<String>,
     /// The transaction currently being processed.
     pub processed_transactions: ProcessedTransaction,
     /// Fee rate for this transaction.
@@ -236,7 +237,7 @@ impl TransactionSender {
     pub async fn new(
         db_pool: Pool<Sqlite>,
         account_name: String,
-        password: String,
+        password: Zeroizing<String>,
         network: Network,
         confirmation_window: u64,
     ) -> Result<Self, anyhow::Error> {

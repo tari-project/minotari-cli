@@ -395,7 +395,7 @@ async fn wait_for_next_poll_cycle<E: EventSender>(
 #[allow(clippy::too_many_arguments)]
 async fn prepare_account_scan(
     account: &AccountRow,
-    password: &str,
+    password: &Zeroizing<String>,
     base_url: &str,
     batch_size: u64,
     processing_threads: usize,
@@ -998,7 +998,7 @@ impl Scanner {
 
             let mut scan_context = prepare_account_scan(
                 &account,
-                self.password.as_str(),
+                &self.password,
                 &self.base_url,
                 self.batch_size,
                 self.processing_threads,

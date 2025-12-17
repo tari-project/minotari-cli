@@ -85,6 +85,7 @@ use tari_transaction_components::key_manager::wallet_types::SeedWordsWallet;
 use tari_transaction_components::key_manager::wallet_types::WalletType;
 use tari_transaction_components::tari_amount::MicroMinotari;
 use tari_utilities::byte_array::ByteArray;
+use zeroize::Zeroizing;
 
 /// Command-line interface definition for the Tari wallet.
 ///
@@ -277,7 +278,7 @@ enum Commands {
     Daemon {
         /// Password to decrypt wallet credentials.
         #[arg(short, long, help = "Password to decrypt the wallet file")]
-        password: String,
+        password: Zeroizing<String>,
         /// Base URL of the Tari HTTP RPC API endpoint.
         #[arg(
             short = 'u',
@@ -406,7 +407,7 @@ enum Commands {
         output_file: String,
         /// Password to decrypt wallet credentials.
         #[arg(short, long, help = "Password to decrypt the wallet file")]
-        password: String,
+        password: Zeroizing<String>,
         /// Path to the SQLite database file.
         #[arg(short, long, help = "Path to the database file", default_value = "data/wallet.db")]
         database_file: String,
@@ -727,7 +728,7 @@ async fn handle_create_unsigned_transaction(
     database_file: String,
     account_name: String,
     network: Network,
-    password: String,
+    password: Zeroizing<String>,
     idempotency_key: Option<String>,
     seconds_to_lock: u64,
     confirmation_window: u64,
