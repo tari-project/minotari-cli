@@ -513,11 +513,11 @@ async fn main() -> Result<(), anyhow::Error> {
             println!("New address: {}", tari_address);
 
             let wallet_data = if let Some(password) = password {
-                let password = if password.len() < 32 {
+                let password = zeroize::Zeroizing::new(if password.len() < 32 {
                     format!("{:0<32}", password)
                 } else {
                     password[..32].to_string()
-                };
+                });
                 let key_bytes: [u8; 32] = password
                     .as_bytes()
                     .try_into()

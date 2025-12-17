@@ -9,6 +9,7 @@ use chacha20poly1305::{
     Key, KeyInit, XChaCha20Poly1305,
     aead::{Aead, AeadCore, OsRng},
 };
+use zeroize::Zeroizing;
 
 use crate::{db, init_db};
 
@@ -73,11 +74,11 @@ pub async fn init_with_view_key(
     let view_key_bytes = hex::decode(view_private_key)?;
     let spend_key_bytes = hex::decode(spend_public_key)?;
 
-    let password = if password.len() < 32 {
+    let password = Zeroizing::new(if password.len() < 32 {
         format!("{:0<32}", password)
     } else {
         password[..32].to_string()
-    };
+    });
     let key_bytes: [u8; 32] = password
         .as_bytes()
         .try_into()
