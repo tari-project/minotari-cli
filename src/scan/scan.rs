@@ -155,7 +155,7 @@ impl ScanContext {
                     // Exponential backoff for error retries
                     let backoff_secs = retry_config
                         .error_backoff_base_secs
-                        .pow(error_retries.min(5))
+                        .pow(error_retries.min(MAX_BACKOFF_EXPONENT))
                         .min(MAX_BACKOFF_SECONDS);
                     println!("Waiting {} seconds before retrying...", backoff_secs);
                     tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
