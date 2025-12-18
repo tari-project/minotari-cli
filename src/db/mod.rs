@@ -20,7 +20,7 @@
 //!
 //! # Migrations
 //!
-//! Database migrations are managed by SQLx and automatically applied on initialization.
+//! Database migrations are managed by rusqlite_migration and automatically applied on initialization.
 //! Migration files are located in the `migrations/` directory.
 //!
 //! # Usage Example
@@ -30,21 +30,30 @@
 //!
 //! # async fn example() -> Result<(), anyhow::Error> {
 //! // Initialize database and run migrations
-//! let pool = init_db("wallet.db").await?;
+//! let pool = init_db("wallet.db")?;
 //!
 //! // Query accounts
-//! let accounts = get_accounts(&pool, None).await?;
+//! let accounts = get_accounts(&pool, None)?;
 //!
 //! // Check balance
-//! let balance = get_balance(&pool, "default").await?;
+//! let balance = get_balance(&pool, "default")?;
 //! println!("Available: {} µT", balance.available);
 //! # Ok(())
 //! # }
 //! ```
 
+use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
 use std::{env::current_dir, fs};
 
-use sqlx::sqlite::{SqlitePool, SqlitePoolOptions};
+use include_dir::{Dir, include_dir};
+use r2d2::Pool;
+use r2d2_sqlite::SqliteConnectionManager;
+use rusqlite::Connection;
+use rusqlite_migration::Migrations;
+
+mod error;
+pub use error::{WalletDbError, WalletDbResult};
 
 mod accounts;
 pub use accounts::{AccountBalance, AccountRow, create_account, get_account_by_name, get_accounts, get_balance};
@@ -57,9 +66,9 @@ pub use scanned_tip_blocks::{
 
 mod outputs;
 pub use outputs::{
-    DbWalletOutput, fetch_outputs_by_lock_request_id, fetch_unspent_outputs,
-    get_output_details_for_balance_change_by_id, get_output_info_by_hash, get_unconfirmed_outputs, insert_output,
-    lock_output, mark_output_confirmed, soft_delete_outputs_from_height, unlock_outputs_for_request,
+    DbWalletOutput, fetch_outputs_by_lock_request_id, fetch_unspent_outputs, get_active_outputs_from_height,
+    get_output_info_by_hash, get_unconfirmed_outputs, insert_output, lock_output, mark_output_confirmed,
+    soft_delete_outputs_from_height, unlock_outputs_for_request,
     unlock_outputs_for_request as unlock_outputs_for_pending_transaction, update_output_status,
 };
 
@@ -101,6 +110,16 @@ pub use displayed_transactions::{
     update_displayed_transaction_status,
 };
 
+const DB_POOL_SIZE: u32 = 5;
+
+pub type SqlitePool = Pool<SqliteConnectionManager>;
+
+static MIGRATIONS_DIR: Dir = include_dir!("$CARGO_MANIFEST_DIR/migrations");
+
+static MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
+    Migrations::from_directory(&MIGRATIONS_DIR).expect("Failed to load migrations from embedded directory")
+});
+
 /// Initializes the SQLite database and runs migrations.
 ///
 /// This function:
@@ -130,31 +149,79 @@ pub use displayed_transactions::{
 ///
 /// # async fn example() -> Result<(), anyhow::Error> {
 /// // Initialize database in current directory
-/// let pool = init_db("wallet.db").await?;
+/// let pool = init_db("wallet.db")?;
 ///
 /// // Or use absolute path
-/// let pool = init_db("/path/to/wallet.db").await?;
+/// let pool = init_db("/path/to/wallet.db")?;
 /// # Ok(())
 /// # }
 /// ```
-pub async fn init_db(db_path: &str) -> Result<SqlitePool, anyhow::Error> {
-    let mut path = std::path::Path::new(db_path).to_path_buf();
+pub fn init_db(db_path: &str) -> WalletDbResult<SqlitePool> {
+    let mut path = Path::new(db_path).to_path_buf();
     if path.is_relative() {
-        path = current_dir()?.to_path_buf().join(path);
+        path = current_dir()?.join(path);
     }
+
     let parent = path
         .parent()
-        .ok_or_else(|| anyhow::anyhow!("Invalid database file path"))?;
-    std::fs::create_dir_all(parent)?;
-    if fs::metadata(&path).is_err() {
-        fs::File::create(&path)
-            .map_err(|e| sqlx::Error::Io(std::io::Error::other(format!("Failed to create database file: {}", e))))?;
-    }
-    let db_url = format!("sqlite:///{}", path.display().to_string().replace("\\", "/"));
-    dbg!(&db_url);
-    let pool = SqlitePoolOptions::new().max_connections(5).connect(&db_url).await?;
+        .ok_or_else(|| std::io::Error::new(std::io::ErrorKind::NotFound, "Invalid database file path"))?;
+    fs::create_dir_all(parent)?;
 
-    // Run migrations
-    sqlx::migrate!("./migrations").run(&pool).await?;
+    match connect_and_migrate(&path) {
+        Ok(pool) => Ok(pool),
+        Err(e) => {
+            eprintln!("Database migration failed: {}. Resetting database...", e);
+            if path.exists() {
+                fs::remove_file(&path).map_err(WalletDbError::Io)?;
+            }
+            connect_and_migrate(&path)
+        },
+    }
+}
+
+fn connect_and_migrate(path: &PathBuf) -> WalletDbResult<SqlitePool> {
+    let manager = SqliteConnectionManager::file(path).with_init(|c| {
+        c.execute_batch(
+            "PRAGMA journal_mode = WAL;
+             PRAGMA synchronous = NORMAL;
+             PRAGMA foreign_keys = ON;
+             PRAGMA busy_timeout = 5000;",
+        )?;
+        Ok(())
+    });
+    let pool = Pool::builder().max_size(DB_POOL_SIZE).build(manager)?;
+    let mut conn = pool.get()?;
+
+    attempt_sqlx_adoption(&mut conn).ok();
+    MIGRATIONS.to_latest(&mut conn)?;
+
     Ok(pool)
+}
+
+/// Attempts to detect if the database was managed by sqlx and updates the
+/// user_version PRAGMA to match the number of applied migrations, allowing
+/// rusqlite_migration to pick up where sqlx left off.
+fn attempt_sqlx_adoption(conn: &mut Connection) -> WalletDbResult<()> {
+    let table_exists: bool = conn
+        .query_row(
+            "SELECT count(*) FROM sqlite_master WHERE type='table' AND name='_sqlx_migrations'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(false);
+
+    if table_exists {
+        let count: i32 = conn.query_row("SELECT count(*) FROM _sqlx_migrations", [], |row| row.get(0))?;
+
+        if count > 0 {
+            let pragma_sql = format!("PRAGMA user_version = {}", count);
+            conn.execute(&pragma_sql, [])?;
+
+            println!("Migrated from sqlx: updated user_version to {}", count);
+        }
+
+        conn.execute("DROP TABLE _sqlx_migrations", [])?;
+    }
+
+    Ok(())
 }

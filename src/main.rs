@@ -59,7 +59,7 @@ use clap::{Parser, Subcommand};
 use minotari::{
     api::accounts::LockFundsRequest,
     daemon,
-    db::{self, get_accounts, get_balance, init_db},
+    db::{self, WalletDbError, get_accounts, get_balance, init_db},
     models::WalletEvent,
     scan::{self, rollback_from_height, scan::ScanError},
     transactions::{
@@ -570,7 +570,6 @@ async fn main() -> Result<(), anyhow::Error> {
                 &database_file,
                 birthday,
             )
-            .await
         },
         Commands::Scan {
             password,
@@ -646,7 +645,7 @@ async fn main() -> Result<(), anyhow::Error> {
             account_name,
         } => {
             println!("Fetching balance...");
-            let _ = handle_balance(&database_file, account_name.as_deref()).await;
+            handle_balance(&database_file, account_name.as_deref())?;
             Ok(())
         },
         Commands::CreateUnsignedTransaction {
@@ -672,7 +671,6 @@ async fn main() -> Result<(), anyhow::Error> {
                 confirmation_window,
                 output_file,
             )
-            .await
         },
         Commands::LockFunds {
             account_name,
@@ -696,17 +694,17 @@ async fn main() -> Result<(), anyhow::Error> {
                 idempotency_key,
                 confirmation_window: Some(confirmation_window),
             };
-            handle_lock_funds(database_file, account_name, output_file, request).await
+            handle_lock_funds(database_file, account_name, output_file, request)
         },
     }
 }
 
-async fn handle_balance(database_file: &str, account_name: Option<&str>) -> Result<(), anyhow::Error> {
-    let pool = init_db(database_file).await?;
-    let mut conn = pool.acquire().await?;
-    let accounts = get_accounts(&mut conn, account_name).await?;
+fn handle_balance(database_file: &str, account_name: Option<&str>) -> Result<(), anyhow::Error> {
+    let pool = init_db(database_file)?;
+    let conn = pool.get()?;
+    let accounts = get_accounts(&conn, account_name)?;
     for account in accounts {
-        let agg_result = get_balance(&mut conn, account.id).await?;
+        let agg_result = get_balance(&conn, account.id)?;
         let tari_balance = agg_result.total / 1_000_000;
         let remainder = agg_result.total % 1_000_000;
         println!(
@@ -722,7 +720,7 @@ async fn handle_balance(database_file: &str, account_name: Option<&str>) -> Resu
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn handle_create_unsigned_transaction(
+fn handle_create_unsigned_transaction(
     recipient: Vec<String>,
     database_file: String,
     account_name: String,
@@ -758,11 +756,10 @@ async fn handle_create_unsigned_transaction(
         .collect();
     let recipients = recipients?;
 
-    let pool = init_db(&database_file).await?;
-    let mut conn = pool.acquire().await?;
-    let account = db::get_account_by_name(&mut conn, &account_name)
-        .await?
-        .ok_or_else(|| anyhow!("Account not found: {}", account_name))?;
+    let pool = init_db(&database_file)?;
+    let conn = pool.get()?;
+    let account =
+        db::get_account_by_name(&conn, &account_name)?.ok_or_else(|| anyhow!("Account not found: {}", account_name))?;
 
     let amount = recipients.iter().map(|r| r.amount).sum();
     let num_outputs = recipients.len();
@@ -781,13 +778,11 @@ async fn handle_create_unsigned_transaction(
             seconds_to_lock,
             confirmation_window,
         )
-        .await
         .map_err(|e| anyhow!("Failed to lock funds: {}", e))?;
 
     let one_sided_tx = OneSidedTransaction::new(pool.clone(), network, password.clone());
     let result = one_sided_tx
         .create_unsigned_transaction(&account, locked_funds, recipients, fee_per_gram)
-        .await
         .map_err(|e| anyhow!("Failed to create an unsigned transaction: {}", e))?;
 
     create_dir_all(Path::new(&output_file).parent().unwrap())?;
@@ -798,17 +793,16 @@ async fn handle_create_unsigned_transaction(
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn handle_lock_funds(
+fn handle_lock_funds(
     database_file: String,
     account_name: String,
     output_file: String,
     request: LockFundsRequest,
 ) -> Result<(), anyhow::Error> {
-    let pool = init_db(&database_file).await?;
-    let mut conn = pool.acquire().await?;
-    let account = db::get_account_by_name(&mut conn, &account_name)
-        .await?
-        .ok_or_else(|| anyhow!("Account not found: {}", account_name))?;
+    let pool = init_db(&database_file)?;
+    let conn = pool.get()?;
+    let account =
+        db::get_account_by_name(&conn, &account_name)?.ok_or_else(|| anyhow!("Account not found: {}", account_name))?;
     let lock_amount = FundLocker::new(pool.clone());
     let result = lock_amount
         .lock(
@@ -821,7 +815,6 @@ async fn handle_lock_funds(
             request.seconds_to_lock_utxos.expect("must be present"),
             request.confirmation_window.expect("must be present"),
         )
-        .await
         .map_err(|e| anyhow!("Failed to lock funds: {}", e))?;
 
     create_dir_all(Path::new(&output_file).parent().unwrap())?;
@@ -857,13 +850,14 @@ async fn rescan(
     rescan_from_height: u64,
     batch_size: u64,
 ) -> Result<(Vec<WalletEvent>, bool), ScanError> {
-    let pool = init_db(database_file).await?;
-    let mut conn = pool.acquire().await?;
+    let pool = init_db(database_file)?;
+    let conn = pool
+        .get()
+        .map_err(|e| ScanError::DbError(WalletDbError::ConnectionError(e)))?;
 
-    let account = db::get_account_by_name(&mut conn, account_name)
-        .await?
-        .ok_or_else(|| anyhow!("Account not found: {}", account_name))?;
-    let _ = rollback_from_height(&mut conn, account.id, rescan_from_height).await?;
+    let account =
+        db::get_account_by_name(&conn, account_name)?.ok_or_else(|| anyhow!("Account not found: {}", account_name))?;
+    let _ = rollback_from_height(&conn, account.id, rescan_from_height).await?;
 
     let max_blocks_to_scan = u64::MAX;
     let mut scanner = scan::Scanner::new(password, base_url, database_file, batch_size).mode(scan::ScanMode::Partial {
@@ -873,7 +867,7 @@ async fn rescan(
     scanner.run().await
 }
 
-async fn init_with_view_key(
+fn init_with_view_key(
     view_private_key: &str,
     spend_public_key: &str,
     password: &str,
@@ -888,5 +882,4 @@ async fn init_with_view_key(
         birthday,
         None,
     )
-    .await
 }

@@ -4,7 +4,7 @@
 //! for synchronizing wallet state with the blockchain.
 
 use lightweight_wallet_libs::{HttpBlockchainScanner, ScanConfig, scanning::BlockchainScanner};
-use sqlx::{Acquire, Sqlite, SqliteConnection, pool::PoolConnection};
+use rusqlite::Connection;
 use std::time::Duration;
 use tari_transaction_components::key_manager::{KeyManager, TransactionKeyManagerInterface};
 use tari_utilities::ByteArray;
@@ -15,8 +15,7 @@ use tokio_util::sync::CancellationToken;
 use thiserror::Error;
 
 use crate::{
-    db,
-    db::AccountRow,
+    db::{self, AccountRow, SqlitePool, WalletDbError},
     http::WalletHttpClient,
     models::WalletEvent,
     scan::{
@@ -73,12 +72,10 @@ pub enum ScanError {
     /// The contained value indicates the number of retry attempts made.
     #[error("Scan timed out after {0} retries")]
     Timeout(u32),
-}
 
-impl From<sqlx::Error> for ScanError {
-    fn from(e: sqlx::Error) -> Self {
-        ScanError::Fatal(e.into())
-    }
+    /// DB execution failed
+    #[error("Database execution error: {0}")]
+    DbError(#[from] WalletDbError),
 }
 
 impl From<BlockProcessorError> for ScanError {
@@ -315,7 +312,7 @@ enum ContinuousWaitResult {
 /// or [`ContinuousWaitResult::Cancelled`] if cancellation was requested.
 async fn wait_for_next_poll_cycle<E: EventSender>(
     scanner_context: &mut ScanContext,
-    conn: &mut PoolConnection<Sqlite>,
+    pool: &SqlitePool,
     event_sender: &E,
     poll_interval: Duration,
     last_scanned_height: u64,
@@ -342,7 +339,8 @@ async fn wait_for_next_poll_cycle<E: EventSender>(
         tokio::time::sleep(poll_interval).await;
     }
 
-    let reorg_result = reorg::handle_reorgs(&mut scanner_context.scanner, conn, scanner_context.account_id)
+    let mut conn = pool.get().map_err(|e| ScanError::DbError(e.into()))?;
+    let reorg_result = reorg::handle_reorgs(&mut scanner_context.scanner, &mut conn, scanner_context.account_id)
         .await
         .map_err(ScanError::Fatal)?;
 
@@ -400,9 +398,9 @@ async fn prepare_account_scan(
     processing_threads: usize,
     reorg_check_interval: u64,
     monitoring_state: MonitoringState,
-    conn: &mut SqliteConnection,
+    conn: &mut Connection,
 ) -> Result<ScanContext, ScanError> {
-    let key_manager = account.get_key_manager(password).await.map_err(ScanError::Fatal)?;
+    let key_manager = account.get_key_manager(password)?;
     let account_view_key = key_manager.get_private_view_key().as_bytes().to_vec();
 
     let mut scanner = HttpBlockchainScanner::new(base_url.to_string(), key_manager.clone(), processing_threads)
@@ -434,7 +432,6 @@ async fn prepare_account_scan(
 
     monitoring_state
         .initialize(conn, account.id)
-        .await
         .map_err(ScanError::Fatal)?;
 
     let transaction_monitor = TransactionMonitor::new(monitoring_state);
@@ -480,7 +477,7 @@ async fn prepare_account_scan(
 /// - `ScanStatus::MoreBlocksAvailable` when more blocks exist
 async fn run_scan_loop<E: EventSender + Clone>(
     scanner_context: &mut ScanContext,
-    conn: &mut PoolConnection<Sqlite>,
+    pool: &SqlitePool,
     event_sender: E,
     mode: &ScanMode,
     retry_config: &ScanRetryConfig,
@@ -538,7 +535,7 @@ async fn run_scan_loop<E: EventSender + Clone>(
             if let ScanMode::Continuous { poll_interval } = mode {
                 match wait_for_next_poll_cycle(
                     scanner_context,
-                    conn,
+                    pool,
                     &event_sender,
                     *poll_interval,
                     last_scanned_height,
@@ -564,8 +561,9 @@ async fn run_scan_loop<E: EventSender + Clone>(
             scanner_context.account_id
         );
         let has_pending_outbound = scanner_context.transaction_monitor.has_pending_outbound();
+        let mut conn = pool.get().map_err(|e| ScanError::DbError(e.into()))?;
         for scanned_block in &scanned_blocks {
-            let mut tx = conn.begin().await?;
+            let tx = conn.transaction().map_err(|e| ScanError::DbError(e.into()))?;
 
             let mut processor = BlockProcessor::with_event_sender(
                 scanner_context.account_id,
@@ -573,11 +571,11 @@ async fn run_scan_loop<E: EventSender + Clone>(
                 event_sender.clone(),
                 has_pending_outbound,
             );
-            processor.process_block(&mut tx, scanned_block).await?;
+            processor.process_block(&tx, scanned_block).await?;
 
             all_events.extend(processor.into_wallet_events());
 
-            tx.commit().await?;
+            tx.commit().map_err(|e| ScanError::DbError(e.into()))?;
         }
 
         if let Some(last_block) = scanned_blocks.last() {
@@ -588,7 +586,7 @@ async fn run_scan_loop<E: EventSender + Clone>(
                 .transaction_monitor
                 .monitor_if_needed(
                     &scanner_context.wallet_client,
-                    conn,
+                    &conn,
                     scanner_context.account_id,
                     last_scanned_height,
                 )
@@ -606,9 +604,10 @@ async fn run_scan_loop<E: EventSender + Clone>(
         }
 
         if more_blocks && blocks_since_reorg_check >= scanner_context.reorg_check_interval {
-            let reorg_result = reorg::handle_reorgs(&mut scanner_context.scanner, conn, scanner_context.account_id)
-                .await
-                .map_err(ScanError::Fatal)?;
+            let reorg_result =
+                reorg::handle_reorgs(&mut scanner_context.scanner, &mut conn, scanner_context.account_id)
+                    .await
+                    .map_err(ScanError::Fatal)?;
 
             if let Some(reorg_info) = reorg_result.reorg_information {
                 println!(
@@ -627,9 +626,8 @@ async fn run_scan_loop<E: EventSender + Clone>(
             blocks_since_reorg_check = 0;
         }
 
-        db::prune_scanned_tip_blocks(conn, scanner_context.account_id, last_scanned_height)
-            .await
-            .map_err(ScanError::Fatal)?;
+        db::prune_scanned_tip_blocks(&conn, scanner_context.account_id, last_scanned_height)?;
+        // .map_err(ScanError::Fatal)?;
 
         event_sender.send(ProcessingEvent::ScanStatus(ScanStatusEvent::Progress {
             account_id: scanner_context.account_id,
@@ -984,12 +982,12 @@ impl Scanner {
         self,
         event_sender: E,
     ) -> Result<(Vec<WalletEvent>, bool), ScanError> {
-        let pool = db::init_db(&self.database_file).await.map_err(ScanError::Fatal)?;
-        let mut conn = pool.acquire().await?;
+        let pool = db::init_db(&self.database_file)?;
+        let mut conn = pool.get().map_err(|e| ScanError::DbError(e.into()))?;
         let mut all_events = Vec::new();
         let mut any_more_blocks = false;
 
-        let accounts = db::get_accounts(&mut conn, self.account_name.as_deref()).await?;
+        let accounts = db::get_accounts(&conn, self.account_name.as_deref())?;
 
         for account in accounts {
             let monitoring_state = MonitoringState::new();
@@ -1008,7 +1006,7 @@ impl Scanner {
 
             let (events, more_blocks) = run_scan_loop(
                 &mut scan_context,
-                &mut conn,
+                &pool,
                 event_sender.clone(),
                 &self.mode,
                 &self.retry_config,

@@ -34,6 +34,7 @@ use axum::{
     Json,
     extract::{Path, State},
 };
+use serde::Deserialize;
 use serde_json::{Value as JsonValue, json};
 use utoipa::{
     IntoParams,
@@ -101,7 +102,7 @@ fn confirmation_window_schema() -> Schema {
 ///
 /// For a request to `/accounts/my_wallet/balance`, the `name` field would
 /// contain `"my_wallet"`.
-#[derive(Debug, serde::Deserialize, IntoParams, utoipa::ToSchema)]
+#[derive(Debug, Deserialize, IntoParams, utoipa::ToSchema)]
 pub struct WalletParams {
     /// The unique name identifying the wallet account.
     name: String,
@@ -135,7 +136,7 @@ pub struct WalletParams {
 ///   "amount": 1000000
 /// }
 /// ```
-#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct LockFundsRequest {
     /// The total amount to lock in MicroMinotari (1 Minotari = 1,000,000 MicroMinotari).
     ///
@@ -202,7 +203,7 @@ pub struct LockFundsRequest {
 ///   "payment_id": "invoice-2024-001"
 /// }
 /// ```
-#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct RecipientRequest {
     /// The recipient's Tari address in Base58 encoding.
     ///
@@ -252,7 +253,7 @@ pub struct RecipientRequest {
 /// - The total amount sent equals the sum of all recipient amounts
 /// - Transaction fees are calculated automatically based on transaction size
 /// - UTXOs are locked during transaction creation to prevent double-spending
-#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct CreateTransactionRequest {
     /// List of recipients for the transaction.
     ///
@@ -328,12 +329,10 @@ pub async fn api_get_balance(
     State(app_state): State<AppState>,
     Path(WalletParams { name }): Path<WalletParams>,
 ) -> Result<Json<AccountBalance>, ApiError> {
-    let mut conn = app_state.db_pool.acquire().await?;
-    let account = get_account_by_name(&mut conn, &name)
-        .await?
-        .ok_or_else(|| ApiError::AccountNotFound(name.clone()))?;
+    let conn = app_state.db_pool.get().map_err(|e| ApiError::DbError(e.to_string()))?;
+    let account = get_account_by_name(&conn, &name)?.ok_or_else(|| ApiError::AccountNotFound(name.clone()))?;
 
-    let balance = get_balance(&mut conn, account.id).await?;
+    let balance = get_balance(&conn, account.id)?;
 
     Ok(Json(balance))
 }
@@ -399,10 +398,8 @@ pub async fn api_lock_funds(
     Path(WalletParams { name }): Path<WalletParams>,
     Json(body): Json<LockFundsRequest>,
 ) -> Result<Json<LockFundsResult>, ApiError> {
-    let mut conn = app_state.db_pool.acquire().await?;
-    let account = get_account_by_name(&mut conn, &name)
-        .await?
-        .ok_or_else(|| ApiError::AccountNotFound(name.clone()))?;
+    let conn = app_state.db_pool.get().map_err(|e| ApiError::DbError(e.to_string()))?;
+    let account = get_account_by_name(&conn, &name)?.ok_or_else(|| ApiError::AccountNotFound(name.clone()))?;
 
     let lock_amount = FundLocker::new(app_state.db_pool.clone());
     let response = lock_amount
@@ -416,7 +413,6 @@ pub async fn api_lock_funds(
             body.seconds_to_lock_utxos.expect("must be defaulted"),
             body.confirmation_window.expect("must be defaulted"),
         )
-        .await
         .map_err(|e| ApiError::FailedToLockFunds(e.to_string()))?;
     Ok(Json(response))
 }
@@ -505,10 +501,8 @@ pub async fn api_create_unsigned_transaction(
         })
         .collect();
 
-    let mut conn = app_state.db_pool.acquire().await?;
-    let account = get_account_by_name(&mut conn, &name)
-        .await?
-        .ok_or_else(|| ApiError::AccountNotFound(name.clone()))?;
+    let conn = app_state.db_pool.get().map_err(|e| ApiError::DbError(e.to_string()))?;
+    let account = get_account_by_name(&conn, &name)?.ok_or_else(|| ApiError::AccountNotFound(name.clone()))?;
 
     let amount = recipients.iter().map(|r| r.amount).sum();
     let num_outputs = recipients.len();
@@ -528,14 +522,12 @@ pub async fn api_create_unsigned_transaction(
             seconds_to_lock_utxos,
             body.confirmation_window.expect("must be defaulted"),
         )
-        .await
         .map_err(|e| ApiError::FailedToLockFunds(e.to_string()))?;
 
     let one_sided_tx =
         OneSidedTransaction::new(app_state.db_pool.clone(), app_state.network, app_state.password.clone());
     let result = one_sided_tx
         .create_unsigned_transaction(&account, locked_funds, recipients, fee_per_gram)
-        .await
         .map_err(|e| ApiError::FailedCreateUnsignedTx(e.to_string()))?;
 
     Ok(Json(serde_json::to_value(result)?))

@@ -6,13 +6,13 @@
 
 use chrono::{DateTime, Utc};
 use lightweight_wallet_libs::BlockScanResult;
-use sqlx::SqliteConnection;
+use rusqlite::Connection;
 use tari_common_types::types::FixedHash;
 use tari_transaction_components::transaction_components::WalletOutput;
 use thiserror::Error;
 
 use crate::{
-    db,
+    db::{self, WalletDbError},
     models::{BalanceChange, OutputStatus, WalletEvent, WalletEventType},
     scan::events::{
         BalanceChangeSummary, BlockProcessedEvent, ConfirmedOutput, DetectedOutput, DisplayedTransactionsEvent,
@@ -29,8 +29,8 @@ use crate::{
 #[derive(Debug, Error)]
 pub enum BlockProcessorError {
     /// A database operation failed.
-    #[error("Database error: {0}")]
-    Database(#[from] sqlx::Error),
+    #[error("Database execution error: {0}")]
+    DbError(#[from] WalletDbError),
 
     /// Failed to insert or process a wallet event.
     #[error("Failed to insert wallet event: {0}")]
@@ -173,11 +173,7 @@ impl<E: EventSender> BlockProcessor<E> {
     /// # Errors
     ///
     /// Returns [`BlockProcessorError`] if any database operation fails.
-    pub async fn process_block(
-        &mut self,
-        tx: &mut SqliteConnection,
-        block: &BlockScanResult,
-    ) -> Result<(), BlockProcessorError> {
+    pub async fn process_block(&mut self, tx: &Connection, block: &BlockScanResult) -> Result<(), BlockProcessorError> {
         self.current_tip_height = block.height;
 
         self.current_block = Some(BlockEventAccumulator::new(
@@ -186,10 +182,10 @@ impl<E: EventSender> BlockProcessor<E> {
             block.block_hash.to_vec(),
         ));
 
-        self.process_outputs(tx, block).await?;
-        self.process_inputs(tx, block).await?;
-        self.record_scanned_block(tx, block).await?;
-        self.process_confirmations(tx, block).await?;
+        self.process_outputs(tx, block)?;
+        self.process_inputs(tx, block)?;
+        self.record_scanned_block(tx, block)?;
+        self.process_confirmations(tx, block)?;
 
         if let Some(acc) = self.current_block.take() {
             if !acc.outputs.is_empty() || !acc.inputs.is_empty() {
@@ -206,7 +202,7 @@ impl<E: EventSender> BlockProcessor<E> {
 
     async fn save_and_emit_displayed_transactions(
         &self,
-        tx: &mut SqliteConnection,
+        tx: &Connection,
         block_height: u64,
         accumulator: &BlockEventAccumulator,
     ) -> Result<(), BlockProcessorError> {
@@ -229,13 +225,13 @@ impl<E: EventSender> BlockProcessor<E> {
 
                 for transaction in transactions {
                     // Check if this is a scanned version of an existing pending outbound transaction
-                    if let Some(existing_pending) = self.find_matching_pending_outbound(tx, &transaction).await? {
+                    if let Some(existing_pending) = self.find_matching_pending_outbound(tx, &transaction)? {
                         // Update the existing pending transaction with blockchain info
                         let updated = self.merge_pending_with_scanned(existing_pending, &transaction, block_height);
-                        db::update_displayed_transaction_mined(tx, &updated).await?;
+                        db::update_displayed_transaction_mined(tx, &updated)?;
                         transactions_to_emit.push(updated);
                     } else {
-                        db::insert_displayed_transaction(tx, &transaction).await?;
+                        db::insert_displayed_transaction(tx, &transaction)?;
                         transactions_to_emit.push(transaction);
                     }
                 }
@@ -260,9 +256,9 @@ impl<E: EventSender> BlockProcessor<E> {
         Ok(())
     }
 
-    async fn find_matching_pending_outbound(
+    fn find_matching_pending_outbound(
         &self,
-        tx: &mut SqliteConnection,
+        tx: &Connection,
         scanned_transaction: &DisplayedTransaction,
     ) -> Result<Option<DisplayedTransaction>, BlockProcessorError> {
         // Skip DB lookup if no pending outbound transactions exist
@@ -277,9 +273,7 @@ impl<E: EventSender> BlockProcessor<E> {
 
         // Check if any of the scanned transaction's inputs match a pending outbound transaction
         for input in &scanned_transaction.details.inputs {
-            if let Some(pending) =
-                db::find_pending_outbound_by_output_hash(tx, self.account_id, &input.output_hash).await?
-            {
+            if let Some(pending) = db::find_pending_outbound_by_output_hash(tx, self.account_id, &input.output_hash)? {
                 return Ok(Some(pending));
             }
         }
@@ -339,11 +333,7 @@ impl<E: EventSender> BlockProcessor<E> {
     /// - Creates a wallet event for detection
     /// - Records the balance change (credit)
     /// - Adds to the block accumulator for event emission
-    async fn process_outputs(
-        &mut self,
-        tx: &mut SqliteConnection,
-        block: &BlockScanResult,
-    ) -> Result<(), BlockProcessorError> {
+    fn process_outputs(&mut self, tx: &Connection, block: &BlockScanResult) -> Result<(), BlockProcessorError> {
         for (hash, output) in &block.wallet_outputs {
             let memo = MemoInfo::from_output(output);
 
@@ -361,13 +351,12 @@ impl<E: EventSender> BlockProcessor<E> {
                 block.mined_timestamp,
                 memo.parsed.clone(),
                 memo.hex.clone(),
-            )
-            .await?;
+            )?;
 
             if is_new {
-                db::insert_wallet_event(tx, self.account_id, &event).await?;
+                db::insert_wallet_event(tx, self.account_id, &event)?;
 
-                let balance_change = self.record_output_balance_change(tx, output_id, block, output).await?;
+                let balance_change = self.record_output_balance_change(tx, output_id, block, output)?;
 
                 if let Some(ref mut acc) = self.current_block {
                     acc.outputs.push(DetectedOutput {
@@ -401,9 +390,9 @@ impl<E: EventSender> BlockProcessor<E> {
     }
 
     /// Records a balance change for a detected output (credit).
-    async fn record_output_balance_change(
+    fn record_output_balance_change(
         &self,
-        tx: &mut SqliteConnection,
+        tx: &Connection,
         output_id: i64,
         block: &BlockScanResult,
         output: &WalletOutput,
@@ -411,7 +400,7 @@ impl<E: EventSender> BlockProcessor<E> {
         let change =
             make_balance_change_for_output(self.account_id, output_id, block.mined_timestamp, block.height, output);
 
-        db::insert_balance_change(tx, &change).await?;
+        db::insert_balance_change(tx, &change)?;
 
         Ok(change)
     }
@@ -423,13 +412,9 @@ impl<E: EventSender> BlockProcessor<E> {
     /// - Records the balance change (debit)
     /// - Updates the output status to Spent
     /// - Adds to the block accumulator for event emission
-    async fn process_inputs(
-        &mut self,
-        tx: &mut SqliteConnection,
-        block: &BlockScanResult,
-    ) -> Result<(), BlockProcessorError> {
+    fn process_inputs(&mut self, tx: &Connection, block: &BlockScanResult) -> Result<(), BlockProcessorError> {
         for input_hash in &block.inputs {
-            let Some((output_id, value)) = db::get_output_info_by_hash(tx, input_hash.as_slice()).await? else {
+            let Some((output_id, value)) = db::get_output_info_by_hash(tx, input_hash.as_slice())? else {
                 continue;
             };
 
@@ -440,12 +425,11 @@ impl<E: EventSender> BlockProcessor<E> {
                 block.height,
                 block.block_hash.as_slice(),
                 block.mined_timestamp,
-            )
-            .await?;
+            )?;
 
             if is_new {
-                let balance_change = self.record_input_balance_change(tx, input_id, value, block).await?;
-                db::update_output_status(tx, output_id, OutputStatus::Spent).await?;
+                let balance_change = self.record_input_balance_change(tx, input_id, value, block)?;
+                db::update_output_status(tx, output_id, OutputStatus::Spent)?;
 
                 if let Some(ref mut acc) = self.current_block {
                     acc.inputs.push(SpentInput {
@@ -461,9 +445,9 @@ impl<E: EventSender> BlockProcessor<E> {
     }
 
     /// Records a balance change for a spent input (debit).
-    async fn record_input_balance_change(
+    fn record_input_balance_change(
         &self,
-        tx: &mut SqliteConnection,
+        tx: &Connection,
         input_id: i64,
         value: u64,
         block: &BlockScanResult,
@@ -489,7 +473,7 @@ impl<E: EventSender> BlockProcessor<E> {
             claimed_amount: None,
         };
 
-        db::insert_balance_change(tx, &change).await?;
+        db::insert_balance_change(tx, &change)?;
         Ok(change)
     }
 
@@ -497,12 +481,8 @@ impl<E: EventSender> BlockProcessor<E> {
     ///
     /// Stores the block height and hash in the scanned_tip_blocks table,
     /// which is used to detect chain reorganizations.
-    async fn record_scanned_block(
-        &self,
-        tx: &mut SqliteConnection,
-        block: &BlockScanResult,
-    ) -> Result<(), BlockProcessorError> {
-        db::insert_scanned_tip_block(tx, self.account_id, block.height as i64, block.block_hash.as_slice()).await?;
+    fn record_scanned_block(&self, tx: &Connection, block: &BlockScanResult) -> Result<(), BlockProcessorError> {
+        db::insert_scanned_tip_block(tx, self.account_id, block.height as i64, block.block_hash.as_slice())?;
         Ok(())
     }
 
@@ -510,27 +490,33 @@ impl<E: EventSender> BlockProcessor<E> {
     ///
     /// Finds outputs that have reached the required confirmation depth
     /// and updates their status to confirmed.
-    async fn process_confirmations(
-        &mut self,
-        tx: &mut SqliteConnection,
-        block: &BlockScanResult,
-    ) -> Result<(), BlockProcessorError> {
-        let unconfirmed =
-            db::get_unconfirmed_outputs(tx, self.account_id, block.height, REQUIRED_CONFIRMATIONS).await?;
+    fn process_confirmations(&mut self, tx: &Connection, block: &BlockScanResult) -> Result<(), BlockProcessorError> {
+        let unconfirmed_outputs =
+            db::get_unconfirmed_outputs(tx, self.account_id, block.height, REQUIRED_CONFIRMATIONS)?;
 
-        for (output_hash, original_height, memo_parsed, memo_hex) in unconfirmed {
-            let event =
-                self.make_confirmation_event(&output_hash, original_height, block.height, memo_parsed, memo_hex);
+        for unconfirmed_output in unconfirmed_outputs {
+            let event = self.make_confirmation_event(
+                &unconfirmed_output.output_hash,
+                unconfirmed_output.mined_in_block_height as u64,
+                block.height,
+                unconfirmed_output.memo_parsed,
+                unconfirmed_output.memo_hex,
+            );
 
             self.wallet_events.push(event.clone());
-            db::insert_wallet_event(tx, self.account_id, &event).await?;
+            db::insert_wallet_event(tx, self.account_id, &event)?;
 
-            db::mark_output_confirmed(tx, &output_hash, block.height, block.block_hash.as_slice()).await?;
+            db::mark_output_confirmed(
+                tx,
+                &unconfirmed_output.output_hash,
+                block.height,
+                block.block_hash.as_slice(),
+            )?;
 
             if let Some(ref mut acc) = self.current_block {
                 acc.confirmations.push(ConfirmedOutput {
-                    hash: output_hash.clone(),
-                    original_height,
+                    hash: unconfirmed_output.output_hash.clone(),
+                    original_height: unconfirmed_output.mined_in_block_height as u64,
                     confirmation_height: block.height,
                 });
             }

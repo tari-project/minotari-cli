@@ -9,6 +9,7 @@ use chacha20poly1305::{
     Key, KeyInit, XChaCha20Poly1305,
     aead::{Aead, AeadCore, OsRng},
 };
+use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
 
 use crate::{db, init_db};
 
@@ -62,7 +63,7 @@ use crate::{db, init_db};
 /// # Ok(())
 /// # }
 /// ```
-pub async fn init_with_view_key(
+pub fn init_with_view_key(
     view_private_key: &str,
     spend_public_key: &str,
     password: &str,
@@ -91,19 +92,18 @@ pub async fn init_with_view_key(
 
     // create a hash of the viewkey to determine duplicate wallets
     let view_key_hash = hash_view_key(&view_key_bytes);
-    let pool = init_db(database_file).await?;
-    let mut conn = pool.acquire().await?;
+    let pool = init_db(database_file)?;
+    let conn = pool.get()?;
     let friendly_name = friendly_name.unwrap_or("default");
     db::create_account(
-        &mut conn,
+        &conn,
         friendly_name,
         &encrypted_view_key,
         &encrypted_spend_key,
         &nonce,
         &view_key_hash,
         birthday as i64,
-    )
-    .await?;
+    )?;
 
     Ok(())
 }
@@ -125,4 +125,28 @@ fn hash_view_key(view_key: &[u8]) -> Vec<u8> {
     hasher.update(b"view_key_hash");
     hasher.update(view_key);
     hasher.finalize().to_vec()
+}
+
+pub trait AsNaive {
+    fn as_naive(&self) -> NaiveDateTime;
+}
+
+impl AsNaive for NaiveDateTime {
+    fn as_naive(&self) -> NaiveDateTime {
+        *self
+    }
+}
+
+impl<T: TimeZone> AsNaive for DateTime<T> {
+    fn as_naive(&self) -> NaiveDateTime {
+        self.naive_utc()
+    }
+}
+
+pub fn format_timestamp(date: impl AsNaive) -> String {
+    date.as_naive().format("%Y-%m-%d %H:%M:%S").to_string()
+}
+
+pub fn current_db_timestamp() -> String {
+    format_timestamp(Utc::now())
 }

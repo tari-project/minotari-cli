@@ -49,10 +49,11 @@
 //! - All API errors are properly typed and do not leak sensitive information
 
 use axum::{Router, extract::FromRef, routing::get, routing::post};
-use sqlx::SqlitePool;
 use tari_common::configuration::Network;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
+
+use crate::db::SqlitePool;
 
 pub mod accounts;
 mod error;

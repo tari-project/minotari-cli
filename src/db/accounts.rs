@@ -1,6 +1,7 @@
 use chacha20poly1305::{Key, KeyInit, XChaCha20Poly1305, XNonce, aead::Aead};
-use serde::Serialize;
-use sqlx::SqliteConnection;
+use rusqlite::{Connection, named_params};
+use serde::{Deserialize, Serialize};
+use serde_rusqlite::from_rows;
 use tari_common::configuration::Network;
 use tari_common_types::{
     tari_address::{TariAddress, TariAddressFeatures},
@@ -19,46 +20,53 @@ use tari_utilities::byte_array::ByteArray;
 use utoipa::ToSchema;
 
 use crate::db::balance_changes::get_balance_aggregates_for_account;
+use crate::db::error::{WalletDbError, WalletDbResult};
 use crate::db::outputs::get_output_totals_for_account;
+use crate::utils::format_timestamp;
 
-pub async fn create_account(
-    conn: &mut SqliteConnection,
+pub fn create_account(
+    conn: &Connection,
     friendly_name: &str,
-    encryptd_view_private_key: &[u8],
+    encrypted_view_private_key: &[u8],
     encrypted_spend_public_key: &[u8],
     cipher_nonce: &[u8],
     unencrypted_view_key_hash: &[u8],
     birthday: i64,
-) -> Result<(), sqlx::Error> {
-    sqlx::query!(
+) -> WalletDbResult<()> {
+    conn.execute(
         r#"
-        INSERT INTO accounts (friendly_name, 
-          encrypted_view_private_key, 
-          encrypted_spend_public_key, 
-          cipher_nonce, 
-          unencrypted_view_key_hash,
-          birthday)
-        VALUES (?, ?, ?, ?, ?, ?)
+        INSERT INTO accounts (
+            friendly_name,
+            encrypted_view_private_key,
+            encrypted_spend_public_key,
+            cipher_nonce,
+            unencrypted_view_key_hash,
+            birthday
+        )
+        VALUES (
+            :name,
+            :enc_view,
+            :enc_spend,
+            :nonce,
+            :view_hash,
+            :birthday
+        )
         "#,
-        friendly_name,
-        encryptd_view_private_key,
-        encrypted_spend_public_key,
-        cipher_nonce,
-        unencrypted_view_key_hash,
-        birthday
-    )
-    .execute(&mut *conn)
-    .await?;
+        named_params! {
+            ":name": friendly_name,
+            ":enc_view": encrypted_view_private_key,
+            ":enc_spend": encrypted_spend_public_key,
+            ":nonce": cipher_nonce,
+            ":view_hash": unencrypted_view_key_hash,
+            ":birthday": birthday,
+        },
+    )?;
 
     Ok(())
 }
 
-pub async fn get_account_by_name(
-    conn: &mut SqliteConnection,
-    friendly_name: &str,
-) -> Result<Option<AccountRow>, sqlx::Error> {
-    let row = sqlx::query_as!(
-        AccountRow,
+pub fn get_account_by_name(conn: &Connection, friendly_name: &str) -> WalletDbResult<Option<AccountRow>> {
+    let mut stmt = conn.prepare_cached(
         r#"
         SELECT id, 
             friendly_name, 
@@ -68,23 +76,19 @@ pub async fn get_account_by_name(
             unencrypted_view_key_hash,
             birthday
         FROM accounts
-        WHERE friendly_name = ?
+        WHERE friendly_name = :name
         "#,
-        friendly_name
-    )
-    .fetch_optional(&mut *conn)
-    .await?;
+    )?;
+
+    let rows = stmt.query(named_params! { ":name": friendly_name })?;
+    let row = from_rows::<AccountRow>(rows).next().transpose()?;
 
     Ok(row)
 }
 
-pub async fn get_accounts(
-    conn: &mut SqliteConnection,
-    friendly_name: Option<&str>,
-) -> Result<Vec<AccountRow>, sqlx::Error> {
-    let rows = if let Some(name) = friendly_name {
-        sqlx::query_as!(
-            AccountRow,
+pub fn get_accounts(conn: &Connection, friendly_name: Option<&str>) -> WalletDbResult<Vec<AccountRow>> {
+    if let Some(name) = friendly_name {
+        let mut stmt = conn.prepare_cached(
             r#"
             SELECT id, 
               friendly_name, 
@@ -94,16 +98,15 @@ pub async fn get_accounts(
               unencrypted_view_key_hash,
               birthday
             FROM accounts
-            WHERE friendly_name = ?
+            WHERE friendly_name = :name
             ORDER BY friendly_name
             "#,
-            name
-        )
-        .fetch_all(&mut *conn)
-        .await?
+        )?;
+        let rows = stmt.query(named_params! { ":name": name })?;
+        let results = from_rows::<AccountRow>(rows).collect::<Result<Vec<_>, _>>()?;
+        Ok(results)
     } else {
-        sqlx::query_as!(
-            AccountRow,
+        let mut stmt = conn.prepare_cached(
             r#"
             SELECT id, 
               friendly_name, 
@@ -114,16 +117,15 @@ pub async fn get_accounts(
               birthday
             FROM accounts
             ORDER BY friendly_name
-            "#
-        )
-        .fetch_all(&mut *conn)
-        .await?
-    };
-
-    Ok(rows)
+            "#,
+        )?;
+        let rows = stmt.query(named_params! {})?;
+        let results = from_rows::<AccountRow>(rows).collect::<Result<Vec<_>, _>>()?;
+        Ok(results)
+    }
 }
 
-#[derive(sqlx::FromRow, Debug)]
+#[derive(Debug, Serialize, Deserialize)]
 pub struct AccountRow {
     pub id: i64,
     pub friendly_name: String,
@@ -139,16 +141,19 @@ impl AccountRow {
     pub fn decrypt_keys(
         &self,
         password: &str,
-    ) -> Result<(RistrettoSecretKey, CompressedKey<RistrettoPublicKey>), anyhow::Error> {
+    ) -> WalletDbResult<(RistrettoSecretKey, CompressedKey<RistrettoPublicKey>)> {
         let password = if password.len() < 32 {
             format!("{:0<32}", password)
         } else {
+            // Note: This naive slicing can panic on multi-byte chars, but maintaining existing behavior for now
             password[..32].to_string()
         };
+
         let key_bytes: [u8; 32] = password
             .as_bytes()
             .try_into()
-            .map_err(|_| anyhow::anyhow!("Password must be 32 bytes"))?;
+            .map_err(|_| WalletDbError::InvalidInput("Password conversion failed".to_string()))?;
+
         let key = Key::from(key_bytes);
         let cipher = XChaCha20Poly1305::new(&key);
 
@@ -156,19 +161,27 @@ impl AccountRow {
             .cipher_nonce
             .as_slice()
             .try_into()
-            .map_err(|_| anyhow::anyhow!("Nonce must be 24 bytes"))?;
+            .map_err(|_| WalletDbError::Decoding("Nonce must be 24 bytes".to_string()))?;
         let nonce = XNonce::from(*nonce_bytes);
 
-        let view_key = cipher.decrypt(&nonce, self.encrypted_view_private_key.as_ref())?;
-        let spend_key = cipher.decrypt(&nonce, self.encrypted_spend_public_key.as_ref())?;
+        let view_key = cipher
+            .decrypt(&nonce, self.encrypted_view_private_key.as_ref())
+            .map_err(|_| WalletDbError::Crypt("Failed to decrypt view key".to_string()))?;
 
-        let view_key = RistrettoSecretKey::from_canonical_bytes(&view_key).map_err(|e| anyhow::anyhow!(e))?;
-        let spend_key =
-            CompressedKey::<RistrettoPublicKey>::from_canonical_bytes(&spend_key).map_err(|e| anyhow::anyhow!(e))?;
+        let spend_key = cipher
+            .decrypt(&nonce, self.encrypted_spend_public_key.as_ref())
+            .map_err(|_| WalletDbError::Crypt("Failed to decrypt spend key".to_string()))?;
+
+        let view_key = RistrettoSecretKey::from_canonical_bytes(&view_key)
+            .map_err(|e| WalletDbError::Decoding(format!("Invalid view key bytes: {}", e)))?;
+
+        let spend_key = CompressedKey::<RistrettoPublicKey>::from_canonical_bytes(&spend_key)
+            .map_err(|e| WalletDbError::Decoding(format!("Invalid spend key bytes: {}", e)))?;
+
         Ok((view_key, spend_key))
     }
 
-    pub fn get_address(&self, network: Network, password: &str) -> Result<TariAddress, anyhow::Error> {
+    pub fn get_address(&self, network: Network, password: &str) -> WalletDbResult<TariAddress> {
         let (view_key, spend_key) = self.decrypt_keys(password)?;
         let address = TariAddress::new_dual_address(
             CompressedPublicKey::new_from_pk(RistrettoPublicKey::from_secret_key(&view_key)),
@@ -176,15 +189,19 @@ impl AccountRow {
             network,
             TariAddressFeatures::create_one_sided_only(),
             None,
-        )?;
+        )
+        .map_err(|e| WalletDbError::Unexpected(format!("Failed to generate address: {}", e)))?;
+
         Ok(address)
     }
 
-    pub async fn get_key_manager(&self, password: &str) -> Result<KeyManager, anyhow::Error> {
+    pub fn get_key_manager(&self, password: &str) -> WalletDbResult<KeyManager> {
         let (view_key, spend_key) = self.decrypt_keys(password)?;
         let view_wallet = ViewWallet::new(spend_key, view_key, Some(self.birthday as u16));
         let wallet_type = WalletType::ViewWallet(view_wallet);
-        let key_manager = KeyManager::new(wallet_type)?;
+        let key_manager = KeyManager::new(wallet_type)
+            .map_err(|e| WalletDbError::Unexpected(format!("Failed to create key manager: {}", e)))?;
+
         Ok(key_manager)
     }
 }
@@ -214,17 +231,21 @@ pub struct AccountBalance {
     pub max_date: Option<String>,
 }
 
-pub async fn get_balance(conn: &mut SqliteConnection, account_id: i64) -> Result<AccountBalance, sqlx::Error> {
-    let history_agg = get_balance_aggregates_for_account(conn, account_id).await?;
+pub fn get_balance(conn: &Connection, account_id: i64) -> WalletDbResult<AccountBalance> {
+    let history_agg = get_balance_aggregates_for_account(conn, account_id)?;
     let (locked_amount, unconfirmed_amount, locked_and_unconfirmed_amount) =
-        get_output_totals_for_account(conn, account_id).await?;
+        get_output_totals_for_account(conn, account_id)?;
+
     let total_credits = history_agg.total_credits.unwrap_or(0) as u64;
     let total_debits = history_agg.total_debits.unwrap_or(0) as u64;
     let total_balance = total_credits.saturating_sub(total_debits);
+
     let unavailable_balance = locked_amount
         .saturating_add(unconfirmed_amount)
         .saturating_sub(locked_and_unconfirmed_amount);
     let available_balance = total_balance.saturating_sub(unavailable_balance);
+
+    let max_date_str = history_agg.max_date.map(format_timestamp);
 
     Ok(AccountBalance {
         total: total_balance,
@@ -234,6 +255,6 @@ pub async fn get_balance(conn: &mut SqliteConnection, account_id: i64) -> Result
         total_credits: history_agg.total_credits,
         total_debits: history_agg.total_debits,
         max_height: history_agg.max_height,
-        max_date: history_agg.max_date,
+        max_date: max_date_str,
     })
 }

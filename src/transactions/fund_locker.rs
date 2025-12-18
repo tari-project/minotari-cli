@@ -21,11 +21,14 @@
 //! idempotency key already exists, the original result is returned.
 
 use chrono::{Duration, Utc};
-use sqlx::SqlitePool;
 use tari_transaction_components::tari_amount::MicroMinotari;
 use uuid::Uuid;
 
-use crate::{api::types::LockFundsResult, db, transactions::input_selector::InputSelector};
+use crate::{
+    api::types::LockFundsResult,
+    db::{self, SqlitePool},
+    transactions::input_selector::InputSelector,
+};
 
 /// Manages temporary locking of UTXOs during transaction construction.
 ///
@@ -130,7 +133,7 @@ impl FundLocker {
     /// println!("Locked {} UTXOs worth {}", result.utxos.len(), result.total_value);
     /// ```
     #[allow(clippy::too_many_arguments)]
-    pub async fn lock(
+    pub fn lock(
         &self,
         account_id: i64,
         amount: MicroMinotari,
@@ -141,26 +144,24 @@ impl FundLocker {
         seconds_to_lock_utxos: u64,
         confirmation_window: u64,
     ) -> Result<LockFundsResult, anyhow::Error> {
-        let mut conn = self.db_pool.acquire().await?;
+        let mut conn = self.db_pool.get()?;
         if let Some(idempotency_key_str) = &idempotency_key
             && let Some(response) =
-                db::find_pending_transaction_locked_funds_by_idempotency_key(&mut conn, idempotency_key_str, account_id)
-                    .await?
+                db::find_pending_transaction_locked_funds_by_idempotency_key(&conn, idempotency_key_str, account_id)?
         {
             return Ok(response);
         }
 
         let input_selector = InputSelector::new(account_id, confirmation_window);
-        let utxo_selection = input_selector
-            .fetch_unspent_outputs(&mut conn, amount, num_outputs, fee_per_gram, estimated_output_size)
-            .await?;
+        let utxo_selection =
+            input_selector.fetch_unspent_outputs(&conn, amount, num_outputs, fee_per_gram, estimated_output_size)?;
 
-        let mut transaction = self.db_pool.begin().await?;
+        let transaction = conn.transaction()?;
 
         let expires_at = Utc::now() + Duration::seconds(seconds_to_lock_utxos as i64);
         let idempotency_key = idempotency_key.unwrap_or_else(|| Uuid::new_v4().to_string());
         let pending_tx_id = db::create_pending_transaction(
-            &mut transaction,
+            &transaction,
             &idempotency_key,
             account_id,
             utxo_selection.requires_change_output,
@@ -168,14 +169,13 @@ impl FundLocker {
             utxo_selection.fee_without_change,
             utxo_selection.fee_with_change,
             expires_at,
-        )
-        .await?;
+        )?;
 
         for utxo in &utxo_selection.utxos {
-            db::lock_output(&mut transaction, utxo.id, &pending_tx_id, expires_at).await?;
+            db::lock_output(&transaction, utxo.id, &pending_tx_id, expires_at)?;
         }
 
-        transaction.commit().await?;
+        transaction.commit()?;
 
         Ok(LockFundsResult {
             utxos: utxo_selection.utxos.iter().map(|utxo| utxo.output.clone()).collect(),

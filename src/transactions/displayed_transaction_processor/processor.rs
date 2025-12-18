@@ -1,4 +1,4 @@
-use sqlx::SqlitePool;
+use rusqlite::Connection;
 
 use super::builder::DisplayedTransactionBuilder;
 use super::error::ProcessorError;
@@ -8,7 +8,7 @@ use super::resolver::{DatabaseResolver, InMemoryResolver, ProcessingContext, Tra
 use super::types::{
     DisplayedTransaction, TransactionDisplayStatus, TransactionInput, TransactionOutput, TransactionSource,
 };
-use crate::db;
+use crate::db::{self, SqlitePool};
 use crate::models::{BalanceChange, Id};
 /// Processes balance changes into user-displayable transactions.
 pub struct DisplayedTransactionProcessor {
@@ -27,7 +27,7 @@ impl DisplayedTransactionProcessor {
     ) -> Result<Vec<DisplayedTransaction>, ProcessorError> {
         match context {
             ProcessingContext::Database(pool) => {
-                let resolver = DatabaseResolver::new(pool);
+                let resolver = DatabaseResolver::new(pool.clone());
                 self.process_with_resolver(balance_changes, &resolver).await
             },
             ProcessingContext::InMemory {
@@ -70,17 +70,17 @@ impl DisplayedTransactionProcessor {
         account_id: Id,
         db_pool: &SqlitePool,
     ) -> Result<Vec<DisplayedTransaction>, ProcessorError> {
-        let mut conn = db_pool.acquire().await?;
-        self.process_all_stored_with_conn(account_id, &mut conn, db_pool).await
+        let conn = db_pool.get().map_err(|e| ProcessorError::DbError(e.into()))?;
+        self.process_all_stored_with_conn(account_id, &conn, db_pool).await
     }
 
     pub async fn process_all_stored_with_conn(
         &self,
         account_id: Id,
-        conn: &mut sqlx::SqliteConnection,
+        conn: &Connection,
         db_pool: &SqlitePool,
     ) -> Result<Vec<DisplayedTransaction>, ProcessorError> {
-        let balance_changes = db::get_all_balance_changes_by_account_id(conn, account_id).await?;
+        let balance_changes = db::get_all_balance_changes_by_account_id(conn, account_id)?;
 
         if balance_changes.is_empty() {
             return Ok(Vec::new());

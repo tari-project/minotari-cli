@@ -13,9 +13,10 @@ pub use database::DatabaseResolver;
 pub use in_memory::InMemoryResolver;
 
 mod context {
-    use sqlx::SqlitePool;
-
-    use crate::scan::{DetectedOutput, SpentInput};
+    use crate::{
+        db::SqlitePool,
+        scan::{DetectedOutput, SpentInput},
+    };
 
     pub enum ProcessingContext<'a> {
         Database(&'a SqlitePool),

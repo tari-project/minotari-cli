@@ -1,198 +1,216 @@
-use chrono::Utc;
-use sqlx::{Error as SqlxError, SqliteConnection};
+use crate::db::error::{WalletDbError, WalletDbResult};
+use rusqlite::{Connection, OptionalExtension, named_params};
+use serde::Deserialize;
+use serde_rusqlite::from_rows;
 
 use crate::models::Id;
 use crate::transactions::{DisplayedTransaction, TransactionDisplayStatus};
+use crate::utils::{current_db_timestamp, format_timestamp};
 
-pub async fn insert_displayed_transaction(
-    conn: &mut SqliteConnection,
-    transaction: &DisplayedTransaction,
-) -> Result<(), SqlxError> {
+#[derive(Deserialize)]
+struct TransactionJsonRow {
+    transaction_json: String,
+}
+
+#[derive(Deserialize)]
+struct TransactionIdJsonRow {
+    id: String,
+    transaction_json: String,
+}
+
+fn serialize_tx(tx: &DisplayedTransaction) -> WalletDbResult<String> {
+    serde_json::to_string(tx).map_err(WalletDbError::SerdeJson)
+}
+
+fn process_json_rows(
+    mut rows: impl Iterator<Item = Result<TransactionJsonRow, serde_rusqlite::Error>>,
+) -> WalletDbResult<Vec<DisplayedTransaction>> {
+    rows.try_fold(Vec::new(), |mut acc, row| {
+        let json = row?.transaction_json;
+        if let Ok(tx) = serde_json::from_str(&json) {
+            acc.push(tx);
+        }
+        Ok::<_, serde_rusqlite::Error>(acc)
+    })
+    .map_err(WalletDbError::from)
+}
+
+pub fn insert_displayed_transaction(conn: &Connection, transaction: &DisplayedTransaction) -> WalletDbResult<()> {
     let direction = format!("{:?}", transaction.direction).to_lowercase();
     let source = format!("{:?}", transaction.source).to_lowercase();
     let status = format!("{:?}", transaction.status).to_lowercase();
-    let timestamp = transaction.blockchain.timestamp.format("%Y-%m-%d %H:%M:%S").to_string();
-    let transaction_json = serde_json::to_string(transaction).map_err(|e| SqlxError::Encode(Box::new(e)))?;
-    let now = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
-    let amount = transaction.amount as i64;
-    let block_height = transaction.blockchain.block_height as i64;
+    let timestamp = format_timestamp(transaction.blockchain.timestamp);
 
-    sqlx::query!(
+    let transaction_json = serialize_tx(transaction)?;
+    let now = current_db_timestamp();
+
+    conn.execute(
         r#"
-        INSERT INTO displayed_transactions (id, account_id, direction, source, status, amount, block_height, timestamp, transaction_json, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO displayed_transactions (
+            id, account_id, direction, source, status, amount, block_height,
+            timestamp, transaction_json, created_at, updated_at
+        )
+        VALUES (
+            :id, :account_id, :direction, :source, :status, :amount, :block_height,
+            :timestamp, :json, :created_at, :updated_at
+        )
         ON CONFLICT(id) DO UPDATE SET
             status = excluded.status,
             transaction_json = excluded.transaction_json,
             updated_at = excluded.updated_at
         "#,
-        transaction.id,
-        transaction.details.account_id,
-        direction,
-        source,
-        status,
-        amount,
-        block_height,
-        timestamp,
-        transaction_json,
-        now,
-        now
-    )
-    .execute(&mut *conn)
-    .await?;
+        named_params! {
+            ":id": transaction.id,
+            ":account_id": transaction.details.account_id,
+            ":direction": direction,
+            ":source": source,
+            ":status": status,
+            ":amount": transaction.amount as i64,
+            ":block_height": transaction.blockchain.block_height as i64,
+            ":timestamp": timestamp,
+            ":json": transaction_json,
+            ":created_at": now,
+            ":updated_at": now,
+        },
+    )?;
 
     Ok(())
 }
 
-pub async fn get_displayed_transactions_by_account(
-    conn: &mut SqliteConnection,
+pub fn get_displayed_transactions_by_account(
+    conn: &Connection,
     account_id: Id,
-) -> Result<Vec<DisplayedTransaction>, SqlxError> {
-    let rows = sqlx::query!(
+) -> WalletDbResult<Vec<DisplayedTransaction>> {
+    let mut stmt = conn.prepare_cached(
         r#"
         SELECT transaction_json
         FROM displayed_transactions
-        WHERE account_id = ?
+        WHERE account_id = :account_id
         ORDER BY block_height DESC, timestamp DESC
         "#,
-        account_id
-    )
-    .fetch_all(&mut *conn)
-    .await?;
+    )?;
 
-    let transactions: Vec<DisplayedTransaction> = rows
-        .into_iter()
-        .filter_map(|row| serde_json::from_str(&row.transaction_json).ok())
-        .collect();
-
-    Ok(transactions)
+    let rows = stmt.query(named_params! { ":account_id": account_id })?;
+    process_json_rows(from_rows::<TransactionJsonRow>(rows))
 }
 
-pub async fn get_displayed_transactions_by_status(
-    conn: &mut SqliteConnection,
+pub fn get_displayed_transactions_by_status(
+    conn: &Connection,
     account_id: Id,
     status: TransactionDisplayStatus,
-) -> Result<Vec<DisplayedTransaction>, SqlxError> {
+) -> WalletDbResult<Vec<DisplayedTransaction>> {
     let status_str = format!("{:?}", status).to_lowercase();
 
-    let rows = sqlx::query!(
+    let mut stmt = conn.prepare_cached(
         r#"
         SELECT transaction_json
         FROM displayed_transactions
-        WHERE account_id = ? AND status = ?
+        WHERE account_id = :account_id AND status = :status
         ORDER BY block_height DESC, timestamp DESC
         "#,
-        account_id,
-        status_str
-    )
-    .fetch_all(&mut *conn)
-    .await?;
+    )?;
 
-    let transactions: Vec<DisplayedTransaction> = rows
-        .into_iter()
-        .filter_map(|row| serde_json::from_str(&row.transaction_json).ok())
-        .collect();
+    let rows = stmt.query(named_params! {
+        ":account_id": account_id,
+        ":status": status_str
+    })?;
 
-    Ok(transactions)
+    process_json_rows(from_rows::<TransactionJsonRow>(rows))
 }
 
-pub async fn get_displayed_transactions_from_height(
-    conn: &mut SqliteConnection,
+pub fn get_displayed_transactions_from_height(
+    conn: &Connection,
     account_id: Id,
     from_height: u64,
-) -> Result<Vec<DisplayedTransaction>, SqlxError> {
-    let height = from_height as i64;
-
-    let rows = sqlx::query!(
+) -> WalletDbResult<Vec<DisplayedTransaction>> {
+    let mut stmt = conn.prepare_cached(
         r#"
         SELECT transaction_json
         FROM displayed_transactions
-        WHERE account_id = ? AND block_height >= ?
+        WHERE account_id = :account_id AND block_height >= :height
         ORDER BY block_height DESC, timestamp DESC
         "#,
-        account_id,
-        height
-    )
-    .fetch_all(&mut *conn)
-    .await?;
+    )?;
 
-    let transactions: Vec<DisplayedTransaction> = rows
-        .into_iter()
-        .filter_map(|row| serde_json::from_str(&row.transaction_json).ok())
-        .collect();
+    let rows = stmt.query(named_params! {
+        ":account_id": account_id,
+        ":height": from_height as i64
+    })?;
 
-    Ok(transactions)
+    process_json_rows(from_rows::<TransactionJsonRow>(rows))
 }
 
-pub async fn update_displayed_transaction_status(
-    conn: &mut SqliteConnection,
+pub fn update_displayed_transaction_status(
+    conn: &Connection,
     id: &str,
     new_status: TransactionDisplayStatus,
     updated_transaction: &DisplayedTransaction,
-) -> Result<bool, SqlxError> {
+) -> WalletDbResult<bool> {
     let status_str = format!("{:?}", new_status).to_lowercase();
-    let transaction_json = serde_json::to_string(updated_transaction).map_err(|e| SqlxError::Encode(Box::new(e)))?;
-    let now = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let transaction_json = serialize_tx(updated_transaction)?;
 
-    let result = sqlx::query!(
+    let rows_affected = conn.execute(
         r#"
         UPDATE displayed_transactions
-        SET status = ?, transaction_json = ?, updated_at = ?
-        WHERE id = ?
+        SET status = :status, transaction_json = :json, updated_at = :now
+        WHERE id = :id
         "#,
-        status_str,
-        transaction_json,
-        now,
-        id
-    )
-    .execute(&mut *conn)
-    .await?;
+        named_params! {
+            ":status": status_str,
+            ":json": transaction_json,
+            ":now": current_db_timestamp(),
+            ":id": id
+        },
+    )?;
 
-    Ok(result.rows_affected() > 0)
+    Ok(rows_affected > 0)
 }
 
-pub async fn mark_displayed_transactions_reorganized(
-    conn: &mut SqliteConnection,
+pub fn mark_displayed_transactions_reorganized(
+    conn: &Connection,
     account_id: Id,
     from_height: u64,
-) -> Result<u64, SqlxError> {
-    let height = from_height as i64;
+) -> WalletDbResult<u64> {
     let status_str = format!("{:?}", TransactionDisplayStatus::Reorganized).to_lowercase();
-    let now = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let now = current_db_timestamp();
 
-    // First get all affected transactions
-    let rows = sqlx::query!(
-        r#"
-        SELECT id, transaction_json
-        FROM displayed_transactions
-        WHERE account_id = ? AND block_height >= ?
-        "#,
-        account_id,
-        height
-    )
-    .fetch_all(&mut *conn)
-    .await?;
+    let rows_to_update = {
+        let mut stmt = conn.prepare_cached(
+            r#"
+            SELECT id, transaction_json
+            FROM displayed_transactions
+            WHERE account_id = :account_id AND block_height >= :height
+            "#,
+        )?;
+
+        let rows = stmt.query(named_params! {
+            ":account_id": account_id,
+            ":height": from_height as i64
+        })?;
+
+        from_rows::<TransactionIdJsonRow>(rows).collect::<Result<Vec<_>, _>>()?
+    };
 
     let mut updated_count = 0u64;
 
-    for row in rows {
+    for row in rows_to_update {
         if let Ok(mut tx) = serde_json::from_str::<DisplayedTransaction>(&row.transaction_json) {
             tx.status = TransactionDisplayStatus::Reorganized;
-            let updated_json = serde_json::to_string(&tx).map_err(|e| SqlxError::Encode(Box::new(e)))?;
+            let updated_json = serialize_tx(&tx)?;
 
-            sqlx::query!(
+            conn.execute(
                 r#"
                 UPDATE displayed_transactions
-                SET status = ?, transaction_json = ?, updated_at = ?
-                WHERE id = ?
+                SET status = :status, transaction_json = :json, updated_at = :now
+                WHERE id = :id
                 "#,
-                status_str,
-                updated_json,
-                now,
-                row.id
-            )
-            .execute(&mut *conn)
-            .await?;
+                named_params! {
+                    ":status": status_str,
+                    ":json": updated_json,
+                    ":now": now,
+                    ":id": row.id
+                },
+            )?;
 
             updated_count += 1;
         }
@@ -201,297 +219,267 @@ pub async fn mark_displayed_transactions_reorganized(
     Ok(updated_count)
 }
 
-pub async fn get_displayed_transaction_by_id(
-    conn: &mut SqliteConnection,
-    id: &str,
-) -> Result<Option<DisplayedTransaction>, SqlxError> {
-    let row = sqlx::query!(
+pub fn get_displayed_transaction_by_id(conn: &Connection, id: &str) -> WalletDbResult<Option<DisplayedTransaction>> {
+    let mut stmt = conn.prepare_cached(
         r#"
         SELECT transaction_json
         FROM displayed_transactions
-        WHERE id = ?
+        WHERE id = :id
         "#,
-        id
-    )
-    .fetch_optional(&mut *conn)
-    .await?;
+    )?;
 
-    Ok(row.and_then(|r| serde_json::from_str(&r.transaction_json).ok()))
+    let row: Option<String> = stmt.query_row(named_params! { ":id": id }, |r| r.get(0)).optional()?;
+
+    Ok(row.and_then(|json| serde_json::from_str(&json).ok()))
 }
 
 /// Find an existing pending outbound transaction that matches the given output hash.
 /// Used by BlockProcessor to detect if a scanned transaction already has a pending record.
-pub async fn find_pending_outbound_by_output_hash(
-    conn: &mut SqliteConnection,
+pub fn find_pending_outbound_by_output_hash(
+    conn: &Connection,
     account_id: Id,
     output_hash: &str,
-) -> Result<Option<DisplayedTransaction>, SqlxError> {
+) -> WalletDbResult<Option<DisplayedTransaction>> {
     let pending_status = format!("{:?}", TransactionDisplayStatus::Pending).to_lowercase();
     let outgoing_direction = "outgoing";
 
-    let rows = sqlx::query!(
+    let mut stmt = conn.prepare_cached(
         r#"
         SELECT transaction_json
         FROM displayed_transactions
-        WHERE account_id = ? AND status = ? AND direction = ?
+        WHERE account_id = :account_id AND status = :status AND direction = :direction
         "#,
-        account_id,
-        pending_status,
-        outgoing_direction
-    )
-    .fetch_all(&mut *conn)
-    .await?;
+    )?;
 
-    for row in rows {
-        if let Ok(tx) = serde_json::from_str::<DisplayedTransaction>(&row.transaction_json) {
-            // Check if any of the sent_output_hashes match
-            if tx.details.sent_output_hashes.contains(&output_hash.to_string()) {
-                return Ok(Some(tx));
-            }
-            // Also check inputs (spent UTXOs)
-            if tx.details.inputs.iter().any(|input| input.output_hash == output_hash) {
-                return Ok(Some(tx));
-            }
-        }
-    }
+    let rows = stmt.query(named_params! {
+        ":account_id": account_id,
+        ":status": pending_status,
+        ":direction": outgoing_direction
+    })?;
 
-    Ok(None)
+    let found = from_rows::<TransactionJsonRow>(rows)
+        .filter_map(|res| res.ok())
+        .filter_map(|r| serde_json::from_str::<DisplayedTransaction>(&r.transaction_json).ok())
+        .find(|tx| {
+            tx.details.sent_output_hashes.contains(&output_hash.to_string())
+                || tx.details.inputs.iter().any(|input| input.output_hash == output_hash)
+        });
+
+    Ok(found)
 }
 
 /// Update an existing displayed transaction with blockchain info when it's mined.
-pub async fn update_displayed_transaction_mined(
-    conn: &mut SqliteConnection,
-    tx: &DisplayedTransaction,
-) -> Result<bool, SqlxError> {
+pub fn update_displayed_transaction_mined(conn: &Connection, tx: &DisplayedTransaction) -> WalletDbResult<bool> {
     let status_str = format!("{:?}", tx.status).to_lowercase();
-    let transaction_json = serde_json::to_string(tx).map_err(|e| SqlxError::Encode(Box::new(e)))?;
-    let now = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
-    let block_height = tx.blockchain.block_height as i64;
+    let transaction_json = serialize_tx(tx)?;
 
-    let result = sqlx::query!(
+    let rows_affected = conn.execute(
         r#"
         UPDATE displayed_transactions
-        SET status = ?, block_height = ?, transaction_json = ?, updated_at = ?
-        WHERE id = ?
+        SET status = :status, block_height = :height, transaction_json = :json, updated_at = :now
+        WHERE id = :id
         "#,
-        status_str,
-        block_height,
-        transaction_json,
-        now,
-        tx.id
-    )
-    .execute(&mut *conn)
-    .await?;
+        named_params! {
+            ":status": status_str,
+            ":height": tx.blockchain.block_height as i64,
+            ":json": transaction_json,
+            ":now": current_db_timestamp(),
+            ":id": tx.id
+        },
+    )?;
 
-    Ok(result.rows_affected() > 0)
+    Ok(rows_affected > 0)
 }
 
-pub async fn get_displayed_transactions_paginated(
-    conn: &mut SqliteConnection,
+pub fn get_displayed_transactions_paginated(
+    conn: &Connection,
     account_id: Id,
     limit: i64,
     offset: i64,
-) -> Result<Vec<DisplayedTransaction>, SqlxError> {
-    let rows = sqlx::query!(
+) -> WalletDbResult<Vec<DisplayedTransaction>> {
+    let mut stmt = conn.prepare_cached(
         r#"
         SELECT transaction_json
         FROM displayed_transactions
-        WHERE account_id = ?
+        WHERE account_id = :account_id
         ORDER BY block_height DESC, timestamp DESC
-        LIMIT ? OFFSET ?
+        LIMIT :limit OFFSET :offset
         "#,
-        account_id,
-        limit,
-        offset
-    )
-    .fetch_all(&mut *conn)
-    .await?;
+    )?;
 
-    let transactions: Vec<DisplayedTransaction> = rows
-        .into_iter()
-        .filter_map(|row| serde_json::from_str(&row.transaction_json).ok())
-        .collect();
+    let rows = stmt.query(named_params! {
+        ":account_id": account_id,
+        ":limit": limit,
+        ":offset": offset
+    })?;
 
-    Ok(transactions)
+    process_json_rows(from_rows::<TransactionJsonRow>(rows))
 }
 
 /// Returns transactions where current_tip_height - block_height < required_confirmations.
-pub async fn get_displayed_transactions_needing_confirmation_update(
-    conn: &mut SqliteConnection,
+pub fn get_displayed_transactions_needing_confirmation_update(
+    conn: &Connection,
     account_id: Id,
     current_tip_height: u64,
     required_confirmations: u64,
-) -> Result<Vec<DisplayedTransaction>, SqlxError> {
+) -> WalletDbResult<Vec<DisplayedTransaction>> {
     let min_height = current_tip_height.saturating_sub(required_confirmations) as i64;
     let pending_status = format!("{:?}", TransactionDisplayStatus::Pending).to_lowercase();
     let unconfirmed_status = format!("{:?}", TransactionDisplayStatus::Unconfirmed).to_lowercase();
 
-    let rows = sqlx::query!(
+    let mut stmt = conn.prepare_cached(
         r#"
         SELECT transaction_json
         FROM displayed_transactions
-        WHERE account_id = ? 
-          AND block_height > ?
-          AND status IN (?, ?)
+        WHERE account_id = :account_id
+          AND block_height > :min_height
+          AND status IN (:s1, :s2)
         ORDER BY block_height DESC
         "#,
-        account_id,
-        min_height,
-        pending_status,
-        unconfirmed_status
-    )
-    .fetch_all(&mut *conn)
-    .await?;
+    )?;
 
-    let transactions: Vec<DisplayedTransaction> = rows
-        .into_iter()
-        .filter_map(|row| serde_json::from_str(&row.transaction_json).ok())
-        .collect();
+    let rows = stmt.query(named_params! {
+        ":account_id": account_id,
+        ":min_height": min_height,
+        ":s1": pending_status,
+        ":s2": unconfirmed_status
+    })?;
 
-    Ok(transactions)
+    process_json_rows(from_rows::<TransactionJsonRow>(rows))
 }
 
-pub async fn update_displayed_transaction_confirmations(
-    conn: &mut SqliteConnection,
+pub fn update_displayed_transaction_confirmations(
+    conn: &Connection,
     transaction: &DisplayedTransaction,
-) -> Result<bool, SqlxError> {
+) -> WalletDbResult<bool> {
     let status_str = format!("{:?}", transaction.status).to_lowercase();
-    let transaction_json = serde_json::to_string(transaction).map_err(|e| SqlxError::Encode(Box::new(e)))?;
-    let now = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let transaction_json = serialize_tx(transaction)?;
 
-    let result = sqlx::query!(
+    let rows_affected = conn.execute(
         r#"
         UPDATE displayed_transactions
-        SET status = ?, transaction_json = ?, updated_at = ?
-        WHERE id = ?
+        SET status = :status, transaction_json = :json, updated_at = :now
+        WHERE id = :id
         "#,
-        status_str,
-        transaction_json,
-        now,
-        transaction.id
-    )
-    .execute(&mut *conn)
-    .await?;
+        named_params! {
+            ":status": status_str,
+            ":json": transaction_json,
+            ":now": current_db_timestamp(),
+            ":id": transaction.id
+        },
+    )?;
 
-    Ok(result.rows_affected() > 0)
+    Ok(rows_affected > 0)
 }
 
-pub async fn mark_displayed_transaction_rejected(
-    conn: &mut SqliteConnection,
+pub fn mark_displayed_transaction_rejected(
+    conn: &Connection,
     tx_id: &str,
-) -> Result<Option<DisplayedTransaction>, SqlxError> {
+) -> WalletDbResult<Option<DisplayedTransaction>> {
     let status_str = format!("{:?}", TransactionDisplayStatus::Rejected).to_lowercase();
-    let now = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let now = current_db_timestamp();
 
-    // First get the transaction
-    let row = sqlx::query!(
-        r#"
-        SELECT transaction_json
-        FROM displayed_transactions
-        WHERE id = ?
-        "#,
-        tx_id
-    )
-    .fetch_optional(&mut *conn)
-    .await?;
+    let mut stmt = conn.prepare_cached("SELECT transaction_json FROM displayed_transactions WHERE id = :id")?;
 
-    let Some(row) = row else {
+    let json_row: Option<String> = stmt
+        .query_row(named_params! { ":id": tx_id }, |r| r.get(0))
+        .optional()?;
+
+    let Some(json) = json_row else {
         return Ok(None);
     };
 
-    let mut tx: DisplayedTransaction =
-        serde_json::from_str(&row.transaction_json).map_err(|e| SqlxError::Decode(Box::new(e)))?;
+    let mut tx: DisplayedTransaction = serde_json::from_str(&json)?;
 
     tx.status = TransactionDisplayStatus::Rejected;
-    let updated_json = serde_json::to_string(&tx).map_err(|e| SqlxError::Encode(Box::new(e)))?;
+    let updated_json = serialize_tx(&tx)?;
 
-    sqlx::query!(
+    conn.execute(
         r#"
         UPDATE displayed_transactions
-        SET status = ?, transaction_json = ?, updated_at = ?
-        WHERE id = ?
+        SET status = :status, transaction_json = :json, updated_at = :now
+        WHERE id = :id
         "#,
-        status_str,
-        updated_json,
-        now,
-        tx_id
-    )
-    .execute(&mut *conn)
-    .await?;
+        named_params! {
+            ":status": status_str,
+            ":json": updated_json,
+            ":now": now,
+            ":id": tx_id
+        },
+    )?;
 
     Ok(Some(tx))
 }
 
-pub async fn get_displayed_transactions_excluding_reorged(
-    conn: &mut SqliteConnection,
+pub fn get_displayed_transactions_excluding_reorged(
+    conn: &Connection,
     account_id: Id,
-) -> Result<Vec<DisplayedTransaction>, SqlxError> {
+) -> WalletDbResult<Vec<DisplayedTransaction>> {
     let reorged_status = format!("{:?}", TransactionDisplayStatus::Reorganized).to_lowercase();
 
-    let rows = sqlx::query!(
+    let mut stmt = conn.prepare_cached(
         r#"
         SELECT transaction_json
         FROM displayed_transactions
-        WHERE account_id = ? AND status != ?
+        WHERE account_id = :account_id AND status != :reorged
         ORDER BY block_height DESC, timestamp DESC
         "#,
-        account_id,
-        reorged_status
-    )
-    .fetch_all(&mut *conn)
-    .await?;
+    )?;
 
-    let transactions: Vec<DisplayedTransaction> = rows
-        .into_iter()
-        .filter_map(|row| serde_json::from_str(&row.transaction_json).ok())
-        .collect();
+    let rows = stmt.query(named_params! {
+        ":account_id": account_id,
+        ":reorged": reorged_status
+    })?;
 
-    Ok(transactions)
+    process_json_rows(from_rows::<TransactionJsonRow>(rows))
 }
 
-pub async fn mark_displayed_transactions_reorganized_and_return(
-    conn: &mut SqliteConnection,
+pub fn mark_displayed_transactions_reorganized_and_return(
+    conn: &Connection,
     account_id: Id,
     from_height: u64,
-) -> Result<Vec<DisplayedTransaction>, SqlxError> {
-    let height = from_height as i64;
+) -> WalletDbResult<Vec<DisplayedTransaction>> {
     let status_str = format!("{:?}", TransactionDisplayStatus::Reorganized).to_lowercase();
-    let now = Utc::now().format("%Y-%m-%d %H:%M:%S").to_string();
+    let now = current_db_timestamp();
 
-    // First get all affected transactions
-    let rows = sqlx::query!(
-        r#"
-        SELECT id, transaction_json
-        FROM displayed_transactions
-        WHERE account_id = ? AND block_height >= ? AND status != ?
-        "#,
-        account_id,
-        height,
-        status_str
-    )
-    .fetch_all(&mut *conn)
-    .await?;
+    let rows_to_update = {
+        let mut stmt = conn.prepare_cached(
+            r#"
+            SELECT id, transaction_json
+            FROM displayed_transactions
+            WHERE account_id = :account_id AND block_height >= :height AND status != :status
+            "#,
+        )?;
 
-    let mut updated_transactions = Vec::new();
+        let rows = stmt.query(named_params! {
+            ":account_id": account_id,
+            ":height": from_height as i64,
+            ":status": status_str
+        })?;
 
-    for row in rows {
+        from_rows::<TransactionIdJsonRow>(rows).collect::<Result<Vec<_>, _>>()?
+    };
+
+    let mut updated_transactions = Vec::with_capacity(rows_to_update.len());
+
+    for row in rows_to_update {
         if let Ok(mut tx) = serde_json::from_str::<DisplayedTransaction>(&row.transaction_json) {
             tx.status = TransactionDisplayStatus::Reorganized;
-            let updated_json = serde_json::to_string(&tx).map_err(|e| SqlxError::Encode(Box::new(e)))?;
+            let updated_json = serialize_tx(&tx)?;
 
-            sqlx::query!(
+            conn.execute(
                 r#"
                 UPDATE displayed_transactions
-                SET status = ?, transaction_json = ?, updated_at = ?
-                WHERE id = ?
+                SET status = :status, transaction_json = :json, updated_at = :now
+                WHERE id = :id
                 "#,
-                status_str,
-                updated_json,
-                now,
-                row.id
-            )
-            .execute(&mut *conn)
-            .await?;
+                named_params! {
+                    ":status": status_str,
+                    ":json": updated_json,
+                    ":now": now,
+                    ":id": row.id
+                },
+            )?;
 
             updated_transactions.push(tx);
         }

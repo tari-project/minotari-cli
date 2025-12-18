@@ -44,6 +44,8 @@ use serde_json::json;
 use thiserror::Error;
 use utoipa::ToSchema;
 
+use crate::db::WalletDbError;
+
 /// Represents all possible errors returned by the REST API.
 ///
 /// Each variant corresponds to a specific error condition that can occur
@@ -133,23 +135,26 @@ pub enum ApiError {
     /// - Cryptographic operation failure
     #[error("Failed to create an unsigned transaction: {0}")]
     FailedCreateUnsignedTx(String),
+
+    /// A generic error, which does not fit anywhere else
+    #[error("Other error")]
+    OtherError(String),
 }
 
-/// Converts SQLx database errors into API errors.
+/// Converts database errors into API errors.
 ///
 /// All database errors are wrapped as [`ApiError::DbError`] with the
 /// original error message preserved for debugging purposes.
-///
-/// # Example
-///
-/// ```rust,ignore
-/// let result = sqlx::query("SELECT * FROM accounts")
-///     .fetch_one(&pool)
-///     .await?; // sqlx::Error automatically converts to ApiError
-/// ```
-impl From<sqlx::Error> for ApiError {
-    fn from(err: sqlx::Error) -> Self {
+impl From<WalletDbError> for ApiError {
+    fn from(err: WalletDbError) -> Self {
         ApiError::DbError(err.to_string())
+    }
+}
+
+/// Converts anyhow error into [`ApiError::OtherError`]
+impl From<anyhow::Error> for ApiError {
+    fn from(err: anyhow::Error) -> Self {
+        ApiError::OtherError(err.to_string())
     }
 }
 
@@ -202,6 +207,7 @@ impl IntoResponse for ApiError {
             ApiError::AccountNotFound(name) => (StatusCode::NOT_FOUND, format!("Account '{}' not found", name)),
             ApiError::FailedToLockFunds(e) => (StatusCode::INTERNAL_SERVER_ERROR, e),
             ApiError::FailedCreateUnsignedTx(e) => (StatusCode::INTERNAL_SERVER_ERROR, e),
+            ApiError::OtherError(e) => (StatusCode::INTERNAL_SERVER_ERROR, e),
         };
 
         let body = Json(json!({
