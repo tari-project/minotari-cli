@@ -163,7 +163,7 @@ enum Commands {
         /// Password to encrypt the wallet file (optional but recommended).
         /// If provided, will be padded or truncated to 32 bytes.
         #[arg(short, long, help = "Password to encrypt the wallet file")]
-        password: Option<String>,
+        password: Option<Zeroizing<String>>,
         /// Path to write the wallet credentials JSON file.
         #[arg(short, long, help = "Path to the output file", default_value = "data/output.json")]
         output_file: String,
@@ -188,7 +188,7 @@ enum Commands {
     Scan {
         /// Password to decrypt the wallet view key from the database.
         #[arg(short, long, help = "Password to decrypt the wallet file")]
-        password: String,
+        password: Zeroizing<String>,
         /// Base URL of the Tari HTTP RPC API endpoint.
         #[arg(
             short = 'u',
@@ -230,7 +230,7 @@ enum Commands {
     ReScan {
         /// Password to decrypt the wallet view key.
         #[arg(short, long, help = "Password to decrypt the wallet file")]
-        password: String,
+        password: Zeroizing<String>,
         /// Base URL of the Tari HTTP RPC API endpoint.
         #[arg(
             short = 'u',
@@ -352,7 +352,7 @@ enum Commands {
         spend_public_key: String,
         /// Password to encrypt the stored credentials.
         #[arg(short, long, help = "Password to encrypt the wallet file")]
-        password: String,
+        password: Zeroizing<String>,
         /// Path to the SQLite database file.
         #[arg(short, long, help = "Path to the database file", default_value = "data/wallet.db")]
         database_file: String,
@@ -513,11 +513,14 @@ async fn main() -> Result<(), anyhow::Error> {
             println!("New address: {}", tari_address);
 
             let wallet_data = if let Some(password) = password {
-                let password = zeroize::Zeroizing::new(if password.len() < 32 {
-                    format!("{:0<32}", password)
+                let password = if password.len() < 32 {
+                    Zeroizing::new(format!("{:0<32}", password.as_str()))
                 } else {
-                    password[..32].to_string()
-                });
+                    if password.len() > 32 {
+                        return Err(anyhow::anyhow!("Password longer than 32 bytes will be truncated."));
+                    }
+                    Zeroizing::new(password[..].to_string())
+                };
                 let key_bytes: [u8; 32] = password
                     .as_bytes()
                     .try_into()
@@ -877,7 +880,7 @@ async fn rescan(
 async fn init_with_view_key(
     view_private_key: &str,
     spend_public_key: &str,
-    password: &str,
+    password: &Zeroizing<String>,
     database_file: &str,
     birthday: u16,
 ) -> Result<(), anyhow::Error> {
