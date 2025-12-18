@@ -343,6 +343,19 @@
                 "description": "Failed to create an unsigned transaction.\n\nThis occurs during transaction construction after funds have been\nlocked. Returns HTTP 500 Internal Server Error.\n\n# Common Causes\n\n- Invalid recipient address format\n- Transaction size exceeds limits\n- Cryptographic operation failure"
               }
             }
+          },
+          {
+            "type": "object",
+            "description": "A generic error, which does not fit anywhere else",
+            "required": [
+              "OtherError"
+            ],
+            "properties": {
+              "OtherError": {
+                "type": "string",
+                "description": "A generic error, which does not fit anywhere else"
+              }
+            }
           }
         ],
         "description": "Represents all possible errors returned by the REST API.\n\nEach variant corresponds to a specific error condition that can occur\nduring API request processing. The error type automatically converts\nto an appropriate HTTP response with a JSON error body.\n\n# Error Handling Pattern\n\nAPI handlers typically use the `?` operator with this error type:\n\n```rust,ignore\npub async fn handler() -> Result<Json<Data>, ApiError> {\n    let data = fetch_data().await?; // Errors automatically convert to ApiError\n    Ok(Json(data))\n}\n```\n\n# Serialization\n\nWhen serialized to JSON for API responses, errors produce:\n\n```json\n{\n  \"error\": \"Error message here\"\n}\n```"
