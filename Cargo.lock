@@ -1797,7 +1797,6 @@ name = "minotari"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "async-trait",
  "axum",
  "blake2",
  "chacha20poly1305",

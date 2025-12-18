@@ -10,7 +10,6 @@ path = "src/bin/generate_openapi.rs"
 
 [dependencies]
 anyhow = "1.0.99"
-async-trait = "0.1.89"
 axum = { version = "0.8.6", features = ["default", "http2", "macros"] }
 blake2 = "0.10.6"
 chacha20poly1305 = { version = "0.10.1", features = ["rand_core", "std"] }
