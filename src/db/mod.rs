@@ -170,11 +170,13 @@ pub fn init_db(db_path: &str) -> WalletDbResult<SqlitePool> {
     match connect_and_migrate(&path) {
         Ok(pool) => Ok(pool),
         Err(e) => {
-            eprintln!("Database migration failed: {}. Resetting database...", e);
-            if path.exists() {
-                fs::remove_file(&path).map_err(WalletDbError::Io)?;
-            }
-            connect_and_migrate(&path)
+            eprintln!(
+                "Database migration failed: {}. Please, remove database {:?} manually",
+                e, &path
+            );
+            Err(WalletDbError::Unexpected(
+                "Migration from sqlx failed. Remove database file".to_string(),
+            ))
         },
     }
 }
