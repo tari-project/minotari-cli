@@ -329,10 +329,20 @@ pub async fn api_get_balance(
     State(app_state): State<AppState>,
     Path(WalletParams { name }): Path<WalletParams>,
 ) -> Result<Json<AccountBalance>, ApiError> {
-    let conn = app_state.db_pool.get().map_err(|e| ApiError::DbError(e.to_string()))?;
-    let account = get_account_by_name(&conn, &name)?.ok_or_else(|| ApiError::AccountNotFound(name.clone()))?;
+    let pool = app_state.db_pool.clone();
+    let name = name.clone();
 
-    let balance = get_balance(&conn, account.id)?;
+    let balance = tokio::task::spawn_blocking(move || {
+        let conn = pool.get().map_err(|e| ApiError::DbError(e.to_string()))?;
+
+        let account = get_account_by_name(&conn, &name)
+            .map_err(|e| ApiError::DbError(e.to_string()))?
+            .ok_or_else(|| ApiError::AccountNotFound(name.clone()))?;
+
+        get_balance(&conn, account.id).map_err(|e| ApiError::DbError(e.to_string()))
+    })
+    .await
+    .map_err(|e| ApiError::InternalServerError(format!("Task join error: {}", e)))??;
 
     Ok(Json(balance))
 }
@@ -398,22 +408,34 @@ pub async fn api_lock_funds(
     Path(WalletParams { name }): Path<WalletParams>,
     Json(body): Json<LockFundsRequest>,
 ) -> Result<Json<LockFundsResult>, ApiError> {
-    let conn = app_state.db_pool.get().map_err(|e| ApiError::DbError(e.to_string()))?;
-    let account = get_account_by_name(&conn, &name)?.ok_or_else(|| ApiError::AccountNotFound(name.clone()))?;
+    let pool = app_state.db_pool.clone();
+    let name = name.clone();
 
-    let lock_amount = FundLocker::new(app_state.db_pool.clone());
-    let response = lock_amount
-        .lock(
-            account.id,
-            body.amount,
-            body.num_outputs.expect("must be defaulted"),
-            body.fee_per_gram.expect("must be defaulted"),
-            body.estimated_output_size,
-            body.idempotency_key,
-            body.seconds_to_lock_utxos.expect("must be defaulted"),
-            body.confirmation_window.expect("must be defaulted"),
-        )
-        .map_err(|e| ApiError::FailedToLockFunds(e.to_string()))?;
+    let response = tokio::task::spawn_blocking(move || {
+        let conn = pool.get().map_err(|e| ApiError::DbError(e.to_string()))?;
+
+        let account = get_account_by_name(&conn, &name)
+            .map_err(|e| ApiError::DbError(e.to_string()))?
+            .ok_or_else(|| ApiError::AccountNotFound(name.clone()))?;
+
+        let lock_amount = FundLocker::new(pool);
+
+        lock_amount
+            .lock(
+                account.id,
+                body.amount,
+                body.num_outputs.expect("must be defaulted"),
+                body.fee_per_gram.expect("must be defaulted"),
+                body.estimated_output_size,
+                body.idempotency_key,
+                body.seconds_to_lock_utxos.expect("must be defaulted"),
+                body.confirmation_window.expect("must be defaulted"),
+            )
+            .map_err(|e| ApiError::FailedToLockFunds(e.to_string()))
+    })
+    .await
+    .map_err(|e| ApiError::InternalServerError(format!("Task join error: {}", e)))??;
+
     Ok(Json(response))
 }
 
@@ -491,44 +513,55 @@ pub async fn api_create_unsigned_transaction(
     Path(WalletParams { name }): Path<WalletParams>,
     Json(body): Json<CreateTransactionRequest>,
 ) -> Result<Json<JsonValue>, ApiError> {
+    let pool = app_state.db_pool.clone();
+    let name = name.clone();
+    let network = app_state.network;
+    let password = app_state.password.clone();
+
     let recipients: Vec<Recipient> = body
         .recipients
-        .into_iter()
+        .iter()
         .map(|r| Recipient {
-            address: r.address.0,
+            address: r.address.0.clone(),
             amount: r.amount,
-            payment_id: r.payment_id,
+            payment_id: r.payment_id.clone(),
         })
         .collect();
 
-    let conn = app_state.db_pool.get().map_err(|e| ApiError::DbError(e.to_string()))?;
-    let account = get_account_by_name(&conn, &name)?.ok_or_else(|| ApiError::AccountNotFound(name.clone()))?;
+    let result = tokio::task::spawn_blocking(move || {
+        let conn = pool.get().map_err(|e| ApiError::DbError(e.to_string()))?;
 
-    let amount = recipients.iter().map(|r| r.amount).sum();
-    let num_outputs = recipients.len();
-    let fee_per_gram = MicroMinotari(5);
-    let estimated_output_size = None;
-    let seconds_to_lock_utxos = body.seconds_to_lock_utxos.unwrap_or(86400); // 24 hours
+        let account = get_account_by_name(&conn, &name)
+            .map_err(|e| ApiError::DbError(e.to_string()))?
+            .ok_or_else(|| ApiError::AccountNotFound(name.clone()))?;
 
-    let lock_amount = FundLocker::new(app_state.db_pool.clone());
-    let locked_funds = lock_amount
-        .lock(
-            account.id,
-            amount,
-            num_outputs,
-            fee_per_gram,
-            estimated_output_size,
-            body.idempotency_key,
-            seconds_to_lock_utxos,
-            body.confirmation_window.expect("must be defaulted"),
-        )
-        .map_err(|e| ApiError::FailedToLockFunds(e.to_string()))?;
+        let amount = recipients.iter().map(|r| r.amount).sum();
+        let num_outputs = recipients.len();
+        let fee_per_gram = MicroMinotari(5);
+        let estimated_output_size = None;
+        let seconds_to_lock_utxos = body.seconds_to_lock_utxos.unwrap_or(86400); // 24 hours
 
-    let one_sided_tx =
-        OneSidedTransaction::new(app_state.db_pool.clone(), app_state.network, app_state.password.clone());
-    let result = one_sided_tx
-        .create_unsigned_transaction(&account, locked_funds, recipients, fee_per_gram)
-        .map_err(|e| ApiError::FailedCreateUnsignedTx(e.to_string()))?;
+        let lock_amount = FundLocker::new(pool.clone());
+        let locked_funds = lock_amount
+            .lock(
+                account.id,
+                amount,
+                num_outputs,
+                fee_per_gram,
+                estimated_output_size,
+                body.idempotency_key,
+                seconds_to_lock_utxos,
+                body.confirmation_window.expect("must be defaulted"),
+            )
+            .map_err(|e| ApiError::FailedToLockFunds(e.to_string()))?;
+
+        let one_sided_tx = OneSidedTransaction::new(pool, network, password);
+        one_sided_tx
+            .create_unsigned_transaction(&account, locked_funds, recipients, fee_per_gram)
+            .map_err(|e| ApiError::FailedCreateUnsignedTx(e.to_string()))
+    })
+    .await
+    .map_err(|e| ApiError::InternalServerError(format!("Task join error: {}", e)))??;
 
     Ok(Json(serde_json::to_value(result)?))
 }

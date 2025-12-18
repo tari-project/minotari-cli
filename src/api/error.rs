@@ -135,10 +135,6 @@ pub enum ApiError {
     /// - Cryptographic operation failure
     #[error("Failed to create an unsigned transaction: {0}")]
     FailedCreateUnsignedTx(String),
-
-    /// A generic error, which does not fit anywhere else
-    #[error("Other error")]
-    OtherError(String),
 }
 
 /// Converts database errors into API errors.
@@ -148,13 +144,6 @@ pub enum ApiError {
 impl From<WalletDbError> for ApiError {
     fn from(err: WalletDbError) -> Self {
         ApiError::DbError(err.to_string())
-    }
-}
-
-/// Converts anyhow error into [`ApiError::OtherError`]
-impl From<anyhow::Error> for ApiError {
-    fn from(err: anyhow::Error) -> Self {
-        ApiError::OtherError(err.to_string())
     }
 }
 
@@ -207,7 +196,6 @@ impl IntoResponse for ApiError {
             ApiError::AccountNotFound(name) => (StatusCode::NOT_FOUND, format!("Account '{}' not found", name)),
             ApiError::FailedToLockFunds(e) => (StatusCode::INTERNAL_SERVER_ERROR, e),
             ApiError::FailedCreateUnsignedTx(e) => (StatusCode::INTERNAL_SERVER_ERROR, e),
-            ApiError::OtherError(e) => (StatusCode::INTERNAL_SERVER_ERROR, e),
         };
 
         let body = Json(json!({
