@@ -571,7 +571,7 @@ async fn run_scan_loop<E: EventSender + Clone>(
                 event_sender.clone(),
                 has_pending_outbound,
             );
-            processor.process_block(&tx, scanned_block).await?;
+            processor.process_block(&tx, scanned_block)?;
 
             all_events.extend(processor.into_wallet_events());
 

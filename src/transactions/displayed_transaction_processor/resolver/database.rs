@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 
-use async_trait::async_trait;
 use rusqlite::{OptionalExtension, named_params};
 
 use super::{OutputDetails, TransactionDataResolver};
@@ -20,9 +19,8 @@ impl DatabaseResolver {
     }
 }
 
-#[async_trait]
 impl TransactionDataResolver for DatabaseResolver {
-    async fn get_output_details(&self, change: &BalanceChange) -> Result<Option<OutputDetails>, ProcessorError> {
+    fn get_output_details(&self, change: &BalanceChange) -> Result<Option<OutputDetails>, ProcessorError> {
         let Some(output_id) = change.caused_by_output_id else {
             return Ok(None);
         };
@@ -88,7 +86,7 @@ impl TransactionDataResolver for DatabaseResolver {
         }))
     }
 
-    async fn get_input_output_hash(&self, change: &BalanceChange) -> Result<Option<String>, ProcessorError> {
+    fn get_input_output_hash(&self, change: &BalanceChange) -> Result<Option<String>, ProcessorError> {
         let Some(input_id) = change.caused_by_input_id else {
             return Ok(None);
         };
@@ -112,15 +110,15 @@ impl TransactionDataResolver for DatabaseResolver {
         Ok(output_hash.map(hex::encode))
     }
 
-    async fn get_sent_output_hashes(&self, change: &BalanceChange) -> Result<Vec<String>, ProcessorError> {
-        if let Some(details) = self.get_output_details(change).await? {
+    fn get_sent_output_hashes(&self, change: &BalanceChange) -> Result<Vec<String>, ProcessorError> {
+        if let Some(details) = self.get_output_details(change)? {
             Ok(details.sent_output_hashes)
         } else {
             Ok(Vec::new())
         }
     }
 
-    async fn build_output_hash_map(&self) -> Result<HashMap<String, Id>, ProcessorError> {
+    fn build_output_hash_map(&self) -> Result<HashMap<String, Id>, ProcessorError> {
         let conn = self.pool.get().map_err(|e| ProcessorError::DbError(e.into()))?;
 
         let mut stmt = conn

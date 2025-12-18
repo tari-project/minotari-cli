@@ -173,7 +173,7 @@ impl<E: EventSender> BlockProcessor<E> {
     /// # Errors
     ///
     /// Returns [`BlockProcessorError`] if any database operation fails.
-    pub async fn process_block(&mut self, tx: &Connection, block: &BlockScanResult) -> Result<(), BlockProcessorError> {
+    pub fn process_block(&mut self, tx: &Connection, block: &BlockScanResult) -> Result<(), BlockProcessorError> {
         self.current_tip_height = block.height;
 
         self.current_block = Some(BlockEventAccumulator::new(
@@ -189,8 +189,7 @@ impl<E: EventSender> BlockProcessor<E> {
 
         if let Some(acc) = self.current_block.take() {
             if !acc.outputs.is_empty() || !acc.inputs.is_empty() {
-                self.save_and_emit_displayed_transactions(tx, block.height, &acc)
-                    .await?;
+                self.save_and_emit_displayed_transactions(tx, block.height, &acc)?;
             }
 
             let block_event = acc.build();
@@ -200,7 +199,7 @@ impl<E: EventSender> BlockProcessor<E> {
         Ok(())
     }
 
-    async fn save_and_emit_displayed_transactions(
+    fn save_and_emit_displayed_transactions(
         &self,
         tx: &Connection,
         block_height: u64,
@@ -216,10 +215,7 @@ impl<E: EventSender> BlockProcessor<E> {
             spent_inputs: &accumulator.inputs,
         };
 
-        match processor
-            .process_balance_changes(accumulator.full_balance_changes.clone(), context)
-            .await
-        {
+        match processor.process_balance_changes(accumulator.full_balance_changes.clone(), context) {
             Ok(transactions) if !transactions.is_empty() => {
                 let mut transactions_to_emit = Vec::new();
 

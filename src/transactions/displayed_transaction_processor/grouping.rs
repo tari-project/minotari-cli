@@ -32,7 +32,7 @@ impl<'a, R: TransactionDataResolver> BalanceChangeGrouper<'a, R> {
         Self { resolver }
     }
 
-    pub async fn group(
+    pub fn group(
         &self,
         changes: Vec<BalanceChange>,
         input_hash_map: &HashMap<String, BalanceChange>,
@@ -48,7 +48,7 @@ impl<'a, R: TransactionDataResolver> BalanceChangeGrouper<'a, R> {
         let by_block = self.group_by_block(regular_changes);
 
         for (base_key, block_changes) in by_block {
-            let merged = self.merge_within_block(block_changes, input_hash_map).await?;
+            let merged = self.merge_within_block(block_changes, input_hash_map)?;
 
             for group in merged {
                 result.push(GroupedTransaction {
@@ -114,7 +114,7 @@ impl<'a, R: TransactionDataResolver> BalanceChangeGrouper<'a, R> {
         groups
     }
 
-    async fn merge_within_block(
+    fn merge_within_block(
         &self,
         changes: Vec<BalanceChange>,
         input_hash_map: &HashMap<String, BalanceChange>,
@@ -133,9 +133,8 @@ impl<'a, R: TransactionDataResolver> BalanceChangeGrouper<'a, R> {
         let mut used_input_indices: HashSet<usize> = HashSet::new();
 
         for output_change in &outputs {
-            let (group, matched_indices) = self
-                .match_inputs_by_hashes(output_change, &inputs, &used_input_indices, input_hash_map)
-                .await?;
+            let (group, matched_indices) =
+                self.match_inputs_by_hashes(output_change, &inputs, &used_input_indices, input_hash_map)?;
 
             used_input_indices.extend(matched_indices);
             groups.push(group);
@@ -181,7 +180,7 @@ impl<'a, R: TransactionDataResolver> BalanceChangeGrouper<'a, R> {
         }
     }
 
-    async fn match_inputs_by_hashes(
+    fn match_inputs_by_hashes(
         &self,
         output_change: &BalanceChange,
         inputs: &[BalanceChange],
@@ -198,7 +197,7 @@ impl<'a, R: TransactionDataResolver> BalanceChangeGrouper<'a, R> {
             claimed_fee: output_change.claimed_fee,
         };
 
-        let sent_hashes = self.resolver.get_sent_output_hashes(output_change).await?;
+        let sent_hashes = self.resolver.get_sent_output_hashes(output_change)?;
         let mut matched_indices = Vec::new();
 
         for sent_hash in &sent_hashes {
@@ -306,7 +305,7 @@ pub(crate) struct MergedGroup {
 }
 
 /// Build a map from output_hash (hex) to the BalanceChange that represents the input spending it.
-pub async fn build_input_hash_map<R: TransactionDataResolver>(
+pub fn build_input_hash_map<R: TransactionDataResolver>(
     balance_changes: &[BalanceChange],
     resolver: &R,
 ) -> Result<HashMap<String, BalanceChange>, ProcessorError> {
@@ -314,7 +313,7 @@ pub async fn build_input_hash_map<R: TransactionDataResolver>(
 
     for change in balance_changes {
         if change.balance_debit > 0
-            && let Some(output_hash) = resolver.get_input_output_hash(change).await?
+            && let Some(output_hash) = resolver.get_input_output_hash(change)?
         {
             map.insert(output_hash, change.clone());
         }

@@ -395,7 +395,7 @@ impl TransactionHistoryService {
     ///
     /// Returns [`TransactionHistoryError`] if database queries or processing fails.
     #[allow(dead_code)]
-    pub async fn rebuild_from_balance_changes(
+    pub fn rebuild_from_balance_changes(
         &self,
         account_id: Id,
     ) -> Result<Vec<DisplayedTransaction>, TransactionHistoryError> {
@@ -406,9 +406,7 @@ impl TransactionHistoryService {
             .unwrap_or(0);
 
         let processor = DisplayedTransactionProcessor::new(tip_height);
-        let transactions = processor
-            .process_all_stored_with_conn(account_id, &conn, &self.db_pool)
-            .await?;
+        let transactions = processor.process_all_stored_with_conn(account_id, &conn, &self.db_pool)?;
 
         Ok(transactions)
     }
