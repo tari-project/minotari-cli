@@ -68,7 +68,7 @@ pub async fn handle_reorgs(
     if is_reorg_detected {
         println!("REORG DETECTED. Rolling back from height: {}", reorg_start_height);
         let tx = conn.transaction()?;
-        let reorg_info = rollback_from_height(&tx, account_id, reorg_start_height).await?;
+        let reorg_info = rollback_from_height(&tx, account_id, reorg_start_height)?;
         tx.commit()?;
         Ok(ReorgResult {
             resume_height: reorg_start_height,
@@ -83,7 +83,7 @@ pub async fn handle_reorgs(
     }
 }
 
-pub async fn rollback_from_height(
+pub fn rollback_from_height(
     tx: &Connection,
     account_id: i64,
     reorg_start_height: u64,

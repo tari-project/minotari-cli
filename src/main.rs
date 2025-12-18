@@ -850,14 +850,25 @@ async fn rescan(
     rescan_from_height: u64,
     batch_size: u64,
 ) -> Result<(Vec<WalletEvent>, bool), ScanError> {
-    let pool = init_db(database_file)?;
-    let conn = pool
-        .get()
-        .map_err(|e| ScanError::DbError(WalletDbError::ConnectionError(e)))?;
+    let db_file_clone = database_file.to_string();
+    let account_name_clone = account_name.to_string();
 
-    let account =
-        db::get_account_by_name(&conn, account_name)?.ok_or_else(|| anyhow!("Account not found: {}", account_name))?;
-    let _ = rollback_from_height(&conn, account.id, rescan_from_height).await?;
+    tokio::task::spawn_blocking(move || {
+        let pool = init_db(&db_file_clone).map_err(|e| format!("Failed to init db: {}", e))?;
+
+        let conn = pool.get().map_err(|e| format!("Failed to get connection: {}", e))?;
+
+        let account = db::get_account_by_name(&conn, &account_name_clone)
+            .map_err(|e| format!("DB error querying account: {}", e))?
+            .ok_or_else(|| format!("Account not found: {}", account_name_clone))?;
+
+        rollback_from_height(&conn, account.id, rescan_from_height).map_err(|e| format!("Rollback failed: {}", e))?;
+
+        Ok::<(), String>(())
+    })
+    .await
+    .map_err(|e| ScanError::DbError(WalletDbError::Unexpected(format!("Task join error: {}", e))))?
+    .map_err(|e| ScanError::DbError(WalletDbError::Unexpected(e)))?;
 
     let max_blocks_to_scan = u64::MAX;
     let mut scanner = scan::Scanner::new(password, base_url, database_file, batch_size).mode(scan::ScanMode::Partial {
