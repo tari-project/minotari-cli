@@ -89,6 +89,7 @@ mod events;
 mod reorg;
 #[allow(clippy::module_inception)]
 pub mod scan;
+pub mod scan_db_handler;
 
 pub use block_processor::BlockProcessor;
 pub use events::{
