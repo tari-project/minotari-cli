@@ -11,6 +11,7 @@ use tari_utilities::ByteArray;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
+use zeroize::Zeroizing;
 
 use thiserror::Error;
 
@@ -394,7 +395,7 @@ async fn wait_for_next_poll_cycle<E: EventSender>(
 #[allow(clippy::too_many_arguments)]
 async fn prepare_account_scan(
     account: &AccountRow,
-    password: &str,
+    password: &Zeroizing<String>,
     base_url: &str,
     batch_size: u64,
     processing_threads: usize,
@@ -734,7 +735,8 @@ pub enum ScanMode {
 /// scanner instances for concurrent scanning of different accounts.
 pub struct Scanner {
     /// Password for decrypting account key managers.
-    password: String,
+    /// Stored in a `Zeroizing` wrapper to ensure it's securely cleared from memory when dropped.
+    password: Zeroizing<String>,
     /// Base URL for the blockchain node HTTP API.
     base_url: String,
     /// Path to the SQLite database file.
@@ -779,7 +781,7 @@ impl Scanner {
     /// ```
     pub fn new(password: &str, base_url: &str, database_file: &str, batch_size: u64) -> Self {
         Self {
-            password: password.to_string(),
+            password: Zeroizing::new(password.to_string()),
             base_url: base_url.to_string(),
             database_file: database_file.to_string(),
             account_name: None,

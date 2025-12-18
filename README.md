@@ -152,6 +152,7 @@ sqlx migrate run
 - Private keys never leave your local machine
 - View-only scanning means the wallet cannot spend funds
 - Passwords are padded to 32 characters for encryption (ensure strong passwords)
+- Passwords are securely zeroized from memory when no longer needed (using the `zeroize` crate)
 
 ## Architecture
 

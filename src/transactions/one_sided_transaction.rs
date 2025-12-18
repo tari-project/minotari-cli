@@ -53,6 +53,7 @@ use tari_transaction_components::{
     tari_amount::MicroMinotari,
     transaction_components::{MemoField, OutputFeatures, memo_field::TxType},
 };
+use zeroize::Zeroizing;
 
 /// Represents a recipient of a one-sided transaction.
 ///
@@ -122,8 +123,8 @@ pub struct OneSidedTransaction {
     pub db_pool: SqlitePool,
     /// The network (MainNet, TestNet, etc.) for consensus rules.
     pub network: Network,
-    /// Password for decrypting the account's key manager.
-    pub password: String,
+    /// Password for decrypting the account's key manager (securely zeroized on drop).
+    pub password: Zeroizing<String>,
 }
 
 impl OneSidedTransaction {
@@ -140,7 +141,7 @@ impl OneSidedTransaction {
     /// ```rust,ignore
     /// let builder = OneSidedTransaction::new(db_pool, Network::MainNet, password);
     /// ```
-    pub fn new(db_pool: SqlitePool, network: Network, password: String) -> Self {
+    pub fn new(db_pool: SqlitePool, network: Network, password: Zeroizing<String>) -> Self {
         Self {
             db_pool,
             network,
