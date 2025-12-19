@@ -145,15 +145,12 @@ impl AccountRow {
         let password = if password.len() < 32 {
             format!("{:0<32}", password)
         } else {
-            // Note: This naive slicing can panic on multi-byte chars, but maintaining existing behavior for now
             password[..32].to_string()
         };
-
         let key_bytes: [u8; 32] = password
             .as_bytes()
             .try_into()
             .map_err(|_| WalletDbError::InvalidInput("Password conversion failed".to_string()))?;
-
         let key = Key::from(key_bytes);
         let cipher = XChaCha20Poly1305::new(&key);
 

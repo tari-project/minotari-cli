@@ -259,7 +259,7 @@ impl Daemon {
                                 sleep(self.scan_interval).await;
                             },
                             ScanError::DbError(err_msg) => {
-                                println!("An DB error occurred during the scan cycle: {}", err_msg);
+                                println!("A DB error occurred during the scan cycle: {}", err_msg);
                                 sleep(self.scan_interval).await;
                             },
                             ScanError::Timeout(retries) => {

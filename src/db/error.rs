@@ -29,9 +29,6 @@ pub enum WalletDbError {
     #[error("Invalid input: {0}")]
     InvalidInput(String),
 
-    #[error("Account with name '{0}' not found")]
-    AccountNotFound(String),
-
     #[error("Duplicate entry: {0}")]
     DuplicateEntry(String),
 
