@@ -580,12 +580,11 @@ async fn run_scan_loop<E: EventSender + Clone + Send + 'static>(
             last_scanned_height = last_block.height;
             blocks_since_reorg_check += batch_size as u64;
 
-            let conn = db_handler.get_connection().await?;
             let monitor_result = scanner_context
                 .transaction_monitor
                 .monitor_if_needed(
                     &scanner_context.wallet_client,
-                    &conn,
+                    pool,
                     scanner_context.account_id,
                     last_scanned_height,
                 )

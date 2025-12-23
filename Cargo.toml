@@ -18,7 +18,7 @@ clap = { version = "4.5.47", features = ["derive"] }
 hex = "0.4.3"
 include_dir = "0.7.4"
 #lightweight_wallet_libs = { path = "../tari-wallet", features = ["grpc","http",] }
-lightweight_wallet_libs = { git = "https://github.com/tari-project/tari-wallet", rev = "3e2807b1731074b6c1c2d166ef72c9085afff5fb", features = [
+lightweight_wallet_libs = { git = "https://github.com/tari-project/tari-wallet", rev = "b78185ae30a9ec39ca7d36c829d260493947b510", features = [
     "grpc",
     "http",
 ] }

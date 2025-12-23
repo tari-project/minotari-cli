@@ -60,12 +60,14 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Result, anyhow};
+use r2d2::PooledConnection;
+use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::Connection;
 use tari_common_types::payment_reference::generate_payment_reference;
 use tari_common_types::types::FixedHash;
 
 use crate::db::{
-    self, CompletedTransaction, CompletedTransactionStatus, get_pending_completed_transactions,
+    self, CompletedTransaction, CompletedTransactionStatus, SqlitePool, get_pending_completed_transactions,
     mark_completed_transaction_as_broadcasted, mark_completed_transaction_as_confirmed,
     mark_completed_transaction_as_mined_unconfirmed, mark_completed_transaction_as_rejected,
 };
@@ -299,6 +301,10 @@ impl TransactionMonitor {
         Self { state }
     }
 
+    fn get_connection(pool: &SqlitePool) -> Result<PooledConnection<SqliteConnectionManager>, anyhow::Error> {
+        pool.get().map_err(|e| anyhow!("Failed to get DB connection: {}", e))
+    }
+
     /// Returns whether there are pending outbound transactions to monitor.
     ///
     /// Delegates to [`MonitoringState::has_pending_outbound`].
@@ -319,7 +325,7 @@ impl TransactionMonitor {
     /// # Arguments
     ///
     /// * `wallet_client` - HTTP client for network queries
-    /// * `conn` - Database connection
+    /// * `db_pool` - Database pool
     /// * `account_id` - The account to monitor
     /// * `current_chain_height` - Current blockchain height for confirmation calculations
     ///
@@ -338,7 +344,7 @@ impl TransactionMonitor {
     /// ```rust,ignore
     /// let result = monitor.monitor_if_needed(
     ///     &wallet_client,
-    ///     &mut conn,
+    ///     &db_pool,
     ///     account_id,
     ///     chain_height,
     /// ).await?;
@@ -350,21 +356,27 @@ impl TransactionMonitor {
     pub async fn monitor_if_needed(
         &self,
         wallet_client: &WalletHttpClient,
-        conn: &Connection,
+        db_pool: &SqlitePool,
         account_id: i64,
         current_chain_height: u64,
     ) -> Result<MonitoringResult> {
-        let mut result = MonitoringResult {
-            updated_displayed_transactions: self.update_displayed_transaction_confirmations(
-                conn,
-                account_id,
-                current_chain_height,
-            )?,
-            ..Default::default()
+        let mut result = {
+            let conn = Self::get_connection(db_pool)?;
+            MonitoringResult {
+                updated_displayed_transactions: self.update_displayed_transaction_confirmations(
+                    &conn,
+                    account_id,
+                    current_chain_height,
+                )?,
+                ..Default::default()
+            }
         };
 
         if self.state.has_pending_outbound() {
-            let pending_transactions = get_pending_completed_transactions(conn, account_id)?;
+            let pending_transactions = {
+                let conn = Self::get_connection(db_pool)?;
+                get_pending_completed_transactions(&conn, account_id)?
+            };
 
             if pending_transactions.is_empty() {
                 self.state.clear_pending_outbound();
@@ -373,7 +385,7 @@ impl TransactionMonitor {
                 let initial_count = by_status.remaining_count();
 
                 let pending_result = self
-                    .process_pending_transactions(wallet_client, conn, account_id, current_chain_height, by_status)
+                    .process_pending_transactions(wallet_client, db_pool, account_id, current_chain_height, by_status)
                     .await?;
 
                 result.extend(pending_result);
@@ -470,7 +482,7 @@ impl TransactionMonitor {
     async fn process_pending_transactions(
         &self,
         wallet_client: &WalletHttpClient,
-        conn: &Connection,
+        db_pool: &SqlitePool,
         account_id: i64,
         current_chain_height: u64,
         by_status: PendingTransactionsByStatus,
@@ -478,15 +490,15 @@ impl TransactionMonitor {
         let mut result = MonitoringResult::default();
 
         result.extend(
-            Self::rebroadcast_completed_transactions(wallet_client, conn, account_id, by_status.completed).await?,
+            Self::rebroadcast_completed_transactions(wallet_client, db_pool, account_id, by_status.completed).await?,
         );
 
         let broadcast_events =
-            Self::check_broadcast_for_mining(wallet_client, conn, account_id, by_status.broadcast).await?;
+            Self::check_broadcast_for_mining(wallet_client, db_pool, account_id, by_status.broadcast).await?;
         result.wallet_events.extend(broadcast_events);
 
         let confirmation_events =
-            Self::check_confirmation_status(conn, account_id, current_chain_height, by_status.mined_unconfirmed)?;
+            Self::check_confirmation_status(db_pool, account_id, current_chain_height, by_status.mined_unconfirmed)?;
         result.wallet_events.extend(confirmation_events);
 
         Ok(result)
@@ -494,19 +506,20 @@ impl TransactionMonitor {
 
     async fn rebroadcast_completed_transactions(
         wallet_client: &WalletHttpClient,
-        conn: &Connection,
+        db_pool: &SqlitePool,
         account_id: i64,
         transactions: Vec<CompletedTransaction>,
     ) -> Result<MonitoringResult> {
         let mut result = MonitoringResult::default();
 
         for tx in transactions {
+            let conn = Self::get_connection(db_pool)?;
             if tx.broadcast_attempts >= MAX_BROADCAST_ATTEMPTS {
                 let reason = format!("Exceeded {} broadcast attempts", MAX_BROADCAST_ATTEMPTS);
-                mark_completed_transaction_as_rejected(conn, &tx.id, &reason)?;
-                db::unlock_outputs_for_pending_transaction(conn, &tx.pending_tx_id)?;
+                mark_completed_transaction_as_rejected(&conn, &tx.id, &reason)?;
+                db::unlock_outputs_for_pending_transaction(&conn, &tx.pending_tx_id)?;
 
-                if let Some(rejected_displayed_tx) = db::mark_displayed_transaction_rejected(conn, &tx.id)? {
+                if let Some(rejected_displayed_tx) = db::mark_displayed_transaction_rejected(&conn, &tx.id)? {
                     result.updated_displayed_transactions.push(rejected_displayed_tx);
                 }
 
@@ -524,7 +537,7 @@ impl TransactionMonitor {
 
             match Self::broadcast_transaction(wallet_client, &tx).await {
                 Ok(()) => {
-                    mark_completed_transaction_as_broadcasted(conn, &tx.id, tx.broadcast_attempts + 1)?;
+                    mark_completed_transaction_as_broadcasted(&conn, &tx.id, tx.broadcast_attempts + 1)?;
 
                     result.wallet_events.push(WalletEvent {
                         id: 0,
@@ -537,10 +550,10 @@ impl TransactionMonitor {
                     });
                 },
                 Err(reason) => {
-                    mark_completed_transaction_as_rejected(conn, &tx.id, &reason)?;
-                    db::unlock_outputs_for_pending_transaction(conn, &tx.pending_tx_id)?;
+                    mark_completed_transaction_as_rejected(&conn, &tx.id, &reason)?;
+                    db::unlock_outputs_for_pending_transaction(&conn, &tx.pending_tx_id)?;
 
-                    if let Some(rejected_displayed_tx) = db::mark_displayed_transaction_rejected(conn, &tx.id)? {
+                    if let Some(rejected_displayed_tx) = db::mark_displayed_transaction_rejected(&conn, &tx.id)? {
                         result.updated_displayed_transactions.push(rejected_displayed_tx);
                     }
 
@@ -562,7 +575,7 @@ impl TransactionMonitor {
 
     async fn check_broadcast_for_mining(
         wallet_client: &WalletHttpClient,
-        conn: &Connection,
+        db_pool: &SqlitePool,
         account_id: i64,
         transactions: Vec<CompletedTransaction>,
     ) -> Result<Vec<WalletEvent>> {
@@ -570,7 +583,8 @@ impl TransactionMonitor {
 
         for tx in transactions {
             if let Some((block_height, block_hash)) = Self::find_kernel_on_chain(wallet_client, &tx).await? {
-                mark_completed_transaction_as_mined_unconfirmed(conn, &tx.id, block_height as i64, &block_hash)?;
+                let conn = Self::get_connection(db_pool)?;
+                mark_completed_transaction_as_mined_unconfirmed(&conn, &tx.id, block_height as i64, &block_hash)?;
 
                 events.push(WalletEvent {
                     id: 0,
@@ -589,7 +603,7 @@ impl TransactionMonitor {
     }
 
     fn check_confirmation_status(
-        conn: &Connection,
+        db_pool: &SqlitePool,
         account_id: i64,
         current_height: u64,
         transactions: Vec<CompletedTransaction>,
@@ -618,7 +632,8 @@ impl TransactionMonitor {
 
                 let payref = hex::encode(generate_payment_reference(&mined_block_hash, &sent_output_hash));
 
-                mark_completed_transaction_as_confirmed(conn, &tx.id, current_height as i64, payref)?;
+                let conn = Self::get_connection(db_pool)?;
+                mark_completed_transaction_as_confirmed(&conn, &tx.id, current_height as i64, payref)?;
 
                 events.push(WalletEvent {
                     id: 0,
