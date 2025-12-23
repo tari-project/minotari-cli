@@ -1,8 +1,9 @@
 use std::fmt;
 use std::str::FromStr;
 
+use crate::db::error::WalletDbResult;
 use chrono::{DateTime, Utc};
-use sqlx::{Error as SqlxError, SqliteConnection};
+use rusqlite::{Connection, OptionalExtension, Row, named_params};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -63,350 +64,311 @@ pub struct CompletedTransaction {
     pub updated_at: DateTime<Utc>,
 }
 
-pub async fn create_completed_transaction(
-    conn: &mut SqliteConnection,
+fn map_row(row: &Row) -> Result<CompletedTransaction, rusqlite::Error> {
+    let status_str: String = row.get("status")?;
+    let status =
+        CompletedTransactionStatus::from_str(&status_str).map_err(|_| rusqlite::Error::ExecuteReturnedResults)?;
+
+    Ok(CompletedTransaction {
+        id: row.get("id")?,
+        account_id: row.get("account_id")?,
+        pending_tx_id: row.get("pending_tx_id")?,
+        status,
+        last_rejected_reason: row.get("last_rejected_reason")?,
+        kernel_excess: row.get("kernel_excess")?,
+        sent_payref: row.get("sent_payref")?,
+        sent_output_hash: row.get("sent_output_hash")?,
+        mined_height: row.get("mined_height")?,
+        mined_block_hash: row.get("mined_block_hash")?,
+        confirmation_height: row.get("confirmation_height")?,
+        broadcast_attempts: row.get("broadcast_attempts")?,
+        serialized_transaction: row.get("serialized_transaction")?,
+        created_at: row.get("created_at")?,
+        updated_at: row.get("updated_at")?,
+    })
+}
+
+pub fn create_completed_transaction(
+    conn: &Connection,
     account_id: i64,
     pending_tx_id: &str,
     kernel_excess: &[u8],
     serialized_transaction: &[u8],
     sent_output_hash: Option<String>,
-) -> Result<String, SqlxError> {
+) -> WalletDbResult<String> {
     let id = Uuid::new_v4().to_string();
     let status_str = CompletedTransactionStatus::Completed.to_string();
 
-    sqlx::query!(
+    conn.execute(
         r#"
-        INSERT INTO completed_transactions (id, account_id, pending_tx_id, status, kernel_excess, serialized_transaction, sent_output_hash)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT INTO completed_transactions (
+            id,
+            account_id,
+            pending_tx_id,
+            status,
+            kernel_excess,
+            serialized_transaction,
+            sent_output_hash
+        )
+        VALUES (
+            :id,
+            :account_id,
+            :pending_id,
+            :status,
+            :kernel_excess,
+            :serialized_tx,
+            :sent_hash
+        )
         "#,
-        id,
-        account_id,
-        pending_tx_id,
-        status_str,
-        kernel_excess,
-        serialized_transaction,
-        sent_output_hash
-    )
-    .execute(&mut *conn)
-    .await?;
+        named_params! {
+            ":id": id,
+            ":account_id": account_id,
+            ":pending_id": pending_tx_id,
+            ":status": status_str,
+            ":kernel_excess": kernel_excess,
+            ":serialized_tx": serialized_transaction,
+            ":sent_hash": sent_output_hash
+        },
+    )?;
 
     Ok(id)
 }
 
-pub async fn get_completed_transaction_by_id(
-    conn: &mut SqliteConnection,
-    id: &str,
-) -> Result<Option<CompletedTransaction>, SqlxError> {
-    let row = sqlx::query!(
+pub fn get_completed_transaction_by_id(conn: &Connection, id: &str) -> WalletDbResult<Option<CompletedTransaction>> {
+    let mut stmt = conn.prepare_cached(
         r#"
         SELECT id, account_id, pending_tx_id, status, last_rejected_reason, kernel_excess, 
                sent_payref, sent_output_hash, mined_height, mined_block_hash, confirmation_height, 
                broadcast_attempts, serialized_transaction, created_at, updated_at
         FROM completed_transactions
-        WHERE id = ?
+        WHERE id = :id
         "#,
-        id
-    )
-    .fetch_optional(&mut *conn)
-    .await?;
+    )?;
 
-    match row {
-        Some(r) => {
-            let status = CompletedTransactionStatus::from_str(&r.status)
-                .map_err(|e| SqlxError::Decode(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e))))?;
-
-            Ok(Some(CompletedTransaction {
-                id: r.id,
-                account_id: r.account_id,
-                pending_tx_id: r.pending_tx_id,
-                status,
-                last_rejected_reason: r.last_rejected_reason,
-                kernel_excess: r.kernel_excess,
-                sent_payref: r.sent_payref,
-                sent_output_hash: r.sent_output_hash,
-                mined_height: r.mined_height,
-                mined_block_hash: r.mined_block_hash,
-                confirmation_height: r.confirmation_height,
-                broadcast_attempts: r.broadcast_attempts as i32,
-                serialized_transaction: r.serialized_transaction,
-                created_at: DateTime::<Utc>::from_naive_utc_and_offset(r.created_at, Utc),
-                updated_at: DateTime::<Utc>::from_naive_utc_and_offset(r.updated_at, Utc),
-            }))
-        },
-        None => Ok(None),
-    }
-}
-
-pub async fn get_completed_transactions_by_status(
-    conn: &mut SqliteConnection,
-    account_id: i64,
-    status: CompletedTransactionStatus,
-) -> Result<Vec<CompletedTransaction>, SqlxError> {
-    let status_str = status.to_string();
-
-    let rows = sqlx::query!(
-        r#"
-        SELECT id, account_id, pending_tx_id, status, last_rejected_reason, kernel_excess, 
-               sent_payref, sent_output_hash, mined_height, mined_block_hash, confirmation_height, 
-               broadcast_attempts, serialized_transaction, created_at, updated_at
-        FROM completed_transactions
-        WHERE account_id = ? AND status = ?
-        "#,
-        account_id,
-        status_str
-    )
-    .fetch_all(&mut *conn)
-    .await?;
-
-    let mut result = Vec::with_capacity(rows.len());
-    for r in rows {
-        let status = CompletedTransactionStatus::from_str(&r.status)
-            .map_err(|e| SqlxError::Decode(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e))))?;
-
-        result.push(CompletedTransaction {
-            id: r.id,
-            account_id: r.account_id,
-            pending_tx_id: r.pending_tx_id,
-            status,
-            last_rejected_reason: r.last_rejected_reason,
-            kernel_excess: r.kernel_excess,
-            sent_payref: r.sent_payref,
-            sent_output_hash: r.sent_output_hash,
-            mined_height: r.mined_height,
-            mined_block_hash: r.mined_block_hash,
-            confirmation_height: r.confirmation_height,
-            broadcast_attempts: r.broadcast_attempts as i32,
-            serialized_transaction: r.serialized_transaction,
-            created_at: DateTime::<Utc>::from_naive_utc_and_offset(r.created_at, Utc),
-            updated_at: DateTime::<Utc>::from_naive_utc_and_offset(r.updated_at, Utc),
-        });
-    }
+    let result = stmt.query_row(named_params! { ":id": id }, map_row).optional()?;
 
     Ok(result)
 }
 
-pub async fn update_completed_transaction_status(
-    conn: &mut SqliteConnection,
+pub fn get_completed_transactions_by_status(
+    conn: &Connection,
+    account_id: i64,
+    status: CompletedTransactionStatus,
+) -> WalletDbResult<Vec<CompletedTransaction>> {
+    let status_str = status.to_string();
+
+    let mut stmt = conn.prepare_cached(
+        r#"
+        SELECT id, account_id, pending_tx_id, status, last_rejected_reason, kernel_excess, 
+               sent_payref, sent_output_hash, mined_height, mined_block_hash, confirmation_height, 
+               broadcast_attempts, serialized_transaction, created_at, updated_at
+        FROM completed_transactions
+        WHERE account_id = :account_id AND status = :status
+        "#,
+    )?;
+
+    let rows = stmt.query_map(
+        named_params! {
+            ":account_id": account_id,
+            ":status": status_str
+        },
+        map_row,
+    )?;
+
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+pub fn update_completed_transaction_status(
+    conn: &Connection,
     id: &str,
     status: CompletedTransactionStatus,
-) -> Result<(), SqlxError> {
+) -> WalletDbResult<()> {
     let status_str = status.to_string();
     let now = Utc::now();
 
-    sqlx::query!(
+    conn.execute(
         r#"
         UPDATE completed_transactions
-        SET status = ?, updated_at = ?
-        WHERE id = ?
+        SET status = :status, updated_at = :now
+        WHERE id = :id
         "#,
-        status_str,
-        now,
-        id
-    )
-    .execute(&mut *conn)
-    .await?;
+        named_params! {
+            ":status": status_str,
+            ":now": now,
+            ":id": id
+        },
+    )?;
 
     Ok(())
 }
 
-pub async fn mark_completed_transaction_as_broadcasted(
-    conn: &mut SqliteConnection,
-    id: &str,
-    attempts: i32,
-) -> Result<(), SqlxError> {
+pub fn mark_completed_transaction_as_broadcasted(conn: &Connection, id: &str, attempts: i32) -> WalletDbResult<()> {
     let status = CompletedTransactionStatus::Broadcast.to_string();
     let now = Utc::now();
 
-    sqlx::query!(
+    conn.execute(
         r#"
         UPDATE completed_transactions
-        SET status = ?, broadcast_attempts = ?, updated_at = ?
-        WHERE id = ?
+        SET status = :status, broadcast_attempts = :attempts, updated_at = :now
+        WHERE id = :id
         "#,
-        status,
-        attempts,
-        now,
-        id
-    )
-    .execute(&mut *conn)
-    .await?;
+        named_params! {
+            ":status": status,
+            ":attempts": attempts,
+            ":now": now,
+            ":id": id
+        },
+    )?;
 
     Ok(())
 }
 
-pub async fn mark_completed_transaction_as_mined_unconfirmed(
-    conn: &mut SqliteConnection,
+pub fn mark_completed_transaction_as_mined_unconfirmed(
+    conn: &Connection,
     id: &str,
     block_height: i64,
     block_hash: &[u8],
-) -> Result<(), SqlxError> {
+) -> WalletDbResult<()> {
     let status = CompletedTransactionStatus::MinedUnconfirmed.to_string();
     let now = Utc::now();
 
-    sqlx::query!(
+    conn.execute(
         r#"
         UPDATE completed_transactions
-        SET status = ?, mined_height = ?, mined_block_hash = ?, updated_at = ?
-        WHERE id = ?
+        SET status = :status, mined_height = :height, mined_block_hash = :hash, updated_at = :now
+        WHERE id = :id
         "#,
-        status,
-        block_height,
-        block_hash,
-        now,
-        id
-    )
-    .execute(&mut *conn)
-    .await?;
+        named_params! {
+            ":status": status,
+            ":height": block_height,
+            ":hash": block_hash,
+            ":now": now,
+            ":id": id
+        },
+    )?;
 
     Ok(())
 }
 
-pub async fn mark_completed_transaction_as_confirmed(
-    conn: &mut SqliteConnection,
+pub fn mark_completed_transaction_as_confirmed(
+    conn: &Connection,
     id: &str,
     confirmation_height: i64,
     sent_payref: String,
-) -> Result<(), SqlxError> {
+) -> WalletDbResult<()> {
     let status = CompletedTransactionStatus::MinedConfirmed.to_string();
     let now = Utc::now();
 
-    sqlx::query!(
+    conn.execute(
         r#"
         UPDATE completed_transactions
-        SET status = ?, confirmation_height = ?, sent_payref = ?, updated_at = ?
-        WHERE id = ?
+        SET status = :status, confirmation_height = :height, sent_payref = :payref, updated_at = :now
+        WHERE id = :id
         "#,
-        status,
-        confirmation_height,
-        sent_payref,
-        now,
-        id
-    )
-    .execute(&mut *conn)
-    .await?;
+        named_params! {
+            ":status": status,
+            ":height": confirmation_height,
+            ":payref": sent_payref,
+            ":now": now,
+            ":id": id
+        },
+    )?;
 
     Ok(())
 }
 
-pub async fn revert_completed_transaction_to_completed(conn: &mut SqliteConnection, id: &str) -> Result<(), SqlxError> {
+pub fn revert_completed_transaction_to_completed(conn: &Connection, id: &str) -> WalletDbResult<()> {
     let status = CompletedTransactionStatus::Completed.to_string();
     let now = Utc::now();
 
-    sqlx::query!(
+    conn.execute(
         r#"
         UPDATE completed_transactions
-        SET status = ?, mined_height = NULL, mined_block_hash = NULL, 
-            confirmation_height = NULL, broadcast_attempts = 0, updated_at = ?
-        WHERE id = ?
+        SET status = :status, mined_height = NULL, mined_block_hash = NULL, 
+            confirmation_height = NULL, broadcast_attempts = 0, updated_at = :now
+        WHERE id = :id
         "#,
-        status,
-        now,
-        id
-    )
-    .execute(&mut *conn)
-    .await?;
+        named_params! {
+            ":status": status,
+            ":now": now,
+            ":id": id
+        },
+    )?;
 
     Ok(())
 }
 
-pub async fn reset_mined_completed_transactions_from_height(
-    conn: &mut SqliteConnection,
+pub fn reset_mined_completed_transactions_from_height(
+    conn: &Connection,
     account_id: i64,
     reorg_height: u64,
-) -> Result<u64, SqlxError> {
+) -> WalletDbResult<u64> {
     let status_completed = CompletedTransactionStatus::Completed.to_string();
     let status_unconfirmed = CompletedTransactionStatus::MinedUnconfirmed.to_string();
     let status_confirmed = CompletedTransactionStatus::MinedConfirmed.to_string();
     let height = reorg_height as i64;
     let now = Utc::now();
 
-    let result = sqlx::query!(
+    let rows_affected = conn.execute(
         r#"
         UPDATE completed_transactions
-        SET status = ?, mined_height = NULL, mined_block_hash = NULL, 
-            confirmation_height = NULL, broadcast_attempts = 0, updated_at = ?
-        WHERE account_id = ? AND (status = ? OR status = ?) AND mined_height >= ?
+        SET status = :status_completed, mined_height = NULL, mined_block_hash = NULL, 
+            confirmation_height = NULL, broadcast_attempts = 0, updated_at = :now
+        WHERE account_id = :account_id 
+          AND (status = :status_unconfirmed OR status = :status_confirmed) 
+          AND mined_height >= :height
         "#,
-        status_completed,
-        now,
-        account_id,
-        status_unconfirmed,
-        status_confirmed,
-        height
-    )
-    .execute(&mut *conn)
-    .await?;
+        named_params! {
+            ":status_completed": status_completed,
+            ":now": now,
+            ":account_id": account_id,
+            ":status_unconfirmed": status_unconfirmed,
+            ":status_confirmed": status_confirmed,
+            ":height": height
+        },
+    )?;
 
-    Ok(result.rows_affected())
+    Ok(rows_affected as u64)
 }
 
-pub async fn mark_completed_transaction_as_rejected(
-    conn: &mut SqliteConnection,
-    id: &str,
-    reject_reason: &str,
-) -> Result<(), SqlxError> {
+pub fn mark_completed_transaction_as_rejected(conn: &Connection, id: &str, reject_reason: &str) -> WalletDbResult<()> {
     let status_str = CompletedTransactionStatus::Rejected.to_string();
     let now = Utc::now();
 
-    sqlx::query!(
+    conn.execute(
         r#"
         UPDATE completed_transactions
-        SET status = ?, last_rejected_reason = ?, updated_at = ?
-        WHERE id = ?
+        SET status = :status, last_rejected_reason = :reason, updated_at = :now
+        WHERE id = :id
         "#,
-        status_str,
-        reject_reason,
-        now,
-        id
-    )
-    .execute(&mut *conn)
-    .await?;
+        named_params! {
+            ":status": status_str,
+            ":reason": reject_reason,
+            ":now": now,
+            ":id": id
+        },
+    )?;
 
     Ok(())
 }
 
-pub async fn get_pending_completed_transactions(
-    conn: &mut SqliteConnection,
+pub fn get_pending_completed_transactions(
+    conn: &Connection,
     account_id: i64,
-) -> Result<Vec<CompletedTransaction>, SqlxError> {
-    let rows = sqlx::query!(
+) -> WalletDbResult<Vec<CompletedTransaction>> {
+    let mut stmt = conn.prepare_cached(
         r#"
         SELECT id, account_id, pending_tx_id, status, last_rejected_reason, kernel_excess,
                sent_payref, sent_output_hash, mined_height, mined_block_hash, confirmation_height,
                broadcast_attempts, serialized_transaction, created_at, updated_at
         FROM completed_transactions
-        WHERE account_id = ?
+        WHERE account_id = :account_id
           AND status NOT IN ('mined_confirmed', 'rejected', 'canceled')
         ORDER BY created_at ASC
         "#,
-        account_id
-    )
-    .fetch_all(&mut *conn)
-    .await?;
+    )?;
 
-    let mut result = Vec::with_capacity(rows.len());
-    for r in rows {
-        let status = CompletedTransactionStatus::from_str(&r.status)
-            .map_err(|e| SqlxError::Decode(Box::new(std::io::Error::new(std::io::ErrorKind::InvalidData, e))))?;
+    let rows = stmt.query_map(named_params! { ":account_id": account_id }, map_row)?;
 
-        result.push(CompletedTransaction {
-            id: r.id,
-            account_id: r.account_id,
-            pending_tx_id: r.pending_tx_id,
-            status,
-            last_rejected_reason: r.last_rejected_reason,
-            kernel_excess: r.kernel_excess,
-            sent_payref: r.sent_payref,
-            sent_output_hash: r.sent_output_hash,
-            mined_height: r.mined_height,
-            mined_block_hash: r.mined_block_hash,
-            confirmation_height: r.confirmation_height,
-            broadcast_attempts: r.broadcast_attempts as i32,
-            serialized_transaction: r.serialized_transaction,
-            created_at: DateTime::<Utc>::from_naive_utc_and_offset(r.created_at, Utc),
-            updated_at: DateTime::<Utc>::from_naive_utc_and_offset(r.updated_at, Utc),
-        });
-    }
-
-    Ok(result)
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }

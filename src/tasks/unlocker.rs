@@ -1,9 +1,12 @@
 use std::time::Duration;
 
-use sqlx::{Connection, SqliteConnection, SqlitePool};
+use rusqlite::Connection;
 use tokio::{sync::broadcast, task::JoinHandle, time::interval};
 
-use crate::{db, models::PendingTransactionStatus};
+use crate::{
+    db::{self, SqlitePool},
+    models::PendingTransactionStatus,
+};
 
 pub struct TransactionUnlocker {
     db_pool: SqlitePool,
@@ -14,16 +17,16 @@ impl TransactionUnlocker {
         Self { db_pool }
     }
 
-    pub async fn unlock_expired_transactions(conn: &mut SqliteConnection) -> Result<(), anyhow::Error> {
-        let expired_txs = db::find_expired_pending_transactions(conn).await?;
+    pub fn unlock_expired_transactions(conn: &mut Connection) -> Result<(), anyhow::Error> {
+        let expired_txs = db::find_expired_pending_transactions(conn)?;
 
         for tx in expired_txs {
-            let mut transaction = conn.begin().await?;
+            let transaction = conn.transaction()?;
 
-            db::update_pending_transaction_status(&mut transaction, &tx.id, PendingTransactionStatus::Expired).await?;
-            db::unlock_outputs_for_request(&mut transaction, &tx.id).await?;
+            db::update_pending_transaction_status(&transaction, &tx.id, PendingTransactionStatus::Expired)?;
+            db::unlock_outputs_for_request(&transaction, &tx.id)?;
 
-            transaction.commit().await?;
+            transaction.commit()?;
         }
 
         Ok(())
@@ -37,8 +40,8 @@ impl TransactionUnlocker {
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
-                        let mut conn = self.db_pool.acquire().await?;
-                        if let Err(e) = Self::unlock_expired_transactions(&mut conn).await {
+                        let mut conn = self.db_pool.get()?;
+                        if let Err(e) = Self::unlock_expired_transactions(&mut conn) {
                             eprintln!("Error unlocking expired transactions: {}", e);
                         }
                     }

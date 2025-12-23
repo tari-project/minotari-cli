@@ -36,7 +36,7 @@ pub type Id = i64;
 ///
 /// Each account maintains a history of recently scanned block hashes
 /// to detect blockchain reorganizations.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ScannedTipBlock {
     pub id: Id,
     #[allow(dead_code)]
@@ -49,7 +49,7 @@ pub struct ScannedTipBlock {
 ///
 /// Events are stored in the database and provide an audit trail of all
 /// wallet activity including outputs, transactions, and blockchain events.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WalletEvent {
     #[allow(dead_code)]
     pub id: Id,
@@ -148,7 +148,7 @@ impl WalletEventType {
 ///
 /// Each balance change links to either an output or input and includes
 /// metadata like memos, addresses, and claimed amounts from the transaction.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct BalanceChange {
     /// Account this balance change belongs to
     pub account_id: Id,

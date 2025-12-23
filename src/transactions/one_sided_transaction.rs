@@ -40,9 +40,9 @@
 //! ).await?;
 //! ```
 
+use crate::db::SqlitePool;
 use crate::{api::types::LockFundsResult, db::AccountRow};
 use anyhow::anyhow;
-use sqlx::SqlitePool;
 use tari_common::configuration::Network;
 use tari_common_types::{tari_address::TariAddress, transaction::TxId};
 use tari_transaction_components::offline_signing::models::PaymentRecipient;
@@ -200,7 +200,7 @@ impl OneSidedTransaction {
     /// // Sign the transaction externally
     /// // let signed = sign(unsigned_tx)?;
     /// ```
-    pub async fn create_unsigned_transaction(
+    pub fn create_unsigned_transaction(
         &self,
         account: &AccountRow,
         locked_funds: LockFundsResult,
@@ -218,7 +218,7 @@ impl OneSidedTransaction {
 
         let sender_address = account.get_address(self.network, &self.password)?;
 
-        let key_manager = account.get_key_manager(&self.password).await?;
+        let key_manager = account.get_key_manager(&self.password)?;
         let consensus_constants = ConsensusConstantsBuilder::new(self.network).build();
         let mut tx_builder = TransactionBuilder::new(consensus_constants, key_manager.clone(), self.network)?;
 

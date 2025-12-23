@@ -89,12 +89,13 @@ mod events;
 mod reorg;
 #[allow(clippy::module_inception)]
 pub mod scan;
+pub mod scan_db_handler;
 
 pub use block_processor::BlockProcessor;
 pub use events::{
     BalanceChangeSummary, BlockProcessedEvent, ChannelEventSender, ConfirmedOutput, DetectedOutput,
     DisplayedTransactionsEvent, EventSender, NoopEventSender, PauseReason, ProcessingEvent, ReorgDetectedEvent,
-    ScanStatusEvent, SpentInput,
+    ScanStatusEvent, SpentInput, TransactionsUpdatedEvent,
 };
 pub use reorg::{ReorgInformation, ReorgResult, rollback_from_height};
 pub use scan::{ScanMode, ScanRetryConfig, ScanTimeoutConfig, Scanner};

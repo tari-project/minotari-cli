@@ -42,7 +42,7 @@
 //! println!("Fee: {}", selection.fee());
 //! ```
 
-use sqlx::SqliteConnection;
+use rusqlite::Connection;
 use tari_script::TariScript;
 use tari_transaction_components::{
     fee::Fee,
@@ -53,7 +53,7 @@ use tari_transaction_components::{
 };
 use thiserror::Error;
 
-use crate::db::{DbWalletOutput, get_latest_scanned_tip_block_by_account};
+use crate::db::{DbWalletOutput, WalletDbError, get_latest_scanned_tip_block_by_account};
 
 /// Errors that can occur during UTXO selection.
 #[derive(Debug, Error)]
@@ -74,9 +74,9 @@ pub enum UtxoSelectionError {
         required: MicroMinotari,
     },
 
-    /// A database operation failed.
-    #[error("DB error")]
-    DbError(#[from] sqlx::Error),
+    /// DB execution failed
+    #[error("Database execution error: {0}")]
+    DbError(#[from] WalletDbError),
 }
 
 /// Result of UTXO selection for a transaction.
@@ -283,21 +283,21 @@ impl InputSelector {
     ///     println!("Change: {}", change);
     /// }
     /// ```
-    pub async fn fetch_unspent_outputs(
+    pub fn fetch_unspent_outputs(
         &self,
-        conn: &mut SqliteConnection,
+        conn: &Connection,
         amount: MicroMinotari,
         num_outputs: usize,
         fee_per_gram: MicroMinotari,
         estimated_output_size: Option<usize>,
     ) -> Result<UtxoSelection, UtxoSelectionError> {
-        let tip = get_latest_scanned_tip_block_by_account(conn, self.account_id).await?;
+        let tip = get_latest_scanned_tip_block_by_account(conn, self.account_id)?;
         let min_height = tip
             .map(|b| b.height)
             .unwrap_or(0)
             .saturating_sub(self.confirmation_window);
 
-        let uo = crate::db::fetch_unspent_outputs(&mut *conn, self.account_id, min_height).await?;
+        let uo = crate::db::fetch_unspent_outputs(conn, self.account_id, min_height)?;
 
         let features_and_scripts_byte_size = match estimated_output_size {
             Some(sz) => sz,

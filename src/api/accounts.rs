@@ -34,6 +34,7 @@ use axum::{
     Json,
     extract::{Path, State},
 };
+use serde::Deserialize;
 use serde_json::{Value as JsonValue, json};
 use utoipa::{
     IntoParams,
@@ -101,7 +102,7 @@ fn confirmation_window_schema() -> Schema {
 ///
 /// For a request to `/accounts/my_wallet/balance`, the `name` field would
 /// contain `"my_wallet"`.
-#[derive(Debug, serde::Deserialize, IntoParams, utoipa::ToSchema)]
+#[derive(Debug, Deserialize, IntoParams, utoipa::ToSchema)]
 pub struct WalletParams {
     /// The unique name identifying the wallet account.
     name: String,
@@ -135,7 +136,7 @@ pub struct WalletParams {
 ///   "amount": 1000000
 /// }
 /// ```
-#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct LockFundsRequest {
     /// The total amount to lock in MicroMinotari (1 Minotari = 1,000,000 MicroMinotari).
     ///
@@ -202,7 +203,7 @@ pub struct LockFundsRequest {
 ///   "payment_id": "invoice-2024-001"
 /// }
 /// ```
-#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct RecipientRequest {
     /// The recipient's Tari address in Base58 encoding.
     ///
@@ -252,7 +253,7 @@ pub struct RecipientRequest {
 /// - The total amount sent equals the sum of all recipient amounts
 /// - Transaction fees are calculated automatically based on transaction size
 /// - UTXOs are locked during transaction creation to prevent double-spending
-#[derive(Debug, serde::Deserialize, utoipa::ToSchema)]
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
 pub struct CreateTransactionRequest {
     /// List of recipients for the transaction.
     ///
@@ -328,12 +329,20 @@ pub async fn api_get_balance(
     State(app_state): State<AppState>,
     Path(WalletParams { name }): Path<WalletParams>,
 ) -> Result<Json<AccountBalance>, ApiError> {
-    let mut conn = app_state.db_pool.acquire().await?;
-    let account = get_account_by_name(&mut conn, &name)
-        .await?
-        .ok_or_else(|| ApiError::AccountNotFound(name.clone()))?;
+    let pool = app_state.db_pool.clone();
+    let name = name.clone();
 
-    let balance = get_balance(&mut conn, account.id).await?;
+    let balance = tokio::task::spawn_blocking(move || {
+        let conn = pool.get().map_err(|e| ApiError::DbError(e.to_string()))?;
+
+        let account = get_account_by_name(&conn, &name)
+            .map_err(|e| ApiError::DbError(e.to_string()))?
+            .ok_or_else(|| ApiError::AccountNotFound(name.clone()))?;
+
+        get_balance(&conn, account.id).map_err(|e| ApiError::DbError(e.to_string()))
+    })
+    .await
+    .map_err(|e| ApiError::InternalServerError(format!("Task join error: {}", e)))??;
 
     Ok(Json(balance))
 }
@@ -399,25 +408,34 @@ pub async fn api_lock_funds(
     Path(WalletParams { name }): Path<WalletParams>,
     Json(body): Json<LockFundsRequest>,
 ) -> Result<Json<LockFundsResult>, ApiError> {
-    let mut conn = app_state.db_pool.acquire().await?;
-    let account = get_account_by_name(&mut conn, &name)
-        .await?
-        .ok_or_else(|| ApiError::AccountNotFound(name.clone()))?;
+    let pool = app_state.db_pool.clone();
+    let name = name.clone();
 
-    let lock_amount = FundLocker::new(app_state.db_pool.clone());
-    let response = lock_amount
-        .lock(
-            account.id,
-            body.amount,
-            body.num_outputs.expect("must be defaulted"),
-            body.fee_per_gram.expect("must be defaulted"),
-            body.estimated_output_size,
-            body.idempotency_key,
-            body.seconds_to_lock_utxos.expect("must be defaulted"),
-            body.confirmation_window.expect("must be defaulted"),
-        )
-        .await
-        .map_err(|e| ApiError::FailedToLockFunds(e.to_string()))?;
+    let response = tokio::task::spawn_blocking(move || {
+        let conn = pool.get().map_err(|e| ApiError::DbError(e.to_string()))?;
+
+        let account = get_account_by_name(&conn, &name)
+            .map_err(|e| ApiError::DbError(e.to_string()))?
+            .ok_or_else(|| ApiError::AccountNotFound(name.clone()))?;
+
+        let lock_amount = FundLocker::new(pool);
+
+        lock_amount
+            .lock(
+                account.id,
+                body.amount,
+                body.num_outputs.expect("must be defaulted"),
+                body.fee_per_gram.expect("must be defaulted"),
+                body.estimated_output_size,
+                body.idempotency_key,
+                body.seconds_to_lock_utxos.expect("must be defaulted"),
+                body.confirmation_window.expect("must be defaulted"),
+            )
+            .map_err(|e| ApiError::FailedToLockFunds(e.to_string()))
+    })
+    .await
+    .map_err(|e| ApiError::InternalServerError(format!("Task join error: {}", e)))??;
+
     Ok(Json(response))
 }
 
@@ -495,48 +513,55 @@ pub async fn api_create_unsigned_transaction(
     Path(WalletParams { name }): Path<WalletParams>,
     Json(body): Json<CreateTransactionRequest>,
 ) -> Result<Json<JsonValue>, ApiError> {
+    let pool = app_state.db_pool.clone();
+    let name = name.clone();
+    let network = app_state.network;
+    let password = app_state.password.clone();
+
     let recipients: Vec<Recipient> = body
         .recipients
-        .into_iter()
+        .iter()
         .map(|r| Recipient {
-            address: r.address.0,
+            address: r.address.0.clone(),
             amount: r.amount,
-            payment_id: r.payment_id,
+            payment_id: r.payment_id.clone(),
         })
         .collect();
 
-    let mut conn = app_state.db_pool.acquire().await?;
-    let account = get_account_by_name(&mut conn, &name)
-        .await?
-        .ok_or_else(|| ApiError::AccountNotFound(name.clone()))?;
+    let result = tokio::task::spawn_blocking(move || {
+        let conn = pool.get().map_err(|e| ApiError::DbError(e.to_string()))?;
 
-    let amount = recipients.iter().map(|r| r.amount).sum();
-    let num_outputs = recipients.len();
-    let fee_per_gram = MicroMinotari(5);
-    let estimated_output_size = None;
-    let seconds_to_lock_utxos = body.seconds_to_lock_utxos.unwrap_or(86400); // 24 hours
+        let account = get_account_by_name(&conn, &name)
+            .map_err(|e| ApiError::DbError(e.to_string()))?
+            .ok_or_else(|| ApiError::AccountNotFound(name.clone()))?;
 
-    let lock_amount = FundLocker::new(app_state.db_pool.clone());
-    let locked_funds = lock_amount
-        .lock(
-            account.id,
-            amount,
-            num_outputs,
-            fee_per_gram,
-            estimated_output_size,
-            body.idempotency_key,
-            seconds_to_lock_utxos,
-            body.confirmation_window.expect("must be defaulted"),
-        )
-        .await
-        .map_err(|e| ApiError::FailedToLockFunds(e.to_string()))?;
+        let amount = recipients.iter().map(|r| r.amount).sum();
+        let num_outputs = recipients.len();
+        let fee_per_gram = MicroMinotari(5);
+        let estimated_output_size = None;
+        let seconds_to_lock_utxos = body.seconds_to_lock_utxos.unwrap_or(86400); // 24 hours
 
-    let one_sided_tx =
-        OneSidedTransaction::new(app_state.db_pool.clone(), app_state.network, app_state.password.clone());
-    let result = one_sided_tx
-        .create_unsigned_transaction(&account, locked_funds, recipients, fee_per_gram)
-        .await
-        .map_err(|e| ApiError::FailedCreateUnsignedTx(e.to_string()))?;
+        let lock_amount = FundLocker::new(pool.clone());
+        let locked_funds = lock_amount
+            .lock(
+                account.id,
+                amount,
+                num_outputs,
+                fee_per_gram,
+                estimated_output_size,
+                body.idempotency_key,
+                seconds_to_lock_utxos,
+                body.confirmation_window.expect("must be defaulted"),
+            )
+            .map_err(|e| ApiError::FailedToLockFunds(e.to_string()))?;
+
+        let one_sided_tx = OneSidedTransaction::new(pool, network, password);
+        one_sided_tx
+            .create_unsigned_transaction(&account, locked_funds, recipients, fee_per_gram)
+            .map_err(|e| ApiError::FailedCreateUnsignedTx(e.to_string()))
+    })
+    .await
+    .map_err(|e| ApiError::InternalServerError(format!("Task join error: {}", e)))??;
 
     Ok(Json(serde_json::to_value(result)?))
 }
