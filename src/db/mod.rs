@@ -183,6 +183,10 @@ pub fn init_db(db_path: &str) -> WalletDbResult<SqlitePool> {
 
 fn connect_and_migrate(path: &PathBuf) -> WalletDbResult<SqlitePool> {
     let manager = SqliteConnectionManager::file(path).with_init(|c| {
+        // WAL mode: Allows concurrent reads and writes (crucial for connection pooling).
+        // synchronous NORMAL: Optimized performance; safe from app crashes in WAL mode.
+        // foreign_keys ON: Enforces table relationships (SQLite defaults to OFF).
+        // busy_timeout: Prevents "database is locked" errors by waiting up to 5s for locks to clear.
         c.execute_batch(
             "PRAGMA journal_mode = WAL;
              PRAGMA synchronous = NORMAL;
