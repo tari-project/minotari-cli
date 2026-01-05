@@ -132,7 +132,7 @@ impl Daemon {
 
         let (shutdown_tx, _) = broadcast::channel(1);
 
-        let db_pool = db::init_db(&self.database_file).await.map_err(ScanError::Fatal)?;
+        let db_pool = db::init_db(&self.database_file)?;
 
         let unlocker = TransactionUnlocker::new(db_pool.clone());
         let unlocker_task_handle = unlocker.run(shutdown_tx.subscribe());
@@ -249,7 +249,7 @@ impl Daemon {
                 }
                 res = self.scan_and_sleep() => {
                     if let Err(e) = res {
-                        match e {
+                        match &e {
                             ScanError::Fatal(_) => {
                                 println!("A fatal error occurred during the scan cycle: {}", e);
                                 return Err(e);
@@ -257,6 +257,10 @@ impl Daemon {
                             ScanError::Intermittent(err_msg) => {
                                 println!("An intermittent error occurred during the scan cycle: {}", err_msg);
                                 sleep(self.scan_interval).await;
+                            },
+                            ScanError::DbError(err_msg) => {
+                                println!("A DB error occurred during the scan cycle: {}", err_msg);
+                                return Err(e);
                             },
                             ScanError::Timeout(retries) => {
                                 println!("Scan timed out after {} retries, will retry after interval", retries);

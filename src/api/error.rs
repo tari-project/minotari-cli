@@ -44,6 +44,8 @@ use serde_json::json;
 use thiserror::Error;
 use utoipa::ToSchema;
 
+use crate::db::WalletDbError;
+
 /// Represents all possible errors returned by the REST API.
 ///
 /// Each variant corresponds to a specific error condition that can occur
@@ -135,20 +137,12 @@ pub enum ApiError {
     FailedCreateUnsignedTx(String),
 }
 
-/// Converts SQLx database errors into API errors.
+/// Converts database errors into API errors.
 ///
 /// All database errors are wrapped as [`ApiError::DbError`] with the
 /// original error message preserved for debugging purposes.
-///
-/// # Example
-///
-/// ```rust,ignore
-/// let result = sqlx::query("SELECT * FROM accounts")
-///     .fetch_one(&pool)
-///     .await?; // sqlx::Error automatically converts to ApiError
-/// ```
-impl From<sqlx::Error> for ApiError {
-    fn from(err: sqlx::Error) -> Self {
+impl From<WalletDbError> for ApiError {
+    fn from(err: WalletDbError) -> Self {
         ApiError::DbError(err.to_string())
     }
 }

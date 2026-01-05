@@ -1,11 +1,11 @@
 use crate::{
-    db,
+    db::{self, get_active_outputs_from_height},
     models::{PendingTransactionStatus, WalletEvent, WalletEventType},
     transactions::DisplayedTransaction,
 };
 use anyhow::anyhow;
 use lightweight_wallet_libs::{HttpBlockchainScanner, scanning::BlockchainScanner};
-use sqlx::{Acquire, SqliteConnection};
+use rusqlite::Connection;
 use std::collections::HashSet;
 use tari_common_types::types::FixedHash;
 use tari_transaction_components::key_manager::KeyManager;
@@ -29,10 +29,10 @@ pub struct ReorgInformation {
 
 pub async fn handle_reorgs(
     scanner: &mut HttpBlockchainScanner<KeyManager>,
-    conn: &mut SqliteConnection,
+    conn: &mut Connection,
     account_id: i64,
 ) -> Result<ReorgResult, anyhow::Error> {
-    let last_blocks = db::get_scanned_tip_blocks_by_account(conn, account_id).await?;
+    let last_blocks = db::get_scanned_tip_blocks_by_account(conn, account_id)?;
 
     if last_blocks.is_empty() {
         return Ok(ReorgResult {
@@ -67,9 +67,9 @@ pub async fn handle_reorgs(
 
     if is_reorg_detected {
         println!("REORG DETECTED. Rolling back from height: {}", reorg_start_height);
-        let mut tx = conn.begin().await?;
-        let reorg_info = rollback_from_height(&mut tx, account_id, reorg_start_height).await?;
-        tx.commit().await?;
+        let tx = conn.transaction()?;
+        let reorg_info = rollback_from_height(&tx, account_id, reorg_start_height)?;
+        tx.commit()?;
         Ok(ReorgResult {
             resume_height: reorg_start_height,
             reorg_information: Some(reorg_info),
@@ -83,14 +83,13 @@ pub async fn handle_reorgs(
     }
 }
 
-pub async fn rollback_from_height(
-    tx: &mut SqliteConnection,
+pub fn rollback_from_height(
+    tx: &Connection,
     account_id: i64,
     reorg_start_height: u64,
 ) -> Result<ReorgInformation, anyhow::Error> {
     // 1. Log BlockRolledBack events
-    let rolled_back_blocks = db::get_scanned_tip_blocks_by_account(tx, account_id)
-        .await?
+    let rolled_back_blocks = db::get_scanned_tip_blocks_by_account(tx, account_id)?
         .into_iter()
         .filter(|b| b.height >= reorg_start_height)
         .collect::<Vec<_>>();
@@ -107,22 +106,11 @@ pub async fn rollback_from_height(
             },
             description: format!("Block at height {} was rolled back due to reorg", block.height),
         };
-        db::insert_wallet_event(tx, account_id, &event).await?;
+        db::insert_wallet_event(tx, account_id, &event)?;
     }
 
     // 2. Get outputs that will be affected to log OutputRolledBack events
-    let output_reorg_start_height = reorg_start_height as i64;
-    let affected_outputs = sqlx::query!(
-        r#"
-        SELECT output_hash, mined_in_block_height, locked_by_request_id
-        FROM outputs
-        WHERE account_id = ? AND mined_in_block_height >= ? AND deleted_at IS NULL
-        "#,
-        account_id,
-        output_reorg_start_height,
-    )
-    .fetch_all(&mut *tx)
-    .await?;
+    let affected_outputs = get_active_outputs_from_height(tx, account_id, reorg_start_height)?;
 
     let mut cancelled_pending_tx_ids = HashSet::new();
     let mut invalidated_output_hashes = Vec::new();
@@ -144,7 +132,7 @@ pub async fn rollback_from_height(
                 output_row.output_hash, output_row.mined_in_block_height
             ),
         };
-        db::insert_wallet_event(tx, account_id, &event).await?;
+        db::insert_wallet_event(tx, account_id, &event)?;
 
         if let Some(request_id) = &output_row.locked_by_request_id {
             cancelled_pending_tx_ids.insert(request_id.clone());
@@ -154,8 +142,7 @@ pub async fn rollback_from_height(
     // 3. Cancel pending transactions linked to reorged outputs
     let cancelled_transaction_ids: Vec<String> = cancelled_pending_tx_ids.into_iter().collect();
     if !cancelled_transaction_ids.is_empty() {
-        db::cancel_pending_transactions_by_ids(tx, &cancelled_transaction_ids, PendingTransactionStatus::Cancelled)
-            .await?;
+        db::cancel_pending_transactions_by_ids(tx, &cancelled_transaction_ids, PendingTransactionStatus::Cancelled)?;
 
         for tx_id in &cancelled_transaction_ids {
             let event = WalletEvent {
@@ -167,19 +154,19 @@ pub async fn rollback_from_height(
                 },
                 description: format!("Pending transaction {} cancelled due to reorg", tx_id),
             };
-            db::insert_wallet_event(tx, account_id, &event).await?;
+            db::insert_wallet_event(tx, account_id, &event)?;
         }
     }
 
     // 4. Soft delete dependent data and create reversal balance changes
-    db::soft_delete_inputs_from_height(tx, account_id, reorg_start_height).await?;
-    db::soft_delete_outputs_from_height(tx, account_id, reorg_start_height).await?;
-    db::delete_scanned_tip_blocks_from_height(tx, account_id, reorg_start_height).await?;
+    db::soft_delete_inputs_from_height(tx, account_id, reorg_start_height)?;
+    db::soft_delete_outputs_from_height(tx, account_id, reorg_start_height)?;
+    db::delete_scanned_tip_blocks_from_height(tx, account_id, reorg_start_height)?;
 
     let reorganized_displayed_transactions =
-        db::mark_displayed_transactions_reorganized_and_return(tx, account_id, reorg_start_height).await?;
+        db::mark_displayed_transactions_reorganized_and_return(tx, account_id, reorg_start_height)?;
 
-    let affected_count = db::reset_mined_completed_transactions_from_height(tx, account_id, reorg_start_height).await?;
+    let affected_count = db::reset_mined_completed_transactions_from_height(tx, account_id, reorg_start_height)?;
     if affected_count > 0 {
         println!(
             "Reset {} completed transaction(s) to Completed status due to reorg",

@@ -1,7 +1,5 @@
 use std::collections::HashMap;
 
-use async_trait::async_trait;
-
 use super::{OutputDetails, TransactionDataResolver};
 use crate::models::{BalanceChange, Id, OutputStatus};
 use crate::scan::{DetectedOutput, SpentInput};
@@ -52,9 +50,8 @@ impl<'a> InMemoryResolver<'a> {
     }
 }
 
-#[async_trait]
 impl TransactionDataResolver for InMemoryResolver<'_> {
-    async fn get_output_details(&self, change: &BalanceChange) -> Result<Option<OutputDetails>, ProcessorError> {
+    fn get_output_details(&self, change: &BalanceChange) -> Result<Option<OutputDetails>, ProcessorError> {
         if change.balance_credit == 0 {
             return Ok(None);
         }
@@ -78,7 +75,7 @@ impl TransactionDataResolver for InMemoryResolver<'_> {
         Ok(None)
     }
 
-    async fn get_input_output_hash(&self, change: &BalanceChange) -> Result<Option<String>, ProcessorError> {
+    fn get_input_output_hash(&self, change: &BalanceChange) -> Result<Option<String>, ProcessorError> {
         if change.balance_debit == 0 {
             return Ok(None);
         }
@@ -90,11 +87,11 @@ impl TransactionDataResolver for InMemoryResolver<'_> {
         Ok(None)
     }
 
-    async fn get_sent_output_hashes(&self, _change: &BalanceChange) -> Result<Vec<String>, ProcessorError> {
+    fn get_sent_output_hashes(&self, _change: &BalanceChange) -> Result<Vec<String>, ProcessorError> {
         Ok(Vec::new())
     }
 
-    async fn build_output_hash_map(&self) -> Result<HashMap<String, Id>, ProcessorError> {
+    fn build_output_hash_map(&self) -> Result<HashMap<String, Id>, ProcessorError> {
         Ok(HashMap::new())
     }
 }
