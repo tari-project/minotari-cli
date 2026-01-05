@@ -175,7 +175,7 @@ pub fn init_db(db_path: &str) -> WalletDbResult<SqlitePool> {
                 e, &path
             );
             Err(WalletDbError::Unexpected(
-                "Migration from sqlx failed. Remove database file".to_string(),
+                "Unexpected error occurred. It is possibly a migration from sqlx that has failed. Consider removing database file and try again".to_string(),
             ))
         },
     }
