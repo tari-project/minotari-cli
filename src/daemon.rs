@@ -249,7 +249,7 @@ impl Daemon {
                 }
                 res = self.scan_and_sleep() => {
                     if let Err(e) = res {
-                        match e {
+                        match &e {
                             ScanError::Fatal(_) => {
                                 println!("A fatal error occurred during the scan cycle: {}", e);
                                 return Err(e);
@@ -260,7 +260,7 @@ impl Daemon {
                             },
                             ScanError::DbError(err_msg) => {
                                 println!("A DB error occurred during the scan cycle: {}", err_msg);
-                                sleep(self.scan_interval).await;
+                                return Err(e);
                             },
                             ScanError::Timeout(retries) => {
                                 println!("Scan timed out after {} retries, will retry after interval", retries);
