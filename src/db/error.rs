@@ -32,6 +32,9 @@ pub enum WalletDbError {
     #[error("Duplicate entry: {0}")]
     DuplicateEntry(String),
 
+    #[error("Key decryption failed: {0}")]
+    DecryptionFailed(String),
+
     #[error("Unexpected error: {0}")]
     Unexpected(String),
 }

@@ -147,10 +147,12 @@ impl AccountRow {
         } else {
             password[..32].to_string()
         };
+
         let key_bytes: [u8; 32] = password
             .as_bytes()
             .try_into()
-            .map_err(|_| WalletDbError::InvalidInput("Password conversion failed".to_string()))?;
+            .map_err(|_| WalletDbError::DecryptionFailed("Password conversion failed".to_string()))?;
+
         let key = Key::from(key_bytes);
         let cipher = XChaCha20Poly1305::new(&key);
 
@@ -158,22 +160,23 @@ impl AccountRow {
             .cipher_nonce
             .as_slice()
             .try_into()
-            .map_err(|_| WalletDbError::Decoding("Nonce must be 24 bytes".to_string()))?;
+            .map_err(|_| WalletDbError::DecryptionFailed("Nonce must be 24 bytes".to_string()))?;
+
         let nonce = XNonce::from(*nonce_bytes);
 
         let view_key = cipher
             .decrypt(&nonce, self.encrypted_view_private_key.as_ref())
-            .map_err(|_| WalletDbError::Crypt("Failed to decrypt view key".to_string()))?;
+            .map_err(|_| WalletDbError::DecryptionFailed("Failed to decrypt view key".to_string()))?;
 
         let spend_key = cipher
             .decrypt(&nonce, self.encrypted_spend_public_key.as_ref())
-            .map_err(|_| WalletDbError::Crypt("Failed to decrypt spend key".to_string()))?;
+            .map_err(|_| WalletDbError::DecryptionFailed("Failed to decrypt spend key".to_string()))?;
 
         let view_key = RistrettoSecretKey::from_canonical_bytes(&view_key)
-            .map_err(|e| WalletDbError::Decoding(format!("Invalid view key bytes: {}", e)))?;
+            .map_err(|e| WalletDbError::DecryptionFailed(format!("Invalid view key bytes: {}", e)))?;
 
         let spend_key = CompressedKey::<RistrettoPublicKey>::from_canonical_bytes(&spend_key)
-            .map_err(|e| WalletDbError::Decoding(format!("Invalid spend key bytes: {}", e)))?;
+            .map_err(|e| WalletDbError::DecryptionFailed(format!("Invalid spend key bytes: {}", e)))?;
 
         Ok((view_key, spend_key))
     }
