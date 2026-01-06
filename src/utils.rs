@@ -77,11 +77,10 @@ pub fn init_with_view_key(
 
     let password = if password.len() < 32 {
         Zeroizing::new(format!("{:0<32}", password.as_str()))
-    } else {
-        if password.len() > 32 {
-            return Err(anyhow::anyhow!("Password must be at most 32 bytes"));
-        }
+    } else if password.len() == 32 {
         password.clone()
+    } else {
+        return Err(anyhow::anyhow!("Password must be at most 32 bytes"));
     };
     let key_bytes: [u8; 32] = password
         .as_bytes()

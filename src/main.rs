@@ -515,11 +515,10 @@ async fn main() -> Result<(), anyhow::Error> {
             let wallet_data = if let Some(password) = password {
                 let password = if password.len() < 32 {
                     Zeroizing::new(format!("{:0<32}", password.as_str()))
+                } else if password.len() == 32 {
+                    Zeroizing::new(password.to_string())
                 } else {
-                    if password.len() > 32 {
-                        return Err(anyhow::anyhow!("Password longer than 32 bytes will be truncated."));
-                    }
-                    Zeroizing::new(password[..].to_string())
+                    return Err(anyhow::anyhow!("Password must be at most 32 bytes"));
                 };
                 let key_bytes: [u8; 32] = password
                     .as_bytes()

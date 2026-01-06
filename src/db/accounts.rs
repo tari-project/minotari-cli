@@ -145,12 +145,10 @@ impl AccountRow {
     ) -> WalletDbResult<(RistrettoSecretKey, CompressedKey<RistrettoPublicKey>)> {
         let password = Zeroizing::new(if password.len() < 32 {
             format!("{:0<32}", password.as_str())
+        } else if password.len() == 32 {
+            password.to_string()
         } else {
-            if password.len() > 32 {
-                return Err(anyhow::anyhow!("Password must be at most 32 bytes"));
-            } else {
-                password[..].to_string()
-            }
+            return Err(WalletDbError::InvalidInput("Password must be at most 32 bytes".to_string()));
         });
 
         let key_bytes: [u8; 32] = password
