@@ -42,6 +42,7 @@
 //! println!("Fee: {}", selection.fee());
 //! ```
 
+use log::{debug, warn};
 use rusqlite::Connection;
 use tari_script::TariScript;
 use tari_transaction_components::{
@@ -53,7 +54,10 @@ use tari_transaction_components::{
 };
 use thiserror::Error;
 
-use crate::db::{DbWalletOutput, WalletDbError, get_latest_scanned_tip_block_by_account};
+use crate::{
+    db::{DbWalletOutput, WalletDbError, get_latest_scanned_tip_block_by_account},
+    log::mask_amount,
+};
 
 /// Errors that can occur during UTXO selection.
 #[derive(Debug, Error)]
@@ -291,6 +295,12 @@ impl InputSelector {
         fee_per_gram: MicroMinotari,
         estimated_output_size: Option<usize>,
     ) -> Result<UtxoSelection, UtxoSelectionError> {
+        debug!(
+            account_id = self.account_id,
+            amount = &*mask_amount(amount.as_u64() as i64);
+            "Selecting UTXOs"
+        );
+
         let tip = get_latest_scanned_tip_block_by_account(conn, self.account_id)?;
         let min_height = tip
             .map(|b| b.height)
@@ -342,11 +352,24 @@ impl InputSelector {
         }
 
         if !sufficient_funds {
+            warn!(
+                target: "audit",
+                available = &*mask_amount(total_value.as_u64() as i64),
+                required = &*mask_amount((amount + fee_with_change).as_u64() as i64);
+                "Insufficient funds for transaction"
+            );
             return Err(UtxoSelectionError::InsufficientFunds {
                 available: total_value,
                 required: amount + fee_with_change,
             });
         }
+
+        debug!(
+            count = utxos.len(),
+            total = &*mask_amount(total_value.as_u64() as i64),
+            change = requires_change_output;
+            "UTXOs selected"
+        );
 
         Ok(UtxoSelection {
             utxos,

@@ -32,6 +32,7 @@
 
 use std::time::Duration;
 
+use log::{debug, info, warn};
 use reqwest::Method;
 use tari_transaction_components::transaction_components::Transaction;
 use tari_utilities::hex::to_hex;
@@ -205,7 +206,7 @@ impl WalletHttpClient {
     /// # }
     /// ```
     pub async fn get_tip_info(&self) -> Result<TipInfoResponse, anyhow::Error> {
-        println!("Requesting tip info from base node");
+        debug!("HTTP: Requesting tip info from base node");
         let response = self
             .http_client
             .send_request(Method::GET, "/get_tip_info", None)
@@ -243,11 +244,14 @@ impl WalletHttpClient {
     pub async fn is_online(&self) -> bool {
         match self.get_tip_info().await {
             Ok(_) => {
-                println!("Base node is online");
+                debug!("Base node is online");
                 true
             },
             Err(e) => {
-                println!("Base node is offline: {}", e);
+                warn!(
+                    error:? = e;
+                    "Base node is offline"
+                );
                 false
             },
         }
@@ -334,7 +338,7 @@ impl WalletHttpClient {
     /// checked against the RPC frame limit. This prevents submission of
     /// transactions that would fail due to size constraints.
     pub async fn submit_transaction(&self, transaction: Transaction) -> Result<TxSubmissionResponse, anyhow::Error> {
-        println!("Submitting transaction");
+        info!(target: "audit", "HTTP: Submitting transaction");
 
         check_transaction_size(&transaction).map_err(|e| anyhow::anyhow!(e.to_string()))?;
 
@@ -352,12 +356,16 @@ impl WalletHttpClient {
 
         match response.result {
             Some(result) => {
-                println!("Transaction submitted successfully");
+                info!(target: "audit", "HTTP: Transaction submitted successfully");
                 Ok(result)
             },
             None => {
                 let error_msg = response.error.unwrap_or_else(|| "Unknown error".to_string());
-                println!("Transaction submission failed: {}", error_msg);
+                warn!(
+                    target: "audit",
+                    reason = &*error_msg;
+                    "HTTP: Transaction submission failed"
+                );
                 Err(anyhow::anyhow!("Transaction submission failed: {}", error_msg))
             },
         }
@@ -423,21 +431,22 @@ impl WalletHttpClient {
         excess_sig_nonce: &[u8],
         excess_sig: &[u8],
     ) -> Result<TxQueryResponse, anyhow::Error> {
-        println!(
-            "Querying transaction with excess sig nonce {} and signature {}",
-            to_hex(excess_sig_nonce),
-            to_hex(excess_sig)
+        let excess_sig_nonce_hex = to_hex(excess_sig_nonce);
+        let excess_sig_hex = to_hex(excess_sig);
+        debug!(
+            nonce = &*excess_sig_nonce_hex,
+            sig = &*excess_sig_hex;
+            "HTTP: Querying transaction"
         );
 
         let path = format!(
             "/transactions?excess_sig_nonce={}&excess_sig_sig={}",
-            to_hex(excess_sig_nonce),
-            to_hex(excess_sig)
+            excess_sig_nonce_hex, excess_sig_hex
         );
 
         let response = self.http_client.send_request(Method::GET, &path, None).await?;
 
-        println!("Transaction query successful");
+        debug!("HTTP: Transaction query successful");
         Ok(response)
     }
 }

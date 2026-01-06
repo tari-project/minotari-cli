@@ -5,6 +5,7 @@ use crate::{
 };
 use anyhow::anyhow;
 use lightweight_wallet_libs::{HttpBlockchainScanner, scanning::BlockchainScanner};
+use log::{debug, info, warn};
 use rusqlite::Connection;
 use std::collections::HashSet;
 use tari_common_types::types::FixedHash;
@@ -66,7 +67,12 @@ pub async fn handle_reorgs(
     }
 
     if is_reorg_detected {
-        println!("REORG DETECTED. Rolling back from height: {}", reorg_start_height);
+        warn!(
+            target: "audit",
+            account_id = account_id,
+            rollback_height = reorg_start_height;
+            "REORG DETECTED. Rolling back chain state."
+        );
         let tx = conn.transaction()?;
         let reorg_info = rollback_from_height(&tx, account_id, reorg_start_height)?;
         tx.commit()?;
@@ -75,7 +81,7 @@ pub async fn handle_reorgs(
             reorg_information: Some(reorg_info),
         })
     } else {
-        println!("No reorgs detected.");
+        debug!("No reorgs detected.");
         Ok(ReorgResult {
             resume_height: last_blocks[0].height + 1,
             reorg_information: None,
@@ -168,9 +174,10 @@ pub fn rollback_from_height(
 
     let affected_count = db::reset_mined_completed_transactions_from_height(tx, account_id, reorg_start_height)?;
     if affected_count > 0 {
-        println!(
-            "Reset {} completed transaction(s) to Completed status due to reorg",
-            affected_count
+        info!(
+            target: "audit",
+            count = affected_count;
+            "Reset completed transaction(s) to Completed status due to reorg"
         );
     }
 

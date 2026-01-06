@@ -1,3 +1,4 @@
+use log::debug;
 use rusqlite::Connection;
 
 use super::builder::DisplayedTransactionBuilder;
@@ -10,6 +11,7 @@ use super::types::{
 };
 use crate::db::{self, SqlitePool};
 use crate::models::{BalanceChange, Id};
+
 /// Processes balance changes into user-displayable transactions.
 pub struct DisplayedTransactionProcessor {
     current_tip_height: u64,
@@ -25,6 +27,11 @@ impl DisplayedTransactionProcessor {
         balance_changes: Vec<BalanceChange>,
         context: ProcessingContext<'_>,
     ) -> Result<Vec<DisplayedTransaction>, ProcessorError> {
+        debug!(
+            count = balance_changes.len();
+            "Processing balance changes"
+        );
+
         match context {
             ProcessingContext::Database(pool) => {
                 let resolver = DatabaseResolver::new(pool.clone());
@@ -80,6 +87,11 @@ impl DisplayedTransactionProcessor {
         conn: &Connection,
         db_pool: &SqlitePool,
     ) -> Result<Vec<DisplayedTransaction>, ProcessorError> {
+        debug!(
+            account_id = account_id;
+            "Processing all stored transactions for account"
+        );
+
         let balance_changes = db::get_all_balance_changes_by_account_id(conn, account_id)?;
 
         if balance_changes.is_empty() {

@@ -21,12 +21,14 @@
 //! idempotency key already exists, the original result is returned.
 
 use chrono::{Duration, Utc};
+use log::info;
 use tari_transaction_components::tari_amount::MicroMinotari;
 use uuid::Uuid;
 
 use crate::{
     api::types::LockFundsResult,
     db::{self, SqlitePool},
+    log::mask_amount,
     transactions::input_selector::InputSelector,
 };
 
@@ -144,11 +146,23 @@ impl FundLocker {
         seconds_to_lock_utxos: u64,
         confirmation_window: u64,
     ) -> Result<LockFundsResult, anyhow::Error> {
+        info!(
+            target: "audit",
+            account_id = account_id,
+            amount = &*mask_amount(amount.as_u64() as i64);
+            "Locking funds"
+        );
+
         let mut conn = self.db_pool.get()?;
         if let Some(idempotency_key_str) = &idempotency_key
             && let Some(response) =
                 db::find_pending_transaction_locked_funds_by_idempotency_key(&conn, idempotency_key_str, account_id)?
         {
+            info!(
+                target: "audit",
+                idempotency_key = idempotency_key_str.as_str();
+                "Found existing pending transaction lock"
+            );
             return Ok(response);
         }
 
@@ -176,6 +190,13 @@ impl FundLocker {
         }
 
         transaction.commit()?;
+
+        info!(
+            target: "audit",
+            utxos_count = utxo_selection.utxos.len(),
+            total_value = &*mask_amount(utxo_selection.total_value.as_u64() as i64);
+            "Funds locked successfully"
+        );
 
         Ok(LockFundsResult {
             utxos: utxo_selection.utxos.iter().map(|utxo| utxo.output.clone()).collect(),

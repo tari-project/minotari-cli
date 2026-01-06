@@ -47,6 +47,7 @@
 use std::time::Duration;
 
 use anyhow::anyhow;
+use log::{error, info, warn};
 use tokio::{signal, sync::broadcast, time::sleep};
 
 use tari_common::configuration::Network;
@@ -128,7 +129,7 @@ impl Daemon {
     /// - `ScanError::Fatal` - Database connection failures, API binding errors, or task panics
     /// - Scanner errors are handled internally with retry logic for intermittent failures
     pub async fn run(&self) -> Result<(), ScanError> {
-        println!("Daemon started. Press Ctrl+C to stop.");
+        info!("Daemon started. Press Ctrl+C to stop.");
 
         let (shutdown_tx, _) = broadcast::channel(1);
 
@@ -143,7 +144,7 @@ impl Daemon {
             .await
             .map_err(|e| ScanError::Fatal(anyhow!("Failed to bind API server to {}: {}", addr, e)))?;
 
-        println!("API server listening on {}", addr);
+        info!(address = &*addr; "API server listening");
 
         let mut shutdown_rx_api = shutdown_tx.subscribe();
         let api_server_handle = tokio::spawn(async move {
@@ -160,7 +161,7 @@ impl Daemon {
         let shutdown_tx_clone = shutdown_tx.clone();
         let ctrlc_handle = tokio::spawn(async move {
             signal::ctrl_c().await.expect("Failed to listen for ctrl_c");
-            println!("\nReceived shutdown signal, stopping all tasks...");
+            info!("Received shutdown signal, stopping all tasks...");
             let _ = shutdown_tx_clone.send(());
             Ok::<(), ()>(())
         });
@@ -172,13 +173,13 @@ impl Daemon {
 
         if let Err(e) = scanner_res {
             if shutdown_tx.send(()).is_err() {
-                eprintln!("Failed to send shutdown signal. All tasks may not have received it.");
+                error!("Failed to send shutdown signal. All tasks may not have received it.");
             }
             return Err(e);
         }
 
         if shutdown_tx.send(()).is_err() {
-            eprintln!("Failed to send shutdown signal. All tasks may not have received it.");
+            error!("Failed to send shutdown signal. All tasks may not have received it.");
         }
 
         let join_res = tokio::try_join!(api_server_handle, unlocker_task_handle, ctrlc_handle)
@@ -186,7 +187,7 @@ impl Daemon {
 
         let (_api_res, _unlocker_res, _ctrlc_res) = join_res;
 
-        println!("Daemon stopped gracefully.");
+        info!("Daemon stopped gracefully.");
         Ok(())
     }
 
@@ -201,7 +202,7 @@ impl Daemon {
     /// - `Ok(())` - Scan completed successfully and sleep finished
     /// - `Err(ScanError)` - Scan failed with a fatal or intermittent error
     async fn scan_and_sleep(&self) -> Result<(), ScanError> {
-        println!("Starting wallet scan...");
+        info!("Starting wallet scan...");
         let result = scan::Scanner::new(&self.password, &self.base_url, &self.database_file, self.batch_size)
             .mode(ScanMode::Partial {
                 max_blocks: self.max_blocks,
@@ -211,10 +212,10 @@ impl Daemon {
 
         match result {
             Ok((events, _are_there_more_blocks_to_scan)) => {
-                println!("Scan completed successfully. Found {} events.", events.len());
+                info!(event_count = events.len(); "Scan completed successfully");
             },
             Err(e) => {
-                println!("Scan failed: {}", e);
+                error!(error:% = e; "Scan failed");
                 return Err(e);
             },
         }
@@ -244,26 +245,26 @@ impl Daemon {
         loop {
             tokio::select! {
                 _ = shutdown_rx.recv() => {
-                    println!("Scanner task received shutdown signal. Exiting gracefully.");
+                    info!("Scanner task received shutdown signal. Exiting gracefully.");
                     break;
                 }
                 res = self.scan_and_sleep() => {
                     if let Err(e) = res {
                         match &e {
                             ScanError::Fatal(_) => {
-                                println!("A fatal error occurred during the scan cycle: {}", e);
+                                error!(error:% = e; "A fatal error occurred during the scan cycle");
                                 return Err(e);
                             },
                             ScanError::Intermittent(err_msg) => {
-                                println!("An intermittent error occurred during the scan cycle: {}", err_msg);
+                                warn!(error:% = err_msg; "An intermittent error occurred during the scan cycle");
                                 sleep(self.scan_interval).await;
                             },
                             ScanError::DbError(err_msg) => {
-                                println!("A DB error occurred during the scan cycle: {}", err_msg);
+                                error!(error:% = err_msg; "A DB error occurred during the scan cycle");
                                 return Err(e);
                             },
                             ScanError::Timeout(retries) => {
-                                println!("Scan timed out after {} retries, will retry after interval", retries);
+                                warn!(retries = retries; "Scan timed out, will retry after interval");
                                 sleep(self.scan_interval).await;
                             },
                         }

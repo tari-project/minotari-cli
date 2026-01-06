@@ -6,6 +6,7 @@
 
 use std::time::{Duration, Instant};
 
+use log::debug;
 use reqwest::Method;
 use serde::de::DeserializeOwned;
 use tokio::sync::RwLock;
@@ -153,6 +154,12 @@ impl HttpClient {
         let start = Instant::now();
         let url = self.base_url.join(path)?;
 
+        debug!(
+            method = method.as_str(),
+            url:% = url;
+            "HTTP: Sending request"
+        );
+
         let req = match method {
             Method::GET => self.client.get(url),
             Method::POST => {
@@ -187,6 +194,10 @@ impl HttpClient {
     ///
     /// Called internally after each successful request to track response times.
     async fn update_latency(&self, duration: Duration) {
+        debug!(
+            latency:? = duration;
+            "HTTP: Request completed"
+        );
         *self.last_latency.write().await = Some((duration, Instant::now()));
     }
 

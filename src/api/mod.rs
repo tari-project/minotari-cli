@@ -49,6 +49,7 @@
 //! - All API errors are properly typed and do not leak sensitive information
 
 use axum::{Router, extract::FromRef, routing::get, routing::post};
+use log::info;
 use tari_common::configuration::Network;
 use utoipa::OpenApi;
 use utoipa_swagger_ui::SwaggerUi;
@@ -166,6 +167,11 @@ pub struct ApiDoc;
 /// # }
 /// ```
 pub fn create_router(db_pool: SqlitePool, network: Network, password: String) -> Router {
+    info!(
+        network:% = network;
+        "Creating API router"
+    );
+
     let app_state = AppState {
         db_pool,
         network,

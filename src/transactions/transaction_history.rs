@@ -52,6 +52,7 @@
 //! }).await?;
 //! ```
 
+use log::debug;
 use r2d2::PooledConnection;
 use r2d2_sqlite::SqliteConnectionManager;
 
@@ -148,6 +149,7 @@ impl TransactionHistoryService {
     ///
     /// Returns [`TransactionHistoryError::Database`] if the query fails.
     pub fn load_all_transactions(&self, account_id: Id) -> Result<Vec<DisplayedTransaction>, TransactionHistoryError> {
+        debug!(account_id = account_id; "Loading all transactions");
         let conn = self.get_connection()?;
         let transactions = db::get_displayed_transactions_by_account(&conn, account_id)?;
         Ok(transactions)
@@ -174,6 +176,7 @@ impl TransactionHistoryService {
         &self,
         account_id: Id,
     ) -> Result<Vec<DisplayedTransaction>, TransactionHistoryError> {
+        debug!(account_id = account_id; "Loading transactions excluding reorged");
         let conn = self.get_connection()?;
         let transactions = db::get_displayed_transactions_excluding_reorged(&conn, account_id)?;
         Ok(transactions)
@@ -208,6 +211,11 @@ impl TransactionHistoryService {
         account_id: Id,
         status: TransactionDisplayStatus,
     ) -> Result<Vec<DisplayedTransaction>, TransactionHistoryError> {
+        debug!(
+            account_id = account_id,
+            status:? = status;
+            "Loading transactions by status"
+        );
         let conn = self.get_connection()?;
         let transactions = db::get_displayed_transactions_by_status(&conn, account_id, status)?;
         Ok(transactions)
@@ -272,6 +280,12 @@ impl TransactionHistoryService {
         limit: i64,
         offset: i64,
     ) -> Result<Vec<DisplayedTransaction>, TransactionHistoryError> {
+        debug!(
+            account_id = account_id,
+            limit = limit,
+            offset = offset;
+            "Loading transactions paginated"
+        );
         let conn = self.get_connection()?;
         let transactions = db::get_displayed_transactions_paginated(&conn, account_id, limit, offset)?;
         Ok(transactions)

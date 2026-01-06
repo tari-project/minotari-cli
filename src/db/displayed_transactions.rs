@@ -1,8 +1,10 @@
-use crate::db::error::{WalletDbError, WalletDbResult};
+use log::{debug, info, warn};
 use rusqlite::{Connection, OptionalExtension, named_params};
 use serde::Deserialize;
 use serde_rusqlite::from_rows;
 
+use crate::db::error::{WalletDbError, WalletDbResult};
+use crate::log::mask_amount;
 use crate::models::Id;
 use crate::transactions::{DisplayedTransaction, TransactionDisplayStatus};
 use crate::utils::{current_db_timestamp, format_timestamp};
@@ -36,6 +38,13 @@ fn process_json_rows(
 }
 
 pub fn insert_displayed_transaction(conn: &Connection, transaction: &DisplayedTransaction) -> WalletDbResult<()> {
+    debug!(
+        id = &*transaction.id,
+        amount = &*mask_amount(transaction.amount as i64),
+        status:? = transaction.status;
+        "DB: Inserting displayed transaction"
+    );
+
     let direction = format!("{:?}", transaction.direction).to_lowercase();
     let source = format!("{:?}", transaction.source).to_lowercase();
     let status = format!("{:?}", transaction.status).to_lowercase();
@@ -81,6 +90,11 @@ pub fn get_displayed_transactions_by_account(
     conn: &Connection,
     account_id: Id,
 ) -> WalletDbResult<Vec<DisplayedTransaction>> {
+    debug!(
+        account_id = account_id;
+        "DB: Get displayed transactions"
+    );
+
     let mut stmt = conn.prepare_cached(
         r#"
         SELECT transaction_json
@@ -146,6 +160,12 @@ pub fn update_displayed_transaction_status(
     new_status: TransactionDisplayStatus,
     updated_transaction: &DisplayedTransaction,
 ) -> WalletDbResult<bool> {
+    debug!(
+        id = id,
+        new_status:? = new_status;
+        "DB: Updating displayed transaction status"
+    );
+
     let status_str = format!("{:?}", new_status).to_lowercase();
     let transaction_json = serialize_tx(updated_transaction)?;
 
@@ -171,6 +191,12 @@ pub fn mark_displayed_transactions_reorganized(
     account_id: Id,
     from_height: u64,
 ) -> WalletDbResult<u64> {
+    warn!(
+        account_id:? = account_id,
+        from_height = from_height;
+        "DB: Marking displayed transactions as reorganized"
+    );
+
     let status_str = format!("{:?}", TransactionDisplayStatus::Reorganized).to_lowercase();
     let now = current_db_timestamp();
 
@@ -270,6 +296,13 @@ pub fn find_pending_outbound_by_output_hash(
 
 /// Update an existing displayed transaction with blockchain info when it's mined.
 pub fn update_displayed_transaction_mined(conn: &Connection, tx: &DisplayedTransaction) -> WalletDbResult<bool> {
+    info!(
+        target: "audit",
+        id = &*tx.id,
+        height = tx.blockchain.block_height;
+        "DB: Displayed Transaction Mined"
+    );
+
     let status_str = format!("{:?}", tx.status).to_lowercase();
     let transaction_json = serialize_tx(tx)?;
 
@@ -376,6 +409,12 @@ pub fn mark_displayed_transaction_rejected(
     conn: &Connection,
     tx_id: &str,
 ) -> WalletDbResult<Option<DisplayedTransaction>> {
+    warn!(
+        target: "audit",
+        id = tx_id;
+        "DB: Marking displayed transaction as rejected"
+    );
+
     let status_str = format!("{:?}", TransactionDisplayStatus::Rejected).to_lowercase();
     let now = current_db_timestamp();
 

@@ -60,6 +60,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Result, anyhow};
+use log::{info, warn};
 use r2d2::PooledConnection;
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::Connection;
@@ -515,6 +516,11 @@ impl TransactionMonitor {
         for tx in transactions {
             let conn = Self::get_connection(db_pool)?;
             if tx.broadcast_attempts >= MAX_BROADCAST_ATTEMPTS {
+                warn!(
+                    target: "audit",
+                    id = tx.id.as_str();
+                    "Transaction exceeded max broadcast attempts"
+                );
                 let reason = format!("Exceeded {} broadcast attempts", MAX_BROADCAST_ATTEMPTS);
                 mark_completed_transaction_as_rejected(&conn, &tx.id, &reason)?;
                 db::unlock_outputs_for_pending_transaction(&conn, &tx.pending_tx_id)?;
@@ -537,6 +543,11 @@ impl TransactionMonitor {
 
             match Self::broadcast_transaction(wallet_client, &tx).await {
                 Ok(()) => {
+                    info!(
+                        target: "audit",
+                        id = tx.id.as_str();
+                        "Rebroadcasting transaction"
+                    );
                     mark_completed_transaction_as_broadcasted(&conn, &tx.id, tx.broadcast_attempts + 1)?;
 
                     result.wallet_events.push(WalletEvent {
@@ -550,6 +561,12 @@ impl TransactionMonitor {
                     });
                 },
                 Err(reason) => {
+                    warn!(
+                        target: "audit",
+                        id = tx.id.as_str(),
+                        reason:% = reason;
+                        "Transaction rejected on rebroadcast"
+                    );
                     mark_completed_transaction_as_rejected(&conn, &tx.id, &reason)?;
                     db::unlock_outputs_for_pending_transaction(&conn, &tx.pending_tx_id)?;
 
@@ -583,6 +600,12 @@ impl TransactionMonitor {
 
         for tx in transactions {
             if let Some((block_height, block_hash)) = Self::find_kernel_on_chain(wallet_client, &tx).await? {
+                info!(
+                    target: "audit",
+                    id = tx.id.as_str(),
+                    height = block_height;
+                    "Transaction mined (unconfirmed)"
+                );
                 let conn = Self::get_connection(db_pool)?;
                 mark_completed_transaction_as_mined_unconfirmed(&conn, &tx.id, block_height as i64, &block_hash)?;
 
@@ -618,6 +641,12 @@ impl TransactionMonitor {
 
             let confirmations = current_height.saturating_sub(mined_height);
             if confirmations >= REQUIRED_CONFIRMATIONS {
+                info!(
+                    target: "audit",
+                    id = tx.id.as_str(),
+                    confirmations = confirmations;
+                    "Transaction confirmed"
+                );
                 let mined_block_hash = tx
                     .mined_block_hash
                     .ok_or_else(|| anyhow!("Block hash missing for a mined tx: {}", tx.id))

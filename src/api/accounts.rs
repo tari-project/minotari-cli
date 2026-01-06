@@ -34,6 +34,7 @@ use axum::{
     Json,
     extract::{Path, State},
 };
+use log::{debug, info};
 use serde::Deserialize;
 use serde_json::{Value as JsonValue, json};
 use utoipa::{
@@ -48,6 +49,7 @@ use crate::{
         types::{LockFundsResult, TariAddressBase58},
     },
     db::{AccountBalance, get_account_by_name, get_balance},
+    log::mask_amount,
     transactions::{
         fund_locker::FundLocker,
         monitor::REQUIRED_CONFIRMATIONS,
@@ -329,6 +331,11 @@ pub async fn api_get_balance(
     State(app_state): State<AppState>,
     Path(WalletParams { name }): Path<WalletParams>,
 ) -> Result<Json<AccountBalance>, ApiError> {
+    debug!(
+        account = &*name;
+        "API: Get balance request"
+    );
+
     let pool = app_state.db_pool.clone();
     let name = name.clone();
 
@@ -408,6 +415,14 @@ pub async fn api_lock_funds(
     Path(WalletParams { name }): Path<WalletParams>,
     Json(body): Json<LockFundsRequest>,
 ) -> Result<Json<LockFundsResult>, ApiError> {
+    info!(
+        target: "audit",
+        account = &*name,
+        amount = &*mask_amount(body.amount.0 as i64),
+        idempotency_key:? = body.idempotency_key;
+        "API: Lock funds request"
+    );
+
     let pool = app_state.db_pool.clone();
     let name = name.clone();
 
@@ -513,6 +528,14 @@ pub async fn api_create_unsigned_transaction(
     Path(WalletParams { name }): Path<WalletParams>,
     Json(body): Json<CreateTransactionRequest>,
 ) -> Result<Json<JsonValue>, ApiError> {
+    info!(
+        target: "audit",
+        account = &*name,
+        recipient_count = body.recipients.len(),
+        idempotency_key:? = body.idempotency_key;
+        "API: Create unsigned transaction request"
+    );
+
     let pool = app_state.db_pool.clone();
     let name = name.clone();
     let network = app_state.network;

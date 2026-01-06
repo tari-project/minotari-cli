@@ -1,0 +1,45 @@
+appenders:
+  stdout:
+    kind: console
+    encoder:
+      kind: structured_console
+      pattern: "{d(%H:%M)} {h({l}):5} {m}"
+
+  audit_file:
+    kind: rolling_file
+    path: "logs/audit.log"
+    encoder:
+      kind: json
+    policy:
+      kind: compound
+      trigger:
+        kind: size
+        limit: 10mb
+      roller:
+        kind: fixed_window
+        pattern: "logs/audit.{}.log"
+        base: 1
+        count: 10
+
+root:
+  level: info
+  appenders:
+    - stdout
+
+loggers:
+  "minotari":
+    level: info
+
+  "audit":
+    level: info
+    additive: false
+    appenders:
+      - stdout
+      - audit_file
+
+  "tower_http":
+    level: debug
+  "hyper":
+    level: warn
+  "h2":
+    level: error

@@ -1,10 +1,12 @@
 use std::str::FromStr;
 
 use crate::db::error::{WalletDbError, WalletDbResult};
+use crate::log::mask_amount;
 use crate::{
     api::types::LockFundsResult, db::outputs::fetch_outputs_by_lock_request_id, models::PendingTransactionStatus,
 };
 use chrono::{DateTime, Utc};
+use log::{debug, info, warn};
 use rusqlite::{Connection, OptionalExtension, ToSql, named_params};
 use serde::Deserialize;
 use serde_rusqlite::from_rows;
@@ -34,6 +36,14 @@ pub fn create_pending_transaction(
     fee_with_change: MicroMinotari,
     expires_at: DateTime<Utc>,
 ) -> WalletDbResult<String> {
+    info!(
+        target: "audit",
+        account_id = account_id,
+        idempotency_key = idempotency_key,
+        total_value = &*mask_amount(total_value.as_u64() as i64);
+        "DB: Creating pending transaction"
+    );
+
     let id: String = Uuid::new_v4().to_string();
     let status_pending = PendingTransactionStatus::Pending.to_string();
     let total_value = total_value.as_u64() as i64;
@@ -84,6 +94,10 @@ pub fn create_pending_transaction(
             if let rusqlite::Error::SqliteFailure(err, _) = &e
                 && err.code == rusqlite::ErrorCode::ConstraintViolation
             {
+                warn!(
+                    idempotency_key = idempotency_key;
+                    "DB: Duplicate pending transaction attempted"
+                );
                 return Err(WalletDbError::DuplicateEntry(format!(
                     "Pending transaction with idempotency key '{}' already exists",
                     idempotency_key
@@ -121,6 +135,12 @@ pub fn update_pending_transaction_status(
     id: &str,
     status: PendingTransactionStatus,
 ) -> WalletDbResult<()> {
+    debug!(
+        id = id,
+        status:% = status;
+        "DB: Updating pending transaction status"
+    );
+
     let status_str = status.to_string();
     conn.execute(
         r#"
@@ -317,6 +337,13 @@ pub fn cancel_pending_transactions_by_ids(
     if ids.is_empty() {
         return Ok(());
     }
+
+    warn!(
+        target: "audit",
+        count = ids.len(),
+        new_status:% = status;
+        "DB: Cancelling pending transactions"
+    );
 
     let status_str = status.to_string();
 

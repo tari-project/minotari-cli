@@ -1,3 +1,4 @@
+use log::{debug, error};
 use r2d2::PooledConnection;
 use r2d2_sqlite::SqliteConnectionManager;
 
@@ -21,7 +22,11 @@ impl ScanDbHandler {
         let pool = self.pool.clone();
         tokio::task::spawn_blocking(move || pool.get().map_err(WalletDbError::from))
             .await
-            .map_err(|e| ScanError::Fatal(anyhow::anyhow!("DB connection task failed: {}", e)))?
+            .map_err(|e| {
+                let err = anyhow::anyhow!("DB connection task failed: {}", e);
+                error!("DB connection task failed: {}", e);
+                ScanError::Fatal(err)
+            })?
             .map_err(ScanError::DbError)
     }
 
@@ -36,6 +41,12 @@ impl ScanDbHandler {
         if blocks.is_empty() {
             return Ok(Vec::new());
         }
+
+        debug!(
+            count = blocks.len(),
+            account_id = account_id;
+            "Processing scanned blocks in DB task"
+        );
 
         let pool = self.pool.clone();
 
@@ -64,7 +75,11 @@ impl ScanDbHandler {
             Ok::<Vec<WalletEvent>, WalletDbError>(events)
         })
         .await
-        .map_err(|e| ScanError::Fatal(anyhow::anyhow!("Block processing task failed: {}", e)))?
+        .map_err(|e| {
+            let err = anyhow::anyhow!("Block processing task failed: {}", e);
+            error!("Block processing task failed: {}", e);
+            ScanError::Fatal(err)
+        })?
         .map_err(ScanError::from)
     }
 
@@ -75,7 +90,11 @@ impl ScanDbHandler {
             prune_scanned_tip_blocks(&conn, account_id, height)
         })
         .await
-        .map_err(|e| ScanError::Fatal(anyhow::anyhow!("Pruning task failed: {}", e)))?
+        .map_err(|e| {
+            let err = anyhow::anyhow!("Pruning task failed: {}", e);
+            error!("Pruning task failed: {}", e);
+            ScanError::Fatal(err)
+        })?
         .map_err(ScanError::DbError)
     }
 }

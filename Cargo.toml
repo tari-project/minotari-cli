@@ -22,6 +22,8 @@ lightweight_wallet_libs = { git = "https://github.com/tari-project/tari-wallet",
     "grpc",
     "http",
 ] }
+log = { version = "0.4.29", features = ["kv"] }
+log4rs = { version = "1.4.0", features = ["yaml_format", "console_appender", "file_appender", "log_kv"] }
 num-format = "0.4.4"
 r2d2 = "0.8.10"
 r2d2_sqlite = "0.31.0"
@@ -33,6 +35,7 @@ rusqlite_migration = { version = "2.3.0", features = ["from-directory"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_rusqlite = "0.40.1"
+serde_yaml = "0.9.34"
 tari_common = { git = "https://github.com/tari-project/tari/", rev = "32b2e748cc1800823aebfa1d32799d2d9fee3bf5" }
 tari_common_types = { git = "https://github.com/tari-project/tari/", rev = "32b2e748cc1800823aebfa1d32799d2d9fee3bf5" }
 tari_crypto = { version = "0.22.1", features = ["borsh"] }

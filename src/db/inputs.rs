@@ -2,6 +2,7 @@ use crate::db::balance_changes::insert_balance_change;
 use crate::db::error::{WalletDbError, WalletDbResult};
 use crate::models::BalanceChange;
 use chrono::{DateTime, Utc};
+use log::{debug, warn};
 use rusqlite::{Connection, OptionalExtension, named_params};
 use serde::Deserialize;
 use serde_rusqlite::from_rows;
@@ -14,6 +15,14 @@ pub fn insert_input(
     mined_in_block_hash: &[u8],
     mined_timestamp: u64,
 ) -> WalletDbResult<(i64, bool)> {
+    debug!(
+        target: "audit",
+        account_id = account_id,
+        output_id = output_id,
+        height = mined_in_block_height;
+        "DB: Inserting input"
+    );
+
     let timestamp = DateTime::<Utc>::from_timestamp(mined_timestamp as i64, 0)
         .ok_or_else(|| WalletDbError::Decoding(format!("Invalid mined timestamp: {}", mined_timestamp)))?;
 
@@ -79,6 +88,13 @@ struct InputToDelete {
 }
 
 pub fn soft_delete_inputs_from_height(conn: &Connection, account_id: i64, height: u64) -> WalletDbResult<()> {
+    warn!(
+        target: "audit",
+        account_id = account_id,
+        height = height;
+        "DB: Soft deleting inputs (Reorg)"
+    );
+
     let height_i64 = height as i64;
     let now = Utc::now();
 

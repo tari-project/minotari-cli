@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use log::{error, info};
 use rusqlite::Connection;
 use tokio::{sync::broadcast, task::JoinHandle, time::interval};
 
@@ -21,6 +22,7 @@ impl TransactionUnlocker {
         let expired_txs = db::find_expired_pending_transactions(conn)?;
 
         for tx in expired_txs {
+            info!(target: "audit", id = &*tx.id; "Transaction expired: unlocking funds");
             let transaction = conn.transaction()?;
 
             db::update_pending_transaction_status(&transaction, &tx.id, PendingTransactionStatus::Expired)?;
@@ -34,7 +36,7 @@ impl TransactionUnlocker {
 
     pub fn run(self, mut shutdown_rx: broadcast::Receiver<()>) -> JoinHandle<Result<(), anyhow::Error>> {
         tokio::spawn(async move {
-            println!("Transaction unlocker task started.");
+            info!(target: "audit", "Transaction unlocker task started.");
             let mut interval = interval(Duration::from_secs(60));
 
             loop {
@@ -42,16 +44,16 @@ impl TransactionUnlocker {
                     _ = interval.tick() => {
                         let mut conn = self.db_pool.get()?;
                         if let Err(e) = Self::unlock_expired_transactions(&mut conn) {
-                            eprintln!("Error unlocking expired transactions: {}", e);
+                            error!(error:% = e; "Error unlocking expired transactions");
                         }
                     }
                     _ = shutdown_rx.recv() => {
-                        println!("Transaction unlocker task received shutdown signal. Exiting gracefully.");
+                        info!(target: "audit", "Transaction unlocker task received shutdown signal. Exiting gracefully.");
                         break;
                     }
                 }
             }
-            println!("Transaction unlocker task has shut down.");
+            info!("Transaction unlocker task has shut down.");
             Ok(())
         })
     }

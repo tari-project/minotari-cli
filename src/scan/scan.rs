@@ -4,6 +4,7 @@
 //! for synchronizing wallet state with the blockchain.
 
 use lightweight_wallet_libs::{HttpBlockchainScanner, ScanConfig, scanning::BlockchainScanner};
+use log::{error, info, warn};
 use rusqlite::Connection;
 use std::time::Duration;
 use tari_transaction_components::key_manager::{KeyManager, TransactionKeyManagerInterface};
@@ -141,9 +142,11 @@ impl ScanContext {
                 Ok(Err(e)) => {
                     error_retries += 1;
                     let error_msg = e.to_string();
-                    println!(
-                        "Blockchain scan failed: {}, retry {}/{}",
-                        error_msg, error_retries, retry_config.max_error_retries
+                    warn!(
+                        error = &*error_msg,
+                        retry = error_retries,
+                        max = retry_config.max_error_retries;
+                        "Blockchain scan failed"
                     );
 
                     if error_retries >= retry_config.max_error_retries {
@@ -155,14 +158,18 @@ impl ScanContext {
                         .error_backoff_base_secs
                         .pow(error_retries.min(MAX_BACKOFF_EXPONENT))
                         .min(MAX_BACKOFF_SECONDS);
-                    println!("Waiting {} seconds before retrying...", backoff_secs);
+                    info!(
+                        seconds = backoff_secs;
+                        "Waiting before retrying..."
+                    );
                     tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
                 },
                 Err(_elapsed) => {
                     timeout_retries += 1;
-                    println!(
-                        "scan_blocks timed out after {:?}, retry {}/{}",
-                        retry_config.timeout, timeout_retries, retry_config.max_timeout_retries
+                    warn!(
+                        retry = timeout_retries,
+                        max = retry_config.max_timeout_retries;
+                        "scan_blocks timed out"
                     );
 
                     if timeout_retries >= retry_config.max_timeout_retries {
@@ -354,9 +361,10 @@ async fn wait_for_next_poll_cycle<E: EventSender>(
     let mut resume_height = last_scanned_height;
 
     if let Some(reorg_info) = reorg_result.reorg_information {
-        println!(
-            "Reorg detected at poll cycle start. Resetting from height {} to {}",
-            last_scanned_height, reorg_result.resume_height
+        warn!(
+            old_height = last_scanned_height,
+            new_height = reorg_result.resume_height;
+            "Reorg detected at poll cycle start. Resetting height."
         );
         resume_height = emit_reorg_event(
             event_sender,
@@ -490,9 +498,11 @@ async fn run_scan_loop<E: EventSender + Clone + Send + 'static>(
     retry_config: &ScanRetryConfig,
     cancel_token: Option<&CancellationToken>,
 ) -> Result<(Vec<WalletEvent>, bool), ScanError> {
-    println!(
-        "Starting scan for account {} from height {}",
-        scanner_context.account_id, scanner_context.scan_config.start_height
+    info!(
+        target: "audit",
+        account_id = scanner_context.account_id,
+        start_height = scanner_context.scan_config.start_height;
+        "Starting scan for account"
     );
 
     let db_handler = ScanDbHandler::new(pool.clone());
@@ -563,9 +573,10 @@ async fn run_scan_loop<E: EventSender + Clone + Send + 'static>(
             return Ok((all_events, false));
         }
 
-        println!(
-            "Processing {} scanned blocks for account {}",
-            batch_size, scanner_context.account_id
+        info!(
+            count = batch_size,
+            account_id = scanner_context.account_id;
+            "Processing scanned blocks"
         );
 
         let has_pending_outbound = scanner_context.transaction_monitor.has_pending_outbound();
@@ -614,9 +625,11 @@ async fn run_scan_loop<E: EventSender + Clone + Send + 'static>(
                     .map_err(ScanError::Fatal)?;
 
             if let Some(reorg_info) = reorg_result.reorg_information {
-                println!(
-                    "Reorg detected during scan. Resetting from height {} to {}",
-                    last_scanned_height, reorg_result.resume_height
+                warn!(
+                    target: "audit",
+                    old_height = last_scanned_height,
+                    new_height = reorg_result.resume_height;
+                    "Reorg detected during scan. Resetting height."
                 );
                 last_scanned_height = emit_reorg_event(
                     &event_sender,

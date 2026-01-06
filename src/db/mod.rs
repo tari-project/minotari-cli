@@ -47,6 +47,7 @@ use std::sync::LazyLock;
 use std::{env::current_dir, fs};
 
 use include_dir::{Dir, include_dir};
+use log::{debug, error, info};
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::Connection;
@@ -157,6 +158,8 @@ static MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
 /// # }
 /// ```
 pub fn init_db(db_path: &str) -> WalletDbResult<SqlitePool> {
+    info!(path = db_path; "Initializing database");
+
     let mut path = Path::new(db_path).to_path_buf();
     if path.is_relative() {
         path = current_dir()?.join(path);
@@ -170,9 +173,10 @@ pub fn init_db(db_path: &str) -> WalletDbResult<SqlitePool> {
     match connect_and_migrate(&path) {
         Ok(pool) => Ok(pool),
         Err(e) => {
-            eprintln!(
-                "Database migration failed: {}. Please, remove database {:?} manually",
-                e, &path
+            error!(
+                error:% = e,
+                path:? = &path;
+                "Database migration failed. Please, remove database manually"
             );
             Err(WalletDbError::Unexpected(
                 "Unexpected error occurred. It is possibly a migration from sqlx that has failed. Consider removing database file and try again".to_string(),
@@ -182,6 +186,7 @@ pub fn init_db(db_path: &str) -> WalletDbResult<SqlitePool> {
 }
 
 fn connect_and_migrate(path: &PathBuf) -> WalletDbResult<SqlitePool> {
+    debug!(path:? = path; "Connecting to database");
     let manager = SqliteConnectionManager::file(path).with_init(|c| {
         // WAL mode: Allows concurrent reads and writes (crucial for connection pooling).
         // synchronous NORMAL: Optimized performance; safe from app crashes in WAL mode.
@@ -199,6 +204,8 @@ fn connect_and_migrate(path: &PathBuf) -> WalletDbResult<SqlitePool> {
     let mut conn = pool.get()?;
 
     attempt_sqlx_adoption(&mut conn).ok();
+
+    debug!("Applying migrations");
     MIGRATIONS.to_latest(&mut conn)?;
 
     Ok(pool)
@@ -223,7 +230,7 @@ fn attempt_sqlx_adoption(conn: &mut Connection) -> WalletDbResult<()> {
             let pragma_sql = format!("PRAGMA user_version = {}", count);
             conn.execute(&pragma_sql, [])?;
 
-            println!("Migrated from sqlx: updated user_version to {}", count);
+            info!(count = count; "Migrated from sqlx: updated user_version");
         }
 
         conn.execute("DROP TABLE _sqlx_migrations", [])?;
