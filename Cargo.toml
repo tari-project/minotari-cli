@@ -10,46 +10,44 @@ path = "src/bin/generate_openapi.rs"
 
 [dependencies]
 anyhow = "1.0.99"
-tokio = { version = "1.47.1", features = ["full"] }
+axum = { version = "0.8.6", features = ["default", "http2", "macros"] }
+blake2 = "0.10.6"
+chacha20poly1305 = { version = "0.10.1", features = ["rand_core", "std"] }
+chrono = "0.4.42"
+clap = { version = "4.5.47", features = ["derive"] }
+hex = "0.4.3"
+include_dir = "0.7.4"
 #lightweight_wallet_libs = { path = "../tari-wallet", features = ["grpc","http",] }
-lightweight_wallet_libs = { git = "https://github.com/tari-project/tari-wallet", rev = "3e2807b1731074b6c1c2d166ef72c9085afff5fb", features = [
+lightweight_wallet_libs = { git = "https://github.com/tari-project/tari-wallet", rev = "b78185ae30a9ec39ca7d36c829d260493947b510", features = [
     "grpc",
     "http",
 ] }
-clap = { version = "4.5.47", features = ["derive"] }
-hex = "0.4.3"
-chacha20poly1305 = { version = "0.10.1", features = ["rand_core", "std"] }
-serde_json = "1.0.143"
-sqlx = { version = "0.8.6", features = [
-    "migrate",
-    "runtime-tokio",
-    "sqlite",
-    "macros",
-    "chrono",
-] }
-blake2 = "0.10.6"
-tari_crypto = { version = "0.22.1", features = ["borsh"] }
-tari_utilities = { version = "0.8", features = ["std"] }
-chrono = "0.4.42"
-serde = "1.0.225"
+num-format = "0.4.4"
+r2d2 = "0.8.10"
+r2d2_sqlite = "0.31.0"
+reqwest = { version = "0.12", features = ["json"] }
+reqwest-middleware = "0.4"
+reqwest-retry = "0.7"
+rusqlite = { version = "0.37", features = ["bundled", "chrono", "uuid", "serde_json"] }
+rusqlite_migration = { version = "2.3.0", features = ["from-directory"] }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+serde_rusqlite = "0.40.1"
 tari_common = { git = "https://github.com/tari-project/tari/", rev = "32b2e748cc1800823aebfa1d32799d2d9fee3bf5" }
 tari_common_types = { git = "https://github.com/tari-project/tari/", rev = "32b2e748cc1800823aebfa1d32799d2d9fee3bf5" }
+tari_crypto = { version = "0.22.1", features = ["borsh"] }
 tari_script = { git = "https://github.com/tari-project/tari/", rev = "32b2e748cc1800823aebfa1d32799d2d9fee3bf5" }
 tari_transaction_components = { git = "https://github.com/tari-project/tari/", rev = "32b2e748cc1800823aebfa1d32799d2d9fee3bf5" }
+tari_utilities = { version = "0.8", features = ["std"] }
 #tari_common = { path = "../tari/common" }
 #tari_common_types = { path = "../tari/base_layer/common_types" }
 #tari_script = { path = "../tari/infrastructure/tari_script" }
 #tari_transaction_components = { path = "../tari/base_layer/transaction_components" }
 thiserror = "2.0.17"
-axum = { version = "0.8.6", features = ["default", "http2", "macros"] }
+tokio = { version = "1.47.1", features = ["full"] }
+tokio-util = { version = "0.7.17", features = ["rt"] }
+url = "2.5"
 utoipa = "5.4.0"
 utoipa-swagger-ui = { version = "9.0.2", features = ["axum"] }
 uuid = { version = "1", features = ["v4"] }
-reqwest = { version = "0.12", features = ["json"] }
-reqwest-middleware = "0.4"
-reqwest-retry = "0.7"
-url = "2.5"
-tokio-util = { version = "0.7.17", features = ["rt"] }
-async-trait = "0.1.89"
-num-format = "0.4.4"
 zeroize = { version = "1.8.2", features = ["zeroize_derive"] }

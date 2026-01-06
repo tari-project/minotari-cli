@@ -4,7 +4,7 @@
 //! for synchronizing wallet state with the blockchain.
 
 use lightweight_wallet_libs::{HttpBlockchainScanner, ScanConfig, scanning::BlockchainScanner};
-use sqlx::{Acquire, Sqlite, SqliteConnection, pool::PoolConnection};
+use rusqlite::Connection;
 use std::time::Duration;
 use tari_transaction_components::key_manager::{KeyManager, TransactionKeyManagerInterface};
 use tari_utilities::ByteArray;
@@ -16,17 +16,17 @@ use zeroize::Zeroizing;
 use thiserror::Error;
 
 use crate::{
-    db,
-    db::AccountRow,
+    db::{self, AccountRow, SqlitePool, WalletDbError},
     http::WalletHttpClient,
     models::WalletEvent,
     scan::{
-        block_processor::{BlockProcessor, BlockProcessorError},
+        block_processor::BlockProcessorError,
         events::{
             ChannelEventSender, EventSender, NoopEventSender, PauseReason, ProcessingEvent, ReorgDetectedEvent,
             ScanStatusEvent, TransactionsUpdatedEvent,
         },
         reorg,
+        scan_db_handler::ScanDbHandler,
     },
     transactions::{MonitoringState, TransactionMonitor},
 };
@@ -49,6 +49,8 @@ const DEFAULT_MAX_ERROR_RETRIES: u32 = 3;
 /// Default base for exponential backoff on errors (in seconds).
 const DEFAULT_ERROR_BACKOFF_BASE_SECS: u64 = 2;
 
+const MAX_BACKOFF_EXPONENT: u32 = 5;
+const MAX_BACKOFF_SECONDS: u64 = 60;
 /// Errors that can occur during blockchain scanning operations.
 ///
 /// This enum distinguishes between different error severities to enable
@@ -74,12 +76,10 @@ pub enum ScanError {
     /// The contained value indicates the number of retry attempts made.
     #[error("Scan timed out after {0} retries")]
     Timeout(u32),
-}
 
-impl From<sqlx::Error> for ScanError {
-    fn from(e: sqlx::Error) -> Self {
-        ScanError::Fatal(e.into())
-    }
+    /// DB execution failed
+    #[error("Database execution error: {0}")]
+    DbError(#[from] WalletDbError),
 }
 
 impl From<BlockProcessorError> for ScanError {
@@ -152,7 +152,10 @@ impl ScanContext {
                     }
 
                     // Exponential backoff for error retries
-                    let backoff_secs = retry_config.error_backoff_base_secs.pow(error_retries.min(5));
+                    let backoff_secs = retry_config
+                        .error_backoff_base_secs
+                        .pow(error_retries.min(MAX_BACKOFF_EXPONENT))
+                        .min(MAX_BACKOFF_SECONDS);
                     println!("Waiting {} seconds before retrying...", backoff_secs);
                     tokio::time::sleep(Duration::from_secs(backoff_secs)).await;
                 },
@@ -316,7 +319,7 @@ enum ContinuousWaitResult {
 /// or [`ContinuousWaitResult::Cancelled`] if cancellation was requested.
 async fn wait_for_next_poll_cycle<E: EventSender>(
     scanner_context: &mut ScanContext,
-    conn: &mut PoolConnection<Sqlite>,
+    db_handler: &ScanDbHandler,
     event_sender: &E,
     poll_interval: Duration,
     last_scanned_height: u64,
@@ -343,7 +346,9 @@ async fn wait_for_next_poll_cycle<E: EventSender>(
         tokio::time::sleep(poll_interval).await;
     }
 
-    let reorg_result = reorg::handle_reorgs(&mut scanner_context.scanner, conn, scanner_context.account_id)
+    let mut conn = db_handler.get_connection().await?;
+
+    let reorg_result = reorg::handle_reorgs(&mut scanner_context.scanner, &mut conn, scanner_context.account_id)
         .await
         .map_err(ScanError::Fatal)?;
 
@@ -401,9 +406,9 @@ async fn prepare_account_scan(
     processing_threads: usize,
     reorg_check_interval: u64,
     monitoring_state: MonitoringState,
-    conn: &mut SqliteConnection,
+    conn: &mut Connection,
 ) -> Result<ScanContext, ScanError> {
-    let key_manager = account.get_key_manager(password).await.map_err(ScanError::Fatal)?;
+    let key_manager = account.get_key_manager(password)?;
     let account_view_key = key_manager.get_private_view_key().as_bytes().to_vec();
 
     let mut scanner = HttpBlockchainScanner::new(base_url.to_string(), key_manager.clone(), processing_threads)
@@ -435,7 +440,6 @@ async fn prepare_account_scan(
 
     monitoring_state
         .initialize(conn, account.id)
-        .await
         .map_err(ScanError::Fatal)?;
 
     let transaction_monitor = TransactionMonitor::new(monitoring_state);
@@ -479,9 +483,9 @@ async fn prepare_account_scan(
 /// - `ScanStatus::Completed` when reaching tip
 /// - `ScanStatus::Paused` when stopping early
 /// - `ScanStatus::MoreBlocksAvailable` when more blocks exist
-async fn run_scan_loop<E: EventSender + Clone>(
+async fn run_scan_loop<E: EventSender + Clone + Send + 'static>(
     scanner_context: &mut ScanContext,
-    conn: &mut PoolConnection<Sqlite>,
+    pool: &SqlitePool,
     event_sender: E,
     mode: &ScanMode,
     retry_config: &ScanRetryConfig,
@@ -491,6 +495,8 @@ async fn run_scan_loop<E: EventSender + Clone>(
         "Starting scan for account {} from height {}",
         scanner_context.account_id, scanner_context.scan_config.start_height
     );
+
+    let db_handler = ScanDbHandler::new(pool.clone());
     let mut all_events = Vec::new();
     let mut total_scanned: u64 = 0;
     let mut blocks_since_reorg_check: u64 = 0;
@@ -526,8 +532,8 @@ async fn run_scan_loop<E: EventSender + Clone>(
         }
 
         let (scanned_blocks, more_blocks) = scanner_context.scan_blocks_with_timeout(retry_config).await?;
-
-        total_scanned += scanned_blocks.len() as u64;
+        let batch_size = scanned_blocks.len();
+        total_scanned += batch_size as u64;
 
         if scanned_blocks.is_empty() || !more_blocks {
             event_sender.send(ProcessingEvent::ScanStatus(ScanStatusEvent::Completed {
@@ -539,7 +545,7 @@ async fn run_scan_loop<E: EventSender + Clone>(
             if let ScanMode::Continuous { poll_interval } = mode {
                 match wait_for_next_poll_cycle(
                     scanner_context,
-                    conn,
+                    &db_handler,
                     &event_sender,
                     *poll_interval,
                     last_scanned_height,
@@ -555,41 +561,36 @@ async fn run_scan_loop<E: EventSender + Clone>(
                     },
                 }
             }
-
             return Ok((all_events, false));
         }
 
         println!(
             "Processing {} scanned blocks for account {}",
-            scanned_blocks.len(),
-            scanner_context.account_id
+            batch_size, scanner_context.account_id
         );
-        let has_pending_outbound = scanner_context.transaction_monitor.has_pending_outbound();
-        for scanned_block in &scanned_blocks {
-            let mut tx = conn.begin().await?;
 
-            let mut processor = BlockProcessor::with_event_sender(
+        let has_pending_outbound = scanner_context.transaction_monitor.has_pending_outbound();
+        let processing_events = db_handler
+            .process_blocks(
+                scanned_blocks.clone(),
                 scanner_context.account_id,
                 scanner_context.account_view_key.clone(),
                 event_sender.clone(),
                 has_pending_outbound,
-            );
-            processor.process_block(&mut tx, scanned_block).await?;
+            )
+            .await?;
 
-            all_events.extend(processor.into_wallet_events());
-
-            tx.commit().await?;
-        }
+        all_events.extend(processing_events);
 
         if let Some(last_block) = scanned_blocks.last() {
             last_scanned_height = last_block.height;
-            blocks_since_reorg_check += scanned_blocks.len() as u64;
+            blocks_since_reorg_check += batch_size as u64;
 
             let monitor_result = scanner_context
                 .transaction_monitor
                 .monitor_if_needed(
                     &scanner_context.wallet_client,
-                    conn,
+                    pool,
                     scanner_context.account_id,
                     last_scanned_height,
                 )
@@ -607,9 +608,11 @@ async fn run_scan_loop<E: EventSender + Clone>(
         }
 
         if more_blocks && blocks_since_reorg_check >= scanner_context.reorg_check_interval {
-            let reorg_result = reorg::handle_reorgs(&mut scanner_context.scanner, conn, scanner_context.account_id)
-                .await
-                .map_err(ScanError::Fatal)?;
+            let mut conn = db_handler.get_connection().await?;
+            let reorg_result =
+                reorg::handle_reorgs(&mut scanner_context.scanner, &mut conn, scanner_context.account_id)
+                    .await
+                    .map_err(ScanError::Fatal)?;
 
             if let Some(reorg_info) = reorg_result.reorg_information {
                 println!(
@@ -624,13 +627,12 @@ async fn run_scan_loop<E: EventSender + Clone>(
                 );
                 scanner_context.set_start_height(reorg_result.resume_height);
             }
-
             blocks_since_reorg_check = 0;
         }
 
-        db::prune_scanned_tip_blocks(conn, scanner_context.account_id, last_scanned_height)
-            .await
-            .map_err(ScanError::Fatal)?;
+        db_handler
+            .prune_tips(scanner_context.account_id, last_scanned_height)
+            .await?;
 
         event_sender.send(ProcessingEvent::ScanStatus(ScanStatusEvent::Progress {
             account_id: scanner_context.account_id,
@@ -982,16 +984,16 @@ impl Scanner {
     }
 
     /// Internal implementation that accepts any event sender.
-    async fn run_internal<E: EventSender + Clone>(
+    async fn run_internal<E: EventSender + Clone + Send + 'static>(
         self,
         event_sender: E,
     ) -> Result<(Vec<WalletEvent>, bool), ScanError> {
-        let pool = db::init_db(&self.database_file).await.map_err(ScanError::Fatal)?;
-        let mut conn = pool.acquire().await?;
+        let pool = db::init_db(&self.database_file)?;
+        let mut conn = pool.get().map_err(|e| ScanError::DbError(e.into()))?;
         let mut all_events = Vec::new();
         let mut any_more_blocks = false;
 
-        let accounts = db::get_accounts(&mut conn, self.account_name.as_deref()).await?;
+        let accounts = db::get_accounts(&conn, self.account_name.as_deref())?;
 
         for account in accounts {
             let monitoring_state = MonitoringState::new();
@@ -1010,7 +1012,7 @@ impl Scanner {
 
             let (events, more_blocks) = run_scan_loop(
                 &mut scan_context,
-                &mut conn,
+                &pool,
                 event_sender.clone(),
                 &self.mode,
                 &self.retry_config,

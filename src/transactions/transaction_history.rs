@@ -52,9 +52,10 @@
 //! }).await?;
 //! ```
 
-use sqlx::SqlitePool;
+use r2d2::PooledConnection;
+use r2d2_sqlite::SqliteConnectionManager;
 
-use crate::db;
+use crate::db::{self, SqlitePool, WalletDbError};
 use crate::models::Id;
 use crate::scan::DisplayedTransactionsEvent;
 use crate::transactions::{
@@ -67,17 +68,15 @@ use crate::transactions::{
 /// transaction history data.
 #[derive(Debug, thiserror::Error)]
 pub enum TransactionHistoryError {
-    /// A database operation failed.
-    ///
-    /// This includes connection failures, query errors, and constraint violations.
-    #[error("Database error: {0}")]
-    Database(#[from] sqlx::Error),
-
     /// Transaction processing failed.
     ///
     /// Occurs when transforming raw database records into displayable transactions.
     #[error("Processing error: {0}")]
     ProcessingError(#[from] ProcessorError),
+
+    /// DB execution failed
+    #[error("Database execution error: {0}")]
+    DbError(#[from] WalletDbError),
 }
 
 /// Service for querying and managing transaction history.
@@ -125,6 +124,12 @@ impl TransactionHistoryService {
         Self { db_pool }
     }
 
+    fn get_connection(&self) -> Result<PooledConnection<SqliteConnectionManager>, TransactionHistoryError> {
+        self.db_pool
+            .get()
+            .map_err(|e| TransactionHistoryError::DbError(WalletDbError::ConnectionError(e)))
+    }
+
     /// Loads all transactions for the specified account.
     ///
     /// Returns all transactions including reorganized ones. For user-facing
@@ -142,12 +147,9 @@ impl TransactionHistoryService {
     /// # Errors
     ///
     /// Returns [`TransactionHistoryError::Database`] if the query fails.
-    pub async fn load_all_transactions(
-        &self,
-        account_id: Id,
-    ) -> Result<Vec<DisplayedTransaction>, TransactionHistoryError> {
-        let mut conn = self.db_pool.acquire().await?;
-        let transactions = db::get_displayed_transactions_by_account(&mut conn, account_id).await?;
+    pub fn load_all_transactions(&self, account_id: Id) -> Result<Vec<DisplayedTransaction>, TransactionHistoryError> {
+        let conn = self.get_connection()?;
+        let transactions = db::get_displayed_transactions_by_account(&conn, account_id)?;
         Ok(transactions)
     }
 
@@ -168,12 +170,12 @@ impl TransactionHistoryService {
     /// # Errors
     ///
     /// Returns [`TransactionHistoryError::Database`] if the query fails.
-    pub async fn load_transactions_excluding_reorged(
+    pub fn load_transactions_excluding_reorged(
         &self,
         account_id: Id,
     ) -> Result<Vec<DisplayedTransaction>, TransactionHistoryError> {
-        let mut conn = self.db_pool.acquire().await?;
-        let transactions = db::get_displayed_transactions_excluding_reorged(&mut conn, account_id).await?;
+        let conn = self.get_connection()?;
+        let transactions = db::get_displayed_transactions_excluding_reorged(&conn, account_id)?;
         Ok(transactions)
     }
 
@@ -201,13 +203,13 @@ impl TransactionHistoryService {
     ///     TransactionDisplayStatus::Pending,
     /// ).await?;
     /// ```
-    pub async fn load_transactions_by_status(
+    pub fn load_transactions_by_status(
         &self,
         account_id: Id,
         status: TransactionDisplayStatus,
     ) -> Result<Vec<DisplayedTransaction>, TransactionHistoryError> {
-        let mut conn = self.db_pool.acquire().await?;
-        let transactions = db::get_displayed_transactions_by_status(&mut conn, account_id, status).await?;
+        let conn = self.get_connection()?;
+        let transactions = db::get_displayed_transactions_by_status(&conn, account_id, status)?;
         Ok(transactions)
     }
 
@@ -225,12 +227,9 @@ impl TransactionHistoryService {
     /// # Errors
     ///
     /// Returns [`TransactionHistoryError::Database`] if the query fails.
-    pub async fn load_transaction_by_id(
-        &self,
-        id: &str,
-    ) -> Result<Option<DisplayedTransaction>, TransactionHistoryError> {
-        let mut conn = self.db_pool.acquire().await?;
-        let transaction = db::get_displayed_transaction_by_id(&mut conn, id).await?;
+    pub fn load_transaction_by_id(&self, id: &str) -> Result<Option<DisplayedTransaction>, TransactionHistoryError> {
+        let conn = self.get_connection()?;
+        let transaction = db::get_displayed_transaction_by_id(&conn, id)?;
         Ok(transaction)
     }
 
@@ -267,14 +266,14 @@ impl TransactionHistoryService {
     ///     page_number * page_size,
     /// ).await?;
     /// ```
-    pub async fn load_transactions_paginated(
+    pub fn load_transactions_paginated(
         &self,
         account_id: Id,
         limit: i64,
         offset: i64,
     ) -> Result<Vec<DisplayedTransaction>, TransactionHistoryError> {
-        let mut conn = self.db_pool.acquire().await?;
-        let transactions = db::get_displayed_transactions_paginated(&mut conn, account_id, limit, offset).await?;
+        let conn = self.get_connection()?;
+        let transactions = db::get_displayed_transactions_paginated(&conn, account_id, limit, offset)?;
         Ok(transactions)
     }
 
@@ -307,11 +306,11 @@ impl TransactionHistoryService {
     ///
     /// println!("Loaded {} transactions", count);
     /// ```
-    pub async fn load_and_emit<F>(&self, account_id: Id, emit_fn: F) -> Result<usize, TransactionHistoryError>
+    pub fn load_and_emit<F>(&self, account_id: Id, emit_fn: F) -> Result<usize, TransactionHistoryError>
     where
         F: FnOnce(DisplayedTransactionsEvent),
     {
-        let transactions = self.load_all_transactions(account_id).await?;
+        let transactions = self.load_all_transactions(account_id)?;
         let count = transactions.len();
 
         if !transactions.is_empty() {
@@ -354,7 +353,7 @@ impl TransactionHistoryService {
     ///     ui.append_transactions(event.transactions);
     /// }).await?;
     /// ```
-    pub async fn emit_in_chunks<F>(
+    pub fn emit_in_chunks<F>(
         &self,
         account_id: Id,
         chunk_size: usize,
@@ -363,7 +362,7 @@ impl TransactionHistoryService {
     where
         F: FnMut(DisplayedTransactionsEvent),
     {
-        let all_transactions = self.load_all_transactions(account_id).await?;
+        let all_transactions = self.load_all_transactions(account_id)?;
         let total = all_transactions.len();
 
         for chunk in all_transactions.chunks(chunk_size) {
@@ -396,21 +395,18 @@ impl TransactionHistoryService {
     ///
     /// Returns [`TransactionHistoryError`] if database queries or processing fails.
     #[allow(dead_code)]
-    pub async fn rebuild_from_balance_changes(
+    pub fn rebuild_from_balance_changes(
         &self,
         account_id: Id,
     ) -> Result<Vec<DisplayedTransaction>, TransactionHistoryError> {
-        let mut conn = self.db_pool.acquire().await?;
+        let conn = self.get_connection()?;
 
-        let tip_height = db::get_latest_scanned_tip_block_by_account(&mut conn, account_id)
-            .await?
+        let tip_height = db::get_latest_scanned_tip_block_by_account(&conn, account_id)?
             .map(|block| block.height)
             .unwrap_or(0);
 
         let processor = DisplayedTransactionProcessor::new(tip_height);
-        let transactions = processor
-            .process_all_stored_with_conn(account_id, &mut conn, &self.db_pool)
-            .await?;
+        let transactions = processor.process_all_stored_with_conn(account_id, &conn, &self.db_pool)?;
 
         Ok(transactions)
     }

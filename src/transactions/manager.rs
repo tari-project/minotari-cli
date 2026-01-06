@@ -56,7 +56,8 @@
 
 use anyhow::anyhow;
 use chrono::{Duration, Utc};
-use sqlx::{Pool, Sqlite, pool::PoolConnection};
+use r2d2::PooledConnection;
+use r2d2_sqlite::SqliteConnectionManager;
 use tari_common::configuration::Network;
 use tari_common_types::{tari_address::TariAddressFeatures, transaction::TxId};
 use tari_transaction_components::{
@@ -74,7 +75,7 @@ use tari_utilities::ByteArray;
 use zeroize::Zeroizing;
 
 use crate::{
-    db::{self, AccountRow},
+    db::{self, AccountRow, SqlitePool},
     http::{TxSubmissionRejectionReason, WalletHttpClient},
     models::PendingTransactionStatus,
     transactions::{
@@ -187,7 +188,7 @@ impl ProcessedTransaction {
 /// ```
 pub struct TransactionSender {
     /// Database connection pool.
-    pub db_pool: Pool<Sqlite>,
+    pub db_pool: SqlitePool,
     /// The network for consensus rules.
     pub network: Network,
     /// The sender's account.
@@ -213,6 +214,7 @@ impl TransactionSender {
     /// * `account_name` - Name of the sending account
     /// * `password` - Password to decrypt the account's key manager
     /// * `network` - The Tari network (MainNet, TestNet, etc.)
+    /// * `confirmation_window` - The confirmation window
     ///
     /// # Returns
     ///
@@ -234,16 +236,15 @@ impl TransactionSender {
     ///     Network::MainNet,
     /// ).await?;
     /// ```
-    pub async fn new(
-        db_pool: Pool<Sqlite>,
+    pub fn new(
+        db_pool: SqlitePool,
         account_name: String,
         password: Zeroizing<String>,
         network: Network,
         confirmation_window: u64,
     ) -> Result<Self, anyhow::Error> {
-        let mut connection = db_pool.acquire().await?;
-        let account_of_processed_transaction: AccountRow = db::get_account_by_name(&mut connection, &account_name)
-            .await?
+        let connection = db_pool.get()?;
+        let account_of_processed_transaction: AccountRow = db::get_account_by_name(&connection, &account_name)?
             .ok_or_else(|| anyhow!("Account with name '{}' not found", &account_name))?;
 
         Ok(Self {
@@ -258,25 +259,22 @@ impl TransactionSender {
     }
 
     /// Acquires a database connection from the pool.
-    async fn get_connection(&self) -> Result<PoolConnection<Sqlite>, anyhow::Error> {
+    fn get_connection(&self) -> Result<PooledConnection<SqliteConnectionManager>, anyhow::Error> {
         self.db_pool
-            .acquire()
-            .await
+            .get()
             .map_err(|e| anyhow::anyhow!("Failed to acquire database connection: {}", e))
     }
 
-    async fn validate_transaction_creation_request(
+    fn validate_transaction_creation_request(
         &mut self,
         processed_transaction: &ProcessedTransaction,
     ) -> Result<(), anyhow::Error> {
-        let mut conn = self.db_pool.acquire().await?;
+        let conn = self.get_connection()?;
         if db::check_if_transaction_was_already_completed_by_idempotency_key(
-            &mut conn,
+            &conn,
             &processed_transaction.idempotency_key,
             self.account.id,
-        )
-        .await?
-        {
+        )? {
             return Err(anyhow!(
                 "A pending transaction with the same idempotency key already exists"
             ));
@@ -293,64 +291,57 @@ impl TransactionSender {
         Ok(())
     }
 
-    async fn check_if_transaction_expired(
-        &self,
-        processed_transaction: &ProcessedTransaction,
-    ) -> Result<(), anyhow::Error> {
-        let mut conn = self.db_pool.acquire().await?;
+    fn check_if_transaction_expired(&self, processed_transaction: &ProcessedTransaction) -> Result<(), anyhow::Error> {
+        let conn = self.get_connection()?;
         let is_expired = db::check_if_transaction_is_expired_by_idempotency_key(
-            &mut conn,
+            &conn,
             &processed_transaction.idempotency_key,
             self.account.id,
-        )
-        .await?;
+        )?;
 
         if is_expired {
             db::update_pending_transaction_status(
-                &mut conn,
+                &conn,
                 processed_transaction.id(),
                 PendingTransactionStatus::Expired,
-            )
-            .await?;
+            )?;
             return Err(anyhow!("The transaction has expired."));
         }
 
         Ok(())
     }
 
-    async fn create_utxo_selection(
+    fn create_utxo_selection(
         &self,
         processed_transaction: &ProcessedTransaction,
     ) -> Result<UtxoSelection, anyhow::Error> {
-        let mut connection = self.get_connection().await?;
+        let connection = self.get_connection()?;
         let amount = processed_transaction.recipient.amount;
         let num_outputs = 1;
         let estimated_output_size = None;
 
         let input_selector = InputSelector::new(self.account.id, self.confirmation_window);
-        let utxo_selection = input_selector
-            .fetch_unspent_outputs(
-                &mut connection,
-                amount,
-                num_outputs,
-                self.fee_per_gram,
-                estimated_output_size,
-            )
-            .await?;
+        let utxo_selection = input_selector.fetch_unspent_outputs(
+            &connection,
+            amount,
+            num_outputs,
+            self.fee_per_gram,
+            estimated_output_size,
+        )?;
         Ok(utxo_selection)
     }
 
-    async fn create_pending_transaction(
+    fn create_pending_transaction(
         &self,
         processed_transaction: &mut ProcessedTransaction,
     ) -> Result<String, anyhow::Error> {
-        let mut connection = self.get_connection().await?;
+        let connection = self.get_connection()?;
 
         let expires_at = Utc::now() + Duration::seconds(processed_transaction.seconds_to_lock_utxos as i64);
-        let utxo_selection = self.create_utxo_selection(processed_transaction).await?;
+        let utxo_selection = self.create_utxo_selection(processed_transaction)?;
 
         let pending_tx_id = db::create_pending_transaction(
-            &mut connection,
+            &connection,
             &processed_transaction.idempotency_key,
             self.account.id,
             utxo_selection.requires_change_output,
@@ -358,11 +349,10 @@ impl TransactionSender {
             utxo_selection.fee_without_change,
             utxo_selection.fee_with_change,
             expires_at,
-        )
-        .await?;
+        )?;
 
         for utxo in &utxo_selection.utxos {
-            db::lock_output(&mut connection, utxo.id, &pending_tx_id, expires_at).await?;
+            db::lock_output(&connection, utxo.id, &pending_tx_id, expires_at)?;
         }
 
         if processed_transaction.selected_utxos.is_empty() {
@@ -377,30 +367,29 @@ impl TransactionSender {
         Ok(pending_tx_id)
     }
 
-    async fn create_or_find_pending_transaction(
+    fn create_or_find_pending_transaction(
         &self,
         processed_transaction: &mut ProcessedTransaction,
     ) -> Result<String, anyhow::Error> {
-        let mut connection = self.get_connection().await?;
+        let connection = self.get_connection()?;
 
         let response = db::find_pending_transaction_by_idempotency_key(
-            &mut connection,
+            &connection,
             &processed_transaction.idempotency_key,
             self.account.id,
-        )
-        .await?;
+        )?;
         if let Some(pending_tx) = response {
             Ok(pending_tx.id.to_string())
         } else {
-            let pending_tx_id = self.create_pending_transaction(processed_transaction).await?;
+            let pending_tx_id = self.create_pending_transaction(processed_transaction)?;
             Ok(pending_tx_id)
         }
     }
-    async fn prepare_transaction_builder(
+    fn prepare_transaction_builder(
         &self,
         locked_utxos: Vec<WalletOutput>,
     ) -> Result<TransactionBuilder<KeyManager>, anyhow::Error> {
-        let key_manager = self.account.get_key_manager(&self.password).await?;
+        let key_manager = self.account.get_key_manager(&self.password)?;
         let consensus_constants = ConsensusConstantsBuilder::new(self.network).build();
         let mut tx_builder = TransactionBuilder::new(consensus_constants, key_manager.clone(), self.network)?;
 
@@ -454,33 +443,29 @@ impl TransactionSender {
     ///     300, // 5 minute lock
     /// ).await?;
     /// ```
-    pub async fn start_new_transaction(
+    pub fn start_new_transaction(
         &mut self,
         idempotency_key: String,
         recipient: Recipient,
         seconds_to_lock_utxo: u64,
     ) -> Result<PrepareOneSidedTransactionForSigningResult, anyhow::Error> {
-        let mut connection = self.get_connection().await?;
+        let connection = self.get_connection()?;
 
         let mut processed_transaction =
             ProcessedTransaction::new(None, idempotency_key, recipient.clone(), seconds_to_lock_utxo);
 
-        self.validate_transaction_creation_request(&processed_transaction)
-            .await?;
+        self.validate_transaction_creation_request(&processed_transaction)?;
 
-        let pending_transaction_id = self
-            .create_or_find_pending_transaction(&mut processed_transaction)
-            .await?;
+        let pending_transaction_id = self.create_or_find_pending_transaction(&mut processed_transaction)?;
         processed_transaction.update_id(pending_transaction_id.clone());
 
         let mut utxo_selection = processed_transaction.selected_utxos.clone();
         if utxo_selection.is_empty() {
-            let db_utxo_selection =
-                db::fetch_outputs_by_lock_request_id(&mut connection, processed_transaction.id()).await?;
+            let db_utxo_selection = db::fetch_outputs_by_lock_request_id(&connection, processed_transaction.id())?;
             utxo_selection = db_utxo_selection.into_iter().map(|db_out| db_out.output).collect();
         }
 
-        let tx_builder = self.prepare_transaction_builder(utxo_selection).await?;
+        let tx_builder = self.prepare_transaction_builder(utxo_selection)?;
 
         let sender_address = self.account.get_address(self.network, &self.password)?;
         let tx_id = TxId::new_random();
@@ -498,16 +483,13 @@ impl TransactionSender {
             payment_id: payment_id.clone(),
         };
 
-        let result = tokio::task::spawn_blocking(move || {
-            prepare_one_sided_transaction_for_signing(
-                tx_id,
-                tx_builder,
-                &[payment_recipient],
-                payment_id,
-                sender_address,
-            )
-        })
-        .await??;
+        let result = prepare_one_sided_transaction_for_signing(
+            tx_id,
+            tx_builder,
+            &[payment_recipient],
+            payment_id,
+            sender_address,
+        )?;
 
         self.processed_transactions = processed_transaction;
 
@@ -562,11 +544,11 @@ impl TransactionSender {
         signed_transaction: SignedOneSidedTransactionResult,
         grpc_address: String,
     ) -> Result<DisplayedTransaction, anyhow::Error> {
-        let mut connection = self.get_connection().await?;
+        let connection = self.get_connection()?;
         let processed_transaction = &self.processed_transactions;
         let account_id = self.account.id;
 
-        self.check_if_transaction_expired(processed_transaction).await?;
+        self.check_if_transaction_expired(processed_transaction)?;
 
         // Extract transaction info from the signed result for building DisplayedTransaction
         let tx_info = &signed_transaction.request.info;
@@ -601,21 +583,19 @@ impl TransactionSender {
             .collect();
 
         db::update_pending_transaction_status(
-            &mut connection,
+            &connection,
             processed_transaction.id(),
             crate::models::PendingTransactionStatus::Completed,
-        )
-        .await?;
+        )?;
 
         let completed_tx_id = db::create_completed_transaction(
-            &mut connection,
+            &connection,
             account_id,
             processed_transaction.id(),
             &kernel_excess,
             &serialized_transaction,
             sent_output_hash,
-        )
-        .await?;
+        )?;
 
         let wallet_http_client = WalletHttpClient::new(grpc_address.parse()?)?;
 
@@ -626,24 +606,22 @@ impl TransactionSender {
         match response {
             Err(e) => {
                 db::mark_completed_transaction_as_rejected(
-                    &mut connection,
+                    &connection,
                     &completed_tx_id,
                     &format!("Transaction submission failed: {}", e),
-                )
-                .await?;
+                )?;
 
                 return Err(anyhow!("Transaction submission failed: {}", e));
             },
             Ok(response) => {
                 if response.accepted {
-                    db::mark_completed_transaction_as_broadcasted(&mut connection, &completed_tx_id, 1).await?;
+                    db::mark_completed_transaction_as_broadcasted(&connection, &completed_tx_id, 1)?;
                 } else if !response.accepted && response.rejection_reason != TxSubmissionRejectionReason::AlreadyMined {
                     db::mark_completed_transaction_as_rejected(
-                        &mut connection,
+                        &connection,
                         &completed_tx_id,
                         &response.rejection_reason.to_string(),
-                    )
-                    .await?;
+                    )?;
 
                     return Err(anyhow!(
                         "Transaction was not accepted by the network: {}",
@@ -662,7 +640,7 @@ impl TransactionSender {
             actual_fee,
         )?;
 
-        db::insert_displayed_transaction(&mut connection, &displayed_transaction).await?;
+        db::insert_displayed_transaction(&connection, &displayed_transaction)?;
 
         Ok(displayed_transaction)
     }

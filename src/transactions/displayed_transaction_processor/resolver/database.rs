@@ -1,58 +1,66 @@
 use std::collections::HashMap;
 
-use async_trait::async_trait;
-use sqlx::SqlitePool;
+use rusqlite::{OptionalExtension, named_params};
 
 use super::{OutputDetails, TransactionDataResolver};
+use crate::db::SqlitePool;
 use crate::models::{BalanceChange, Id, OutputStatus};
 use crate::transactions::ProcessorError;
 use crate::transactions::displayed_transaction_processor::parsing::ParsedWalletOutput;
 
 /// Resolver that fetches transaction data from the database.
-pub struct DatabaseResolver<'a> {
-    pool: &'a SqlitePool,
+pub struct DatabaseResolver {
+    pool: SqlitePool,
 }
 
-impl<'a> DatabaseResolver<'a> {
-    pub fn new(pool: &'a SqlitePool) -> Self {
+impl DatabaseResolver {
+    pub fn new(pool: SqlitePool) -> Self {
         Self { pool }
     }
 }
 
-#[async_trait]
-impl TransactionDataResolver for DatabaseResolver<'_> {
-    async fn get_output_details(&self, change: &BalanceChange) -> Result<Option<OutputDetails>, ProcessorError> {
+impl TransactionDataResolver for DatabaseResolver {
+    fn get_output_details(&self, change: &BalanceChange) -> Result<Option<OutputDetails>, ProcessorError> {
         let Some(output_id) = change.caused_by_output_id else {
             return Ok(None);
         };
 
-        let mut conn = self.pool.acquire().await?;
+        let conn = self.pool.get().map_err(|e| ProcessorError::DbError(e.into()))?;
 
-        let row = sqlx::query!(
-            r#"
-            SELECT output_hash, confirmed_height, status, wallet_output_json
-            FROM outputs
-            WHERE id = ? AND deleted_at IS NULL
-            "#,
-            output_id
-        )
-        .fetch_optional(&mut *conn)
-        .await?;
+        let row = conn
+            .query_row(
+                r#"
+                SELECT output_hash, confirmed_height, status, wallet_output_json
+                FROM outputs
+                WHERE id = :id AND deleted_at IS NULL
+                "#,
+                named_params! { ":id": output_id },
+                |row| {
+                    Ok((
+                        row.get::<_, Vec<u8>>("output_hash")?,
+                        row.get::<_, Option<i64>>("confirmed_height")?,
+                        row.get::<_, String>("status")?,
+                        row.get::<_, Option<String>>("wallet_output_json")?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(|e| ProcessorError::DbError(e.into()))?;
 
-        let Some(row) = row else {
+        let Some((output_hash, confirmed_height, status_str, wallet_output_json)) = row else {
             return Ok(None);
         };
 
-        let status = row.status.parse::<OutputStatus>().unwrap_or_else(|_| {
+        let status = status_str.parse::<OutputStatus>().unwrap_or_else(|_| {
             eprintln!(
                 "Warning: Failed to parse output status '{}' for output_id={}, defaulting to Unspent",
-                row.status, output_id
+                status_str, output_id
             );
             OutputStatus::Unspent
         });
 
         let (output_type, coinbase_extra, is_coinbase, sent_output_hashes) =
-            if let Some(ref json_str) = row.wallet_output_json {
+            if let Some(ref json_str) = wallet_output_json {
                 if let Some(parsed) = ParsedWalletOutput::from_json(json_str) {
                     (
                         parsed.output_type,
@@ -68,8 +76,8 @@ impl TransactionDataResolver for DatabaseResolver<'_> {
             };
 
         Ok(Some(OutputDetails {
-            hash_hex: hex::encode(&row.output_hash),
-            confirmed_height: row.confirmed_height.map(|h| h as u64),
+            hash_hex: hex::encode(output_hash),
+            confirmed_height: confirmed_height.map(|h| h as u64),
             status,
             output_type,
             coinbase_extra,
@@ -78,67 +86,64 @@ impl TransactionDataResolver for DatabaseResolver<'_> {
         }))
     }
 
-    async fn get_input_output_hash(&self, change: &BalanceChange) -> Result<Option<String>, ProcessorError> {
+    fn get_input_output_hash(&self, change: &BalanceChange) -> Result<Option<String>, ProcessorError> {
         let Some(input_id) = change.caused_by_input_id else {
             return Ok(None);
         };
 
-        let mut conn = self.pool.acquire().await?;
+        let conn = self.pool.get().map_err(|e| ProcessorError::DbError(e.into()))?;
 
-        let input_row = sqlx::query!(
-            r#"
-            SELECT output_id
-            FROM inputs
-            WHERE id = ? AND deleted_at IS NULL
-            "#,
-            input_id
-        )
-        .fetch_optional(&mut *conn)
-        .await?;
+        let output_hash: Option<Vec<u8>> = conn
+            .query_row(
+                r#"
+                SELECT o.output_hash
+                FROM inputs i
+                JOIN outputs o ON i.output_id = o.id
+                WHERE i.id = :id AND i.deleted_at IS NULL
+                "#,
+                named_params! { ":id": input_id },
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(|e| ProcessorError::DbError(e.into()))?;
 
-        let Some(input_row) = input_row else {
-            return Ok(None);
-        };
-
-        let output_row = sqlx::query!(
-            r#"
-            SELECT output_hash
-            FROM outputs
-            WHERE id = ?
-            "#,
-            input_row.output_id
-        )
-        .fetch_optional(&mut *conn)
-        .await?;
-
-        Ok(output_row.map(|r| hex::encode(&r.output_hash)))
+        Ok(output_hash.map(hex::encode))
     }
 
-    async fn get_sent_output_hashes(&self, change: &BalanceChange) -> Result<Vec<String>, ProcessorError> {
-        if let Some(details) = self.get_output_details(change).await? {
+    fn get_sent_output_hashes(&self, change: &BalanceChange) -> Result<Vec<String>, ProcessorError> {
+        if let Some(details) = self.get_output_details(change)? {
             Ok(details.sent_output_hashes)
         } else {
             Ok(Vec::new())
         }
     }
 
-    async fn build_output_hash_map(&self) -> Result<HashMap<String, Id>, ProcessorError> {
-        let mut conn = self.pool.acquire().await?;
+    fn build_output_hash_map(&self) -> Result<HashMap<String, Id>, ProcessorError> {
+        let conn = self.pool.get().map_err(|e| ProcessorError::DbError(e.into()))?;
 
-        let rows = sqlx::query!(
-            r#"
-            SELECT id, output_hash
-            FROM outputs
-            WHERE deleted_at IS NULL
-            "#
-        )
-        .fetch_all(&mut *conn)
-        .await?;
+        let mut stmt = conn
+            .prepare_cached(
+                r#"
+                SELECT id, output_hash
+                FROM outputs
+                WHERE deleted_at IS NULL
+                "#,
+            )
+            .map_err(|e| ProcessorError::DbError(e.into()))?;
 
-        let map: HashMap<String, Id> = rows
-            .into_iter()
-            .map(|row| (hex::encode(&row.output_hash), row.id))
-            .collect();
+        let rows = stmt
+            .query_map([], |row| {
+                let id: i64 = row.get("id")?;
+                let hash: Vec<u8> = row.get("output_hash")?;
+                Ok((hex::encode(hash), id))
+            })
+            .map_err(|e| ProcessorError::DbError(e.into()))?;
+
+        let mut map = HashMap::new();
+        for row in rows {
+            let (hash, id) = row.map_err(|e| ProcessorError::DbError(e.into()))?;
+            map.insert(hash, id);
+        }
 
         Ok(map)
     }

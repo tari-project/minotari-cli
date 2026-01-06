@@ -1,117 +1,126 @@
-use chrono::NaiveDateTime;
-use sqlx::SqliteConnection;
+use rusqlite::{Connection, named_params};
+use serde::Deserialize;
+use serde_rusqlite::from_rows;
 
+use crate::db::error::{WalletDbError, WalletDbResult};
 use crate::models::BalanceChange;
 
-pub async fn insert_balance_change(conn: &mut SqliteConnection, change: &BalanceChange) -> Result<(), sqlx::Error> {
+pub fn insert_balance_change(conn: &Connection, change: &BalanceChange) -> WalletDbResult<()> {
     let balance_credit = change.balance_credit as i64;
     let balance_debit = change.balance_debit as i64;
     let effective_height = change.effective_height as i64;
     let claimed_fee = change.claimed_fee.map(|v| v as i64);
     let claimed_amount = change.claimed_amount.map(|v| v as i64);
-    let effective_date = change.effective_date.format("%Y-%m-%d %H:%M:%S").to_string();
-    let description = &change.description;
-    sqlx::query!(
+
+    conn.execute(
         r#"
        INSERT INTO balance_changes (
-         account_id, 
-         caused_by_output_id, 
-         caused_by_input_id, 
-         description, 
-         balance_credit, 
-         balance_debit, 
-         effective_date, 
-         effective_height, 
+         account_id,
+         caused_by_output_id,
+         caused_by_input_id,
+         description,
+         balance_credit,
+         balance_debit,
+         effective_date,
+         effective_height,
          claimed_recipient_address,
          claimed_sender_address,
          memo_parsed,
          memo_hex,
          claimed_fee,
          claimed_amount)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,?,?)
+         VALUES (
+            :account_id,
+            :caused_by_output_id,
+            :caused_by_input_id,
+            :description,
+            :balance_credit,
+            :balance_debit,
+            :effective_date,
+            :effective_height,
+            :claimed_recipient_address,
+            :claimed_sender_address,
+            :memo_parsed,
+            :memo_hex,
+            :claimed_fee,
+            :claimed_amount
+         )
         "#,
-        change.account_id,
-        change.caused_by_output_id,
-        change.caused_by_input_id,
-        description,
-        balance_credit,
-        balance_debit,
-        effective_date,
-        effective_height,
-        change.claimed_recipient_address,
-        change.claimed_sender_address,
-        change.memo_parsed,
-        change.memo_hex,
-        claimed_fee,
-        claimed_amount
-    )
-    .execute(&mut *conn)
-    .await?;
+        named_params! {
+            ":account_id": change.account_id,
+            ":caused_by_output_id": change.caused_by_output_id,
+            ":caused_by_input_id": change.caused_by_input_id,
+            ":description": change.description,
+            ":balance_credit": balance_credit,
+            ":balance_debit": balance_debit,
+            ":effective_date": change.effective_date,
+            ":effective_height": effective_height,
+            ":claimed_recipient_address": change.claimed_recipient_address,
+            ":claimed_sender_address": change.claimed_sender_address,
+            ":memo_parsed": change.memo_parsed,
+            ":memo_hex": change.memo_hex,
+            ":claimed_fee": claimed_fee,
+            ":claimed_amount": claimed_amount,
+        },
+    )?;
 
     Ok(())
 }
 
-pub async fn get_all_balance_changes_by_account_id(
-    conn: &mut SqliteConnection,
-    account_id: i64,
-) -> Result<Vec<BalanceChange>, sqlx::Error> {
-    let rows = sqlx::query_as!(
-        BalanceChange,
+pub fn get_all_balance_changes_by_account_id(conn: &Connection, account_id: i64) -> WalletDbResult<Vec<BalanceChange>> {
+    let mut stmt = conn.prepare_cached(
         r#"
         SELECT 
-            account_id as "account_id: i64",
-            caused_by_output_id as "caused_by_output_id: _",
-            caused_by_input_id as "caused_by_input_id: _",
+            account_id,
+            caused_by_output_id,
+            caused_by_input_id,
             description,
-            balance_credit as "balance_credit: u64",
-            balance_debit as "balance_debit: u64",
-            effective_date as "effective_date: NaiveDateTime",
-            effective_height as "effective_height: u64",
-            claimed_recipient_address as "claimed_recipient_address: _",
-            claimed_sender_address as "claimed_sender_address: _",
+            balance_credit,
+            balance_debit,
+            REPLACE(effective_date, ' ', 'T') as effective_date,
+            effective_height,
+            claimed_recipient_address,
+            claimed_sender_address,
             memo_parsed,
             memo_hex,
-            claimed_fee as "claimed_fee: _",
-            claimed_amount as "claimed_amount: _"
+            claimed_fee,
+            claimed_amount
         FROM balance_changes
-        WHERE account_id = ?
+        WHERE account_id = :account_id
         ORDER BY effective_height ASC, id ASC
         "#,
-        account_id
-    )
-    .fetch_all(&mut *conn)
-    .await?;
+    )?;
 
-    Ok(rows)
+    let rows = stmt.query(named_params! { ":account_id": account_id })?;
+    let results: Vec<BalanceChange> = from_rows::<BalanceChange>(rows).collect::<Result<Vec<_>, _>>()?;
+
+    Ok(results)
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Deserialize)]
 pub struct BalanceAggregates {
     pub total_credits: Option<i64>,
     pub total_debits: Option<i64>,
     pub max_height: Option<i64>,
-    pub max_date: Option<String>,
+    pub max_date: Option<chrono::NaiveDateTime>,
 }
 
-pub async fn get_balance_aggregates_for_account(
-    conn: &mut SqliteConnection,
-    account_id: i64,
-) -> Result<BalanceAggregates, sqlx::Error> {
-    let agg_result = sqlx::query_as!(
-        BalanceAggregates,
+pub fn get_balance_aggregates_for_account(conn: &Connection, account_id: i64) -> WalletDbResult<BalanceAggregates> {
+    let mut stmt = conn.prepare_cached(
         r#"
             SELECT
-              SUM(balance_credit) as "total_credits: _",
-              SUM(balance_debit) as "total_debits: _",
-              MAX(effective_height) as "max_height: _",
-              strftime('%Y-%m-%d %H:%M:%S', MAX(effective_date)) as "max_date: _"
+              SUM(balance_credit) as total_credits,
+              SUM(balance_debit) as total_debits,
+              MAX(effective_height) as max_height,
+              REPLACE(MAX(effective_date), ' ', 'T') as max_date
             FROM balance_changes
-            WHERE account_id = ?
-            "#,
-        account_id
-    )
-    .fetch_one(&mut *conn)
-    .await?;
+            WHERE account_id = :account_id
+        "#,
+    )?;
 
-    Ok(agg_result)
+    let rows = stmt.query(named_params! { ":account_id": account_id })?;
+    let result = from_rows::<BalanceAggregates>(rows)
+        .next()
+        .ok_or_else(|| WalletDbError::Unexpected("Aggregate query returned no rows".to_string()))??;
+    Ok(result)
 }
