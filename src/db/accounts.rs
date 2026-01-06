@@ -167,18 +167,18 @@ impl AccountRow {
 
         let nonce = XNonce::from(*nonce_bytes);
 
-        let view_key = cipher
+        let view_key_bytes = Zeroizing::new(cipher
             .decrypt(&nonce, self.encrypted_view_private_key.as_ref())
-            .map_err(|_| WalletDbError::DecryptionFailed("Failed to decrypt view key".to_string()))?;
+            .map_err(|_| WalletDbError::DecryptionFailed("Failed to decrypt view key".to_string()))?);
 
-        let spend_key = cipher
+        let spend_key_bytes = Zeroizing::new(cipher
             .decrypt(&nonce, self.encrypted_spend_public_key.as_ref())
-            .map_err(|_| WalletDbError::DecryptionFailed("Failed to decrypt spend key".to_string()))?;
+            .map_err(|_| WalletDbError::DecryptionFailed("Failed to decrypt spend key".to_string()))?);
 
-        let view_key = RistrettoSecretKey::from_canonical_bytes(&view_key)
+        let view_key = RistrettoSecretKey::from_canonical_bytes(&view_key_bytes)
             .map_err(|e| WalletDbError::DecryptionFailed(format!("Invalid view key bytes: {}", e)))?;
 
-        let spend_key = CompressedKey::<RistrettoPublicKey>::from_canonical_bytes(&spend_key)
+        let spend_key = CompressedKey::<RistrettoPublicKey>::from_canonical_bytes(&spend_key_bytes)
             .map_err(|e| WalletDbError::DecryptionFailed(format!("Invalid spend key bytes: {}", e)))?;
 
         Ok((view_key, spend_key))
