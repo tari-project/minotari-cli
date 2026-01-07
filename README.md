@@ -45,6 +45,7 @@ cargo install sqlx-cli --no-default-features --features sqlite
 
 To protect user privacy, the wallet masks Personally Identifiable Information (PII) such as addresses and transaction amounts in the application logs by default.
 
+#### Reveal PII
 If you are debugging and need to see the full, unmasked data, you can set the `REVEAL_PII` environment variable:
 
 ```bash
@@ -53,6 +54,33 @@ REVEAL_PII=true cargo run --bin minotari -- scan [ARGS]
 ```
 
 **Supported values for `REVEAL_PII`:** `true`, `1`.
+
+#### Advanced Logging Configuration
+The application comes with an embedded logging configuration. However, you can override this by placing a `log4rs.yml` file in the application's working directory. 
+
+The application supports a custom encoder kind called `structured_console`, which renders structured log attributes (key-value pairs) as colorized text in the console.
+
+**Example `log4rs.yml`:**
+```yaml
+appenders:
+  stdout:
+    kind: console
+    encoder:
+      kind: structured_console
+      pattern: "{d(%Y-%m-%d %H:%M:%S)} {h({l}):5} {m}"
+
+root:
+  level: info
+  appenders:
+    - stdout
+```
+
+#### Running with Docker
+If running inside a Docker container, you can mount your custom configuration file:
+
+```bash
+docker run -v $(pwd)/log4rs.yml:/app/log4rs.yml minotari-wallet scan [ARGS]
+```
 
 ### Import a Wallet
 
