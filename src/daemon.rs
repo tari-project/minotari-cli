@@ -138,7 +138,7 @@ impl Daemon {
         let unlocker = TransactionUnlocker::new(db_pool.clone());
         let unlocker_task_handle = unlocker.run(shutdown_tx.subscribe());
 
-        let router = api::create_router(db_pool.clone(), self.network, (*self.password).clone());
+        let router = api::create_router(db_pool.clone(), self.network, self.password.clone());
         let addr = format!("0.0.0.0:{}", self.api_port);
         let listener = tokio::net::TcpListener::bind(&addr)
             .await

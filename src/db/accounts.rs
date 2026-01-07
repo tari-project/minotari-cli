@@ -148,7 +148,9 @@ impl AccountRow {
         } else if password.len() == 32 {
             password.to_string()
         } else {
-            return Err(WalletDbError::InvalidInput("Password must be at most 32 bytes".to_string()));
+            return Err(WalletDbError::InvalidInput(
+                "Password must be at most 32 bytes".to_string(),
+            ));
         });
 
         let key_bytes: [u8; 32] = password
@@ -167,13 +169,17 @@ impl AccountRow {
 
         let nonce = XNonce::from(*nonce_bytes);
 
-        let view_key_bytes = Zeroizing::new(cipher
-            .decrypt(&nonce, self.encrypted_view_private_key.as_ref())
-            .map_err(|_| WalletDbError::DecryptionFailed("Failed to decrypt view key".to_string()))?);
+        let view_key_bytes = Zeroizing::new(
+            cipher
+                .decrypt(&nonce, self.encrypted_view_private_key.as_ref())
+                .map_err(|_| WalletDbError::DecryptionFailed("Failed to decrypt view key".to_string()))?,
+        );
 
-        let spend_key_bytes = Zeroizing::new(cipher
-            .decrypt(&nonce, self.encrypted_spend_public_key.as_ref())
-            .map_err(|_| WalletDbError::DecryptionFailed("Failed to decrypt spend key".to_string()))?);
+        let spend_key_bytes = Zeroizing::new(
+            cipher
+                .decrypt(&nonce, self.encrypted_spend_public_key.as_ref())
+                .map_err(|_| WalletDbError::DecryptionFailed("Failed to decrypt spend key".to_string()))?,
+        );
 
         let view_key = RistrettoSecretKey::from_canonical_bytes(&view_key_bytes)
             .map_err(|e| WalletDbError::DecryptionFailed(format!("Invalid view key bytes: {}", e)))?;

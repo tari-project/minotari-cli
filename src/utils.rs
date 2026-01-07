@@ -9,8 +9,8 @@ use chacha20poly1305::{
     Key, KeyInit, XChaCha20Poly1305,
     aead::{Aead, AeadCore, OsRng},
 };
-use zeroize::Zeroizing;
 use chrono::{DateTime, NaiveDateTime, TimeZone, Utc};
+use zeroize::Zeroizing;
 
 use crate::{db, init_db};
 

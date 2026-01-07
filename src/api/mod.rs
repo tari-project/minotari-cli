@@ -166,11 +166,11 @@ pub struct ApiDoc;
 /// # Ok(())
 /// # }
 /// ```
-pub fn create_router(db_pool: SqlitePool, network: Network, password: String) -> Router {
+pub fn create_router(db_pool: SqlitePool, network: Network, password: Zeroizing<String>) -> Router {
     let app_state = AppState {
         db_pool,
         network,
-        password: Zeroizing::new(password),
+        password,
     };
 
     Router::new()
