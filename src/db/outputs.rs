@@ -25,7 +25,7 @@ pub fn insert_output(
     memo_hex: Option<String>,
 ) -> WalletDbResult<(i64, bool)> {
     info!(
-        taget = "audit",
+        target: "audit",
         account_id = account_id,
         value = &*mask_amount(output.value().as_u64() as i64),
         height = block_height;

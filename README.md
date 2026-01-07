@@ -11,6 +11,7 @@ transactions without requiring a full node.
 - **Blockchain Scanning**: Efficiently scan the blockchain for outputs and track
   confirmations
 - **Balance Tracking**: Monitor account balances with detailed transaction history
+- **Privacy-First Logging**: Sensitive data (PII) is masked in logs by default
 - **Reorg Detection**: Automatically detects and handles blockchain reorganizations
 - **Encrypted Storage**: Wallet keys are encrypted using XChaCha20-Poly1305
 - **SQLite Database**: All wallet data stored in a local SQLite database with migrations
@@ -39,6 +40,19 @@ cargo install sqlx-cli --no-default-features --features sqlite
 ```
 
 ## Usage
+
+### Logging and Privacy
+
+To protect user privacy, the wallet masks Personally Identifiable Information (PII) such as addresses and transaction amounts in the application logs by default.
+
+If you are debugging and need to see the full, unmasked data, you can set the `REVEAL_PII` environment variable:
+
+```bash
+# Reveal full addresses and amounts in logs
+REVEAL_PII=true cargo run --bin minotari -- scan [ARGS]
+```
+
+**Supported values for `REVEAL_PII`:** `true`, `1`.
 
 ### Import a Wallet
 
@@ -74,15 +88,6 @@ cargo run --bin minotari -- scan \
   --batch-size 10
 ```
 
-**Parameters:**
-
-- `--password`: Password used to decrypt the wallet
-- `--base-url`: Tari RPC endpoint URL (default: `https://rpc.tari.com`)
-- `--database-file`: Path to the database file (default: `data/wallet.db`)
-- `--account-name`: Optional account name to scan (scans all accounts if not specified)
-- `--max-blocks-to-scan`: Maximum number of blocks to scan per run (default: `50`)
-- `--batch-size`: Number of blocks to scan per batch (default: `1`)
-
 ### Check Balance
 
 View your wallet balance:
@@ -92,11 +97,6 @@ cargo run --bin minotari -- balance \
   --database-file data/wallet.db \
   --account-name default
 ```
-
-**Parameters:**
-
-- `--database-file`: Path to the database file (default: `data/wallet.db`)
-- `--account-name`: Optional account name (shows all accounts if not specified)
 
 ## Database
 
@@ -148,16 +148,18 @@ sqlx migrate run
 
 ## Security
 
-- Wallet keys are encrypted with XChaCha20-Poly1305 using a user-provided password
-- Private keys never leave your local machine
-- View-only scanning means the wallet cannot spend funds
-- Passwords are padded to 32 characters for encryption (ensure strong passwords)
+- **PII Masking**: By default, logs redact transaction amounts and truncate addresses (e.g., `abcd12...wxyz34`) to prevent sensitive data from leaking into log files.
+- **Key Encryption**: Wallet keys are encrypted with XChaCha20-Poly1305 using a user-provided password.
+- **Local Privacy**: Private keys never leave your local machine.
+- **View-Only**: The wallet uses view-only scanning, meaning it cannot spend funds even if the database is compromised.
+- **Password Strength**: Passwords are padded to 32 characters for encryption (ensure strong passwords).
 
 ## Architecture
 
 ### Key Components
 
 - **`src/main.rs`**: CLI interface and core scanning logic
+- **`src/log/`**: Structured logging implementation and PII masking utilities.
 - **`src/db/`**: Database layer with SQLite queries
   - `accounts.rs`: Account management
   - `outputs.rs`: Output tracking and confirmations
