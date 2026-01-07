@@ -5,6 +5,7 @@ use log::{
 use log4rs::encode::pattern::PatternEncoder;
 use log4rs::encode::{Color, Encode, Style, Write};
 use serde::Deserialize;
+use std::io;
 
 #[derive(Debug, Deserialize)]
 pub struct StructuredConsoleEncoderConfig {
@@ -28,9 +29,16 @@ impl Encode for StructuredConsoleEncoder {
     fn encode(&self, w: &mut dyn Write, record: &Record) -> anyhow::Result<()> {
         self.delegate.encode(w, record)?;
 
-        let mut visitor = TextVisitor { writer: w };
-        if let Err(e) = record.key_values().visit(&mut visitor) {
-            write!(w, " [KV Error: {}]", e)?;
+        let mut visitor = TextVisitor {
+            writer: w,
+            io_err: None,
+        };
+
+        if let Err(kv_err) = record.key_values().visit(&mut visitor) {
+            if let Some(io_err) = visitor.io_err {
+                return Err(io_err.into());
+            }
+            write!(w, " [KV Error: {}]", kv_err)?;
         }
 
         w.write_all(b"\n")?;
@@ -40,15 +48,24 @@ impl Encode for StructuredConsoleEncoder {
 
 struct TextVisitor<'a> {
     writer: &'a mut dyn Write,
+    io_err: Option<io::Error>,
 }
 
 impl<'a, 'kvs> VisitSource<'kvs> for TextVisitor<'a> {
     fn visit_pair(&mut self, key: Key<'kvs>, value: Value<'kvs>) -> Result<(), Error> {
-        let _ = self.writer.set_style(Style::new().text(Color::Cyan));
-        let _ = write!(self.writer, " {}=", key);
+        let result = (|| {
+            self.writer.set_style(Style::new().text(Color::Cyan))?;
+            write!(self.writer, " {}=", key)?;
 
-        let _ = self.writer.set_style(&Style::default());
-        let _ = write!(self.writer, "{}", value);
+            self.writer.set_style(&Style::default())?;
+            write!(self.writer, "{}", value)?;
+            Ok::<(), io::Error>(())
+        })();
+
+        if let Err(e) = result {
+            self.io_err = Some(e);
+            return Err(Error::msg("io error during visit"));
+        }
 
         Ok(())
     }
