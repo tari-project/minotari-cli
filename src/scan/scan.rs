@@ -4,7 +4,7 @@
 //! for synchronizing wallet state with the blockchain.
 
 use lightweight_wallet_libs::{HttpBlockchainScanner, ScanConfig, scanning::BlockchainScanner};
-use log::{error, info, warn};
+use log::{info, warn};
 use rusqlite::Connection;
 use std::time::Duration;
 use tari_transaction_components::key_manager::{KeyManager, TransactionKeyManagerInterface};
