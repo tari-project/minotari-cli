@@ -213,11 +213,9 @@ async fn main() -> Result<(), anyhow::Error> {
 
             let (events, _more_blocks_to_scan) = scan(
                 &security.password,
-                &wallet_config.base_url,
-                wallet_config.database_path.clone(),
-                wallet_config.account_name.as_deref(),
+                &wallet_config,
                 max_blocks_to_scan,
-                wallet_config.batch_size,
+                wallet_config.account_name.as_deref(),
             )
             .await?;
             info!(event_count = events.len(); "Scan complete");
@@ -235,15 +233,8 @@ async fn main() -> Result<(), anyhow::Error> {
             wallet_config.apply_node(&node);
             wallet_config.apply_database(&db);
 
-            let (events, _more_blocks_to_scan) = rescan(
-                &security.password,
-                &wallet_config.base_url,
-                wallet_config.database_path.clone(),
-                &account_name,
-                rescan_from_height,
-                wallet_config.batch_size,
-            )
-            .await?;
+            let (events, _more_blocks_to_scan) =
+                rescan(&security.password, &wallet_config, &account_name, rescan_from_height).await?;
             info!(event_count = events.len(); "Re-scan complete");
             Ok(())
         },
@@ -279,10 +270,7 @@ async fn main() -> Result<(), anyhow::Error> {
             wallet_config.apply_database(&db);
             wallet_config.apply_account(&account);
 
-            handle_balance(
-                wallet_config.database_path.clone(),
-                wallet_config.account_name.as_deref(),
-            )?;
+            handle_balance(&wallet_config)?;
             Ok(())
         },
         Commands::CreateUnsignedTransaction {
@@ -341,10 +329,10 @@ async fn main() -> Result<(), anyhow::Error> {
     }
 }
 
-fn handle_balance(database_file: PathBuf, account_name: Option<&str>) -> Result<(), anyhow::Error> {
-    let pool = init_db(database_file)?;
+fn handle_balance(config: &WalletConfig) -> Result<(), anyhow::Error> {
+    let pool = init_db(config.database_path.clone())?;
     let conn = pool.get()?;
-    let accounts = get_accounts(&conn, account_name)?;
+    let accounts = get_accounts(&conn, config.account_name.as_deref())?;
     for account in accounts {
         let agg_result = get_balance(&conn, account.id)?;
         let tari_balance = agg_result.total / 1_000_000;
@@ -468,14 +456,17 @@ fn handle_lock_funds(
 
 async fn scan(
     password: &str,
-    base_url: &str,
-    database_file: PathBuf,
-    account_name: Option<&str>,
+    config: &WalletConfig,
     max_blocks: u64,
-    batch_size: u64,
+    account_name: Option<&str>,
 ) -> Result<(Vec<WalletEvent>, bool), ScanError> {
-    let mut scanner =
-        scan::Scanner::new(password, base_url, database_file, batch_size).mode(scan::ScanMode::Partial { max_blocks });
+    let mut scanner = scan::Scanner::new(
+        password,
+        &config.base_url,
+        config.database_path.clone(),
+        config.batch_size,
+    )
+    .mode(scan::ScanMode::Partial { max_blocks });
 
     if let Some(name) = account_name {
         scanner = scanner.account(name);
@@ -486,13 +477,11 @@ async fn scan(
 
 async fn rescan(
     password: &str,
-    base_url: &str,
-    database_file: PathBuf,
+    config: &WalletConfig,
     account_name: &str,
     rescan_from_height: u64,
-    batch_size: u64,
 ) -> Result<(Vec<WalletEvent>, bool), ScanError> {
-    let db_file_clone = database_file.clone();
+    let db_file_clone = config.database_path.clone();
     let account_name_clone = account_name.to_string();
 
     tokio::task::spawn_blocking(move || {
@@ -513,7 +502,13 @@ async fn rescan(
     .map_err(|e| ScanError::DbError(WalletDbError::Unexpected(e)))?;
 
     let max_blocks_to_scan = u64::MAX;
-    let mut scanner = scan::Scanner::new(password, base_url, database_file, batch_size).mode(scan::ScanMode::Partial {
+    let mut scanner = scan::Scanner::new(
+        password,
+        &config.base_url,
+        config.database_path.clone(),
+        config.batch_size,
+    )
+    .mode(scan::ScanMode::Partial {
         max_blocks: max_blocks_to_scan,
     });
     scanner = scanner.account(account_name);
