@@ -121,6 +121,8 @@
 //! Database migrations are handled automatically via SQLx.
 
 pub mod api;
+pub mod cli;
+pub mod config;
 pub mod daemon;
 pub mod db;
 pub mod http;

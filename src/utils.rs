@@ -4,6 +4,8 @@
 //! with encrypted key storage. It handles password padding, key encryption,
 //! and database initialization.
 
+use std::path::Path;
+
 use blake2::{Blake2s256, Digest};
 use chacha20poly1305::{
     Key, KeyInit, XChaCha20Poly1305,
@@ -67,7 +69,7 @@ pub fn init_with_view_key(
     view_private_key: &str,
     spend_public_key: &str,
     password: &str,
-    database_file: &str,
+    database_file: &Path,
     birthday: u16,
     friendly_name: Option<&str>,
 ) -> Result<(), anyhow::Error> {
@@ -92,7 +94,7 @@ pub fn init_with_view_key(
 
     // create a hash of the viewkey to determine duplicate wallets
     let view_key_hash = hash_view_key(&view_key_bytes);
-    let pool = init_db(database_file)?;
+    let pool = init_db(database_file.to_path_buf())?;
     let conn = pool.get()?;
     let friendly_name = friendly_name.unwrap_or("default");
     db::create_account(
