@@ -6,10 +6,7 @@
 use lightweight_wallet_libs::{HttpBlockchainScanner, ScanConfig, scanning::BlockchainScanner};
 use log::{info, warn};
 use rusqlite::Connection;
-use std::{
-    path::{Path, PathBuf},
-    time::Duration,
-};
+use std::{path::PathBuf, time::Duration};
 use tari_transaction_components::key_manager::{KeyManager, TransactionKeyManagerInterface};
 use tari_utilities::ByteArray;
 use tokio::sync::mpsc;
@@ -795,11 +792,11 @@ impl Scanner {
     /// ```rust,ignore
     /// let scanner = Scanner::new("password", "http://localhost:18142", "wallet.db", 100);
     /// ```
-    pub fn new(password: &str, base_url: &str, database_file: &Path, batch_size: u64) -> Self {
+    pub fn new(password: &str, base_url: &str, database_file: PathBuf, batch_size: u64) -> Self {
         Self {
             password: password.to_string(),
             base_url: base_url.to_string(),
-            database_file: database_file.to_path_buf(),
+            database_file,
             account_name: None,
             batch_size,
             processing_threads: 8,

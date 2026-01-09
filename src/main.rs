@@ -47,7 +47,7 @@
 
 use std::{
     fs::{self, create_dir_all},
-    path::Path,
+    path::{Path, PathBuf},
 };
 
 use anyhow::anyhow;
@@ -214,7 +214,7 @@ async fn main() -> Result<(), anyhow::Error> {
             let (events, _more_blocks_to_scan) = scan(
                 &security.password,
                 &wallet_config.base_url,
-                &wallet_config.database_path,
+                wallet_config.database_path.clone(),
                 wallet_config.account_name.as_deref(),
                 max_blocks_to_scan,
                 wallet_config.batch_size,
@@ -238,7 +238,7 @@ async fn main() -> Result<(), anyhow::Error> {
             let (events, _more_blocks_to_scan) = rescan(
                 &security.password,
                 &wallet_config.base_url,
-                &wallet_config.database_path,
+                wallet_config.database_path.clone(),
                 &account_name,
                 rescan_from_height,
                 wallet_config.batch_size,
@@ -279,7 +279,10 @@ async fn main() -> Result<(), anyhow::Error> {
             wallet_config.apply_database(&db);
             wallet_config.apply_account(&account);
 
-            handle_balance(&wallet_config.database_path, wallet_config.account_name.as_deref())?;
+            handle_balance(
+                wallet_config.database_path.clone(),
+                wallet_config.account_name.as_deref(),
+            )?;
             Ok(())
         },
         Commands::CreateUnsignedTransaction {
@@ -298,7 +301,7 @@ async fn main() -> Result<(), anyhow::Error> {
 
             handle_create_unsigned_transaction(
                 recipient,
-                &wallet_config.database_path,
+                wallet_config.database_path.clone(),
                 account_name,
                 wallet_config.network,
                 security.password,
@@ -333,13 +336,13 @@ async fn main() -> Result<(), anyhow::Error> {
                 idempotency_key: tx.idempotency_key,
                 confirmation_window: tx.confirmation_window,
             };
-            handle_lock_funds(&wallet_config.database_path, account_name, output_file, request)
+            handle_lock_funds(wallet_config.database_path.clone(), account_name, output_file, request)
         },
     }
 }
 
-fn handle_balance(database_file: &Path, account_name: Option<&str>) -> Result<(), anyhow::Error> {
-    let pool = init_db(database_file.to_path_buf())?;
+fn handle_balance(database_file: PathBuf, account_name: Option<&str>) -> Result<(), anyhow::Error> {
+    let pool = init_db(database_file)?;
     let conn = pool.get()?;
     let accounts = get_accounts(&conn, account_name)?;
     for account in accounts {
@@ -361,7 +364,7 @@ fn handle_balance(database_file: &Path, account_name: Option<&str>) -> Result<()
 #[allow(clippy::too_many_arguments)]
 fn handle_create_unsigned_transaction(
     recipient: Vec<String>,
-    database_file: &Path,
+    database_file: PathBuf,
     account_name: String,
     network: Network,
     password: String,
@@ -395,7 +398,7 @@ fn handle_create_unsigned_transaction(
         .collect();
     let recipients = recipients?;
 
-    let pool = init_db(database_file.to_path_buf())?;
+    let pool = init_db(database_file)?;
     let conn = pool.get()?;
     let account =
         db::get_account_by_name(&conn, &account_name)?.ok_or_else(|| anyhow!("Account not found: {}", account_name))?;
@@ -433,12 +436,12 @@ fn handle_create_unsigned_transaction(
 
 #[allow(clippy::too_many_arguments)]
 fn handle_lock_funds(
-    database_file: &Path,
+    database_file: PathBuf,
     account_name: String,
     output_file: String,
     request: LockFundsRequest,
 ) -> Result<(), anyhow::Error> {
-    let pool = init_db(database_file.to_path_buf())?;
+    let pool = init_db(database_file)?;
     let conn = pool.get()?;
     let account =
         db::get_account_by_name(&conn, &account_name)?.ok_or_else(|| anyhow!("Account not found: {}", account_name))?;
@@ -466,7 +469,7 @@ fn handle_lock_funds(
 async fn scan(
     password: &str,
     base_url: &str,
-    database_file: &Path,
+    database_file: PathBuf,
     account_name: Option<&str>,
     max_blocks: u64,
     batch_size: u64,
@@ -484,12 +487,12 @@ async fn scan(
 async fn rescan(
     password: &str,
     base_url: &str,
-    database_file: &Path,
+    database_file: PathBuf,
     account_name: &str,
     rescan_from_height: u64,
     batch_size: u64,
 ) -> Result<(Vec<WalletEvent>, bool), ScanError> {
-    let db_file_clone = database_file.to_path_buf();
+    let db_file_clone = database_file.clone();
     let account_name_clone = account_name.to_string();
 
     tokio::task::spawn_blocking(move || {

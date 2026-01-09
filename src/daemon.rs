@@ -203,12 +203,17 @@ impl Daemon {
     /// - `Err(ScanError)` - Scan failed with a fatal or intermittent error
     async fn scan_and_sleep(&self) -> Result<(), ScanError> {
         info!("Starting wallet scan...");
-        let result = scan::Scanner::new(&self.password, &self.base_url, &self.database_file, self.batch_size)
-            .mode(ScanMode::Partial {
-                max_blocks: self.max_blocks,
-            })
-            .run()
-            .await;
+        let result = scan::Scanner::new(
+            &self.password,
+            &self.base_url,
+            self.database_file.clone(),
+            self.batch_size,
+        )
+        .mode(ScanMode::Partial {
+            max_blocks: self.max_blocks,
+        })
+        .run()
+        .await;
 
         match result {
             Ok((events, _are_there_more_blocks_to_scan)) => {
