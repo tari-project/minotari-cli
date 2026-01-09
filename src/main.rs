@@ -56,10 +56,12 @@ use chacha20poly1305::{
     aead::{Aead, OsRng},
 };
 use clap::{Parser, Subcommand};
+use log::info;
 use minotari::{
     api::accounts::LockFundsRequest,
     daemon,
     db::{self, WalletDbError, get_accounts, get_balance, init_db},
+    log::{init_logging, mask_string},
     models::WalletEvent,
     scan::{self, rollback_from_height, scan::ScanError},
     transactions::{
@@ -485,11 +487,12 @@ enum Commands {
 
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
+    init_logging();
     let cli = Cli::parse();
 
     match cli.command {
         Commands::CreateAddress { password, output_file } => {
-            println!("Creating new address...");
+            info!(target: "audit", "Creating new address...");
             let seeds = CipherSeed::random();
             let birthday = seeds.birthday();
             let seed_words = seeds.to_mnemonic(MnemonicLanguage::English, None)?.join(" ");
@@ -509,7 +512,11 @@ async fn main() -> Result<(), anyhow::Error> {
                 TariAddressFeatures::create_one_sided_only(),
                 None,
             )?;
-            println!("New address: {}", tari_address);
+            info!(
+                target: "audit",
+                address:% = tari_address;
+                "New address generated"
+            );
 
             let wallet_data = if let Some(password) = password {
                 let password = if password.len() < 32 {
@@ -549,7 +556,7 @@ async fn main() -> Result<(), anyhow::Error> {
             };
             std::fs::create_dir_all(std::path::Path::new(&output_file).parent().unwrap())?;
             std::fs::write(output_file, serde_json::to_string_pretty(&wallet_data)?)?;
-            println!("Wallet data written to file.");
+            info!("Wallet data written to file.");
             Ok(())
         },
         Commands::ImportViewKey {
@@ -559,9 +566,11 @@ async fn main() -> Result<(), anyhow::Error> {
             database_file,
             birthday,
         } => {
-            println!(
-                "Importing wallet with view key: {} and spend key: {}",
-                view_private_key, spend_public_key
+            info!(
+                target: "audit",
+                view_key = &*mask_string(&view_private_key),
+                spend_key = &*mask_string(&spend_public_key);
+                "Importing wallet"
             );
             init_with_view_key(
                 &view_private_key,
@@ -579,7 +588,7 @@ async fn main() -> Result<(), anyhow::Error> {
             max_blocks_to_scan,
             batch_size,
         } => {
-            println!("Scanning blockchain...");
+            info!("Scanning blockchain...");
             let (events, _more_blocks_to_scan) = scan(
                 &password,
                 &base_url,
@@ -589,7 +598,7 @@ async fn main() -> Result<(), anyhow::Error> {
                 batch_size,
             )
             .await?;
-            println!("Scan complete. Events: {}", events.len());
+            info!(event_count = events.len(); "Scan complete");
             Ok(())
         },
         Commands::ReScan {
@@ -600,10 +609,7 @@ async fn main() -> Result<(), anyhow::Error> {
             rescan_from_height,
             batch_size,
         } => {
-            println!(
-                "Rolling back to block {} and scanning blockchain...",
-                rescan_from_height
-            );
+            info!(target: "audit", height = rescan_from_height; "Rolling back to block and scanning blockchain");
             let (events, _more_blocks_to_scan) = rescan(
                 &password,
                 &base_url,
@@ -613,7 +619,7 @@ async fn main() -> Result<(), anyhow::Error> {
                 batch_size,
             )
             .await?;
-            println!("Re-scan complete. Events: {}", events.len());
+            info!(event_count = events.len(); "Re-scan complete");
             Ok(())
         },
         Commands::Daemon {
@@ -625,7 +631,7 @@ async fn main() -> Result<(), anyhow::Error> {
             api_port,
             network,
         } => {
-            println!("Starting Tari wallet daemon...");
+            info!("Starting Tari wallet daemon...");
             let max_blocks_to_scan = u64::MAX;
             let daemon = daemon::Daemon::new(
                 password,
@@ -644,7 +650,7 @@ async fn main() -> Result<(), anyhow::Error> {
             database_file,
             account_name,
         } => {
-            println!("Fetching balance...");
+            info!("Fetching balance...");
             handle_balance(&database_file, account_name.as_deref())?;
             Ok(())
         },
@@ -659,7 +665,7 @@ async fn main() -> Result<(), anyhow::Error> {
             network,
             confirmation_window,
         } => {
-            println!("Creating unsigned transaction...");
+            info!("Creating unsigned transaction...");
             handle_create_unsigned_transaction(
                 recipient,
                 database_file,
@@ -684,7 +690,7 @@ async fn main() -> Result<(), anyhow::Error> {
             idempotency_key,
             confirmation_window,
         } => {
-            println!("Locking funds...");
+            info!("Locking funds...");
             let request = LockFundsRequest {
                 amount,
                 num_outputs: Some(num_outputs),
@@ -788,7 +794,7 @@ fn handle_create_unsigned_transaction(
     create_dir_all(Path::new(&output_file).parent().unwrap())?;
     fs::write(output_file, serde_json::to_string_pretty(&result)?)?;
 
-    println!("Unsigned transaction written to file.");
+    info!(target:"audit", "Unsigned transaction written to file.");
     Ok(())
 }
 
@@ -820,7 +826,7 @@ fn handle_lock_funds(
     create_dir_all(Path::new(&output_file).parent().unwrap())?;
     fs::write(output_file, serde_json::to_string_pretty(&result)?)?;
 
-    println!("Locked funds output written to file.");
+    info!(target:"audit", "Locked funds output written to file.");
     Ok(())
 }
 

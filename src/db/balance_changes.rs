@@ -1,11 +1,21 @@
+use log::debug;
 use rusqlite::{Connection, named_params};
 use serde::Deserialize;
 use serde_rusqlite::from_rows;
 
 use crate::db::error::{WalletDbError, WalletDbResult};
+use crate::log::mask_amount;
 use crate::models::BalanceChange;
 
 pub fn insert_balance_change(conn: &Connection, change: &BalanceChange) -> WalletDbResult<()> {
+    debug!(
+        target: "audit",
+        account_id = change.account_id,
+        credit = &*mask_amount(change.balance_credit as i64),
+        debit = &*mask_amount(change.balance_debit as i64);
+        "DB: Inserting balance change"
+    );
+
     let balance_credit = change.balance_credit as i64;
     let balance_debit = change.balance_debit as i64;
     let effective_height = change.effective_height as i64;
@@ -68,6 +78,11 @@ pub fn insert_balance_change(conn: &Connection, change: &BalanceChange) -> Walle
 }
 
 pub fn get_all_balance_changes_by_account_id(conn: &Connection, account_id: i64) -> WalletDbResult<Vec<BalanceChange>> {
+    debug!(
+        account_id = account_id;
+        "DB: Fetching all balance changes"
+    );
+
     let mut stmt = conn.prepare_cached(
         r#"
         SELECT 

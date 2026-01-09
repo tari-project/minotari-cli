@@ -6,6 +6,7 @@
 
 use chrono::{DateTime, Utc};
 use lightweight_wallet_libs::BlockScanResult;
+use log::{error, info};
 use rusqlite::Connection;
 use tari_common_types::types::FixedHash;
 use tari_transaction_components::transaction_components::WalletOutput;
@@ -13,6 +14,7 @@ use thiserror::Error;
 
 use crate::{
     db::{self, WalletDbError},
+    log::{mask_amount, mask_string},
     models::{BalanceChange, OutputStatus, WalletEvent, WalletEventType},
     scan::events::{
         BalanceChangeSummary, BlockProcessedEvent, ConfirmedOutput, DetectedOutput, DisplayedTransactionsEvent,
@@ -242,9 +244,10 @@ impl<E: EventSender> BlockProcessor<E> {
             },
             Ok(_) => {},
             Err(e) => {
-                eprintln!(
-                    "Failed to process displayed transactions for block {}: {}",
-                    block_height, e
+                error!(
+                    block_height = block_height,
+                    error:% = e;
+                    "Failed to process displayed transactions"
                 );
             },
         }
@@ -333,6 +336,15 @@ impl<E: EventSender> BlockProcessor<E> {
         for (hash, output) in &block.wallet_outputs {
             let memo = MemoInfo::from_output(output);
 
+            info!(
+                target: "audit",
+                account_id = self.account_id,
+                block_height = block.height,
+                value = &*mask_amount(output.value().as_u64() as i64),
+                is_coinbase = output.features().is_coinbase();
+                "Detected wallet output"
+            );
+
             let event = self.make_output_detected_event(*hash, block, &memo);
             self.wallet_events.push(event.clone());
 
@@ -414,6 +426,14 @@ impl<E: EventSender> BlockProcessor<E> {
                 continue;
             };
 
+            info!(
+                target: "audit",
+                account_id = self.account_id,
+                block_height = block.height,
+                value = &*mask_amount(value as i64);
+                "Detected spent input"
+            );
+
             let (input_id, is_new) = db::insert_input(
                 tx,
                 self.account_id,
@@ -491,6 +511,15 @@ impl<E: EventSender> BlockProcessor<E> {
             db::get_unconfirmed_outputs(tx, self.account_id, block.height, REQUIRED_CONFIRMATIONS)?;
 
         for unconfirmed_output in unconfirmed_outputs {
+            info!(
+                target: "audit",
+                account_id = self.account_id,
+                output_hash = &*mask_string(&hex::encode(&unconfirmed_output.output_hash)),
+                original_height = unconfirmed_output.mined_in_block_height,
+                confirmed_at = block.height;
+                "Output confirmed"
+            );
+
             let event = self.make_confirmation_event(
                 &unconfirmed_output.output_hash,
                 unconfirmed_output.mined_in_block_height as u64,

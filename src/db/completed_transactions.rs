@@ -3,6 +3,7 @@ use std::str::FromStr;
 
 use crate::db::error::WalletDbResult;
 use chrono::{DateTime, Utc};
+use log::{debug, info, warn};
 use rusqlite::{Connection, OptionalExtension, Row, named_params};
 use uuid::Uuid;
 
@@ -96,6 +97,12 @@ pub fn create_completed_transaction(
     serialized_transaction: &[u8],
     sent_output_hash: Option<String>,
 ) -> WalletDbResult<String> {
+    debug!(
+        account_id = account_id,
+        pending_id = pending_tx_id;
+        "DB: Creating completed transaction"
+    );
+
     let id = Uuid::new_v4().to_string();
     let status_str = CompletedTransactionStatus::Completed.to_string();
 
@@ -130,6 +137,14 @@ pub fn create_completed_transaction(
             ":sent_hash": sent_output_hash
         },
     )?;
+
+    info!(
+        target: "audit",
+        id = &*id,
+        account_id = account_id,
+        pending_id = pending_tx_id;
+        "DB: Transaction Completed"
+    );
 
     Ok(id)
 }
@@ -183,6 +198,12 @@ pub fn update_completed_transaction_status(
     id: &str,
     status: CompletedTransactionStatus,
 ) -> WalletDbResult<()> {
+    debug!(
+        id = id,
+        status:% = status;
+        "DB: Updating completed tx status"
+    );
+
     let status_str = status.to_string();
     let now = Utc::now();
 
@@ -203,6 +224,13 @@ pub fn update_completed_transaction_status(
 }
 
 pub fn mark_completed_transaction_as_broadcasted(conn: &Connection, id: &str, attempts: i32) -> WalletDbResult<()> {
+    info!(
+        target: "audit",
+        id = id,
+        attempts = attempts;
+        "DB: Marking completed tx as broadcasted"
+    );
+
     let status = CompletedTransactionStatus::Broadcast.to_string();
     let now = Utc::now();
 
@@ -229,6 +257,13 @@ pub fn mark_completed_transaction_as_mined_unconfirmed(
     block_height: i64,
     block_hash: &[u8],
 ) -> WalletDbResult<()> {
+    info!(
+        target: "audit",
+        id = id,
+        height = block_height;
+        "DB: Transaction Mined (Unconfirmed)"
+    );
+
     let status = CompletedTransactionStatus::MinedUnconfirmed.to_string();
     let now = Utc::now();
 
@@ -256,6 +291,13 @@ pub fn mark_completed_transaction_as_confirmed(
     confirmation_height: i64,
     sent_payref: String,
 ) -> WalletDbResult<()> {
+    info!(
+        target: "audit",
+        id = id,
+        height = confirmation_height;
+        "DB: Transaction Confirmed"
+    );
+
     let status = CompletedTransactionStatus::MinedConfirmed.to_string();
     let now = Utc::now();
 
@@ -278,6 +320,12 @@ pub fn mark_completed_transaction_as_confirmed(
 }
 
 pub fn revert_completed_transaction_to_completed(conn: &Connection, id: &str) -> WalletDbResult<()> {
+    warn!(
+        target: "audit",
+        id = id;
+        "DB: Reverting transaction to completed state (Reorg)"
+    );
+
     let status = CompletedTransactionStatus::Completed.to_string();
     let now = Utc::now();
 
@@ -303,6 +351,12 @@ pub fn reset_mined_completed_transactions_from_height(
     account_id: i64,
     reorg_height: u64,
 ) -> WalletDbResult<u64> {
+    warn!(
+        account_id = account_id,
+        height = reorg_height;
+        "DB: Resetting mined transactions from height (Reorg)"
+    );
+
     let status_completed = CompletedTransactionStatus::Completed.to_string();
     let status_unconfirmed = CompletedTransactionStatus::MinedUnconfirmed.to_string();
     let status_confirmed = CompletedTransactionStatus::MinedConfirmed.to_string();
@@ -332,6 +386,12 @@ pub fn reset_mined_completed_transactions_from_height(
 }
 
 pub fn mark_completed_transaction_as_rejected(conn: &Connection, id: &str, reject_reason: &str) -> WalletDbResult<()> {
+    warn!(
+        id = id,
+        reason = reject_reason;
+        "DB: Transaction Rejected"
+    );
+
     let status_str = CompletedTransactionStatus::Rejected.to_string();
     let now = Utc::now();
 

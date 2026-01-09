@@ -43,6 +43,7 @@
 use crate::db::SqlitePool;
 use crate::{api::types::LockFundsResult, db::AccountRow};
 use anyhow::anyhow;
+use log::info;
 use tari_common::configuration::Network;
 use tari_common_types::{tari_address::TariAddress, transaction::TxId};
 use tari_transaction_components::offline_signing::models::PaymentRecipient;
@@ -53,6 +54,8 @@ use tari_transaction_components::{
     tari_amount::MicroMinotari,
     transaction_components::{MemoField, OutputFeatures, memo_field::TxType},
 };
+
+use crate::log::{mask_amount, mask_string};
 
 /// Represents a recipient of a one-sided transaction.
 ///
@@ -215,6 +218,12 @@ impl OneSidedTransaction {
         }
 
         let recipient = &recipients[0];
+        info!(
+            target: "audit",
+            recipient = &*mask_string(&recipient.address.to_string()),
+            amount = &*mask_amount(recipient.amount.as_u64() as i64);
+            "Creating unsigned one-sided transaction"
+        );
 
         let sender_address = account.get_address(self.network, &self.password)?;
 

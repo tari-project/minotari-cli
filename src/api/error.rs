@@ -40,6 +40,7 @@ use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
+use log::{error, warn};
 use serde_json::json;
 use thiserror::Error;
 use utoipa::ToSchema;
@@ -190,12 +191,27 @@ impl From<serde_json::Error> for ApiError {
 /// | `FailedCreateUnsignedTx` | 500 |
 impl IntoResponse for ApiError {
     fn into_response(self) -> Response {
-        let (status, error_message) = match self {
-            ApiError::InternalServerError(msg) => (StatusCode::INTERNAL_SERVER_ERROR, msg),
-            ApiError::DbError(e) => (StatusCode::INTERNAL_SERVER_ERROR, e),
-            ApiError::AccountNotFound(name) => (StatusCode::NOT_FOUND, format!("Account '{}' not found", name)),
-            ApiError::FailedToLockFunds(e) => (StatusCode::INTERNAL_SERVER_ERROR, e),
-            ApiError::FailedCreateUnsignedTx(e) => (StatusCode::INTERNAL_SERVER_ERROR, e),
+        let (status, error_message) = match &self {
+            ApiError::InternalServerError(msg) => {
+                error!(error = msg.as_str(); "API: Internal Server Error");
+                (StatusCode::INTERNAL_SERVER_ERROR, msg.clone())
+            },
+            ApiError::DbError(e) => {
+                error!(error = e.as_str(); "API: Database Error");
+                (StatusCode::INTERNAL_SERVER_ERROR, e.clone())
+            },
+            ApiError::AccountNotFound(name) => {
+                warn!(account = name.as_str(); "API: Account Not Found");
+                (StatusCode::NOT_FOUND, format!("Account '{}' not found", name))
+            },
+            ApiError::FailedToLockFunds(e) => {
+                error!(target: "audit", error = e.as_str(); "API: Failed to lock funds");
+                (StatusCode::INTERNAL_SERVER_ERROR, e.clone())
+            },
+            ApiError::FailedCreateUnsignedTx(e) => {
+                error!(target: "audit", error = e.as_str(); "API: Failed to create unsigned transaction");
+                (StatusCode::INTERNAL_SERVER_ERROR, e.clone())
+            },
         };
 
         let body = Json(json!({

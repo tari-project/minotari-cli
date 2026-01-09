@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 
+use log::warn;
 use rusqlite::{OptionalExtension, named_params};
 
 use super::{OutputDetails, TransactionDataResolver};
@@ -52,9 +53,11 @@ impl TransactionDataResolver for DatabaseResolver {
         };
 
         let status = status_str.parse::<OutputStatus>().unwrap_or_else(|_| {
-            eprintln!(
-                "Warning: Failed to parse output status '{}' for output_id={}, defaulting to Unspent",
-                status_str, output_id
+            warn!(
+                target: "audit",
+                status = &*status_str,
+                output_id = output_id;
+                "Failed to parse output status, defaulting to Unspent"
             );
             OutputStatus::Unspent
         });

@@ -1,8 +1,10 @@
 use crate::db::balance_changes::insert_balance_change;
 use crate::db::error::{WalletDbError, WalletDbResult};
+use crate::log::mask_amount;
 use crate::models::BalanceChange;
 use crate::models::OutputStatus;
 use chrono::{DateTime, Utc};
+use log::{debug, info, warn};
 use rusqlite::{Connection, named_params};
 use serde::Deserialize;
 use serde_rusqlite::from_rows;
@@ -22,6 +24,14 @@ pub fn insert_output(
     memo_parsed: Option<String>,
     memo_hex: Option<String>,
 ) -> WalletDbResult<(i64, bool)> {
+    info!(
+        target: "audit",
+        account_id = account_id,
+        value = &*mask_amount(output.value().as_u64() as i64),
+        height = block_height;
+        "DB: Inserting output"
+    );
+
     let id = TxId::new_deterministic(account_view_key, &output.output_hash()).as_i64_wrapped();
 
     let output_json = serde_json::to_string(&output)?;
@@ -140,6 +150,12 @@ pub fn mark_output_confirmed(
     confirmed_height: u64,
     confirmed_hash: &[u8],
 ) -> WalletDbResult<()> {
+    info!(
+        target: "audit",
+        height = confirmed_height;
+        "DB: Output Confirmed"
+    );
+
     let confirmed_height = confirmed_height as i64;
     conn.execute(
         r#"
@@ -164,6 +180,13 @@ struct OutputToDelete {
 }
 
 pub fn soft_delete_outputs_from_height(conn: &Connection, account_id: i64, height: u64) -> WalletDbResult<()> {
+    warn!(
+        target: "audit",
+        account_id = account_id,
+        height = height;
+        "DB: Soft deleting outputs (Reorg)"
+    );
+
     let height_i64 = height as i64;
     let now = Utc::now();
 
@@ -221,6 +244,12 @@ pub fn soft_delete_outputs_from_height(conn: &Connection, account_id: i64, heigh
 }
 
 pub fn update_output_status(conn: &Connection, output_id: i64, status: OutputStatus) -> WalletDbResult<()> {
+    debug!(
+        output_id = output_id,
+        status:% = status;
+        "DB: Updating output status"
+    );
+
     let status_str = status.to_string();
     conn.execute(
         r#"
@@ -243,6 +272,13 @@ pub fn lock_output(
     locked_by_request_id: &str,
     locked_at: DateTime<Utc>,
 ) -> WalletDbResult<()> {
+    info!(
+        target: "audit",
+        output_id = output_id,
+        request_id = locked_by_request_id;
+        "DB: Locking output"
+    );
+
     let locked_status = OutputStatus::Locked.to_string();
     let unspent_status = OutputStatus::Unspent.to_string();
 
@@ -313,6 +349,11 @@ pub fn fetch_unspent_outputs(
 }
 
 pub fn unlock_outputs_for_request(conn: &Connection, locked_by_request_id: &str) -> WalletDbResult<()> {
+    debug!(
+        request_id = locked_by_request_id;
+        "DB: Unlocking outputs for request"
+    );
+
     let unspent_status = OutputStatus::Unspent.to_string();
     let locked_status = OutputStatus::Locked.to_string();
 

@@ -1,4 +1,5 @@
 use chacha20poly1305::{Key, KeyInit, XChaCha20Poly1305, XNonce, aead::Aead};
+use log::{debug, info, warn};
 use rusqlite::{Connection, named_params};
 use serde::{Deserialize, Serialize};
 use serde_rusqlite::from_rows;
@@ -33,6 +34,12 @@ pub fn create_account(
     unencrypted_view_key_hash: &[u8],
     birthday: i64,
 ) -> WalletDbResult<()> {
+    info!(
+        target: "audit",
+        account = friendly_name;
+        "DB: Creating new account"
+    );
+
     conn.execute(
         r#"
         INSERT INTO accounts (
@@ -66,6 +73,11 @@ pub fn create_account(
 }
 
 pub fn get_account_by_name(conn: &Connection, friendly_name: &str) -> WalletDbResult<Option<AccountRow>> {
+    debug!(
+        account = friendly_name;
+        "DB: Fetching account by name"
+    );
+
     let mut stmt = conn.prepare_cached(
         r#"
         SELECT id, 
@@ -88,6 +100,10 @@ pub fn get_account_by_name(conn: &Connection, friendly_name: &str) -> WalletDbRe
 
 pub fn get_accounts(conn: &Connection, friendly_name: Option<&str>) -> WalletDbResult<Vec<AccountRow>> {
     if let Some(name) = friendly_name {
+        debug!(
+            account = name;
+            "DB: Listing accounts with filter"
+        );
         let mut stmt = conn.prepare_cached(
             r#"
             SELECT id, 
@@ -106,6 +122,7 @@ pub fn get_accounts(conn: &Connection, friendly_name: Option<&str>) -> WalletDbR
         let results = from_rows::<AccountRow>(rows).collect::<Result<Vec<_>, _>>()?;
         Ok(results)
     } else {
+        debug!("DB: Listing all accounts");
         let mut stmt = conn.prepare_cached(
             r#"
             SELECT id, 
@@ -166,11 +183,17 @@ impl AccountRow {
 
         let view_key = cipher
             .decrypt(&nonce, self.encrypted_view_private_key.as_ref())
-            .map_err(|_| WalletDbError::DecryptionFailed("Failed to decrypt view key".to_string()))?;
+            .map_err(|e| {
+                warn!(error:? = e; "DB: Failed to decrypt view key");
+                WalletDbError::DecryptionFailed("Failed to decrypt view key".to_string())
+            })?;
 
         let spend_key = cipher
             .decrypt(&nonce, self.encrypted_spend_public_key.as_ref())
-            .map_err(|_| WalletDbError::DecryptionFailed("Failed to decrypt spend key".to_string()))?;
+            .map_err(|e| {
+                warn!(error:? = e; "DB: Failed to decrypt spend key");
+                WalletDbError::DecryptionFailed("Failed to decrypt spend key".to_string())
+            })?;
 
         let view_key = RistrettoSecretKey::from_canonical_bytes(&view_key)
             .map_err(|e| WalletDbError::DecryptionFailed(format!("Invalid view key bytes: {}", e)))?;
@@ -232,6 +255,10 @@ pub struct AccountBalance {
 }
 
 pub fn get_balance(conn: &Connection, account_id: i64) -> WalletDbResult<AccountBalance> {
+    debug!(
+        account_id = account_id;
+        "DB: Calculating account balance"
+    );
     let history_agg = get_balance_aggregates_for_account(conn, account_id)?;
     let (locked_amount, unconfirmed_amount, locked_and_unconfirmed_amount) =
         get_output_totals_for_account(conn, account_id)?;

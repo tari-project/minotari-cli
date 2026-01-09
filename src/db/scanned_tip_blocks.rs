@@ -1,3 +1,4 @@
+use log::{debug, warn};
 use rusqlite::{Connection, named_params};
 use serde::Deserialize;
 use serde_rusqlite::from_rows;
@@ -58,6 +59,12 @@ pub fn get_latest_scanned_tip_block_by_account(
 }
 
 pub fn insert_scanned_tip_block(conn: &Connection, account_id: i64, height: i64, hash: &[u8]) -> WalletDbResult<()> {
+    debug!(
+        account_id = account_id,
+        height = height;
+        "DB: Inserting scanned tip block"
+    );
+
     conn.execute(
         r#"
         INSERT OR IGNORE INTO scanned_tip_blocks (account_id, height, hash)
@@ -74,6 +81,13 @@ pub fn insert_scanned_tip_block(conn: &Connection, account_id: i64, height: i64,
 }
 
 pub fn delete_scanned_tip_blocks_from_height(conn: &Connection, account_id: i64, height: u64) -> WalletDbResult<()> {
+    warn!(
+        target: "audit",
+        account_id = account_id,
+        height = height;
+        "DB: Deleting scanned tip blocks (Reorg)"
+    );
+
     let height = height as i64;
     conn.execute(
         r#"
@@ -90,6 +104,12 @@ pub fn delete_scanned_tip_blocks_from_height(conn: &Connection, account_id: i64,
 }
 
 pub fn prune_scanned_tip_blocks(conn: &Connection, account_id: i64, current_tip_height: u64) -> WalletDbResult<()> {
+    debug!(
+        account_id = account_id,
+        tip = current_tip_height;
+        "DB: Pruning scanned tip blocks"
+    );
+
     // Keep the last RECENT_BLOCKS_TO_KEEP blocks
     let min_height_for_recent = current_tip_height.saturating_sub(RECENT_BLOCKS_TO_KEEP) as i64;
     let interval = OLD_BLOCKS_PRUNING_INTERVAL as i64;

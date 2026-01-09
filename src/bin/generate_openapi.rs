@@ -1,3 +1,4 @@
+use log::info;
 use minotari::ApiDoc;
 use utoipa::OpenApi;
 
@@ -6,5 +7,5 @@ fn main() {
     let output_path = "openapi.json";
     std::fs::write(output_path, openapi_spec).expect("Failed to write OpenAPI spec to file");
 
-    println!("✅ OpenAPI spec generated and written to {}", output_path);
+    info!(output_path; "✅ OpenAPI spec generated and written");
 }

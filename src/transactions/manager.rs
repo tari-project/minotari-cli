@@ -56,6 +56,7 @@
 
 use anyhow::anyhow;
 use chrono::{Duration, Utc};
+use log::{info, warn};
 use r2d2::PooledConnection;
 use r2d2_sqlite::SqliteConnectionManager;
 use tari_common::configuration::Network;
@@ -76,6 +77,7 @@ use tari_utilities::ByteArray;
 use crate::{
     db::{self, AccountRow, SqlitePool},
     http::{TxSubmissionRejectionReason, WalletHttpClient},
+    log::mask_amount,
     models::PendingTransactionStatus,
     transactions::{
         displayed_transaction_processor::{
@@ -448,6 +450,12 @@ impl TransactionSender {
         recipient: Recipient,
         seconds_to_lock_utxo: u64,
     ) -> Result<PrepareOneSidedTransactionForSigningResult, anyhow::Error> {
+        info!(
+            target: "audit",
+            idempotency_key = idempotency_key.as_str(),
+            amount = &*mask_amount(recipient.amount.as_u64() as i64);
+            "Starting new transaction"
+        );
         let connection = self.get_connection()?;
 
         let mut processed_transaction =
@@ -547,6 +555,12 @@ impl TransactionSender {
         let processed_transaction = &self.processed_transactions;
         let account_id = self.account.id;
 
+        info!(
+            target: "audit",
+            id = processed_transaction.id();
+            "Finalizing and broadcasting transaction"
+        );
+
         self.check_if_transaction_expired(processed_transaction)?;
 
         // Extract transaction info from the signed result for building DisplayedTransaction
@@ -604,6 +618,12 @@ impl TransactionSender {
 
         match response {
             Err(e) => {
+                warn!(
+                    target: "audit",
+                    id = processed_transaction.id(),
+                    reason:% = e;
+                    "Transaction submission failed"
+                );
                 db::mark_completed_transaction_as_rejected(
                     &connection,
                     &completed_tx_id,
@@ -614,8 +634,19 @@ impl TransactionSender {
             },
             Ok(response) => {
                 if response.accepted {
+                    info!(
+                        target: "audit",
+                        id = &*completed_tx_id;
+                        "Transaction accepted by network"
+                    );
                     db::mark_completed_transaction_as_broadcasted(&connection, &completed_tx_id, 1)?;
                 } else if !response.accepted && response.rejection_reason != TxSubmissionRejectionReason::AlreadyMined {
+                    warn!(
+                        target: "audit",
+                        id = &*completed_tx_id,
+                        reason:% = response.rejection_reason;
+                        "Transaction rejected by network"
+                    );
                     db::mark_completed_transaction_as_rejected(
                         &connection,
                         &completed_tx_id,

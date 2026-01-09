@@ -26,6 +26,7 @@
 //! - [`daemon`]: Background daemon mode for continuous blockchain scanning
 //! - [`db`]: Database layer with SQLite queries for accounts, outputs, inputs, and balance changes
 //! - [`http`]: HTTP server and REST API endpoints for wallet operations
+//! - [`log`]: Log handling
 //! - [`models`]: Data models including wallet events, balance changes, and output statuses
 //! - [`scan`]: Core blockchain scanning logic with batch processing and reorg handling
 //! - [`tasks`]: Background task management for periodic operations
@@ -123,6 +124,7 @@ pub mod api;
 pub mod daemon;
 pub mod db;
 pub mod http;
+pub mod log;
 pub mod models;
 pub mod scan;
 pub mod tasks;
