@@ -97,13 +97,6 @@ async fn main() -> Result<(), anyhow::Error> {
     let config_obj = load_configuration(&cli.config, cli.network)?;
     let mut wallet_config = WalletConfig::load_from(&config_obj)?;
 
-    let resolved_network = config_obj
-        .get_string("network")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(Network::MainNet);
-    wallet_config.network = resolved_network;
-
     match cli.command {
         Commands::CreateAddress { password, output_file } => {
             info!(target: "audit", "Creating new address...");
