@@ -288,6 +288,50 @@ pub enum Commands {
         birthday: u16,
     },
 
+    /// Create a new wallet or restore from seed words.
+    ///
+    /// This initializes the database with a full signing wallet (SeedWordsWallet).
+    /// - If `seed_words` are provided, it restores the wallet.
+    /// - If omitted, it generates a generic random wallet.
+    Create {
+        #[command(flatten)]
+        security: SecurityArgs,
+        #[command(flatten)]
+        db: DatabaseArgs,
+        #[command(flatten)]
+        account: AccountArgs,
+
+        /// Optional space-separated seed words to restore from.
+        #[arg(short, long, help = "Restore from specific seed words (space separated)")]
+        seed_words: Option<String>,
+    },
+
+    /// Reveal the seed words for a specific wallet.
+    ///
+    /// Requires the wallet password to decrypt the seed.
+    /// Will fail if the wallet is a View-Only wallet or Ledger wallet.
+    ShowSeedWords {
+        #[command(flatten)]
+        security: SecurityArgs,
+        #[command(flatten)]
+        db: DatabaseArgs,
+        #[command(flatten)]
+        account: AccountArgs,
+    },
+
+    /// Reveal the cryptographic keys for a specific wallet.
+    ///
+    /// Outputs the Private View Key (used for scanning) and the Public Spend Key
+    /// (used to generate addresses). Requires the wallet password.
+    ShowKeys {
+        #[command(flatten)]
+        security: SecurityArgs,
+        #[command(flatten)]
+        db: DatabaseArgs,
+        #[command(flatten)]
+        account: AccountArgs,
+    },
+
     /// Create an unsigned one-sided transaction.
     ///
     /// Builds a transaction that can be signed offline. The transaction sends

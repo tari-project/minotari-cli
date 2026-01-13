@@ -40,11 +40,12 @@
 //! Use [`init_with_view_key`] to import a view-only wallet:
 //!
 //! ```no_run
-//! use minotari::{init_with_view_key, init_db};
+//! use minotari::utils::init_wallet::init_with_view_key;
+//! use minotari::init_db;
 //!
-//! # async fn example() -> anyhow::Result<()> {
+//! # fn example() -> anyhow::Result<()> {
 //! // Initialize the database
-//! let db = init_db("wallet.db").await?;
+//! let db = init_db("wallet.db");
 //!
 //! // Import a view-only wallet
 //! init_with_view_key(
@@ -54,7 +55,7 @@
 //!     "secure_password",
 //!     None,      // account name (uses "default")
 //!     Some(0),   // birthday height
-//! ).await?;
+//! );
 //! # Ok(())
 //! # }
 //! ```
@@ -65,12 +66,12 @@
 //!
 //! ```no_run
 //! use minotari::{Scanner, ScanMode, get_accounts};
-//! # use minotari::init_db;
+//! use minotari::init_db;
 //!
 //! # async fn example() -> anyhow::Result<()> {
-//! # let db = init_db("wallet.db").await?;
+//! # let db = init_db("wallet.db");
 //! // Load accounts
-//! let accounts = get_accounts(&db, None).await?;
+//! let accounts = get_accounts(&db, None)?;
 //!
 //! // Create and run scanner
 //! let mut scanner = Scanner::new(
@@ -92,9 +93,9 @@
 //! ```no_run
 //! use minotari::{get_balance, init_db};
 //!
-//! # async fn example() -> anyhow::Result<()> {
-//! let db = init_db("wallet.db").await?;
-//! let balance = get_balance(&db, "default").await?;
+//! # fn example() -> anyhow::Result<()> {
+//! let db = init_db("wallet.db")?;
+//! let balance = get_balance(&db, "default")?;
 //! println!("Available balance: {} µT", balance.available);
 //! # Ok(())
 //! # }
@@ -139,4 +140,3 @@ pub use crate::models::WalletEvent;
 pub use crate::scan::scan::ScanError;
 pub use crate::scan::{BlockProcessedEvent, PauseReason, ProcessingEvent, ScanMode, ScanStatusEvent, Scanner};
 pub use crate::transactions::{DisplayedTransaction, TransactionHistoryService};
-pub use crate::utils::init_with_view_key;
