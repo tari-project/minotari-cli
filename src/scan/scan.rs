@@ -6,7 +6,7 @@
 use lightweight_wallet_libs::{HttpBlockchainScanner, ScanConfig, scanning::BlockchainScanner};
 use log::{info, warn};
 use rusqlite::Connection;
-use std::time::Duration;
+use std::{path::PathBuf, time::Duration};
 use tari_transaction_components::key_manager::{KeyManager, TransactionKeyManagerInterface};
 use tari_utilities::ByteArray;
 use tokio::sync::mpsc;
@@ -753,7 +753,7 @@ pub struct Scanner {
     /// Base URL for the blockchain node HTTP API.
     base_url: String,
     /// Path to the SQLite database file.
-    database_file: String,
+    database_file: PathBuf,
     /// Optional account name filter. If `None`, scans all accounts.
     account_name: Option<String>,
     /// Number of blocks to fetch per scan batch.
@@ -792,11 +792,11 @@ impl Scanner {
     /// ```rust,ignore
     /// let scanner = Scanner::new("password", "http://localhost:18142", "wallet.db", 100);
     /// ```
-    pub fn new(password: &str, base_url: &str, database_file: &str, batch_size: u64) -> Self {
+    pub fn new(password: &str, base_url: &str, database_file: PathBuf, batch_size: u64) -> Self {
         Self {
             password: password.to_string(),
             base_url: base_url.to_string(),
-            database_file: database_file.to_string(),
+            database_file,
             account_name: None,
             batch_size,
             processing_threads: 8,
@@ -999,7 +999,7 @@ impl Scanner {
         self,
         event_sender: E,
     ) -> Result<(Vec<WalletEvent>, bool), ScanError> {
-        let pool = db::init_db(&self.database_file)?;
+        let pool = db::init_db(self.database_file.clone())?;
         let mut conn = pool.get().map_err(|e| ScanError::DbError(e.into()))?;
         let mut all_events = Vec::new();
         let mut any_more_blocks = false;

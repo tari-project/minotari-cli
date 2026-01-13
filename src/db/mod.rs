@@ -42,7 +42,7 @@
 //! # }
 //! ```
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::LazyLock;
 use std::{env::current_dir, fs};
 
@@ -157,10 +157,10 @@ static MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
 /// # Ok(())
 /// # }
 /// ```
-pub fn init_db(db_path: &str) -> WalletDbResult<SqlitePool> {
-    info!(path = db_path; "Initializing database");
+pub fn init_db(db_path: PathBuf) -> WalletDbResult<SqlitePool> {
+    debug!(path:? = db_path; "Initializing database");
 
-    let mut path = Path::new(db_path).to_path_buf();
+    let mut path = db_path;
     if path.is_relative() {
         path = current_dir()?.join(path);
     }

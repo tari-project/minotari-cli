@@ -44,7 +44,7 @@
 //!
 //! All components listen for shutdown signals and terminate gracefully.
 
-use std::time::Duration;
+use std::{path::PathBuf, time::Duration};
 
 use anyhow::anyhow;
 use log::{error, info, warn};
@@ -66,7 +66,7 @@ use crate::{
 pub struct Daemon {
     password: String,
     base_url: String,
-    database_file: String,
+    database_file: PathBuf,
     max_blocks: u64,
     batch_size: u64,
     scan_interval: Duration,
@@ -91,7 +91,7 @@ impl Daemon {
     pub fn new(
         password: String,
         base_url: String,
-        database_file: String,
+        database_file: PathBuf,
         max_blocks: u64,
         batch_size: u64,
         scan_interval_secs: u64,
@@ -133,7 +133,7 @@ impl Daemon {
 
         let (shutdown_tx, _) = broadcast::channel(1);
 
-        let db_pool = db::init_db(&self.database_file)?;
+        let db_pool = db::init_db(self.database_file.clone())?;
 
         let unlocker = TransactionUnlocker::new(db_pool.clone());
         let unlocker_task_handle = unlocker.run(shutdown_tx.subscribe());
@@ -203,12 +203,17 @@ impl Daemon {
     /// - `Err(ScanError)` - Scan failed with a fatal or intermittent error
     async fn scan_and_sleep(&self) -> Result<(), ScanError> {
         info!("Starting wallet scan...");
-        let result = scan::Scanner::new(&self.password, &self.base_url, &self.database_file, self.batch_size)
-            .mode(ScanMode::Partial {
-                max_blocks: self.max_blocks,
-            })
-            .run()
-            .await;
+        let result = scan::Scanner::new(
+            &self.password,
+            &self.base_url,
+            self.database_file.clone(),
+            self.batch_size,
+        )
+        .mode(ScanMode::Partial {
+            max_blocks: self.max_blocks,
+        })
+        .run()
+        .await;
 
         match result {
             Ok((events, _are_there_more_blocks_to_scan)) => {
