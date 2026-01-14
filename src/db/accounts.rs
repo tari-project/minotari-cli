@@ -42,7 +42,7 @@ pub fn create_account(
     let wallet_json =
         serde_json::to_string(wallet).map_err(|e| WalletDbError::Unexpected(format!("Serialization failed: {}", e)))?;
 
-    let (encrypted_wallet, nonce) = encrypt_data(wallet_json.as_bytes(), password)
+    let (encrypted_wallet, nonce, salt) = encrypt_data(wallet_json.as_bytes(), password)
         .map_err(|e| WalletDbError::Unexpected(format!("Encryption failed: {}", e)))?;
 
     conn.execute(
@@ -52,6 +52,7 @@ pub fn create_account(
             fingerprint,
             encrypted_wallet,
             cipher_nonce,
+            salt,
             birthday
         )
         VALUES (
@@ -59,6 +60,7 @@ pub fn create_account(
             :fingerprint,
             :enc_wallet,
             :nonce,
+            :salt,
             :birthday
         )
         "#,
@@ -67,6 +69,7 @@ pub fn create_account(
             ":fingerprint": fingerprint,
             ":enc_wallet": encrypted_wallet,
             ":nonce": nonce,
+            ":salt": salt,
             ":birthday": birthday,
         },
     )?;
@@ -86,7 +89,8 @@ pub fn get_account_by_name(conn: &Connection, friendly_name: &str) -> WalletDbRe
             friendly_name, 
             fingerprint,
             encrypted_wallet,
-            cipher_nonce, 
+            cipher_nonce,
+            salt,
             birthday
         FROM accounts
         WHERE friendly_name = :name
@@ -111,7 +115,8 @@ pub fn get_accounts(conn: &Connection, friendly_name: Option<&str>) -> WalletDbR
               friendly_name, 
               fingerprint,
               encrypted_wallet,
-              cipher_nonce, 
+              cipher_nonce,
+              salt,
               birthday
             FROM accounts
             WHERE friendly_name = :name
@@ -129,7 +134,8 @@ pub fn get_accounts(conn: &Connection, friendly_name: Option<&str>) -> WalletDbR
               friendly_name, 
               fingerprint,
               encrypted_wallet,
-              cipher_nonce, 
+              cipher_nonce,
+              salt,
               birthday
             FROM accounts
             ORDER BY friendly_name
@@ -148,15 +154,17 @@ pub struct AccountRow {
     pub fingerprint: Vec<u8>,
     pub encrypted_wallet: Vec<u8>,
     pub cipher_nonce: Vec<u8>,
+    pub salt: Vec<u8>,
     pub birthday: i64,
 }
 
 impl AccountRow {
     pub fn decrypt_wallet_type(&self, password: &str) -> WalletDbResult<WalletType> {
-        let plaintext_bytes = decrypt_data(&self.encrypted_wallet, &self.cipher_nonce, password).map_err(|e| {
-            warn!(error:? = e; "DB: Failed to decrypt wallet");
-            WalletDbError::DecryptionFailed("Failed to decrypt wallet data".to_string())
-        })?;
+        let plaintext_bytes =
+            decrypt_data(&self.encrypted_wallet, &self.cipher_nonce, &self.salt, password).map_err(|e| {
+                warn!(error:? = e; "DB: Failed to decrypt wallet");
+                WalletDbError::DecryptionFailed("Failed to decrypt wallet data".to_string())
+            })?;
 
         let wallet: WalletType = serde_json::from_slice(&plaintext_bytes)
             .map_err(|e| WalletDbError::Decoding(format!("Failed to deserialize wallet JSON: {}", e)))?;
