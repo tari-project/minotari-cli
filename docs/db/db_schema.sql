@@ -147,6 +147,7 @@ CREATE TABLE accounts (
     fingerprint BLOB NOT NULL UNIQUE,
     encrypted_wallet BLOB NOT NULL,
     cipher_nonce BLOB NOT NULL,
+    salt BLOB NOT NULL,
     birthday INTEGER NOT NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
