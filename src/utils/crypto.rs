@@ -18,9 +18,15 @@ fn derive_key(password: &str, salt: &[u8]) -> Result<Key, anyhow::Error> {
     Ok(Key::from(key_bytes))
 }
 
+#[derive(Debug, Clone)]
+pub struct FullEncryptedData<S = Vec<u8>> {
+    pub ciphertext: S,
+    pub nonce: S,
+    pub salt_bytes: S,
+}
+
 /// Encrypts data using XChaCha20-Poly1305.
-/// Returns (ciphertext, nonce, salt_bytes).
-pub fn encrypt_data(data: &[u8], password: &str) -> Result<(Vec<u8>, Vec<u8>, Vec<u8>), anyhow::Error> {
+pub fn encrypt_data(data: &[u8], password: &str) -> Result<FullEncryptedData, anyhow::Error> {
     let salt_string = SaltString::generate(&mut OsRng);
     let salt_bytes = salt_string.as_str().as_bytes();
 
@@ -33,24 +39,26 @@ pub fn encrypt_data(data: &[u8], password: &str) -> Result<(Vec<u8>, Vec<u8>, Ve
         .encrypt(&nonce, data)
         .map_err(|e| anyhow!("Encryption failed: {}", e))?;
 
-    Ok((ciphertext, nonce.to_vec(), salt_bytes.to_vec()))
+    Ok(FullEncryptedData {
+        ciphertext,
+        nonce: nonce.to_vec(),
+        salt_bytes: salt_bytes.to_vec(),
+    })
 }
 
 /// Decrypts data using XChaCha20-Poly1305.
-pub fn decrypt_data(
-    encrypted_data: &[u8],
-    nonce: &[u8],
-    salt: &[u8],
-    password: &str,
-) -> Result<Vec<u8>, anyhow::Error> {
+pub fn decrypt_data<S: AsRef<[u8]>>(data: &FullEncryptedData<S>, password: &str) -> Result<Vec<u8>, anyhow::Error> {
+    let salt = data.salt_bytes.as_ref();
     let key = derive_key(password, salt)?;
     let cipher = XChaCha20Poly1305::new(&key);
 
-    let nonce_bytes: &[u8; 24] = nonce.try_into().map_err(|_| anyhow!("Nonce must be 24 bytes"))?;
+    let nonce_slice = data.nonce.as_ref();
+    let nonce_bytes: &[u8; 24] = nonce_slice.try_into().map_err(|_| anyhow!("Nonce must be 24 bytes"))?;
+
     let xnonce = XNonce::from(*nonce_bytes);
 
     let plaintext = cipher
-        .decrypt(&xnonce, encrypted_data)
+        .decrypt(&xnonce, data.ciphertext.as_ref())
         .map_err(|e| anyhow!("Decryption failed: {}", e))?;
 
     Ok(plaintext)

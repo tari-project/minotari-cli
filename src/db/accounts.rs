@@ -15,7 +15,6 @@ use tari_crypto::{keys::PublicKey, ristretto::RistrettoPublicKey};
 use tari_transaction_components::key_manager::{KeyManager, wallet_types::WalletType};
 use utoipa::ToSchema;
 
-use crate::db::balance_changes::get_balance_aggregates_for_account;
 use crate::db::error::{WalletDbError, WalletDbResult};
 use crate::db::outputs::get_output_totals_for_account;
 use crate::utils::{
@@ -23,6 +22,7 @@ use crate::utils::{
     fingerprint::calculate_fingerprint,
     timestamp::format_timestamp,
 };
+use crate::{db::balance_changes::get_balance_aggregates_for_account, utils::crypto::FullEncryptedData};
 use tari_utilities::hex::Hex;
 
 pub fn create_account(
@@ -42,7 +42,7 @@ pub fn create_account(
     let wallet_json =
         serde_json::to_string(wallet).map_err(|e| WalletDbError::Unexpected(format!("Serialization failed: {}", e)))?;
 
-    let (encrypted_wallet, nonce, salt) = encrypt_data(wallet_json.as_bytes(), password)
+    let encrypted_data = encrypt_data(wallet_json.as_bytes(), password)
         .map_err(|e| WalletDbError::Unexpected(format!("Encryption failed: {}", e)))?;
 
     conn.execute(
@@ -67,9 +67,9 @@ pub fn create_account(
         named_params! {
             ":name": friendly_name,
             ":fingerprint": fingerprint,
-            ":enc_wallet": encrypted_wallet,
-            ":nonce": nonce,
-            ":salt": salt,
+            ":enc_wallet": encrypted_data.ciphertext,
+            ":nonce": encrypted_data.nonce,
+            ":salt": encrypted_data.salt_bytes,
             ":birthday": birthday,
         },
     )?;
@@ -160,11 +160,15 @@ pub struct AccountRow {
 
 impl AccountRow {
     pub fn decrypt_wallet_type(&self, password: &str) -> WalletDbResult<WalletType> {
-        let plaintext_bytes =
-            decrypt_data(&self.encrypted_wallet, &self.cipher_nonce, &self.salt, password).map_err(|e| {
-                warn!(error:? = e; "DB: Failed to decrypt wallet");
-                WalletDbError::DecryptionFailed("Failed to decrypt wallet data".to_string())
-            })?;
+        let encrypted_data = FullEncryptedData {
+            ciphertext: &self.encrypted_wallet,
+            nonce: &self.cipher_nonce,
+            salt_bytes: &self.salt,
+        };
+        let plaintext_bytes = decrypt_data(&encrypted_data, password).map_err(|e| {
+            warn!(error:? = e; "DB: Failed to decrypt wallet");
+            WalletDbError::DecryptionFailed("Failed to decrypt wallet data".to_string())
+        })?;
 
         let wallet: WalletType = serde_json::from_slice(&plaintext_bytes)
             .map_err(|e| WalletDbError::Decoding(format!("Failed to deserialize wallet JSON: {}", e)))?;
