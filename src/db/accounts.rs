@@ -1,38 +1,35 @@
-use chacha20poly1305::{Key, KeyInit, XChaCha20Poly1305, XNonce, aead::Aead};
 use log::{debug, info, warn};
 use rusqlite::{Connection, named_params};
 use serde::{Deserialize, Serialize};
 use serde_rusqlite::from_rows;
 use tari_common::configuration::Network;
 use tari_common_types::{
+    seeds::{
+        mnemonic::{Mnemonic, MnemonicLanguage},
+        seed_words::SeedWords,
+    },
     tari_address::{TariAddress, TariAddressFeatures},
     types::CompressedPublicKey,
 };
-use tari_crypto::keys::PublicKey;
-use tari_crypto::{
-    compressed_key::CompressedKey,
-    ristretto::{RistrettoPublicKey, RistrettoSecretKey},
-};
-use tari_transaction_components::key_manager::KeyManager;
-use tari_transaction_components::key_manager::wallet_types::ViewWallet;
-use tari_transaction_components::key_manager::wallet_types::WalletType;
-
-use tari_utilities::byte_array::ByteArray;
+use tari_crypto::{keys::PublicKey, ristretto::RistrettoPublicKey};
+use tari_transaction_components::key_manager::{KeyManager, wallet_types::WalletType};
 use utoipa::ToSchema;
 
-use crate::db::balance_changes::get_balance_aggregates_for_account;
 use crate::db::error::{WalletDbError, WalletDbResult};
 use crate::db::outputs::get_output_totals_for_account;
-use crate::utils::format_timestamp;
+use crate::utils::{
+    crypto::{decrypt_data, encrypt_data},
+    fingerprint::calculate_fingerprint,
+    timestamp::format_timestamp,
+};
+use crate::{db::balance_changes::get_balance_aggregates_for_account, utils::crypto::FullEncryptedData};
+use tari_utilities::hex::Hex;
 
 pub fn create_account(
     conn: &Connection,
     friendly_name: &str,
-    encrypted_view_private_key: &[u8],
-    encrypted_spend_public_key: &[u8],
-    cipher_nonce: &[u8],
-    unencrypted_view_key_hash: &[u8],
-    birthday: i64,
+    wallet: &WalletType,
+    password: &str,
 ) -> WalletDbResult<()> {
     info!(
         target: "audit",
@@ -40,31 +37,39 @@ pub fn create_account(
         "DB: Creating new account"
     );
 
+    let fingerprint = calculate_fingerprint(wallet);
+    let birthday = wallet.get_birthday().unwrap_or(0) as i64;
+    let wallet_json =
+        serde_json::to_string(wallet).map_err(|e| WalletDbError::Unexpected(format!("Serialization failed: {}", e)))?;
+
+    let encrypted_data = encrypt_data(wallet_json.as_bytes(), password)
+        .map_err(|e| WalletDbError::Unexpected(format!("Encryption failed: {}", e)))?;
+
     conn.execute(
         r#"
         INSERT INTO accounts (
             friendly_name,
-            encrypted_view_private_key,
-            encrypted_spend_public_key,
+            fingerprint,
+            encrypted_wallet,
             cipher_nonce,
-            unencrypted_view_key_hash,
+            salt,
             birthday
         )
         VALUES (
             :name,
-            :enc_view,
-            :enc_spend,
+            :fingerprint,
+            :enc_wallet,
             :nonce,
-            :view_hash,
+            :salt,
             :birthday
         )
         "#,
         named_params! {
             ":name": friendly_name,
-            ":enc_view": encrypted_view_private_key,
-            ":enc_spend": encrypted_spend_public_key,
-            ":nonce": cipher_nonce,
-            ":view_hash": unencrypted_view_key_hash,
+            ":fingerprint": fingerprint,
+            ":enc_wallet": encrypted_data.ciphertext,
+            ":nonce": encrypted_data.nonce,
+            ":salt": encrypted_data.salt_bytes,
             ":birthday": birthday,
         },
     )?;
@@ -82,10 +87,10 @@ pub fn get_account_by_name(conn: &Connection, friendly_name: &str) -> WalletDbRe
         r#"
         SELECT id, 
             friendly_name, 
-            encrypted_view_private_key, 
-            encrypted_spend_public_key, 
-            cipher_nonce, 
-            unencrypted_view_key_hash,
+            fingerprint,
+            encrypted_wallet,
+            cipher_nonce,
+            salt,
             birthday
         FROM accounts
         WHERE friendly_name = :name
@@ -108,10 +113,10 @@ pub fn get_accounts(conn: &Connection, friendly_name: Option<&str>) -> WalletDbR
             r#"
             SELECT id, 
               friendly_name, 
-              encrypted_view_private_key, 
-              encrypted_spend_public_key, 
-              cipher_nonce, 
-              unencrypted_view_key_hash,
+              fingerprint,
+              encrypted_wallet,
+              cipher_nonce,
+              salt,
               birthday
             FROM accounts
             WHERE friendly_name = :name
@@ -127,10 +132,10 @@ pub fn get_accounts(conn: &Connection, friendly_name: Option<&str>) -> WalletDbR
             r#"
             SELECT id, 
               friendly_name, 
-              encrypted_view_private_key, 
-              encrypted_spend_public_key, 
-              cipher_nonce, 
-              unencrypted_view_key_hash,
+              fingerprint,
+              encrypted_wallet,
+              cipher_nonce,
+              salt,
               birthday
             FROM accounts
             ORDER BY friendly_name
@@ -146,69 +151,43 @@ pub fn get_accounts(conn: &Connection, friendly_name: Option<&str>) -> WalletDbR
 pub struct AccountRow {
     pub id: i64,
     pub friendly_name: String,
-    pub encrypted_view_private_key: Vec<u8>,
-    pub encrypted_spend_public_key: Vec<u8>,
+    pub fingerprint: Vec<u8>,
+    pub encrypted_wallet: Vec<u8>,
     pub cipher_nonce: Vec<u8>,
-    #[allow(dead_code)]
-    pub unencrypted_view_key_hash: Option<Vec<u8>>,
+    pub salt: Vec<u8>,
     pub birthday: i64,
 }
 
 impl AccountRow {
-    pub fn decrypt_keys(
-        &self,
-        password: &str,
-    ) -> WalletDbResult<(RistrettoSecretKey, CompressedKey<RistrettoPublicKey>)> {
-        let password = if password.len() < 32 {
-            format!("{:0<32}", password)
-        } else {
-            password[..32].to_string()
+    pub fn decrypt_wallet_type(&self, password: &str) -> WalletDbResult<WalletType> {
+        let encrypted_data = FullEncryptedData {
+            ciphertext: &self.encrypted_wallet,
+            nonce: &self.cipher_nonce,
+            salt_bytes: &self.salt,
         };
+        let plaintext_bytes = decrypt_data(&encrypted_data, password).map_err(|e| {
+            warn!(error:? = e; "DB: Failed to decrypt wallet");
+            WalletDbError::DecryptionFailed("Failed to decrypt wallet data".to_string())
+        })?;
 
-        let key_bytes: [u8; 32] = password
-            .as_bytes()
-            .try_into()
-            .map_err(|_| WalletDbError::DecryptionFailed("Password conversion failed".to_string()))?;
+        let wallet: WalletType = serde_json::from_slice(&plaintext_bytes)
+            .map_err(|e| WalletDbError::Decoding(format!("Failed to deserialize wallet JSON: {}", e)))?;
 
-        let key = Key::from(key_bytes);
-        let cipher = XChaCha20Poly1305::new(&key);
-
-        let nonce_bytes: &[u8; 24] = self
-            .cipher_nonce
-            .as_slice()
-            .try_into()
-            .map_err(|_| WalletDbError::DecryptionFailed("Nonce must be 24 bytes".to_string()))?;
-
-        let nonce = XNonce::from(*nonce_bytes);
-
-        let view_key = cipher
-            .decrypt(&nonce, self.encrypted_view_private_key.as_ref())
-            .map_err(|e| {
-                warn!(error:? = e; "DB: Failed to decrypt view key");
-                WalletDbError::DecryptionFailed("Failed to decrypt view key".to_string())
-            })?;
-
-        let spend_key = cipher
-            .decrypt(&nonce, self.encrypted_spend_public_key.as_ref())
-            .map_err(|e| {
-                warn!(error:? = e; "DB: Failed to decrypt spend key");
-                WalletDbError::DecryptionFailed("Failed to decrypt spend key".to_string())
-            })?;
-
-        let view_key = RistrettoSecretKey::from_canonical_bytes(&view_key)
-            .map_err(|e| WalletDbError::DecryptionFailed(format!("Invalid view key bytes: {}", e)))?;
-
-        let spend_key = CompressedKey::<RistrettoPublicKey>::from_canonical_bytes(&spend_key)
-            .map_err(|e| WalletDbError::DecryptionFailed(format!("Invalid spend key bytes: {}", e)))?;
-
-        Ok((view_key, spend_key))
+        Ok(wallet)
     }
 
     pub fn get_address(&self, network: Network, password: &str) -> WalletDbResult<TariAddress> {
-        let (view_key, spend_key) = self.decrypt_keys(password)?;
+        let wallet = self.decrypt_wallet_type(password)?;
+
+        let view_private_key = wallet.get_view_key();
+        let spend_public_key = wallet.get_public_spend_key();
+
+        let view_public_key = RistrettoPublicKey::from_secret_key(view_private_key);
+        let view_public_compressed = CompressedPublicKey::new_from_pk(view_public_key);
+
         let address = TariAddress::new_dual_address(
-            CompressedPublicKey::new_from_pk(RistrettoPublicKey::from_secret_key(&view_key)),
-            spend_key,
+            view_public_compressed,
+            spend_public_key,
             network,
             TariAddressFeatures::create_one_sided_only(),
             None,
@@ -219,13 +198,36 @@ impl AccountRow {
     }
 
     pub fn get_key_manager(&self, password: &str) -> WalletDbResult<KeyManager> {
-        let (view_key, spend_key) = self.decrypt_keys(password)?;
-        let view_wallet = ViewWallet::new(spend_key, view_key, Some(self.birthday as u16));
-        let wallet_type = WalletType::ViewWallet(view_wallet);
-        let key_manager = KeyManager::new(wallet_type)
+        let wallet = self.decrypt_wallet_type(password)?;
+        let key_manager = KeyManager::new(wallet)
             .map_err(|e| WalletDbError::Unexpected(format!("Failed to create key manager: {}", e)))?;
 
         Ok(key_manager)
+    }
+
+    pub fn get_seed_words(&self, password: &str) -> WalletDbResult<Option<SeedWords>> {
+        let wallet = self.decrypt_wallet_type(password)?;
+
+        match wallet {
+            WalletType::SeedWords(seed_wallet) => {
+                let cipher_seed = seed_wallet.cipher_seed();
+                let mnemonic = cipher_seed.to_mnemonic(MnemonicLanguage::English, None).map_err(|e| {
+                    warn!(error:? = e; "DB: Failed to convert seed to mnemonic");
+                    WalletDbError::Unexpected(format!("Failed to generate mnemonic: {}", e))
+                })?;
+                Ok(Some(mnemonic))
+            },
+            _ => Ok(None),
+        }
+    }
+
+    pub fn get_keys_hex(&self, password: &str) -> WalletDbResult<(String, String)> {
+        let wallet = self.decrypt_wallet_type(password)?;
+
+        let view_key = wallet.get_view_key();
+        let spend_key = wallet.get_public_spend_key();
+
+        Ok((view_key.to_hex(), spend_key.to_hex()))
     }
 }
 

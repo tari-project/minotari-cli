@@ -1,21 +1,3 @@
-CREATE TABLE _sqlx_migrations (
-    version BIGINT PRIMARY KEY,
-    description TEXT NOT NULL,
-    installed_on TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    success BOOLEAN NOT NULL,
-    checksum BLOB NOT NULL,
-    execution_time BIGINT NOT NULL
-);
-CREATE TABLE accounts (
-            id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
-            friendly_name TEXT NOT NULL UNIQUE,
-            unencrypted_view_key_hash blob NOT NULL UNIQUE,
-            encrypted_view_private_key blob NOT NULL,
-            encrypted_spend_public_key blob NOT NULL,
-            cipher_nonce blob NOT NULL,
-            birthday INTEGER NOT NULL,
-            created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-        );
 CREATE TABLE sqlite_sequence(name,seq);
 CREATE TABLE outputs (
     id INTEGER NOT NULL PRIMARY KEY, -- Removed AUTOINCREMENT
@@ -153,9 +135,19 @@ CREATE INDEX idx_displayed_transactions_status ON displayed_transactions(status)
 CREATE INDEX idx_displayed_transactions_block_height ON displayed_transactions(block_height);
 CREATE INDEX idx_displayed_transactions_account_status ON displayed_transactions(account_id, status);
 CREATE INDEX idx_displayed_transactions_account_height ON displayed_transactions(account_id, block_height DESC);
-CREATE INDEX idx_outputs_account_status_active 
-ON outputs(account_id, status) 
+CREATE INDEX idx_outputs_account_status_active
+ON outputs(account_id, status)
 WHERE deleted_at IS NULL;
-CREATE INDEX idx_outputs_account_confirmed_active 
-ON outputs(account_id) 
+CREATE INDEX idx_outputs_account_confirmed_active
+ON outputs(account_id)
 WHERE confirmed_height IS NULL AND deleted_at IS NULL;
+CREATE TABLE accounts (
+    id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    friendly_name TEXT NOT NULL UNIQUE,
+    fingerprint BLOB NOT NULL UNIQUE,
+    encrypted_wallet BLOB NOT NULL,
+    cipher_nonce BLOB NOT NULL,
+    salt BLOB NOT NULL,
+    birthday INTEGER NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+);

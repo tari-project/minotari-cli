@@ -10,8 +10,8 @@ path = "src/bin/generate_openapi.rs"
 
 [dependencies]
 anyhow = "1.0.99"
+argon2 = { version = "0.5.3", features = ["std", "alloc"] }
 axum = { version = "0.8.6", features = ["default", "http2", "macros"] }
-blake2 = "0.10.6"
 chacha20poly1305 = { version = "0.10.1", features = ["rand_core", "std"] }
 chrono = "0.4.42"
 clap = { version = "4.5.47", features = ["derive"] }

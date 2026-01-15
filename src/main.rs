@@ -79,6 +79,7 @@ use tari_common_types::{
     seeds::{
         cipher_seed::CipherSeed,
         mnemonic::{Mnemonic, MnemonicLanguage},
+        seed_words::SeedWords,
     },
     tari_address::{TariAddress, TariAddressFeatures},
 };
@@ -190,6 +191,95 @@ async fn main() -> Result<(), anyhow::Error> {
                 &wallet_config.database_path,
                 birthday,
             )
+        },
+        Commands::Create {
+            security,
+            db,
+            account,
+            seed_words,
+        } => {
+            info!(target: "audit", "Initializing Seed Words Wallet...");
+
+            wallet_config.apply_database(&db);
+            wallet_config.apply_account(&account);
+
+            let cipher_seed = match seed_words {
+                Some(words_str) => {
+                    info!("Restoring from provided seed words...");
+                    let mnemonic =
+                        SeedWords::from_str(&words_str).map_err(|e| anyhow!("Invalid seed words format: {}", e))?;
+                    CipherSeed::from_mnemonic(&mnemonic, None)?
+                },
+                None => {
+                    info!("Generating new random seed...");
+                    CipherSeed::random()
+                },
+            };
+
+            utils::init_wallet::init_with_seed_words(
+                cipher_seed,
+                &security.password,
+                &wallet_config.database_path,
+                wallet_config.account_name.as_deref(),
+            )?;
+
+            info!("Wallet initialized successfully");
+            Ok(())
+        },
+
+        Commands::ShowSeedWords { security, db, account } => {
+            info!("Retrieving seed words...");
+
+            wallet_config.apply_database(&db);
+            wallet_config.apply_account(&account);
+
+            let pool = init_db(wallet_config.database_path.clone())?;
+            let conn = pool.get()?;
+
+            let name = wallet_config.account_name.as_deref().unwrap_or("default");
+            let account =
+                db::get_account_by_name(&conn, name)?.ok_or_else(|| anyhow!("Account '{}' not found", name))?;
+
+            match account.get_seed_words(&security.password)? {
+                Some(words) => {
+                    let seed_words = words.join(" ");
+                    println!("---------------------------------------------------------");
+                    println!("Wallet: {}", account.friendly_name);
+                    println!("Seed Words: {}", seed_words.reveal());
+                    println!("---------------------------------------------------------");
+                    println!("WARNING: Keep these words safe. Anyone with them can spend your funds.");
+                },
+                None => {
+                    println!(
+                        "Account '{}' does not have seed words (It might be a View-Only or Ledger wallet).",
+                        name
+                    );
+                },
+            }
+            Ok(())
+        },
+        Commands::ShowKeys { security, db, account } => {
+            info!("Retrieving wallet keys...");
+
+            wallet_config.apply_database(&db);
+            wallet_config.apply_account(&account);
+
+            let pool = init_db(wallet_config.database_path.clone())?;
+            let conn = pool.get()?;
+
+            let name = wallet_config.account_name.as_deref().unwrap_or("default");
+            let account =
+                db::get_account_by_name(&conn, name)?.ok_or_else(|| anyhow!("Account '{}' not found", name))?;
+
+            let (view_key_hex, spend_key_hex) = account.get_keys_hex(&security.password)?;
+
+            println!("---------------------------------------------------------");
+            println!("Wallet           : {}", account.friendly_name);
+            println!("Private View Key : {}", view_key_hex);
+            println!("Public Spend Key : {}", spend_key_hex);
+            println!("---------------------------------------------------------");
+            println!("WARNING: Keep your private view key safe. Anyone with it can see your transaction history.");
+            Ok(())
         },
         Commands::Scan {
             security,
@@ -515,7 +605,7 @@ fn init_with_view_key(
     database_file: &Path,
     birthday: u16,
 ) -> Result<(), anyhow::Error> {
-    utils::init_with_view_key(
+    utils::init_wallet::init_with_view_key(
         view_private_key,
         spend_public_key,
         password,

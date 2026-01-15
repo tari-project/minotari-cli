@@ -115,7 +115,19 @@ checksum = "db4ce4441f99dbd377ca8a8f57b698c44d0d6e712d8329b5040da5a64aa1ce73"
 dependencies = [
  "base64ct",
  "blake2",
- "password-hash",
+ "password-hash 0.4.2",
+]
+
+[[package]]
+name = "argon2"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3c3610892ee6e0cbce8ae2700349fcf8f98adb0dbfbee85aec3c9179d29cc072"
+dependencies = [
+ "base64ct",
+ "blake2",
+ "cpufeatures",
+ "password-hash 0.5.0",
 ]
 
 [[package]]
@@ -1811,8 +1823,8 @@ name = "minotari"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "argon2 0.5.3",
  "axum",
- "blake2",
  "chacha20poly1305",
  "chrono",
  "clap 4.5.49",
@@ -1854,7 +1866,7 @@ name = "minotari_app_grpc"
 version = "5.2.0-pre.7"
 source = "git+https://github.com/tari-project/tari/?rev=32b2e748cc1800823aebfa1d32799d2d9fee3bf5#32b2e748cc1800823aebfa1d32799d2d9fee3bf5"
 dependencies = [
- "argon2",
+ "argon2 0.4.1",
  "base64 0.22.1",
  "borsh",
  "log",
@@ -2194,6 +2206,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "password-hash"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "346f04948ba92c43e8469c1ee6736c7563d71012b17d40745260fe106aac2166"
+dependencies = [
+ "base64ct",
+ "rand_core 0.6.4",
+ "subtle",
+]
+
+[[package]]
 name = "paste"
 version = "1.0.15"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2524,7 +2547,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "6db2770f06117d490610c7488547d543617b21bfa07796d7a12f6f1bd53850d1"
 dependencies = [
  "rand_chacha 0.9.0",
- "rand_core 0.9.3",
+ "rand_core 0.9.5",
 ]
 
 [[package]]
@@ -2544,7 +2567,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d3022b5f1df60f26e1ffddd6c66e8aa15de382ae63b3a0c1bfc0e4d3e3f325cb"
 dependencies = [
  "ppv-lite86",
- "rand_core 0.9.3",
+ "rand_core 0.9.5",
 ]
 
 [[package]]
@@ -2558,9 +2581,9 @@ dependencies = [
 
 [[package]]
 name = "rand_core"
-version = "0.9.3"
+version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "99d9a13982dcf210057a8a78572b2217b667c3beacbf3a0d8b454f6f82837d38"
+checksum = "76afc826de14238e6e8c374ddcc1fa19e374fd8dd986b0d2af0d02377261d83c"
 dependencies = [
  "getrandom 0.3.4",
 ]
@@ -3444,7 +3467,7 @@ name = "tari_common_types"
 version = "5.2.0-pre.7"
 source = "git+https://github.com/tari-project/tari/?rev=32b2e748cc1800823aebfa1d32799d2d9fee3bf5#32b2e748cc1800823aebfa1d32799d2d9fee3bf5"
 dependencies = [
- "argon2",
+ "argon2 0.4.1",
  "base64 0.22.1",
  "bitflags 2.10.0",
  "blake2",
