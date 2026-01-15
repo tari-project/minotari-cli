@@ -60,7 +60,5 @@ mod utils;
 mod wallet_http_client;
 
 pub use error::HttpError;
-pub use types::{
-    JsonRpcResponse, TipInfoResponse, TxLocation, TxQueryResponse, TxSubmissionRejectionReason, TxSubmissionResponse,
-};
+pub use types::*;
 pub use wallet_http_client::WalletHttpClient;
