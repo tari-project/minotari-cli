@@ -418,7 +418,7 @@ async fn prepare_account_scan(
     let key_manager = account.get_key_manager(password)?;
     let account_view_key = key_manager.get_private_view_key().as_bytes().to_vec();
 
-    let mut scanner = HttpBlockchainScanner::new(base_url.to_string(), key_manager.clone(), processing_threads)
+    let mut scanner = HttpBlockchainScanner::new(base_url.to_string(), vec![key_manager.clone()], processing_threads)
         .await
         .map_err(|e| ScanError::Intermittent(e.to_string()))?;
 

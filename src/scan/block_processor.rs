@@ -333,7 +333,7 @@ impl<E: EventSender> BlockProcessor<E> {
     /// - Records the balance change (credit)
     /// - Adds to the block accumulator for event emission
     fn process_outputs(&mut self, tx: &Connection, block: &BlockScanResult) -> Result<(), BlockProcessorError> {
-        for (hash, output) in &block.wallet_outputs {
+        for (hash, output, _wallet_id) in &block.wallet_outputs {
             let memo = MemoInfo::from_output(output);
 
             info!(
