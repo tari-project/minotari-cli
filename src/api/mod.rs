@@ -9,6 +9,7 @@
 //! The API exposes the following endpoints:
 //!
 //! - `GET /accounts/{name}/balance` - Retrieve account balance
+//! - `GET /accounts/{name}/scan_status` - Retrieve last scanned block height and timestamp
 //! - `GET /accounts/{name}/events` - Retrieve all wallet events for an account
 //! - `GET /accounts/{name}/completed_transactions` - Retrieve all completed transactions for an account
 //! - `GET /accounts/{name}/displayed_transactions` - Retrieve all displayed transactions for an account
@@ -98,6 +99,7 @@ impl FromRef<AppState> for SqlitePool {
 ///
 /// ## Paths (Endpoints)
 /// - `/accounts/{name}/balance` - Get account balance
+/// - `/accounts/{name}/scan_status` - Get last scanned block info
 /// - `/accounts/{name}/events` - Get wallet events
 /// - `/accounts/{name}/completed_transactions` - Get completed transactions
 /// - `/accounts/{name}/displayed_transactions` - Get displayed transactions
@@ -119,6 +121,7 @@ impl FromRef<AppState> for SqlitePool {
 #[openapi(
     paths(
         accounts::api_get_balance,
+        accounts::api_get_scan_status,
         accounts::api_get_events,
         accounts::api_get_completed_transactions,
         accounts::api_get_displayed_transactions,
@@ -137,6 +140,7 @@ impl FromRef<AppState> for SqlitePool {
             crate::api::types::LockFundsResult,
             crate::api::types::TariAddressBase58,
             crate::api::types::CompletedTransactionResponse,
+            crate::api::types::ScanStatusResponse,
         )
     ),
     tags(
@@ -194,6 +198,7 @@ pub fn create_router(db_pool: SqlitePool, network: Network, password: String) ->
     Router::new()
         .merge(SwaggerUi::new("/swagger-ui").url("/openapi.json", ApiDoc::openapi()))
         .route("/accounts/{name}/balance", get(accounts::api_get_balance))
+        .route("/accounts/{name}/scan_status", get(accounts::api_get_scan_status))
         .route("/accounts/{name}/events", get(accounts::api_get_events))
         .route(
             "/accounts/{name}/completed_transactions",

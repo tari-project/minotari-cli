@@ -61,8 +61,9 @@ pub use accounts::{AccountBalance, AccountRow, create_account, get_account_by_na
 
 mod scanned_tip_blocks;
 pub use scanned_tip_blocks::{
-    delete_scanned_tip_blocks_from_height, get_latest_scanned_tip_block_by_account, get_scanned_tip_blocks_by_account,
-    insert_scanned_tip_block, prune_scanned_tip_blocks,
+    LatestScannedBlock, delete_scanned_tip_blocks_from_height, get_latest_scanned_block_with_timestamp,
+    get_latest_scanned_tip_block_by_account, get_scanned_tip_blocks_by_account, insert_scanned_tip_block,
+    prune_scanned_tip_blocks,
 };
 
 mod outputs;

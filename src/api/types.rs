@@ -198,6 +198,40 @@ impl From<crate::db::CompletedTransaction> for CompletedTransactionResponse {
     }
 }
 
+/// API response type for the scan status endpoint.
+///
+/// Contains information about the last scanned block including height,
+/// block hash, and the timestamp when it was scanned.
+///
+/// # JSON Example
+///
+/// ```json
+/// {
+///   "last_scanned_height": 12345,
+///   "last_scanned_block_hash": "abc123def456...",
+///   "scanned_at": "2024-01-15 10:30:00"
+/// }
+/// ```
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
+pub struct ScanStatusResponse {
+    /// The height of the last scanned block
+    pub last_scanned_height: u64,
+    /// The hash of the last scanned block (hex encoded)
+    pub last_scanned_block_hash: String,
+    /// Timestamp when this block was scanned
+    pub scanned_at: String,
+}
+
+impl From<crate::db::LatestScannedBlock> for ScanStatusResponse {
+    fn from(block: crate::db::LatestScannedBlock) -> Self {
+        Self {
+            last_scanned_height: block.height,
+            last_scanned_block_hash: hex::encode(&block.hash),
+            scanned_at: block.scanned_at,
+        }
+    }
+}
+
 /// Serializes a [`TariAddressBase58`] to its Base58 string representation.
 ///
 /// # Output Format

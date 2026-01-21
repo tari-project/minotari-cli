@@ -111,6 +111,21 @@ pub enum ApiError {
     #[error("Account not found: {0}")]
     AccountNotFound(String),
 
+    /// A requested resource was not found.
+    ///
+    /// Used for generic not found errors beyond just accounts.
+    /// Returns HTTP 404 Not Found.
+    ///
+    /// # Example
+    ///
+    /// ```json
+    /// {
+    ///   "error": "No blocks have been scanned yet"
+    /// }
+    /// ```
+    #[error("{0}")]
+    NotFound(String),
+
     /// Failed to lock funds for a transaction.
     ///
     /// This typically occurs when there are insufficient available funds
@@ -187,6 +202,7 @@ impl From<serde_json::Error> for ApiError {
 /// | `InternalServerError` | 500 |
 /// | `DbError` | 500 |
 /// | `AccountNotFound` | 404 |
+/// | `NotFound` | 404 |
 /// | `FailedToLockFunds` | 500 |
 /// | `FailedCreateUnsignedTx` | 500 |
 impl IntoResponse for ApiError {
@@ -203,6 +219,10 @@ impl IntoResponse for ApiError {
             ApiError::AccountNotFound(name) => {
                 warn!(account = name.as_str(); "API: Account Not Found");
                 (StatusCode::NOT_FOUND, format!("Account '{}' not found", name))
+            },
+            ApiError::NotFound(msg) => {
+                warn!(message = msg.as_str(); "API: Not Found");
+                (StatusCode::NOT_FOUND, msg.clone())
             },
             ApiError::FailedToLockFunds(e) => {
                 error!(target: "audit", error = e.as_str(); "API: Failed to lock funds");

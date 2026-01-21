@@ -51,12 +51,12 @@ use super::error::ApiError;
 use crate::{
     api::{
         AppState,
-        types::{CompletedTransactionResponse, LockFundsResult, TariAddressBase58},
+        types::{CompletedTransactionResponse, LockFundsResult, ScanStatusResponse, TariAddressBase58},
     },
     db::{
         AccountBalance, DbWalletEvent, get_account_by_name, get_balance,
         get_completed_transactions_by_account, get_displayed_transactions_paginated,
-        get_events_by_account_id,
+        get_events_by_account_id, get_latest_scanned_block_with_timestamp,
     },
     log::mask_amount,
     transactions::{
@@ -380,6 +380,79 @@ pub async fn api_get_balance(
     .map_err(|e| ApiError::InternalServerError(format!("Task join error: {}", e)))??;
 
     Ok(Json(balance))
+}
+
+/// Retrieves the scan status for a specified account.
+///
+/// Returns information about the last scanned block, including the block height,
+/// block hash, and the timestamp when the scan occurred. This is useful for
+/// monitoring the wallet's synchronization progress with the blockchain.
+///
+/// # Path Parameters
+///
+/// - `name`: The unique account name to query
+///
+/// # Response
+///
+/// Returns a [`ScanStatusResponse`] object containing:
+/// - Last scanned block height
+/// - Last scanned block hash (hex encoded)
+/// - Timestamp when the block was scanned
+///
+/// # Errors
+///
+/// - [`ApiError::AccountNotFound`]: The specified account does not exist
+/// - [`ApiError::NotFound`]: No blocks have been scanned yet for this account
+/// - [`ApiError::DbError`]: Database connection or query failure
+///
+/// # Example Response
+///
+/// ```json
+/// {
+///   "last_scanned_height": 12345,
+///   "last_scanned_block_hash": "abc123def456...",
+///   "scanned_at": "2024-01-15 10:30:00"
+/// }
+/// ```
+#[utoipa::path(
+    get,
+    path = "/accounts/{name}/scan_status",
+    responses(
+        (status = 200, description = "Scan status retrieved successfully", body = ScanStatusResponse),
+        (status = 404, description = "Account not found or no blocks scanned", body = ApiError),
+        (status = 500, description = "Internal server error", body = ApiError),
+    ),
+    params(
+        ("name" = String, Path, description = "Name of the account to retrieve scan status for"),
+    )
+)]
+pub async fn api_get_scan_status(
+    State(app_state): State<AppState>,
+    Path(WalletParams { name }): Path<WalletParams>,
+) -> Result<Json<ScanStatusResponse>, ApiError> {
+    debug!(
+        account = &*name;
+        "API: Get scan status request"
+    );
+
+    let pool = app_state.db_pool.clone();
+    let name = name.clone();
+
+    let scan_status = tokio::task::spawn_blocking(move || {
+        let conn = pool.get().map_err(|e| ApiError::DbError(e.to_string()))?;
+
+        let account = get_account_by_name(&conn, &name)
+            .map_err(|e| ApiError::DbError(e.to_string()))?
+            .ok_or_else(|| ApiError::AccountNotFound(name.clone()))?;
+
+        get_latest_scanned_block_with_timestamp(&conn, account.id)
+            .map_err(|e| ApiError::DbError(e.to_string()))?
+            .ok_or_else(|| ApiError::NotFound("No blocks have been scanned yet".to_string()))
+    })
+    .await
+    .map_err(|e| ApiError::InternalServerError(format!("Task join error: {}", e)))??;
+
+    Ok(Json(ScanStatusResponse::from(scan_status)))
 }
 
 /// Retrieves wallet events for a specified account with pagination.
