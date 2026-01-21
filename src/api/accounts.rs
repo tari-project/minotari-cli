@@ -4,6 +4,7 @@
 //! in the Minotari wallet REST API. It includes functionality for:
 //!
 //! - Querying account balances
+//! - Retrieving wallet events
 //! - Locking funds for transaction preparation
 //! - Creating unsigned transactions for one-sided payments
 //!
@@ -15,6 +16,7 @@
 //! | Method | Path | Description |
 //! |--------|------|-------------|
 //! | GET | `/accounts/{name}/balance` | Retrieve account balance |
+//! | GET | `/accounts/{name}/events` | Retrieve wallet events |
 //! | POST | `/accounts/{name}/lock_funds` | Lock UTXOs for spending |
 //! | POST | `/accounts/{name}/create_unsigned_transaction` | Create unsigned transaction |
 //!
@@ -24,6 +26,9 @@
 //! # Get account balance
 //! curl -X GET http://localhost:8080/accounts/default/balance
 //!
+//! # Get wallet events
+//! curl -X GET http://localhost:8080/accounts/default/events
+//!
 //! # Lock funds for a transaction
 //! curl -X POST http://localhost:8080/accounts/default/lock_funds \
 //!   -H "Content-Type: application/json" \
@@ -32,7 +37,7 @@
 
 use axum::{
     Json,
-    extract::{Path, State},
+    extract::{Path, Query, State},
 };
 use log::{debug, info};
 use serde::Deserialize;
@@ -48,7 +53,7 @@ use crate::{
         AppState,
         types::{LockFundsResult, TariAddressBase58},
     },
-    db::{AccountBalance, get_account_by_name, get_balance},
+    db::{AccountBalance, DbWalletEvent, get_account_by_name, get_balance, get_events_by_account_id},
     log::mask_amount,
     transactions::{
         fund_locker::FundLocker,
@@ -93,6 +98,24 @@ fn confirmation_window_schema() -> Schema {
         .description(Some("Number of confirmations required"))
         .build()
         .into()
+}
+
+/// Default number of items per page for paginated endpoints.
+const DEFAULT_PAGE_LIMIT: i64 = 50;
+
+/// Maximum number of items that can be requested per page.
+const MAX_PAGE_LIMIT: i64 = 1000;
+
+/// Query parameters for pagination.
+///
+/// Used to control the number of results returned and offset for paginated
+/// endpoints.
+#[derive(Debug, Deserialize, IntoParams)]
+pub struct PaginationParams {
+    /// Maximum number of items to return (default: 50, max: 1000)
+    pub limit: Option<i64>,
+    /// Number of items to skip for pagination (default: 0)
+    pub offset: Option<i64>,
 }
 
 /// Path parameters for wallet/account identification.
@@ -352,6 +375,106 @@ pub async fn api_get_balance(
     .map_err(|e| ApiError::InternalServerError(format!("Task join error: {}", e)))??;
 
     Ok(Json(balance))
+}
+
+/// Retrieves wallet events for a specified account with pagination.
+///
+/// Returns a paginated list of events that have occurred for the account, including
+/// output detection, confirmation, transaction broadcasts, and blockchain
+/// reorganizations. Events are ordered by creation time (most recent first).
+///
+/// # Path Parameters
+///
+/// - `name`: The unique account name to query
+///
+/// # Query Parameters
+///
+/// - `limit`: Maximum number of events to return (default: 50, max: 1000)
+/// - `offset`: Number of events to skip for pagination (default: 0)
+///
+/// # Response
+///
+/// Returns a list of [`DbWalletEvent`] objects, each containing:
+/// - Event ID and type
+/// - Human-readable description
+/// - JSON data with event-specific details
+/// - Creation timestamp
+///
+/// # Errors
+///
+/// - [`ApiError::AccountNotFound`]: The specified account does not exist
+/// - [`ApiError::DbError`]: Database connection or query failure
+///
+/// # Example Request
+///
+/// ```bash
+/// # Get first 50 events (default)
+/// curl -X GET http://localhost:8080/accounts/default/events
+///
+/// # Get 100 events starting from offset 50
+/// curl -X GET "http://localhost:8080/accounts/default/events?limit=100&offset=50"
+/// ```
+///
+/// # Example Response
+///
+/// ```json
+/// [
+///   {
+///     "id": 42,
+///     "account_id": 1,
+///     "event_type": "OutputDetected",
+///     "description": "Detected output at height 12345",
+///     "data_json": "{\"hash\":\"abc...\",\"block_height\":12345}",
+///     "created_at": "2024-01-15T10:30:00"
+///   }
+/// ]
+/// ```
+#[utoipa::path(
+    get,
+    path = "/accounts/{name}/events",
+    responses(
+        (status = 200, description = "Account events retrieved successfully", body = Vec<DbWalletEvent>),
+        (status = 404, description = "Account not found", body = ApiError),
+        (status = 500, description = "Internal server error", body = ApiError),
+    ),
+    params(
+        ("name" = String, Path, description = "Name of the account to retrieve events for"),
+        ("limit" = Option<i64>, Query, description = "Maximum number of events to return (default: 50, max: 1000)"),
+        ("offset" = Option<i64>, Query, description = "Number of events to skip for pagination (default: 0)"),
+    )
+)]
+pub async fn api_get_events(
+    State(app_state): State<AppState>,
+    Path(WalletParams { name }): Path<WalletParams>,
+    Query(pagination): Query<PaginationParams>,
+) -> Result<Json<Vec<DbWalletEvent>>, ApiError> {
+    // Apply defaults and constraints
+    let limit = pagination.limit.unwrap_or(DEFAULT_PAGE_LIMIT).min(MAX_PAGE_LIMIT);
+    let offset = pagination.offset.unwrap_or(0).max(0);
+
+    debug!(
+        account = &*name,
+        limit = limit,
+        offset = offset;
+        "API: Get events request"
+    );
+
+    let pool = app_state.db_pool.clone();
+    let name = name.clone();
+
+    let events = tokio::task::spawn_blocking(move || {
+        let conn = pool.get().map_err(|e| ApiError::DbError(e.to_string()))?;
+
+        let account = get_account_by_name(&conn, &name)
+            .map_err(|e| ApiError::DbError(e.to_string()))?
+            .ok_or_else(|| ApiError::AccountNotFound(name.clone()))?;
+
+        get_events_by_account_id(&conn, account.id, limit, offset).map_err(|e| ApiError::DbError(e.to_string()))
+    })
+    .await
+    .map_err(|e| ApiError::InternalServerError(format!("Task join error: {}", e)))??;
+
+    Ok(Json(events))
 }
 
 /// Locks funds from an account for transaction preparation.

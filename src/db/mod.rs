@@ -92,7 +92,7 @@ pub use completed_transactions::{
 };
 
 mod events;
-pub use events::insert_wallet_event;
+pub use events::{DbWalletEvent, get_events_by_account_id, insert_wallet_event};
 
 mod balance_changes;
 pub use balance_changes::{get_all_balance_changes_by_account_id, insert_balance_change};

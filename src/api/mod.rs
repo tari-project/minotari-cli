@@ -9,6 +9,7 @@
 //! The API exposes the following endpoints:
 //!
 //! - `GET /accounts/{name}/balance` - Retrieve account balance
+//! - `GET /accounts/{name}/events` - Retrieve all wallet events for an account
 //! - `POST /accounts/{name}/lock_funds` - Lock UTXOs for transaction creation
 //! - `POST /accounts/{name}/create_unsigned_transaction` - Create an unsigned one-sided transaction
 //! - `GET /swagger-ui` - Interactive Swagger UI documentation
@@ -95,11 +96,13 @@ impl FromRef<AppState> for SqlitePool {
 ///
 /// ## Paths (Endpoints)
 /// - `/accounts/{name}/balance` - Get account balance
+/// - `/accounts/{name}/events` - Get wallet events
 /// - `/accounts/{name}/lock_funds` - Lock funds for transaction
 /// - `/accounts/{name}/create_unsigned_transaction` - Create unsigned transaction
 ///
 /// ## Schemas
 /// - `AccountBalance` - Balance information with available/pending amounts
+/// - `DbWalletEvent` - Wallet event record with type, description and data
 /// - `ApiError` - Standardized error responses
 /// - `WalletParams` - Account name path parameter
 /// - `LockFundsRequest` - Request body for fund locking
@@ -111,12 +114,14 @@ impl FromRef<AppState> for SqlitePool {
 #[openapi(
     paths(
         accounts::api_get_balance,
+        accounts::api_get_events,
         accounts::api_lock_funds,
         accounts::api_create_unsigned_transaction,
     ),
     components(
         schemas(
             crate::db::AccountBalance,
+            crate::db::DbWalletEvent,
             error::ApiError,
             accounts::WalletParams,
             accounts::LockFundsRequest,
@@ -181,6 +186,7 @@ pub fn create_router(db_pool: SqlitePool, network: Network, password: String) ->
     Router::new()
         .merge(SwaggerUi::new("/swagger-ui").url("/openapi.json", ApiDoc::openapi()))
         .route("/accounts/{name}/balance", get(accounts::api_get_balance))
+        .route("/accounts/{name}/events", get(accounts::api_get_events))
         .route("/accounts/{name}/lock_funds", post(accounts::api_lock_funds))
         .route(
             "/accounts/{name}/create_unsigned_transaction",
