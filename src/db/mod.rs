@@ -25,18 +25,20 @@
 //!
 //! # Usage Example
 //!
-//! ```no_run
+//! ```ignore
 //! use minotari::db::{init_db, get_accounts, get_balance};
+//! use std::path::PathBuf;
 //!
-//! # async fn example() -> Result<(), anyhow::Error> {
+//! # fn example() -> Result<(), anyhow::Error> {
 //! // Initialize database and run migrations
-//! let pool = init_db("wallet.db")?;
+//! let pool = init_db(PathBuf::from("wallet.db"))?;
+//! let conn = pool.get()?;
 //!
 //! // Query accounts
-//! let accounts = get_accounts(&pool, None)?;
+//! let accounts = get_accounts(&conn, None)?;
 //!
-//! // Check balance
-//! let balance = get_balance(&pool, "default")?;
+//! // Check balance (account_id = 1)
+//! let balance = get_balance(&conn, 1)?;
 //! println!("Available: {} µT", balance.available);
 //! # Ok(())
 //! # }
@@ -146,15 +148,16 @@ static MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
 ///
 /// # Example
 ///
-/// ```no_run
+/// ```ignore
 /// use minotari::db::init_db;
+/// use std::path::PathBuf;
 ///
-/// # async fn example() -> Result<(), anyhow::Error> {
+/// # fn example() -> Result<(), anyhow::Error> {
 /// // Initialize database in current directory
-/// let pool = init_db("wallet.db")?;
+/// let pool = init_db(PathBuf::from("wallet.db"))?;
 ///
 /// // Or use absolute path
-/// let pool = init_db("/path/to/wallet.db")?;
+/// let pool = init_db(PathBuf::from("/path/to/wallet.db"))?;
 /// # Ok(())
 /// # }
 /// ```

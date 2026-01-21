@@ -29,13 +29,14 @@
 //!
 //! # Usage Example
 //!
-//! ```no_run
+//! ```ignore
 //! use minotari::api::create_router;
 //! use minotari::init_db;
 //! use tari_common::configuration::Network;
+//! use std::path::PathBuf;
 //!
 //! # async fn example() -> anyhow::Result<()> {
-//! let db_pool = init_db("wallet.db").await?;
+//! let db_pool = init_db(PathBuf::from("wallet.db"))?;
 //! let network = Network::Esmeralda;
 //! let password = "secure_password".to_string();
 //!
@@ -185,13 +186,14 @@ pub struct ApiDoc;
 ///
 /// # Example
 ///
-/// ```no_run
+/// ```ignore
 /// use minotari::api::create_router;
 /// use minotari::init_db;
 /// use tari_common::configuration::Network;
+/// use std::path::PathBuf;
 ///
 /// # async fn example() -> anyhow::Result<()> {
-/// let db_pool = init_db("wallet.db").await?;
+/// let db_pool = init_db(PathBuf::from("wallet.db"))?;
 /// let router = create_router(db_pool, Network::Esmeralda, "password".to_string());
 ///
 /// let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;

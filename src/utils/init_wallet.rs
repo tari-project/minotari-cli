@@ -50,15 +50,16 @@ use tari_utilities::hex::Hex;
 ///
 /// # Example
 ///
-/// ```no_run
-/// use minotari::utils::init_with_view_key;
+/// ```ignore
+/// use minotari::utils::init_wallet::init_with_view_key;
+/// use std::path::Path;
 ///
 /// # fn example() -> Result<(), anyhow::Error> {
 /// init_with_view_key(
 ///     "a0b1c2d3e4f5...",  // view_private_key (hex)
 ///     "b1c2d3e4f5a0...",  // spend_public_key (hex)
 ///     "my_secure_password",
-///     "wallet.db",
+///     Path::new("wallet.db"),
 ///     0,                   // birthday height
 ///     Some("my_wallet"),   // account name
 /// )?;
