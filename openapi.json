@@ -68,7 +68,7 @@
           "accounts"
         ],
         "summary": "Creates a Tari address with an embedded payment ID for a specified account.",
-        "description": "Generates a new address that includes a payment ID, which can be used to\nidentify specific transactions or invoices. When someone sends funds to\nthis address, the payment ID will be included in the transaction.\n\n# Path Parameters\n\n- `name`: The unique account name\n\n# Request Body\n\nSee [`CreatePaymentIdAddressRequest`] for the complete request schema.\n\n# Response\n\nReturns an [`AddressWithPaymentIdResponse`] object containing:\n- The address with embedded payment ID in Base58 encoding\n- The emoji ID representation\n- The original payment ID\n\n# Errors\n\n- [`ApiError::AccountNotFound`]: The specified account does not exist\n- [`ApiError::DbError`]: Database connection or query failure\n- [`ApiError::InternalServerError`]: Failed to generate the address\n\n# Example Request\n\n```bash\ncurl -X POST http://localhost:8080/accounts/default/address_with_payment_id \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\"payment_id\": \"invoice-12345\"}'\n```\n\n# Example Response\n\n```json\n{\n  \"address\": \"f4FxMqKAPDMqAjh6hTpCnLKfEu3MmS7NRu2YmKZPvZHc2K\",\n  \"emoji_id\": \"🎉🌟🚀...\",\n  \"payment_id_hex\": \"696e766f6963652d3132333435\"\n}\n```",
+        "description": "Generates a new address that includes a payment ID, which can be used to\nidentify specific transactions or invoices. When someone sends funds to\nthis address, the payment ID will be included in the transaction.\n\n# Path Parameters\n\n- `name`: The unique account name\n\n# Request Body\n\nSee [`CreatePaymentIdAddressRequest`] for the complete request schema.\n\n# Response\n\nReturns an [`AddressWithPaymentIdResponse`] object containing:\n- The address with embedded payment ID in Base58 encoding\n- The emoji ID representation\n- The original payment ID\n\n# Errors\n\n- [`ApiError::AccountNotFound`]: The specified account does not exist\n- [`ApiError::DbError`]: Database connection or query failure\n- [`ApiError::InternalServerError`]: Failed to generate the address\n\n# Example Request\n\n```bash\ncurl -X POST http://localhost:8080/accounts/default/address_with_payment_id \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\"payment_id\": \"696e766f6963652d3132333435\"}'\n```\n\n# Example Response\n\n```json\n{\n  \"address\": \"f4FxMqKAPDMqAjh6hTpCnLKfEu3MmS7NRu2YmKZPvZHc2K\",\n  \"emoji_id\": \"🎉🌟🚀...\",\n  \"payment_id_hex\": \"696e766f6963652d3132333435\"\n}\n```",
         "operationId": "api_create_address_with_payment_id",
         "parameters": [
           {
@@ -384,7 +384,7 @@
                 "schema": {
                   "type": "array",
                   "items": {
-                    "type": "object"
+                    "$ref": "#/components/schemas/DisplayedTransaction"
                   }
                 }
               }
@@ -843,6 +843,29 @@
         ],
         "description": "Represents all possible errors returned by the REST API.\n\nEach variant corresponds to a specific error condition that can occur\nduring API request processing. The error type automatically converts\nto an appropriate HTTP response with a JSON error body.\n\n# Error Handling Pattern\n\nAPI handlers typically use the `?` operator with this error type:\n\n```rust,ignore\npub async fn handler() -> Result<Json<Data>, ApiError> {\n    let data = fetch_data().await?; // Errors automatically convert to ApiError\n    Ok(Json(data))\n}\n```\n\n# Serialization\n\nWhen serialized to JSON for API responses, errors produce:\n\n```json\n{\n  \"error\": \"Error message here\"\n}\n```"
       },
+      "BlockchainInfo": {
+        "type": "object",
+        "required": [
+          "block_height",
+          "timestamp",
+          "confirmations"
+        ],
+        "properties": {
+          "block_height": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "confirmations": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "timestamp": {
+            "type": "string"
+          }
+        }
+      },
       "CompletedTransactionResponse": {
         "type": "object",
         "description": "API response type for a completed transaction.\n\nThis structure represents a completed transaction in the API response.\nIt contains all the relevant transaction details for display and tracking.\n\n# JSON Example\n\n```json\n{\n  \"id\": \"550e8400-e29b-41d4-a716-446655440000\",\n  \"pending_tx_id\": \"661e8400-e29b-41d4-a716-446655440001\",\n  \"account_id\": 1,\n  \"status\": \"broadcast\",\n  \"last_rejected_reason\": null,\n  \"kernel_excess_hex\": \"abc123...\",\n  \"sent_payref\": null,\n  \"sent_output_hash\": \"def456...\",\n  \"mined_height\": null,\n  \"mined_block_hash_hex\": null,\n  \"confirmation_height\": null,\n  \"broadcast_attempts\": 1,\n  \"created_at\": \"2024-01-15T10:30:00Z\",\n  \"updated_at\": \"2024-01-15T10:31:00Z\"\n}\n```",
@@ -937,6 +960,30 @@
           }
         }
       },
+      "CounterpartyInfo": {
+        "type": "object",
+        "required": [
+          "address"
+        ],
+        "properties": {
+          "address": {
+            "type": "string"
+          },
+          "address_emoji": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "label": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "User-defined alias from address book."
+          }
+        }
+      },
       "CreatePaymentIdAddressRequest": {
         "type": "object",
         "description": "Request body for creating an address with a payment ID.\n\n# JSON Example\n\n```json\n{\n  \"payment_id_hex\": \"696e766f6963652d3132333435\"\n}\n```",
@@ -1027,6 +1074,94 @@
             "type": "integer",
             "format": "int64",
             "description": "Unique identifier for this event"
+          }
+        }
+      },
+      "DisplayedTransaction": {
+        "type": "object",
+        "description": "User-friendly transaction representation.",
+        "required": [
+          "id",
+          "direction",
+          "source",
+          "status",
+          "amount",
+          "amount_display",
+          "blockchain",
+          "details"
+        ],
+        "properties": {
+          "amount": {
+            "type": "integer",
+            "format": "int64",
+            "description": "Net amount in microTari (always positive, use direction for sign).",
+            "minimum": 0
+          },
+          "amount_display": {
+            "type": "string",
+            "description": "User-friendly amount (e.g., \"1,234.567890 XTM\")."
+          },
+          "blockchain": {
+            "$ref": "#/components/schemas/BlockchainInfo"
+          },
+          "counterparty": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/CounterpartyInfo"
+              }
+            ]
+          },
+          "details": {
+            "$ref": "#/components/schemas/TransactionDetails"
+          },
+          "direction": {
+            "$ref": "#/components/schemas/TransactionDirection"
+          },
+          "fee": {
+            "oneOf": [
+              {
+                "type": "null"
+              },
+              {
+                "$ref": "#/components/schemas/FeeInfo",
+                "description": "Fee information (only populated for outgoing transactions)."
+              }
+            ]
+          },
+          "id": {
+            "type": "string"
+          },
+          "message": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "source": {
+            "$ref": "#/components/schemas/TransactionSource"
+          },
+          "status": {
+            "$ref": "#/components/schemas/TransactionDisplayStatus"
+          }
+        }
+      },
+      "FeeInfo": {
+        "type": "object",
+        "required": [
+          "amount",
+          "amount_display"
+        ],
+        "properties": {
+          "amount": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "amount_display": {
+            "type": "string"
           }
         }
       },
@@ -1133,6 +1268,14 @@
           }
         }
       },
+      "OutputStatus": {
+        "type": "string",
+        "enum": [
+          "Unspent",
+          "Locked",
+          "Spent"
+        ]
+      },
       "RecipientRequest": {
         "type": "object",
         "description": "Represents a single recipient in a transaction request.\n\nEach recipient specifies a destination address and the amount to send.\nAn optional payment ID can be included for tracking or identification\npurposes.\n\n# JSON Example\n\n```json\n{\n  \"address\": \"f4FxMqKAPDMqAjh6hTpC...\",\n  \"amount\": 500000,\n  \"payment_id\": \"invoice-2024-001\"\n}\n```",
@@ -1188,6 +1331,166 @@
       "TariAddressBase58": {
         "type": "string",
         "description": "A wrapper type for [`TariAddress`] with Base58 serialization.\n\nThis type provides JSON serialization and deserialization of Tari addresses\nusing Base58 encoding, which is the standard human-readable format for\nTari addresses.\n\n# Serialization\n\nWhen serialized to JSON, the address is represented as a Base58-encoded string:\n\n```json\n\"f4FxMqKAPDMqAjh6hTpCnLKfEu3MmS7NRu2YmKZPvZHc2K\"\n```\n\n# Deserialization\n\nWhen deserializing from JSON, the string is parsed as a Base58-encoded\nTari address. Invalid addresses will result in a deserialization error.\n\n# Example\n\n```rust,ignore\nuse crate::api::types::TariAddressBase58;\n\n#[derive(Deserialize)]\nstruct Request {\n    recipient: TariAddressBase58,\n}\n\n// JSON: {\"recipient\": \"f4FxMqKAPDMqAjh6hTpC...\"}\n```"
+      },
+      "TransactionDetails": {
+        "type": "object",
+        "description": "Advanced transaction details.",
+        "required": [
+          "account_id",
+          "total_credit",
+          "total_debit",
+          "inputs",
+          "outputs"
+        ],
+        "properties": {
+          "account_id": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "coinbase_extra": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Extra data for coinbase transactions."
+          },
+          "inputs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TransactionInput"
+            }
+          },
+          "memo_hex": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "output_type": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "outputs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/TransactionOutput"
+            }
+          },
+          "sent_output_hashes": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Hashes of outputs sent in this transaction (hex encoded).\nUsed to match pending broadcasted transactions with scanned ones."
+          },
+          "total_credit": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "total_debit": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          }
+        }
+      },
+      "TransactionDirection": {
+        "type": "string",
+        "enum": [
+          "incoming",
+          "outgoing"
+        ]
+      },
+      "TransactionDisplayStatus": {
+        "type": "string",
+        "enum": [
+          "pending",
+          "unconfirmed",
+          "confirmed",
+          "cancelled",
+          "reorganized",
+          "rejected"
+        ]
+      },
+      "TransactionInput": {
+        "type": "object",
+        "description": "A transaction input (spent UTXO).",
+        "required": [
+          "output_hash",
+          "amount",
+          "is_matched"
+        ],
+        "properties": {
+          "amount": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "is_matched": {
+            "type": "boolean"
+          },
+          "matched_output_id": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "description": "ID of the matched output in our database (if found)."
+          },
+          "output_hash": {
+            "type": "string"
+          }
+        }
+      },
+      "TransactionOutput": {
+        "type": "object",
+        "description": "A transaction output (created UTXO).",
+        "required": [
+          "hash",
+          "amount",
+          "status",
+          "output_type",
+          "is_change"
+        ],
+        "properties": {
+          "amount": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
+          },
+          "confirmed_height": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "format": "int64",
+            "minimum": 0
+          },
+          "hash": {
+            "type": "string"
+          },
+          "is_change": {
+            "type": "boolean"
+          },
+          "output_type": {
+            "type": "string"
+          },
+          "status": {
+            "$ref": "#/components/schemas/OutputStatus"
+          }
+        }
+      },
+      "TransactionSource": {
+        "type": "string",
+        "enum": [
+          "transfer",
+          "coinbase",
+          "one_sided",
+          "unknown"
+        ]
       },
       "Value": {},
       "VersionResponse": {

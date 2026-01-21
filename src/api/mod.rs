@@ -158,6 +158,17 @@ impl FromRef<AppState> for SqlitePool {
             crate::api::types::AddressResponse,
             crate::api::types::AddressWithPaymentIdResponse,
             crate::api::types::VersionResponse,
+            crate::transactions::DisplayedTransaction,
+            crate::transactions::TransactionDirection,
+            crate::transactions::TransactionSource,
+            crate::transactions::TransactionDisplayStatus,
+            crate::transactions::CounterpartyInfo,
+            crate::transactions::BlockchainInfo,
+            crate::transactions::FeeInfo,
+            crate::transactions::TransactionDetails,
+            crate::transactions::TransactionInput,
+            crate::transactions::TransactionOutput,
+            crate::models::OutputStatus,
         )
     ),
     tags(

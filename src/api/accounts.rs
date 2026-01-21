@@ -984,7 +984,7 @@ pub async fn api_get_completed_transactions(
     get,
     path = "/accounts/{name}/displayed_transactions",
     responses(
-        (status = 200, description = "Displayed transactions retrieved successfully", body = Vec<Object>),
+        (status = 200, description = "Displayed transactions retrieved successfully", body = Vec<DisplayedTransaction>),
         (status = 404, description = "Account not found", body = ApiError),
         (status = 500, description = "Internal server error", body = ApiError),
     ),
