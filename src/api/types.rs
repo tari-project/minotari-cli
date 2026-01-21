@@ -120,6 +120,84 @@ pub struct LockFundsResult {
     pub fee_with_change: MicroMinotari,
 }
 
+/// API response type for a completed transaction.
+///
+/// This structure represents a completed transaction in the API response.
+/// It contains all the relevant transaction details for display and tracking.
+///
+/// # JSON Example
+///
+/// ```json
+/// {
+///   "id": "550e8400-e29b-41d4-a716-446655440000",
+///   "pending_tx_id": "661e8400-e29b-41d4-a716-446655440001",
+///   "account_id": 1,
+///   "status": "broadcast",
+///   "last_rejected_reason": null,
+///   "kernel_excess_hex": "abc123...",
+///   "sent_payref": null,
+///   "sent_output_hash": "def456...",
+///   "mined_height": null,
+///   "mined_block_hash_hex": null,
+///   "confirmation_height": null,
+///   "broadcast_attempts": 1,
+///   "created_at": "2024-01-15T10:30:00Z",
+///   "updated_at": "2024-01-15T10:31:00Z"
+/// }
+/// ```
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
+pub struct CompletedTransactionResponse {
+    /// Unique identifier for this completed transaction
+    pub id: String,
+    /// Reference to the original pending transaction
+    pub pending_tx_id: String,
+    /// Account this transaction belongs to
+    pub account_id: i64,
+    /// Current status of the transaction (completed, broadcast, mined_unconfirmed, mined_confirmed, rejected, canceled)
+    pub status: String,
+    /// Reason for rejection if the transaction was rejected
+    pub last_rejected_reason: Option<String>,
+    /// Kernel excess in hexadecimal encoding
+    pub kernel_excess_hex: String,
+    /// Payment reference if the transaction has been confirmed
+    pub sent_payref: Option<String>,
+    /// Output hash for the sent transaction
+    pub sent_output_hash: Option<String>,
+    /// Block height where the transaction was mined (if mined)
+    pub mined_height: Option<i64>,
+    /// Block hash where the transaction was mined (hex encoded, if mined)
+    pub mined_block_hash_hex: Option<String>,
+    /// Block height where the transaction was confirmed (if confirmed)
+    pub confirmation_height: Option<i64>,
+    /// Number of broadcast attempts made
+    pub broadcast_attempts: i32,
+    /// Timestamp when the transaction was created
+    pub created_at: String,
+    /// Timestamp when the transaction was last updated
+    pub updated_at: String,
+}
+
+impl From<crate::db::CompletedTransaction> for CompletedTransactionResponse {
+    fn from(tx: crate::db::CompletedTransaction) -> Self {
+        Self {
+            id: tx.id,
+            pending_tx_id: tx.pending_tx_id,
+            account_id: tx.account_id,
+            status: tx.status.to_string(),
+            last_rejected_reason: tx.last_rejected_reason,
+            kernel_excess_hex: hex::encode(&tx.kernel_excess),
+            sent_payref: tx.sent_payref,
+            sent_output_hash: tx.sent_output_hash,
+            mined_height: tx.mined_height,
+            mined_block_hash_hex: tx.mined_block_hash.map(|h| hex::encode(&h)),
+            confirmation_height: tx.confirmation_height,
+            broadcast_attempts: tx.broadcast_attempts,
+            created_at: tx.created_at.to_rfc3339(),
+            updated_at: tx.updated_at.to_rfc3339(),
+        }
+    }
+}
+
 /// Serializes a [`TariAddressBase58`] to its Base58 string representation.
 ///
 /// # Output Format

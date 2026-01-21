@@ -10,6 +10,8 @@
 //!
 //! - `GET /accounts/{name}/balance` - Retrieve account balance
 //! - `GET /accounts/{name}/events` - Retrieve all wallet events for an account
+//! - `GET /accounts/{name}/completed_transactions` - Retrieve all completed transactions for an account
+//! - `GET /accounts/{name}/displayed_transactions` - Retrieve all displayed transactions for an account
 //! - `POST /accounts/{name}/lock_funds` - Lock UTXOs for transaction creation
 //! - `POST /accounts/{name}/create_unsigned_transaction` - Create an unsigned one-sided transaction
 //! - `GET /swagger-ui` - Interactive Swagger UI documentation
@@ -97,12 +99,15 @@ impl FromRef<AppState> for SqlitePool {
 /// ## Paths (Endpoints)
 /// - `/accounts/{name}/balance` - Get account balance
 /// - `/accounts/{name}/events` - Get wallet events
+/// - `/accounts/{name}/completed_transactions` - Get completed transactions
+/// - `/accounts/{name}/displayed_transactions` - Get displayed transactions
 /// - `/accounts/{name}/lock_funds` - Lock funds for transaction
 /// - `/accounts/{name}/create_unsigned_transaction` - Create unsigned transaction
 ///
 /// ## Schemas
 /// - `AccountBalance` - Balance information with available/pending amounts
 /// - `DbWalletEvent` - Wallet event record with type, description and data
+/// - `CompletedTransactionResponse` - Completed transaction details
 /// - `ApiError` - Standardized error responses
 /// - `WalletParams` - Account name path parameter
 /// - `LockFundsRequest` - Request body for fund locking
@@ -115,6 +120,8 @@ impl FromRef<AppState> for SqlitePool {
     paths(
         accounts::api_get_balance,
         accounts::api_get_events,
+        accounts::api_get_completed_transactions,
+        accounts::api_get_displayed_transactions,
         accounts::api_lock_funds,
         accounts::api_create_unsigned_transaction,
     ),
@@ -129,6 +136,7 @@ impl FromRef<AppState> for SqlitePool {
             accounts::RecipientRequest,
             crate::api::types::LockFundsResult,
             crate::api::types::TariAddressBase58,
+            crate::api::types::CompletedTransactionResponse,
         )
     ),
     tags(
@@ -187,6 +195,14 @@ pub fn create_router(db_pool: SqlitePool, network: Network, password: String) ->
         .merge(SwaggerUi::new("/swagger-ui").url("/openapi.json", ApiDoc::openapi()))
         .route("/accounts/{name}/balance", get(accounts::api_get_balance))
         .route("/accounts/{name}/events", get(accounts::api_get_events))
+        .route(
+            "/accounts/{name}/completed_transactions",
+            get(accounts::api_get_completed_transactions),
+        )
+        .route(
+            "/accounts/{name}/displayed_transactions",
+            get(accounts::api_get_displayed_transactions),
+        )
         .route("/accounts/{name}/lock_funds", post(accounts::api_lock_funds))
         .route(
             "/accounts/{name}/create_unsigned_transaction",

@@ -432,3 +432,54 @@ pub fn get_pending_completed_transactions(
 
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
+
+/// Retrieves all completed transactions for an account with pagination.
+///
+/// Returns transactions ordered by creation time (most recent first).
+///
+/// # Parameters
+///
+/// * `conn` - Database connection
+/// * `account_id` - The account to query transactions for
+/// * `limit` - Maximum number of transactions to return
+/// * `offset` - Number of transactions to skip for pagination
+///
+/// # Returns
+///
+/// A vector of completed transactions, or an error if the query fails.
+pub fn get_completed_transactions_by_account(
+    conn: &Connection,
+    account_id: i64,
+    limit: i64,
+    offset: i64,
+) -> WalletDbResult<Vec<CompletedTransaction>> {
+    debug!(
+        account_id = account_id,
+        limit = limit,
+        offset = offset;
+        "DB: Fetching completed transactions with pagination"
+    );
+
+    let mut stmt = conn.prepare_cached(
+        r#"
+        SELECT id, account_id, pending_tx_id, status, last_rejected_reason, kernel_excess,
+               sent_payref, sent_output_hash, mined_height, mined_block_hash, confirmation_height,
+               broadcast_attempts, serialized_transaction, created_at, updated_at
+        FROM completed_transactions
+        WHERE account_id = :account_id
+        ORDER BY created_at DESC, id DESC
+        LIMIT :limit OFFSET :offset
+        "#,
+    )?;
+
+    let rows = stmt.query_map(
+        named_params! {
+            ":account_id": account_id,
+            ":limit": limit,
+            ":offset": offset
+        },
+        map_row,
+    )?;
+
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}

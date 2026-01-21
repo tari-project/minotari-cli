@@ -51,14 +51,19 @@ use super::error::ApiError;
 use crate::{
     api::{
         AppState,
-        types::{LockFundsResult, TariAddressBase58},
+        types::{CompletedTransactionResponse, LockFundsResult, TariAddressBase58},
     },
-    db::{AccountBalance, DbWalletEvent, get_account_by_name, get_balance, get_events_by_account_id},
+    db::{
+        AccountBalance, DbWalletEvent, get_account_by_name, get_balance,
+        get_completed_transactions_by_account, get_displayed_transactions_paginated,
+        get_events_by_account_id,
+    },
     log::mask_amount,
     transactions::{
         fund_locker::FundLocker,
         monitor::REQUIRED_CONFIRMATIONS,
         one_sided_transaction::{OneSidedTransaction, Recipient},
+        DisplayedTransaction,
     },
 };
 use tari_transaction_components::tari_amount::MicroMinotari;
@@ -475,6 +480,245 @@ pub async fn api_get_events(
     .map_err(|e| ApiError::InternalServerError(format!("Task join error: {}", e)))??;
 
     Ok(Json(events))
+}
+
+/// Retrieves completed transactions for a specified account with pagination.
+///
+/// Returns a paginated list of completed transactions for the account, including
+/// their status, mined block information, and confirmation details. Transactions
+/// are ordered by creation time (most recent first).
+///
+/// # Path Parameters
+///
+/// - `name`: The unique account name to query
+///
+/// # Query Parameters
+///
+/// - `limit`: Maximum number of transactions to return (default: 50, max: 1000)
+/// - `offset`: Number of transactions to skip for pagination (default: 0)
+///
+/// # Response
+///
+/// Returns a list of [`CompletedTransactionResponse`] objects, each containing:
+/// - Transaction ID and status
+/// - Kernel excess (hex encoded)
+/// - Mining and confirmation details
+/// - Creation and update timestamps
+///
+/// # Errors
+///
+/// - [`ApiError::AccountNotFound`]: The specified account does not exist
+/// - [`ApiError::DbError`]: Database connection or query failure
+///
+/// # Example Request
+///
+/// ```bash
+/// # Get first 50 completed transactions (default)
+/// curl -X GET http://localhost:8080/accounts/default/completed_transactions
+///
+/// # Get 100 transactions starting from offset 50
+/// curl -X GET "http://localhost:8080/accounts/default/completed_transactions?limit=100&offset=50"
+/// ```
+///
+/// # Example Response
+///
+/// ```json
+/// [
+///   {
+///     "id": "550e8400-e29b-41d4-a716-446655440000",
+///     "pending_tx_id": "661e8400-e29b-41d4-a716-446655440001",
+///     "account_id": 1,
+///     "status": "mined_confirmed",
+///     "last_rejected_reason": null,
+///     "kernel_excess_hex": "abc123...",
+///     "sent_payref": "payref-123",
+///     "sent_output_hash": "def456...",
+///     "mined_height": 12345,
+///     "mined_block_hash_hex": "789abc...",
+///     "confirmation_height": 12350,
+///     "broadcast_attempts": 1,
+///     "created_at": "2024-01-15T10:30:00Z",
+///     "updated_at": "2024-01-15T10:35:00Z"
+///   }
+/// ]
+/// ```
+#[utoipa::path(
+    get,
+    path = "/accounts/{name}/completed_transactions",
+    responses(
+        (status = 200, description = "Completed transactions retrieved successfully", body = Vec<CompletedTransactionResponse>),
+        (status = 404, description = "Account not found", body = ApiError),
+        (status = 500, description = "Internal server error", body = ApiError),
+    ),
+    params(
+        ("name" = String, Path, description = "Name of the account to retrieve completed transactions for"),
+        ("limit" = Option<i64>, Query, description = "Maximum number of transactions to return (default: 50, max: 1000)"),
+        ("offset" = Option<i64>, Query, description = "Number of transactions to skip for pagination (default: 0)"),
+    )
+)]
+pub async fn api_get_completed_transactions(
+    State(app_state): State<AppState>,
+    Path(WalletParams { name }): Path<WalletParams>,
+    Query(pagination): Query<PaginationParams>,
+) -> Result<Json<Vec<CompletedTransactionResponse>>, ApiError> {
+    // Apply defaults and constraints
+    let limit = pagination.limit.unwrap_or(DEFAULT_PAGE_LIMIT).min(MAX_PAGE_LIMIT);
+    let offset = pagination.offset.unwrap_or(0).max(0);
+
+    debug!(
+        account = &*name,
+        limit = limit,
+        offset = offset;
+        "API: Get completed transactions request"
+    );
+
+    let pool = app_state.db_pool.clone();
+    let name = name.clone();
+
+    let transactions = tokio::task::spawn_blocking(move || {
+        let conn = pool.get().map_err(|e| ApiError::DbError(e.to_string()))?;
+
+        let account = get_account_by_name(&conn, &name)
+            .map_err(|e| ApiError::DbError(e.to_string()))?
+            .ok_or_else(|| ApiError::AccountNotFound(name.clone()))?;
+
+        get_completed_transactions_by_account(&conn, account.id, limit, offset)
+            .map_err(|e| ApiError::DbError(e.to_string()))
+    })
+    .await
+    .map_err(|e| ApiError::InternalServerError(format!("Task join error: {}", e)))??;
+
+    // Convert to API response type
+    let response: Vec<CompletedTransactionResponse> = transactions
+        .into_iter()
+        .map(CompletedTransactionResponse::from)
+        .collect();
+
+    Ok(Json(response))
+}
+
+/// Retrieves displayed transactions for a specified account with pagination.
+///
+/// Returns a paginated list of user-friendly transactions for the account,
+/// including incoming and outgoing transactions with their status, amounts,
+/// and blockchain information. Transactions are ordered by block height
+/// (most recent first).
+///
+/// # Path Parameters
+///
+/// - `name`: The unique account name to query
+///
+/// # Query Parameters
+///
+/// - `limit`: Maximum number of transactions to return (default: 50, max: 1000)
+/// - `offset`: Number of transactions to skip for pagination (default: 0)
+///
+/// # Response
+///
+/// Returns a list of [`DisplayedTransaction`] objects, each containing:
+/// - Transaction ID, direction (incoming/outgoing), and source
+/// - Status (pending, unconfirmed, confirmed, cancelled, etc.)
+/// - Amount and formatted display amount
+/// - Counterparty information (if available)
+/// - Blockchain details (block height, timestamp, confirmations)
+/// - Fee information (for outgoing transactions)
+/// - Detailed input/output information
+///
+/// # Errors
+///
+/// - [`ApiError::AccountNotFound`]: The specified account does not exist
+/// - [`ApiError::DbError`]: Database connection or query failure
+///
+/// # Example Request
+///
+/// ```bash
+/// # Get first 50 displayed transactions (default)
+/// curl -X GET http://localhost:8080/accounts/default/displayed_transactions
+///
+/// # Get 100 transactions starting from offset 50
+/// curl -X GET "http://localhost:8080/accounts/default/displayed_transactions?limit=100&offset=50"
+/// ```
+///
+/// # Example Response
+///
+/// ```json
+/// [
+///   {
+///     "id": "tx-123",
+///     "direction": "incoming",
+///     "source": "transfer",
+///     "status": "confirmed",
+///     "amount": 1000000,
+///     "amount_display": "1.000000 XTM",
+///     "message": null,
+///     "counterparty": {
+///       "address": "f4FxMqKAPDMqAjh6hTpC...",
+///       "address_emoji": "🎉🌟...",
+///       "label": null
+///     },
+///     "blockchain": {
+///       "block_height": 12345,
+///       "timestamp": "2024-01-15T10:30:00",
+///       "confirmations": 10
+///     },
+///     "fee": null,
+///     "details": {
+///       "account_id": 1,
+///       "total_credit": 1000000,
+///       "total_debit": 0,
+///       "inputs": [],
+///       "outputs": [...]
+///     }
+///   }
+/// ]
+/// ```
+#[utoipa::path(
+    get,
+    path = "/accounts/{name}/displayed_transactions",
+    responses(
+        (status = 200, description = "Displayed transactions retrieved successfully", body = Vec<Object>),
+        (status = 404, description = "Account not found", body = ApiError),
+        (status = 500, description = "Internal server error", body = ApiError),
+    ),
+    params(
+        ("name" = String, Path, description = "Name of the account to retrieve displayed transactions for"),
+        ("limit" = Option<i64>, Query, description = "Maximum number of transactions to return (default: 50, max: 1000)"),
+        ("offset" = Option<i64>, Query, description = "Number of transactions to skip for pagination (default: 0)"),
+    )
+)]
+pub async fn api_get_displayed_transactions(
+    State(app_state): State<AppState>,
+    Path(WalletParams { name }): Path<WalletParams>,
+    Query(pagination): Query<PaginationParams>,
+) -> Result<Json<Vec<DisplayedTransaction>>, ApiError> {
+    // Apply defaults and constraints
+    let limit = pagination.limit.unwrap_or(DEFAULT_PAGE_LIMIT).min(MAX_PAGE_LIMIT);
+    let offset = pagination.offset.unwrap_or(0).max(0);
+
+    debug!(
+        account = &*name,
+        limit = limit,
+        offset = offset;
+        "API: Get displayed transactions request"
+    );
+
+    let pool = app_state.db_pool.clone();
+    let name = name.clone();
+
+    let transactions = tokio::task::spawn_blocking(move || {
+        let conn = pool.get().map_err(|e| ApiError::DbError(e.to_string()))?;
+
+        let account = get_account_by_name(&conn, &name)
+            .map_err(|e| ApiError::DbError(e.to_string()))?
+            .ok_or_else(|| ApiError::AccountNotFound(name.clone()))?;
+
+        get_displayed_transactions_paginated(&conn, account.id, limit, offset)
+            .map_err(|e| ApiError::DbError(e.to_string()))
+    })
+    .await
+    .map_err(|e| ApiError::InternalServerError(format!("Task join error: {}", e)))??;
+
+    Ok(Json(transactions))
 }
 
 /// Locks funds from an account for transaction preparation.

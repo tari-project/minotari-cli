@@ -84,7 +84,7 @@ pub use pending_transactions::{
 mod completed_transactions;
 pub use completed_transactions::{
     CompletedTransaction, CompletedTransactionStatus, create_completed_transaction, get_completed_transaction_by_id,
-    get_completed_transactions_by_status, get_pending_completed_transactions,
+    get_completed_transactions_by_account, get_completed_transactions_by_status, get_pending_completed_transactions,
     mark_completed_transaction_as_broadcasted, mark_completed_transaction_as_confirmed,
     mark_completed_transaction_as_mined_unconfirmed, mark_completed_transaction_as_rejected,
     reset_mined_completed_transactions_from_height, revert_completed_transaction_to_completed,
