@@ -126,6 +126,21 @@ pub enum ApiError {
     #[error("{0}")]
     NotFound(String),
 
+    /// A bad request error for invalid input.
+    ///
+    /// Used when the client sends invalid data in the request.
+    /// Returns HTTP 400 Bad Request.
+    ///
+    /// # Example
+    ///
+    /// ```json
+    /// {
+    ///   "error": "Invalid hex in payment_id_hex: Invalid character"
+    /// }
+    /// ```
+    #[error("{0}")]
+    BadRequest(String),
+
     /// Failed to lock funds for a transaction.
     ///
     /// This typically occurs when there are insufficient available funds
@@ -203,6 +218,7 @@ impl From<serde_json::Error> for ApiError {
 /// | `DbError` | 500 |
 /// | `AccountNotFound` | 404 |
 /// | `NotFound` | 404 |
+/// | `BadRequest` | 400 |
 /// | `FailedToLockFunds` | 500 |
 /// | `FailedCreateUnsignedTx` | 500 |
 impl IntoResponse for ApiError {
@@ -223,6 +239,10 @@ impl IntoResponse for ApiError {
             ApiError::NotFound(msg) => {
                 warn!(message = msg.as_str(); "API: Not Found");
                 (StatusCode::NOT_FOUND, msg.clone())
+            },
+            ApiError::BadRequest(msg) => {
+                warn!(message = msg.as_str(); "API: Bad Request");
+                (StatusCode::BAD_REQUEST, msg.clone())
             },
             ApiError::FailedToLockFunds(e) => {
                 error!(target: "audit", error = e.as_str(); "API: Failed to lock funds");

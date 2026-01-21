@@ -51,7 +51,10 @@ use super::error::ApiError;
 use crate::{
     api::{
         AppState,
-        types::{CompletedTransactionResponse, LockFundsResult, ScanStatusResponse, TariAddressBase58},
+        types::{
+            AddressResponse, AddressWithPaymentIdResponse, CompletedTransactionResponse, LockFundsResult,
+            ScanStatusResponse, TariAddressBase58,
+        },
     },
     db::{
         AccountBalance, DbWalletEvent, get_account_by_name, get_balance,
@@ -380,6 +383,203 @@ pub async fn api_get_balance(
     .map_err(|e| ApiError::InternalServerError(format!("Task join error: {}", e)))??;
 
     Ok(Json(balance))
+}
+
+/// Retrieves the Tari address for a specified account.
+///
+/// Returns the account's Tari address in Base58 format along with the emoji ID
+/// representation. This address can be shared with others to receive payments.
+///
+/// # Path Parameters
+///
+/// - `name`: The unique account name to query
+///
+/// # Response
+///
+/// Returns an [`AddressResponse`] object containing:
+/// - The address in Base58 encoding
+/// - The emoji ID representation
+///
+/// # Errors
+///
+/// - [`ApiError::AccountNotFound`]: The specified account does not exist
+/// - [`ApiError::DbError`]: Database connection or query failure
+///
+/// # Example Response
+///
+/// ```json
+/// {
+///   "address": "f4FxMqKAPDMqAjh6hTpCnLKfEu3MmS7NRu2YmKZPvZHc2K",
+///   "emoji_id": "🎉🌟🚀..."
+/// }
+/// ```
+#[utoipa::path(
+    get,
+    path = "/accounts/{name}/address",
+    responses(
+        (status = 200, description = "Account address retrieved successfully", body = AddressResponse),
+        (status = 404, description = "Account not found", body = ApiError),
+        (status = 500, description = "Internal server error", body = ApiError),
+    ),
+    params(
+        ("name" = String, Path, description = "Name of the account to retrieve address for"),
+    )
+)]
+pub async fn api_get_address(
+    State(app_state): State<AppState>,
+    Path(WalletParams { name }): Path<WalletParams>,
+) -> Result<Json<AddressResponse>, ApiError> {
+    debug!(
+        account = &*name;
+        "API: Get address request"
+    );
+
+    let pool = app_state.db_pool.clone();
+    let name = name.clone();
+    let network = app_state.network;
+    let password = app_state.password.clone();
+
+    let address_response = tokio::task::spawn_blocking(move || {
+        let conn = pool.get().map_err(|e| ApiError::DbError(e.to_string()))?;
+
+        let account = get_account_by_name(&conn, &name)
+            .map_err(|e| ApiError::DbError(e.to_string()))?
+            .ok_or_else(|| ApiError::AccountNotFound(name.clone()))?;
+
+        let address = account
+            .get_address(network, &password)
+            .map_err(|e| ApiError::InternalServerError(format!("Failed to get address: {}", e)))?;
+
+        Ok::<_, ApiError>(AddressResponse {
+            address: address.to_base58(),
+            emoji_id: address.to_emoji_string(),
+        })
+    })
+    .await
+    .map_err(|e| ApiError::InternalServerError(format!("Task join error: {}", e)))??;
+
+    Ok(Json(address_response))
+}
+
+/// Request body for creating an address with a payment ID.
+///
+/// # JSON Example
+///
+/// ```json
+/// {
+///   "payment_id_hex": "696e766f6963652d3132333435"
+/// }
+/// ```
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct CreatePaymentIdAddressRequest {
+    /// The payment ID to embed in the address, hex encoded.
+    ///
+    /// This should be a hex-encoded byte string (e.g., "696e766f6963652d3132333435" for "invoice-12345").
+    /// Maximum length is 256 bytes when decoded.
+    pub payment_id_hex: String,
+}
+
+/// Creates a Tari address with an embedded payment ID for a specified account.
+///
+/// Generates a new address that includes a payment ID, which can be used to
+/// identify specific transactions or invoices. When someone sends funds to
+/// this address, the payment ID will be included in the transaction.
+///
+/// # Path Parameters
+///
+/// - `name`: The unique account name
+///
+/// # Request Body
+///
+/// See [`CreatePaymentIdAddressRequest`] for the complete request schema.
+///
+/// # Response
+///
+/// Returns an [`AddressWithPaymentIdResponse`] object containing:
+/// - The address with embedded payment ID in Base58 encoding
+/// - The emoji ID representation
+/// - The original payment ID
+///
+/// # Errors
+///
+/// - [`ApiError::AccountNotFound`]: The specified account does not exist
+/// - [`ApiError::DbError`]: Database connection or query failure
+/// - [`ApiError::InternalServerError`]: Failed to generate the address
+///
+/// # Example Request
+///
+/// ```bash
+/// curl -X POST http://localhost:8080/accounts/default/address_with_payment_id \
+///   -H "Content-Type: application/json" \
+///   -d '{"payment_id": "invoice-12345"}'
+/// ```
+///
+/// # Example Response
+///
+/// ```json
+/// {
+///   "address": "f4FxMqKAPDMqAjh6hTpCnLKfEu3MmS7NRu2YmKZPvZHc2K",
+///   "emoji_id": "🎉🌟🚀...",
+///   "payment_id_hex": "696e766f6963652d3132333435"
+/// }
+/// ```
+#[utoipa::path(
+    post,
+    path = "/accounts/{name}/address_with_payment_id",
+    request_body = CreatePaymentIdAddressRequest,
+    responses(
+        (status = 200, description = "Address with payment ID created successfully", body = AddressWithPaymentIdResponse),
+        (status = 400, description = "Bad request", body = ApiError),
+        (status = 404, description = "Account not found", body = ApiError),
+        (status = 500, description = "Internal server error", body = ApiError),
+    ),
+    params(
+        ("name" = String, Path, description = "Name of the account to create address for"),
+    )
+)]
+pub async fn api_create_address_with_payment_id(
+    State(app_state): State<AppState>,
+    Path(WalletParams { name }): Path<WalletParams>,
+    Json(body): Json<CreatePaymentIdAddressRequest>,
+) -> Result<Json<AddressWithPaymentIdResponse>, ApiError> {
+    // Decode the hex payment ID
+    let payment_id_bytes = hex::decode(&body.payment_id_hex)
+        .map_err(|e| ApiError::BadRequest(format!("Invalid hex in payment_id_hex: {}", e)))?;
+
+    info!(
+        target: "audit",
+        account = &*name,
+        payment_id_hex = &*body.payment_id_hex;
+        "API: Create address with payment ID request"
+    );
+
+    let pool = app_state.db_pool.clone();
+    let name = name.clone();
+    let network = app_state.network;
+    let password = app_state.password.clone();
+    let payment_id_hex = body.payment_id_hex.clone();
+
+    let address_response = tokio::task::spawn_blocking(move || {
+        let conn = pool.get().map_err(|e| ApiError::DbError(e.to_string()))?;
+
+        let account = get_account_by_name(&conn, &name)
+            .map_err(|e| ApiError::DbError(e.to_string()))?
+            .ok_or_else(|| ApiError::AccountNotFound(name.clone()))?;
+
+        let address = account
+            .get_address_with_payment_id(network, &password, &payment_id_bytes)
+            .map_err(|e| ApiError::InternalServerError(format!("Failed to create address with payment ID: {}", e)))?;
+
+        Ok::<_, ApiError>(AddressWithPaymentIdResponse {
+            address: address.to_base58(),
+            emoji_id: address.to_emoji_string(),
+            payment_id_hex,
+        })
+    })
+    .await
+    .map_err(|e| ApiError::InternalServerError(format!("Task join error: {}", e)))??;
+
+    Ok(Json(address_response))
 }
 
 /// Retrieves the scan status for a specified account.

@@ -9,6 +9,8 @@
 //! The API exposes the following endpoints:
 //!
 //! - `GET /accounts/{name}/balance` - Retrieve account balance
+//! - `GET /accounts/{name}/address` - Retrieve account Tari address
+//! - `POST /accounts/{name}/address_with_payment_id` - Create address with embedded payment ID
 //! - `GET /accounts/{name}/scan_status` - Retrieve last scanned block height and timestamp
 //! - `GET /accounts/{name}/events` - Retrieve all wallet events for an account
 //! - `GET /accounts/{name}/completed_transactions` - Retrieve all completed transactions for an account
@@ -99,6 +101,8 @@ impl FromRef<AppState> for SqlitePool {
 ///
 /// ## Paths (Endpoints)
 /// - `/accounts/{name}/balance` - Get account balance
+/// - `/accounts/{name}/address` - Get account address
+/// - `/accounts/{name}/address_with_payment_id` - Create address with payment ID
 /// - `/accounts/{name}/scan_status` - Get last scanned block info
 /// - `/accounts/{name}/events` - Get wallet events
 /// - `/accounts/{name}/completed_transactions` - Get completed transactions
@@ -108,6 +112,8 @@ impl FromRef<AppState> for SqlitePool {
 ///
 /// ## Schemas
 /// - `AccountBalance` - Balance information with available/pending amounts
+/// - `AddressResponse` - Account address in Base58 with emoji ID
+/// - `AddressWithPaymentIdResponse` - Address with embedded payment ID
 /// - `DbWalletEvent` - Wallet event record with type, description and data
 /// - `CompletedTransactionResponse` - Completed transaction details
 /// - `ApiError` - Standardized error responses
@@ -121,6 +127,8 @@ impl FromRef<AppState> for SqlitePool {
 #[openapi(
     paths(
         accounts::api_get_balance,
+        accounts::api_get_address,
+        accounts::api_create_address_with_payment_id,
         accounts::api_get_scan_status,
         accounts::api_get_events,
         accounts::api_get_completed_transactions,
@@ -136,11 +144,14 @@ impl FromRef<AppState> for SqlitePool {
             accounts::WalletParams,
             accounts::LockFundsRequest,
             accounts::CreateTransactionRequest,
+            accounts::CreatePaymentIdAddressRequest,
             accounts::RecipientRequest,
             crate::api::types::LockFundsResult,
             crate::api::types::TariAddressBase58,
             crate::api::types::CompletedTransactionResponse,
             crate::api::types::ScanStatusResponse,
+            crate::api::types::AddressResponse,
+            crate::api::types::AddressWithPaymentIdResponse,
         )
     ),
     tags(
@@ -198,6 +209,11 @@ pub fn create_router(db_pool: SqlitePool, network: Network, password: String) ->
     Router::new()
         .merge(SwaggerUi::new("/swagger-ui").url("/openapi.json", ApiDoc::openapi()))
         .route("/accounts/{name}/balance", get(accounts::api_get_balance))
+        .route("/accounts/{name}/address", get(accounts::api_get_address))
+        .route(
+            "/accounts/{name}/address_with_payment_id",
+            post(accounts::api_create_address_with_payment_id),
+        )
         .route("/accounts/{name}/scan_status", get(accounts::api_get_scan_status))
         .route("/accounts/{name}/events", get(accounts::api_get_events))
         .route(

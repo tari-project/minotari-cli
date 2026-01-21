@@ -232,6 +232,50 @@ impl From<crate::db::LatestScannedBlock> for ScanStatusResponse {
     }
 }
 
+/// API response type for an account address.
+///
+/// Contains the Tari address in Base58 format along with the emoji ID representation.
+///
+/// # JSON Example
+///
+/// ```json
+/// {
+///   "address": "f4FxMqKAPDMqAjh6hTpCnLKfEu3MmS7NRu2YmKZPvZHc2K",
+///   "emoji_id": "🎉🌟🚀..."
+/// }
+/// ```
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
+pub struct AddressResponse {
+    /// The Tari address in Base58 encoding
+    pub address: String,
+    /// The emoji representation of the address
+    pub emoji_id: String,
+}
+
+/// API response type for an address with payment ID.
+///
+/// Contains the Tari address with embedded payment ID in Base58 format,
+/// along with the emoji ID representation and the original payment ID in hex.
+///
+/// # JSON Example
+///
+/// ```json
+/// {
+///   "address": "f4FxMqKAPDMqAjh6hTpCnLKfEu3MmS7NRu2YmKZPvZHc2K",
+///   "emoji_id": "🎉🌟🚀...",
+///   "payment_id_hex": "696e766f6963652d3132333435"
+/// }
+/// ```
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
+pub struct AddressWithPaymentIdResponse {
+    /// The Tari address with embedded payment ID in Base58 encoding
+    pub address: String,
+    /// The emoji representation of the address
+    pub emoji_id: String,
+    /// The payment ID that was embedded in the address (hex encoded)
+    pub payment_id_hex: String,
+}
+
 /// Serializes a [`TariAddressBase58`] to its Base58 string representation.
 ///
 /// # Output Format
