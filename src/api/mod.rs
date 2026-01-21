@@ -8,6 +8,7 @@
 //!
 //! The API exposes the following endpoints:
 //!
+//! - `GET /version` - Retrieve wallet version information
 //! - `GET /accounts/{name}/balance` - Retrieve account balance
 //! - `GET /accounts/{name}/address` - Retrieve account Tari address
 //! - `POST /accounts/{name}/address_with_payment_id` - Create address with embedded payment ID
@@ -100,6 +101,7 @@ impl FromRef<AppState> for SqlitePool {
 /// # Registered Components
 ///
 /// ## Paths (Endpoints)
+/// - `/version` - Get wallet version information
 /// - `/accounts/{name}/balance` - Get account balance
 /// - `/accounts/{name}/address` - Get account address
 /// - `/accounts/{name}/address_with_payment_id` - Create address with payment ID
@@ -111,6 +113,7 @@ impl FromRef<AppState> for SqlitePool {
 /// - `/accounts/{name}/create_unsigned_transaction` - Create unsigned transaction
 ///
 /// ## Schemas
+/// - `VersionResponse` - Wallet version information
 /// - `AccountBalance` - Balance information with available/pending amounts
 /// - `AddressResponse` - Account address in Base58 with emoji ID
 /// - `AddressWithPaymentIdResponse` - Address with embedded payment ID
@@ -126,6 +129,7 @@ impl FromRef<AppState> for SqlitePool {
 #[derive(OpenApi)]
 #[openapi(
     paths(
+        accounts::api_get_version,
         accounts::api_get_balance,
         accounts::api_get_address,
         accounts::api_create_address_with_payment_id,
@@ -152,6 +156,7 @@ impl FromRef<AppState> for SqlitePool {
             crate::api::types::ScanStatusResponse,
             crate::api::types::AddressResponse,
             crate::api::types::AddressWithPaymentIdResponse,
+            crate::api::types::VersionResponse,
         )
     ),
     tags(
@@ -208,6 +213,7 @@ pub fn create_router(db_pool: SqlitePool, network: Network, password: String) ->
 
     Router::new()
         .merge(SwaggerUi::new("/swagger-ui").url("/openapi.json", ApiDoc::openapi()))
+        .route("/version", get(accounts::api_get_version))
         .route("/accounts/{name}/balance", get(accounts::api_get_balance))
         .route("/accounts/{name}/address", get(accounts::api_get_address))
         .route(

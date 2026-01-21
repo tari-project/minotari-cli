@@ -53,7 +53,7 @@ use crate::{
         AppState,
         types::{
             AddressResponse, AddressWithPaymentIdResponse, CompletedTransactionResponse, LockFundsResult,
-            ScanStatusResponse, TariAddressBase58,
+            ScanStatusResponse, TariAddressBase58, VersionResponse,
         },
     },
     db::{
@@ -313,6 +313,42 @@ pub struct CreateTransactionRequest {
     #[serde(default = "default_confirmation_window")]
     #[schema(schema_with = confirmation_window_schema)]
     pub confirmation_window: Option<u64>,
+}
+
+/// Retrieves the wallet version information.
+///
+/// Returns the version and name of the wallet software. This endpoint does not
+/// require authentication and can be used for health checks or compatibility
+/// verification.
+///
+/// # Response
+///
+/// Returns a [`VersionResponse`] object containing:
+/// - The semantic version string
+/// - The package name
+///
+/// # Example Response
+///
+/// ```json
+/// {
+///   "version": "0.1.0",
+///   "name": "minotari"
+/// }
+/// ```
+#[utoipa::path(
+    get,
+    path = "/version",
+    responses(
+        (status = 200, description = "Version information retrieved successfully", body = VersionResponse),
+    ),
+)]
+pub async fn api_get_version() -> Json<VersionResponse> {
+    debug!("API: Get version request");
+
+    Json(VersionResponse {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        name: env!("CARGO_PKG_NAME").to_string(),
+    })
 }
 
 /// Retrieves the current balance for a specified account.

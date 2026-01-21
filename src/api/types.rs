@@ -276,6 +276,26 @@ pub struct AddressWithPaymentIdResponse {
     pub payment_id_hex: String,
 }
 
+/// API response type for the wallet version.
+///
+/// Contains version information about the wallet software.
+///
+/// # JSON Example
+///
+/// ```json
+/// {
+///   "version": "0.1.0",
+///   "name": "minotari"
+/// }
+/// ```
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
+pub struct VersionResponse {
+    /// The semantic version of the wallet (e.g., "0.1.0")
+    pub version: String,
+    /// The name of the wallet package
+    pub name: String,
+}
+
 /// Serializes a [`TariAddressBase58`] to its Base58 string representation.
 ///
 /// # Output Format
