@@ -103,10 +103,5 @@ pub fn get_events_by_account_id(
         },
     )?;
 
-    let mut results = Vec::new();
-    for row in rows {
-        results.push(row?);
-    }
-
-    Ok(results)
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }

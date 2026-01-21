@@ -546,7 +546,7 @@ pub struct CreatePaymentIdAddressRequest {
 /// ```bash
 /// curl -X POST http://localhost:8080/accounts/default/address_with_payment_id \
 ///   -H "Content-Type: application/json" \
-///   -d '{"payment_id": "invoice-12345"}'
+///   -d '{"payment_id": "696e766f6963652d3132333435"}'
 /// ```
 ///
 /// # Example Response
