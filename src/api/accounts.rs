@@ -57,16 +57,15 @@ use crate::{
         },
     },
     db::{
-        AccountBalance, DbWalletEvent, get_account_by_name, get_balance,
-        get_completed_transactions_by_account, get_displayed_transactions_paginated,
-        get_events_by_account_id, get_latest_scanned_block_with_timestamp,
+        AccountBalance, DbWalletEvent, get_account_by_name, get_balance, get_completed_transactions_by_account,
+        get_displayed_transactions_paginated, get_events_by_account_id, get_latest_scanned_block_with_timestamp,
     },
     log::mask_amount,
     transactions::{
+        DisplayedTransaction,
         fund_locker::FundLocker,
         monitor::REQUIRED_CONFIRMATIONS,
         one_sided_transaction::{OneSidedTransaction, Recipient},
-        DisplayedTransaction,
     },
 };
 use tari_transaction_components::tari_amount::MicroMinotari;
