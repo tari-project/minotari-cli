@@ -431,8 +431,7 @@ async fn prepare_account_scan(
 
     let birthday_time = if start_height == 0 {
         Some(
-            u64::from((account.birthday as u64).saturating_sub(scanning_offset)) * 24 * 60 * 60
-                + BIRTHDAY_GENESIS_FROM_UNIX_EPOCH,
+            (account.birthday as u64).saturating_sub(scanning_offset) * 24 * 60 * 60 + BIRTHDAY_GENESIS_FROM_UNIX_EPOCH,
         )
     } else {
         None
