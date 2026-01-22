@@ -451,9 +451,8 @@ impl WalletHttpClient {
     }
 
     pub async fn get_height_at_time(&self, epoch_time: u64) -> Result<u64, anyhow::Error> {
-        let epoch_time_string = epoch_time.to_string();
         debug!(
-            time = &*epoch_time_string;
+            time = epoch_time;
             "HTTP: Requesting block height at time"
         );
         let path = format!("/get_height_at_time?time={}", epoch_time);

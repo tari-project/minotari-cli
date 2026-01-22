@@ -34,9 +34,6 @@ use crate::{
 /// Unix timestamp for the genesis epoch used in birthday calculations.
 const BIRTHDAY_GENESIS_FROM_UNIX_EPOCH: u64 = 1640995200; // seconds to 2022-01-01 00:00:00 UTC;
 
-/// Unix timestamp of the Tari mainnet genesis block.
-const MAINNET_GENESIS_DATE: u64 = 1746489644;
-
 /// Default timeout for individual scan operations (5 minutes).
 const DEFAULT_SCAN_TIMEOUT: Duration = Duration::from_secs(60 * 5);
 
@@ -48,6 +45,9 @@ const DEFAULT_MAX_ERROR_RETRIES: u32 = 3;
 
 /// Default base for exponential backoff on errors (in seconds).
 const DEFAULT_ERROR_BACKOFF_BASE_SECS: u64 = 2;
+
+/// Default number of days to offset from wallet birthday when calculating start height.
+const DEFAULT_SCANNING_OFFSET_DAYS: u64 = 2;
 
 const MAX_BACKOFF_EXPONENT: u32 = 5;
 const MAX_BACKOFF_SECONDS: u64 = 60;
@@ -430,9 +430,6 @@ async fn prepare_account_scan(
     let mut start_height = reorg_result.resume_height;
 
     let birthday_time = if start_height == 0 {
-        let birthday_day = (account.birthday as u64) * 24 * 60 * 60 + BIRTHDAY_GENESIS_FROM_UNIX_EPOCH;
-        let estimate_birthday_block = (birthday_day.saturating_sub(MAINNET_GENESIS_DATE)) / 120;
-        start_height = estimate_birthday_block;
         Some(
             u64::from((account.birthday as u64).saturating_sub(scanning_offset)) * 24 * 60 * 60
                 + BIRTHDAY_GENESIS_FROM_UNIX_EPOCH,
@@ -814,7 +811,7 @@ impl Scanner {
             account_name: None,
             batch_size,
             processing_threads: 8,
-            scanning_offset: 2,
+            scanning_offset: DEFAULT_SCANNING_OFFSET_DAYS,
             reorg_check_interval: 1000,
             mode: ScanMode::Full,
             retry_config: ScanRetryConfig::default(),
