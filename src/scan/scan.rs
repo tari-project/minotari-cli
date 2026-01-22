@@ -429,13 +429,6 @@ async fn prepare_account_scan(
 
     let mut start_height = reorg_result.resume_height;
 
-    let birthday_time = if start_height == 0 {
-        Some(
-            (account.birthday as u64).saturating_sub(scanning_offset) * 24 * 60 * 60 + BIRTHDAY_GENESIS_FROM_UNIX_EPOCH,
-        )
-    } else {
-        None
-    };
     let wallet_client = WalletHttpClient::new(
         base_url
             .parse()
@@ -443,12 +436,15 @@ async fn prepare_account_scan(
     )
     .map_err(ScanError::Fatal)?;
 
-    if let Some(timestamp) = birthday_time {
+    if start_height == 0 {
+        let timestamp =
+            (account.birthday as u64).saturating_sub(scanning_offset) * 24 * 60 * 60 + BIRTHDAY_GENESIS_FROM_UNIX_EPOCH;
         start_height = wallet_client
             .get_height_at_time(timestamp)
             .await
             .map_err(ScanError::Fatal)?;
-    }
+    };
+
     let scan_config = ScanConfig::default()
         .with_start_height(start_height)
         .with_batch_size(batch_size);
