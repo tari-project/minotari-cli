@@ -32,7 +32,7 @@ use crate::{
 };
 
 /// Unix timestamp for the genesis epoch used in birthday calculations.
-const BIRTHDAY_GENESIS_FROM_UNIX_EPOCH: u64 = 1640995200;
+const BIRTHDAY_GENESIS_FROM_UNIX_EPOCH: u64 = 1640995200; // seconds to 2022-01-01 00:00:00 UTC;
 
 /// Unix timestamp of the Tari mainnet genesis block.
 const MAINNET_GENESIS_DATE: u64 = 1746489644;
@@ -411,6 +411,7 @@ async fn prepare_account_scan(
     base_url: &str,
     batch_size: u64,
     processing_threads: usize,
+    scanning_offset: u64,
     reorg_check_interval: u64,
     monitoring_state: MonitoringState,
     conn: &mut Connection,
@@ -428,22 +429,33 @@ async fn prepare_account_scan(
 
     let mut start_height = reorg_result.resume_height;
 
-    if start_height == 0 {
+    let birthday_time = if start_height == 0 {
         let birthday_day = (account.birthday as u64) * 24 * 60 * 60 + BIRTHDAY_GENESIS_FROM_UNIX_EPOCH;
         let estimate_birthday_block = (birthday_day.saturating_sub(MAINNET_GENESIS_DATE)) / 120;
         start_height = estimate_birthday_block;
-    }
-
-    let scan_config = ScanConfig::default()
-        .with_start_height(start_height)
-        .with_batch_size(batch_size);
-
+        Some(
+            u64::from((account.birthday as u64).saturating_sub(scanning_offset)) * 24 * 60 * 60
+                + BIRTHDAY_GENESIS_FROM_UNIX_EPOCH,
+        )
+    } else {
+        None
+    };
     let wallet_client = WalletHttpClient::new(
         base_url
             .parse()
             .map_err(|e| ScanError::Fatal(anyhow::anyhow!("{}", e)))?,
     )
     .map_err(ScanError::Fatal)?;
+
+    if let Some(timestamp) = birthday_time {
+        start_height = wallet_client
+            .get_height_at_time(timestamp)
+            .await
+            .map_err(ScanError::Fatal)?;
+    }
+    let scan_config = ScanConfig::default()
+        .with_start_height(start_height)
+        .with_batch_size(batch_size);
 
     monitoring_state
         .initialize(conn, account.id)
@@ -760,6 +772,8 @@ pub struct Scanner {
     batch_size: u64,
     /// Number of parallel threads for output detection.
     processing_threads: usize,
+    /// Number of days to offset birthday scanning by.
+    scanning_offset: u64,
     /// Number of blocks between periodic reorg checks.
     reorg_check_interval: u64,
     /// Scanning mode (Full, Partial, or Continuous).
@@ -800,6 +814,7 @@ impl Scanner {
             account_name: None,
             batch_size,
             processing_threads: 8,
+            scanning_offset: 2,
             reorg_check_interval: 1000,
             mode: ScanMode::Full,
             retry_config: ScanRetryConfig::default(),
@@ -1015,6 +1030,7 @@ impl Scanner {
                 &self.base_url,
                 self.batch_size,
                 self.processing_threads,
+                self.scanning_offset,
                 self.reorg_check_interval,
                 monitoring_state,
                 &mut conn,
