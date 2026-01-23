@@ -236,7 +236,7 @@ pub fn soft_delete_outputs_from_height(conn: &Connection, account_id: i64, heigh
     conn.execute(
         r#"
         UPDATE outputs
-        SET deleted_at = :now, deleted_in_block_height = :height
+        SET deleted_at = :now, deleted_in_block_height = :height, payment_reference = NULL
         WHERE account_id = :account_id AND mined_in_block_height >= :height AND deleted_at IS NULL
         "#,
         named_params! {
