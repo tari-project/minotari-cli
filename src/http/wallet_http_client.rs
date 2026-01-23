@@ -449,4 +449,17 @@ impl WalletHttpClient {
         debug!("HTTP: Transaction query successful");
         Ok(response)
     }
+
+    pub async fn get_height_at_time(&self, epoch_time: u64) -> Result<u64, anyhow::Error> {
+        debug!(
+            time = epoch_time;
+            "HTTP: Requesting block height at time"
+        );
+        let path = format!("/get_height_at_time?time={}", epoch_time);
+
+        let response = self.http_client.send_request::<u64>(Method::GET, &path, None).await?;
+
+        debug!("HTTP: Requesting block height successful");
+        Ok(response)
+    }
 }
