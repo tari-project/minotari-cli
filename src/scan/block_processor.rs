@@ -8,6 +8,7 @@ use chrono::{DateTime, Utc};
 use lightweight_wallet_libs::BlockScanResult;
 use log::{error, info};
 use rusqlite::Connection;
+use tari_common_types::payment_reference::generate_payment_reference;
 use tari_common_types::types::FixedHash;
 use tari_transaction_components::transaction_components::WalletOutput;
 use thiserror::Error;
@@ -348,6 +349,9 @@ impl<E: EventSender> BlockProcessor<E> {
             let event = self.make_output_detected_event(*hash, block, &memo);
             self.wallet_events.push(event.clone());
 
+            // Compute the payment reference from block hash and output hash
+            let payment_reference = generate_payment_reference(&block.block_hash, hash);
+
             let (output_id, is_new) = db::insert_output(
                 tx,
                 self.account_id,
@@ -359,6 +363,7 @@ impl<E: EventSender> BlockProcessor<E> {
                 block.mined_timestamp,
                 memo.parsed.clone(),
                 memo.hex.clone(),
+                payment_reference,
             )?;
 
             if is_new {

@@ -8,6 +8,7 @@ use log::{debug, info, warn};
 use rusqlite::{Connection, named_params};
 use serde::Deserialize;
 use serde_rusqlite::from_rows;
+use tari_common_types::payment_reference::PaymentReference;
 use tari_common_types::transaction::TxId;
 use tari_transaction_components::transaction_components::WalletOutput;
 
@@ -23,6 +24,7 @@ pub fn insert_output(
     mined_timestamp: u64,
     memo_parsed: Option<String>,
     memo_hex: Option<String>,
+    payment_reference: PaymentReference,
 ) -> WalletDbResult<(i64, bool)> {
     info!(
         target: "audit",
@@ -41,6 +43,7 @@ pub fn insert_output(
 
     let block_height = block_height as i64;
     let value = output.value().as_u64() as i64;
+    let payment_reference_hex = hex::encode(payment_reference.as_slice());
 
     let rows_affected = conn.execute(
         r#"
@@ -54,7 +57,8 @@ pub fn insert_output(
             mined_timestamp,
             wallet_output_json,
             memo_parsed,
-            memo_hex
+            memo_hex,
+            payment_reference
        )
        VALUES (
             :id,
@@ -66,7 +70,8 @@ pub fn insert_output(
             :mined_timestamp,
             :output_json,
             :memo_parsed,
-            :memo_hex
+            :memo_hex,
+            :payment_reference
        )
         "#,
         named_params! {
@@ -80,6 +85,7 @@ pub fn insert_output(
             ":output_json": output_json,
             ":memo_parsed": memo_parsed,
             ":memo_hex": memo_hex,
+            ":payment_reference": payment_reference_hex,
         },
     )?;
 

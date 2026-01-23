@@ -18,6 +18,7 @@ CREATE TABLE outputs (
     locked_by_request_id TEXT, 
     deleted_at TIMESTAMP, 
     deleted_in_block_height INTEGER,
+    payment_reference TEXT,
     FOREIGN KEY (account_id) REFERENCES accounts(id)
 );
 CREATE TABLE scanned_tip_blocks (
