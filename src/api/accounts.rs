@@ -57,9 +57,9 @@ use crate::{
         },
     },
     db::{
-        AccountBalance, DbWalletEvent, get_account_by_name, get_balance, get_completed_transactions_by_account,
+        AccountBalance, DbWalletEvent, get_account_by_name, get_balance, get_completed_transaction_by_payref,
+        get_completed_transactions_by_account, get_displayed_transactions_by_payref,
         get_displayed_transactions_paginated, get_events_by_account_id, get_latest_scanned_block_with_timestamp,
-        get_completed_transaction_by_payref, get_displayed_transactions_by_payref,
     },
     log::mask_amount,
     transactions::{
@@ -1413,4 +1413,3 @@ pub async fn api_get_displayed_transactions_by_payref(
 
     Ok(Json(transactions))
 }
-

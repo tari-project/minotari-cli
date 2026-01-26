@@ -578,4 +578,3 @@ pub fn get_displayed_transactions_by_payref(
 
     process_json_rows(from_rows::<TransactionJsonRow>(rows))
 }
-
