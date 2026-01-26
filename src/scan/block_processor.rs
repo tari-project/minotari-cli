@@ -8,6 +8,7 @@ use chrono::{DateTime, Utc};
 use lightweight_wallet_libs::BlockScanResult;
 use log::{error, info};
 use rusqlite::Connection;
+use tari_common_types::payment_reference::generate_payment_reference;
 use tari_common_types::types::FixedHash;
 use tari_transaction_components::transaction_components::WalletOutput;
 use thiserror::Error;
@@ -348,6 +349,9 @@ impl<E: EventSender> BlockProcessor<E> {
             let event = self.make_output_detected_event(*hash, block, &memo);
             self.wallet_events.push(event.clone());
 
+            // Compute the payment reference from block hash and output hash
+            let payment_reference = generate_payment_reference(&block.block_hash, hash);
+
             let (output_id, is_new) = db::insert_output(
                 tx,
                 self.account_id,
@@ -355,10 +359,11 @@ impl<E: EventSender> BlockProcessor<E> {
                 hash.to_vec(),
                 output,
                 block.height,
-                block.block_hash.as_slice(),
+                &block.block_hash,
                 block.mined_timestamp,
                 memo.parsed.clone(),
                 memo.hex.clone(),
+                payment_reference,
             )?;
 
             if is_new {
@@ -369,6 +374,8 @@ impl<E: EventSender> BlockProcessor<E> {
                 if let Some(ref mut acc) = self.current_block {
                     acc.outputs.push(DetectedOutput {
                         hash: *hash,
+                        height: block.height,
+                        mined_in_block_hash: block.block_hash,
                         value: output.value().as_u64(),
                         is_coinbase: output.features().is_coinbase(),
                         memo: memo.parsed,
@@ -422,7 +429,7 @@ impl<E: EventSender> BlockProcessor<E> {
     /// - Adds to the block accumulator for event emission
     fn process_inputs(&mut self, tx: &Connection, block: &BlockScanResult) -> Result<(), BlockProcessorError> {
         for input_hash in &block.inputs {
-            let Some((output_id, value)) = db::get_output_info_by_hash(tx, input_hash.as_slice())? else {
+            let Some((output_id, value)) = db::get_output_info_by_hash(tx, input_hash)? else {
                 continue;
             };
 
@@ -449,7 +456,8 @@ impl<E: EventSender> BlockProcessor<E> {
 
                 if let Some(ref mut acc) = self.current_block {
                     acc.inputs.push(SpentInput {
-                        output_hash: input_hash.to_vec(),
+                        output_hash: *input_hash,
+                        mined_in_block: block.block_hash,
                         value,
                     });
                     acc.add_balance_change(balance_change);
@@ -514,7 +522,7 @@ impl<E: EventSender> BlockProcessor<E> {
             info!(
                 target: "audit",
                 account_id = self.account_id,
-                output_hash = &*mask_string(&hex::encode(&unconfirmed_output.output_hash)),
+                output_hash = &*mask_string(&hex::encode(unconfirmed_output.output_hash)),
                 original_height = unconfirmed_output.mined_in_block_height,
                 confirmed_at = block.height;
                 "Output confirmed"
@@ -540,7 +548,7 @@ impl<E: EventSender> BlockProcessor<E> {
 
             if let Some(ref mut acc) = self.current_block {
                 acc.confirmations.push(ConfirmedOutput {
-                    hash: unconfirmed_output.output_hash.clone(),
+                    hash: unconfirmed_output.output_hash,
                     original_height: unconfirmed_output.mined_in_block_height as u64,
                     confirmation_height: block.height,
                 });
@@ -553,7 +561,7 @@ impl<E: EventSender> BlockProcessor<E> {
     /// Creates a wallet event for an output reaching confirmation depth.
     fn make_confirmation_event(
         &self,
-        output_hash: &[u8],
+        output_hash: &FixedHash,
         original_height: u64,
         confirmation_height: u64,
         memo_parsed: Option<String>,
@@ -563,7 +571,7 @@ impl<E: EventSender> BlockProcessor<E> {
             id: 0,
             account_id: self.account_id,
             event_type: WalletEventType::OutputConfirmed {
-                hash: output_hash.to_vec(),
+                hash: *output_hash,
                 block_height: original_height,
                 confirmation_height,
                 memo_parsed,

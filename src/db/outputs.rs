@@ -8,7 +8,9 @@ use log::{debug, info, warn};
 use rusqlite::{Connection, named_params};
 use serde::Deserialize;
 use serde_rusqlite::from_rows;
+use tari_common_types::payment_reference::PaymentReference;
 use tari_common_types::transaction::TxId;
+use tari_common_types::types::FixedHash;
 use tari_transaction_components::transaction_components::WalletOutput;
 
 #[allow(clippy::too_many_arguments)]
@@ -19,10 +21,11 @@ pub fn insert_output(
     output_hash: Vec<u8>,
     output: &WalletOutput,
     block_height: u64,
-    block_hash: &[u8],
+    block_hash: &FixedHash,
     mined_timestamp: u64,
     memo_parsed: Option<String>,
     memo_hex: Option<String>,
+    payment_reference: PaymentReference,
 ) -> WalletDbResult<(i64, bool)> {
     info!(
         target: "audit",
@@ -41,6 +44,7 @@ pub fn insert_output(
 
     let block_height = block_height as i64;
     let value = output.value().as_u64() as i64;
+    let payment_reference_hex = hex::encode(payment_reference.as_slice());
 
     let rows_affected = conn.execute(
         r#"
@@ -54,7 +58,8 @@ pub fn insert_output(
             mined_timestamp,
             wallet_output_json,
             memo_parsed,
-            memo_hex
+            memo_hex,
+            payment_reference
        )
        VALUES (
             :id,
@@ -66,7 +71,8 @@ pub fn insert_output(
             :mined_timestamp,
             :output_json,
             :memo_parsed,
-            :memo_hex
+            :memo_hex,
+            :payment_reference
        )
         "#,
         named_params! {
@@ -74,12 +80,13 @@ pub fn insert_output(
             ":account_id": account_id,
             ":output_hash": output_hash,
             ":block_height": block_height,
-            ":block_hash": block_hash,
+            ":block_hash": block_hash.as_slice(),
             ":value": value,
             ":mined_timestamp": mined_timestamp_dt,
             ":output_json": output_json,
             ":memo_parsed": memo_parsed,
             ":memo_hex": memo_hex,
+            ":payment_reference": payment_reference_hex,
         },
     )?;
 
@@ -92,7 +99,7 @@ struct OutputInfoRow {
     value: i64,
 }
 
-pub fn get_output_info_by_hash(conn: &Connection, output_hash: &[u8]) -> WalletDbResult<Option<(i64, u64)>> {
+pub fn get_output_info_by_hash(conn: &Connection, output_hash: &FixedHash) -> WalletDbResult<Option<(i64, u64)>> {
     let mut stmt = conn.prepare_cached(
         r#"
         SELECT id, value
@@ -101,7 +108,7 @@ pub fn get_output_info_by_hash(conn: &Connection, output_hash: &[u8]) -> WalletD
         "#,
     )?;
 
-    let rows = stmt.query(named_params! { ":output_hash": output_hash })?;
+    let rows = stmt.query(named_params! { ":output_hash": output_hash.as_slice() })?;
     let result: Option<OutputInfoRow> = from_rows(rows).next().transpose()?;
 
     Ok(result.map(|r| (r.id, r.value as u64)))
@@ -109,7 +116,7 @@ pub fn get_output_info_by_hash(conn: &Connection, output_hash: &[u8]) -> WalletD
 
 #[derive(Deserialize)]
 pub struct UnconfirmedOutputRow {
-    pub output_hash: Vec<u8>,
+    pub output_hash: FixedHash,
     pub mined_in_block_height: i64,
     pub memo_parsed: Option<String>,
     pub memo_hex: Option<String>,
@@ -146,7 +153,7 @@ pub fn get_unconfirmed_outputs(
 
 pub fn mark_output_confirmed(
     conn: &Connection,
-    output_hash: &[u8],
+    output_hash: &FixedHash,
     confirmed_height: u64,
     confirmed_hash: &[u8],
 ) -> WalletDbResult<()> {
@@ -166,7 +173,7 @@ pub fn mark_output_confirmed(
         named_params! {
             ":height": confirmed_height,
             ":hash": confirmed_hash,
-            ":output_hash": output_hash
+            ":output_hash": output_hash.to_vec(),
         },
     )?;
 
@@ -230,7 +237,7 @@ pub fn soft_delete_outputs_from_height(conn: &Connection, account_id: i64, heigh
     conn.execute(
         r#"
         UPDATE outputs
-        SET deleted_at = :now, deleted_in_block_height = :height
+        SET deleted_at = :now, deleted_in_block_height = :height, payment_reference = NULL
         WHERE account_id = :account_id AND mined_in_block_height >= :height AND deleted_at IS NULL
         "#,
         named_params! {

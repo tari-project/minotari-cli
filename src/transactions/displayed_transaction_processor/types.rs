@@ -1,3 +1,4 @@
+use crate::models::{Id, OutputStatus};
 use chrono::NaiveDateTime;
 use serde::{Deserialize, Serialize};
 use utoipa::ToSchema;
@@ -97,6 +98,7 @@ pub struct BlockchainInfo {
     #[schema(value_type = String)]
     pub timestamp: NaiveDateTime,
     pub confirmations: u64,
+    pub block_hash: FixedHash,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
@@ -121,27 +123,31 @@ pub struct TransactionDetails {
     /// Hashes of outputs sent in this transaction (hex encoded).
     /// Used to match pending broadcasted transactions with scanned ones.
     #[serde(default)]
-    pub sent_output_hashes: Vec<String>,
+    pub sent_output_hashes: Vec<FixedHash>,
+    #[serde(default)]
+    pub sent_payrefs: Vec<PaymentReference>,
 }
 
 /// A transaction input (spent UTXO).
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct TransactionInput {
-    pub output_hash: String,
+    pub output_hash: FixedHash,
     pub amount: u64,
     /// ID of the matched output in our database (if found).
     #[schema(value_type = Option<i64>)]
     pub matched_output_id: Option<Id>,
     pub is_matched: bool,
+    pub mined_in_block_hash: FixedHash,
 }
 
 /// A transaction output (created UTXO).
 #[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct TransactionOutput {
-    pub hash: String,
+    pub hash: FixedHash,
     pub amount: u64,
     pub status: OutputStatus,
-    pub confirmed_height: Option<u64>,
+    pub mined_in_block_height: u64,
+    pub mined_in_block_hash: FixedHash,
     pub output_type: String,
     pub is_change: bool,
 }

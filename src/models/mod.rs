@@ -79,7 +79,7 @@ pub enum WalletEventType {
         memo_hex: Option<String>,
     },
     OutputConfirmed {
-        hash: Vec<u8>,
+        hash: FixedHash,
         block_height: u64,
         confirmation_height: u64,
         memo_parsed: Option<String>,

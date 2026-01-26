@@ -1,6 +1,6 @@
-use serde::{Deserialize, Serialize};
-
 use super::formatting::output_type_from_number;
+use serde::{Deserialize, Serialize};
+use tari_common_types::types::FixedHash;
 
 /// Parsed wallet output data with extracted fields.
 #[derive(Debug, Clone)]
@@ -9,7 +9,7 @@ pub struct ParsedWalletOutput {
     pub is_coinbase: bool,
     pub coinbase_extra: Option<String>,
     /// Hashes of outputs that were spent as inputs for this transaction (hex encoded).
-    pub sent_output_hashes: Vec<String>,
+    pub sent_output_hashes: Vec<FixedHash>,
 }
 
 impl ParsedWalletOutput {
@@ -78,7 +78,7 @@ impl ParsedWalletOutput {
         }
     }
 
-    fn extract_sent_output_hashes(payment_id: &serde_json::Value) -> Vec<String> {
+    fn extract_sent_output_hashes(payment_id: &serde_json::Value) -> Vec<FixedHash> {
         let hashes_array = payment_id
             .get("inner")
             .and_then(|inner| inner.get("TransactionInfo"))
@@ -98,7 +98,8 @@ impl ParsedWalletOutput {
                 if bytes.is_empty() {
                     None
                 } else {
-                    Some(hex::encode(&bytes))
+                    let hash = FixedHash::try_from(bytes.as_slice()).ok()?;
+                    Some(hash)
                 }
             })
             .collect()

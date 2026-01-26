@@ -333,7 +333,7 @@ pub fn revert_completed_transaction_to_completed(conn: &Connection, id: &str) ->
         r#"
         UPDATE completed_transactions
         SET status = :status, mined_height = NULL, mined_block_hash = NULL, 
-            confirmation_height = NULL, broadcast_attempts = 0, updated_at = :now
+            confirmation_height = NULL, sent_payref = NULL, broadcast_attempts = 0, updated_at = :now
         WHERE id = :id
         "#,
         named_params! {
@@ -367,8 +367,8 @@ pub fn reset_mined_completed_transactions_from_height(
         r#"
         UPDATE completed_transactions
         SET status = :status_completed, mined_height = NULL, mined_block_hash = NULL, 
-            confirmation_height = NULL, broadcast_attempts = 0, updated_at = :now
-        WHERE account_id = :account_id 
+            confirmation_height = NULL, sent_payref = NULL, broadcast_attempts = 0, updated_at = :now
+        WHERE account_id = :account_id
           AND (status = :status_unconfirmed OR status = :status_confirmed) 
           AND mined_height >= :height
         "#,
