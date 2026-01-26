@@ -1,6 +1,3 @@
-use chrono::NaiveDateTime;
-use tari_common_types::payment_reference::generate_payment_reference;
-use tari_common_types::types::FixedHash;
 use super::error::ProcessorError;
 use super::formatting::format_micro_tari;
 use super::types::{
@@ -8,6 +5,9 @@ use super::types::{
     TransactionDisplayStatus, TransactionInput, TransactionOutput, TransactionSource,
 };
 use crate::models::Id;
+use chrono::NaiveDateTime;
+use tari_common_types::payment_reference::generate_payment_reference;
+use tari_common_types::types::FixedHash;
 
 #[derive(Debug, Default)]
 pub struct DisplayedTransactionBuilder {
@@ -92,7 +92,13 @@ impl DisplayedTransactionBuilder {
         self
     }
 
-    pub fn blockchain_info(mut self, height: u64, hash: FixedHash, timestamp: NaiveDateTime, confirmations: u64) -> Self {
+    pub fn blockchain_info(
+        mut self,
+        height: u64,
+        hash: FixedHash,
+        timestamp: NaiveDateTime,
+        confirmations: u64,
+    ) -> Self {
         self.block_height = Some(height);
         self.timestamp = Some(timestamp);
         self.confirmations = Some(confirmations);
@@ -159,7 +165,6 @@ impl DisplayedTransactionBuilder {
 
         let mut payrefs = Vec::new();
         if let Some(block_hash) = &self.block_hash {
-
             for output_hash in self.sent_output_hashes.iter() {
                 let payref = generate_payment_reference(block_hash, output_hash);
                 payrefs.push(payref);

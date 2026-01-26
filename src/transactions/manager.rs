@@ -60,8 +60,8 @@ use log::{info, warn};
 use r2d2::PooledConnection;
 use r2d2_sqlite::SqliteConnectionManager;
 use tari_common::configuration::Network;
-use tari_common_types::{tari_address::TariAddressFeatures, transaction::TxId};
 use tari_common_types::types::FixedHash;
+use tari_common_types::{tari_address::TariAddressFeatures, transaction::TxId};
 use tari_transaction_components::{
     MicroMinotari, TransactionBuilder,
     consensus::ConsensusConstantsBuilder,
@@ -589,9 +589,7 @@ impl TransactionSender {
             .map(hex::encode);
 
         // Collect sent_output_hashes before moving signed_transaction
-        let sent_output_hashes: Vec<FixedHash> = signed_transaction
-            .signed_transaction
-            .sent_hashes.clone();
+        let sent_output_hashes: Vec<FixedHash> = signed_transaction.signed_transaction.sent_hashes.clone();
 
         db::update_pending_transaction_status(
             &connection,

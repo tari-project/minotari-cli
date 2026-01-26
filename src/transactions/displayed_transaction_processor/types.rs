@@ -1,8 +1,8 @@
+use crate::models::{Id, OutputStatus};
 use chrono::NaiveDateTime;
 use serde::{Deserialize, Serialize};
 use tari_common_types::payment_reference::PaymentReference;
 use tari_common_types::types::FixedHash;
-use crate::models::{Id, OutputStatus};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
@@ -122,7 +122,7 @@ pub struct TransactionDetails {
     #[serde(default)]
     pub sent_output_hashes: Vec<FixedHash>,
     #[serde(default)]
-    pub sent_payrefs: Vec<PaymentReference>
+    pub sent_payrefs: Vec<PaymentReference>,
 }
 
 /// A transaction input (spent UTXO).

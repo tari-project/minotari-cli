@@ -1,6 +1,6 @@
+use super::formatting::output_type_from_number;
 use serde::{Deserialize, Serialize};
 use tari_common_types::types::FixedHash;
-use super::formatting::output_type_from_number;
 
 /// Parsed wallet output data with extracted fields.
 #[derive(Debug, Clone)]

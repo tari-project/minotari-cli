@@ -1,9 +1,9 @@
-use std::collections::HashMap;
-use tari_common_types::types::FixedHash;
 use super::{OutputDetails, TransactionDataResolver};
 use crate::models::{BalanceChange, Id, OutputStatus};
 use crate::scan::{DetectedOutput, SpentInput};
 use crate::transactions::ProcessorError;
+use std::collections::HashMap;
+use tari_common_types::types::FixedHash;
 
 /// Resolver that uses in-memory data from block processing.
 pub struct InMemoryResolver<'a> {

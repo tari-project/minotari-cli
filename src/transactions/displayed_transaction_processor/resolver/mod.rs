@@ -1,10 +1,10 @@
 mod database;
 mod in_memory;
 
-use std::collections::HashMap;
-use tari_common_types::types::FixedHash;
 use super::error::ProcessorError;
 use crate::models::{BalanceChange, Id, OutputStatus};
+use std::collections::HashMap;
+use tari_common_types::types::FixedHash;
 
 pub use self::context::ProcessingContext;
 pub use database::DatabaseResolver;

@@ -1,11 +1,11 @@
 use std::collections::{HashMap, HashSet};
 
-use chrono::NaiveDateTime;
-use tari_common_types::types::FixedHash;
 use super::error::ProcessorError;
 use super::formatting::AMOUNT_MATCHING_TOLERANCE;
 use super::resolver::TransactionDataResolver;
 use crate::models::{BalanceChange, Id};
+use chrono::NaiveDateTime;
+use tari_common_types::types::FixedHash;
 
 /// A grouped transaction consisting of one output (credit) and zero or more inputs (debits).
 #[derive(Debug, Clone)]
