@@ -114,6 +114,7 @@ CREATE TABLE displayed_transactions (
     block_height INTEGER NOT NULL,
     timestamp TEXT NOT NULL,
     transaction_json TEXT NOT NULL,
+    payref TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -136,6 +137,7 @@ CREATE INDEX idx_displayed_transactions_status ON displayed_transactions(status)
 CREATE INDEX idx_displayed_transactions_block_height ON displayed_transactions(block_height);
 CREATE INDEX idx_displayed_transactions_account_status ON displayed_transactions(account_id, status);
 CREATE INDEX idx_displayed_transactions_account_height ON displayed_transactions(account_id, block_height DESC);
+CREATE INDEX idx_displayed_transactions_payref ON displayed_transactions(payref);
 CREATE INDEX idx_outputs_account_status_active
 ON outputs(account_id, status)
 WHERE deleted_at IS NULL;
