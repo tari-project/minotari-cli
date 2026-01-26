@@ -1,13 +1,13 @@
-use log::{debug, info, warn};
-use rusqlite::{Connection, OptionalExtension, named_params};
-use serde::Deserialize;
-use serde_rusqlite::from_rows;
-
 use crate::db::error::{WalletDbError, WalletDbResult};
 use crate::log::mask_amount;
 use crate::models::Id;
 use crate::transactions::{DisplayedTransaction, TransactionDisplayStatus};
 use crate::utils::timestamp::{current_db_timestamp, format_timestamp};
+use log::{debug, info, warn};
+use rusqlite::{Connection, OptionalExtension, named_params};
+use serde::Deserialize;
+use serde_rusqlite::from_rows;
+use tari_common_types::types::FixedHash;
 
 #[derive(Deserialize)]
 struct TransactionJsonRow {
@@ -52,20 +52,22 @@ pub fn insert_displayed_transaction(conn: &Connection, transaction: &DisplayedTr
 
     let transaction_json = serialize_tx(transaction)?;
     let now = current_db_timestamp();
+    let payref = Some(serde_json::to_string(&transaction.details.sent_payrefs)?);
 
     conn.execute(
         r#"
         INSERT INTO displayed_transactions (
             id, account_id, direction, source, status, amount, block_height,
-            timestamp, transaction_json, created_at, updated_at
+            timestamp, transaction_json, payref, created_at, updated_at
         )
         VALUES (
             :id, :account_id, :direction, :source, :status, :amount, :block_height,
-            :timestamp, :json, :created_at, :updated_at
+            :timestamp, :json, :payref, :created_at, :updated_at
         )
         ON CONFLICT(id) DO UPDATE SET
             status = excluded.status,
             transaction_json = excluded.transaction_json,
+            payref = excluded.payref,
             updated_at = excluded.updated_at
         "#,
         named_params! {
@@ -78,6 +80,7 @@ pub fn insert_displayed_transaction(conn: &Connection, transaction: &DisplayedTr
             ":block_height": transaction.blockchain.block_height as i64,
             ":timestamp": timestamp,
             ":json": transaction_json,
+            ":payref": payref,
             ":created_at": now,
             ":updated_at": now,
         },
@@ -264,7 +267,7 @@ pub fn get_displayed_transaction_by_id(conn: &Connection, id: &str) -> WalletDbR
 pub fn find_pending_outbound_by_output_hash(
     conn: &Connection,
     account_id: Id,
-    output_hash: &str,
+    output_hash: &FixedHash,
 ) -> WalletDbResult<Option<DisplayedTransaction>> {
     let pending_status = format!("{:?}", TransactionDisplayStatus::Pending).to_lowercase();
     let outgoing_direction = "outgoing";
@@ -287,8 +290,8 @@ pub fn find_pending_outbound_by_output_hash(
         .filter_map(|res| res.ok())
         .filter_map(|r| serde_json::from_str::<DisplayedTransaction>(&r.transaction_json).ok())
         .find(|tx| {
-            tx.details.sent_output_hashes.contains(&output_hash.to_string())
-                || tx.details.inputs.iter().any(|input| input.output_hash == output_hash)
+            tx.details.sent_output_hashes.contains(output_hash)
+                || tx.details.inputs.iter().any(|input| &input.output_hash == output_hash)
         });
 
     Ok(found)
@@ -305,17 +308,19 @@ pub fn update_displayed_transaction_mined(conn: &Connection, tx: &DisplayedTrans
 
     let status_str = format!("{:?}", tx.status).to_lowercase();
     let transaction_json = serialize_tx(tx)?;
+    let payref = Some(serde_json::to_string(&tx.details.sent_payrefs)?);
 
     let rows_affected = conn.execute(
         r#"
         UPDATE displayed_transactions
-        SET status = :status, block_height = :height, transaction_json = :json, updated_at = :now
+        SET status = :status, block_height = :height, transaction_json = :json, payref = :payref, updated_at = :now
         WHERE id = :id
         "#,
         named_params! {
             ":status": status_str,
             ":height": tx.blockchain.block_height as i64,
             ":json": transaction_json,
+            ":payref": payref,
             ":now": current_db_timestamp(),
             ":id": tx.id
         },

@@ -1,6 +1,3 @@
-use log::debug;
-use rusqlite::Connection;
-
 use super::builder::DisplayedTransactionBuilder;
 use super::error::ProcessorError;
 use super::formatting::{address_to_emoji, determine_transaction_source};
@@ -11,6 +8,8 @@ use super::types::{
 };
 use crate::db::{self, SqlitePool};
 use crate::models::{BalanceChange, Id};
+use log::debug;
+use rusqlite::Connection;
 
 /// Processes balance changes into user-displayable transactions.
 pub struct DisplayedTransactionProcessor {
@@ -118,6 +117,16 @@ impl DisplayedTransactionProcessor {
 
         let inputs = self.collect_input_details(&group, resolver)?;
 
+        let mined_hash = match (outputs.first(), inputs.first()) {
+            (Some(output), _) => output.mined_in_block_hash,
+            (_, Some(input)) => input.mined_in_block_hash,
+            _ => {
+                return Err(ProcessorError::ParseError(
+                    "Display transaction has no inputs or outputs".to_string(),
+                ));
+            },
+        };
+
         let source = self.determine_source(&group, is_coinbase);
         let status = self.determine_status(group.effective_height);
         let (counterparty_addr, counterparty_emoji) = self.determine_counterparty(&group, total_credit, total_debit);
@@ -131,7 +140,7 @@ impl DisplayedTransactionProcessor {
             .credits_and_debits(total_credit, total_debit)
             .message(group.memo_parsed)
             .counterparty(counterparty_addr, counterparty_emoji)
-            .blockchain_info(group.effective_height, group.effective_date, confirmations)
+            .blockchain_info(group.effective_height, mined_hash, group.effective_date, confirmations)
             .fee(group.claimed_fee)
             .inputs(inputs)
             .outputs(outputs)
@@ -160,10 +169,11 @@ impl DisplayedTransactionProcessor {
             coinbase_extra = details.coinbase_extra.clone();
 
             outputs.push(TransactionOutput {
-                hash: details.hash_hex,
+                hash: details.hash,
                 amount: output_change.balance_credit,
                 status: details.status,
-                confirmed_height: details.confirmed_height,
+                mined_in_block_height: details.mined_in_block_height,
+                mined_in_block_hash: details.mined_hash,
                 output_type: details.output_type,
                 is_change: false,
             });
@@ -180,10 +190,11 @@ impl DisplayedTransactionProcessor {
         let mut inputs = Vec::new();
 
         for input_change in &group.input_changes {
-            if let Some(output_hash_hex) = resolver.get_input_output_hash(input_change)? {
+            if let Some((output_hash, mined_hash)) = resolver.get_input_output_hash(input_change)? {
                 inputs.push(TransactionInput {
-                    output_hash: output_hash_hex,
+                    output_hash,
                     amount: input_change.balance_debit,
+                    mined_in_block_hash: mined_hash,
                     matched_output_id: None,
                     is_matched: false,
                 });

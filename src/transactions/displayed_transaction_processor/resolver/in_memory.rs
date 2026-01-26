@@ -1,9 +1,9 @@
-use std::collections::HashMap;
-
 use super::{OutputDetails, TransactionDataResolver};
 use crate::models::{BalanceChange, Id, OutputStatus};
 use crate::scan::{DetectedOutput, SpentInput};
 use crate::transactions::ProcessorError;
+use std::collections::HashMap;
+use tari_common_types::types::FixedHash;
 
 /// Resolver that uses in-memory data from block processing.
 pub struct InMemoryResolver<'a> {
@@ -58,8 +58,9 @@ impl TransactionDataResolver for InMemoryResolver<'_> {
 
         if let Some(output) = self.output_by_value.get(&change.balance_credit) {
             return Ok(Some(OutputDetails {
-                hash_hex: hex::encode(output.hash.as_slice()),
-                confirmed_height: None,
+                hash: output.hash,
+                mined_in_block_height: output.height,
+                mined_hash: output.mined_in_block_hash,
                 status: OutputStatus::Unspent,
                 output_type: if output.is_coinbase {
                     "Coinbase".to_string()
@@ -75,23 +76,23 @@ impl TransactionDataResolver for InMemoryResolver<'_> {
         Ok(None)
     }
 
-    fn get_input_output_hash(&self, change: &BalanceChange) -> Result<Option<String>, ProcessorError> {
+    fn get_input_output_hash(&self, change: &BalanceChange) -> Result<Option<(FixedHash, FixedHash)>, ProcessorError> {
         if change.balance_debit == 0 {
             return Ok(None);
         }
 
         if let Some(input) = self.input_by_value.get(&change.balance_debit) {
-            return Ok(Some(hex::encode(&input.output_hash)));
+            return Ok(Some((input.output_hash, input.mined_in_block)));
         }
 
         Ok(None)
     }
 
-    fn get_sent_output_hashes(&self, _change: &BalanceChange) -> Result<Vec<String>, ProcessorError> {
+    fn get_sent_output_hashes(&self, _change: &BalanceChange) -> Result<Vec<FixedHash>, ProcessorError> {
         Ok(Vec::new())
     }
 
-    fn build_output_hash_map(&self) -> Result<HashMap<String, Id>, ProcessorError> {
+    fn build_output_hash_map(&self) -> Result<HashMap<FixedHash, Id>, ProcessorError> {
         Ok(HashMap::new())
     }
 }

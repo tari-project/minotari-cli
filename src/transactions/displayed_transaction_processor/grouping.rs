@@ -1,11 +1,11 @@
 use std::collections::{HashMap, HashSet};
 
-use chrono::NaiveDateTime;
-
 use super::error::ProcessorError;
 use super::formatting::AMOUNT_MATCHING_TOLERANCE;
 use super::resolver::TransactionDataResolver;
 use crate::models::{BalanceChange, Id};
+use chrono::NaiveDateTime;
+use tari_common_types::types::FixedHash;
 
 /// A grouped transaction consisting of one output (credit) and zero or more inputs (debits).
 #[derive(Debug, Clone)]
@@ -35,7 +35,7 @@ impl<'a, R: TransactionDataResolver> BalanceChangeGrouper<'a, R> {
     pub fn group(
         &self,
         changes: Vec<BalanceChange>,
-        input_hash_map: &HashMap<String, BalanceChange>,
+        input_hash_map: &HashMap<FixedHash, BalanceChange>,
     ) -> Result<Vec<GroupedTransaction>, ProcessorError> {
         let (coinbase_changes, regular_changes) = self.separate_coinbase(changes);
 
@@ -57,6 +57,7 @@ impl<'a, R: TransactionDataResolver> BalanceChangeGrouper<'a, R> {
                     account_id: base_key.account_id,
                     effective_height: base_key.effective_height,
                     effective_date: base_key.effective_date,
+                    //hash: base_key.hash,
                     sender: group.sender,
                     recipient: group.recipient,
                     memo_parsed: group.memo_parsed,
@@ -117,7 +118,7 @@ impl<'a, R: TransactionDataResolver> BalanceChangeGrouper<'a, R> {
     fn merge_within_block(
         &self,
         changes: Vec<BalanceChange>,
-        input_hash_map: &HashMap<String, BalanceChange>,
+        input_hash_map: &HashMap<FixedHash, BalanceChange>,
     ) -> Result<Vec<MergedGroup>, ProcessorError> {
         let (outputs, inputs) = self.separate_outputs_inputs(changes);
 
@@ -185,7 +186,7 @@ impl<'a, R: TransactionDataResolver> BalanceChangeGrouper<'a, R> {
         output_change: &BalanceChange,
         inputs: &[BalanceChange],
         used_indices: &HashSet<usize>,
-        input_hash_map: &HashMap<String, BalanceChange>,
+        input_hash_map: &HashMap<FixedHash, BalanceChange>,
     ) -> Result<(MergedGroup, Vec<usize>), ProcessorError> {
         let mut group = MergedGroup {
             output_change: Some(output_change.clone()),
@@ -290,6 +291,7 @@ impl<'a, R: TransactionDataResolver> BalanceChangeGrouper<'a, R> {
 struct BlockKey {
     account_id: Id,
     effective_height: u64,
+    // hash: FixedHash,
     effective_date: NaiveDateTime,
 }
 
@@ -308,12 +310,12 @@ pub(crate) struct MergedGroup {
 pub fn build_input_hash_map<R: TransactionDataResolver>(
     balance_changes: &[BalanceChange],
     resolver: &R,
-) -> Result<HashMap<String, BalanceChange>, ProcessorError> {
-    let mut map: HashMap<String, BalanceChange> = HashMap::new();
+) -> Result<HashMap<FixedHash, BalanceChange>, ProcessorError> {
+    let mut map: HashMap<FixedHash, BalanceChange> = HashMap::new();
 
     for change in balance_changes {
         if change.balance_debit > 0
-            && let Some(output_hash) = resolver.get_input_output_hash(change)?
+            && let Some((output_hash, _mined_hash)) = resolver.get_input_output_hash(change)?
         {
             map.insert(output_hash, change.clone());
         }
