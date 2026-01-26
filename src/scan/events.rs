@@ -94,6 +94,8 @@ pub struct BlockProcessedEvent {
 #[derive(Debug, Clone)]
 pub struct DetectedOutput {
     pub hash: FixedHash,
+    pub height: u64,
+    pub mined_in_block_hash: FixedHash,
     pub value: u64,
     pub is_coinbase: bool,
     pub memo: Option<String>,
@@ -101,13 +103,14 @@ pub struct DetectedOutput {
 
 #[derive(Debug, Clone)]
 pub struct SpentInput {
-    pub output_hash: Vec<u8>,
+    pub output_hash: FixedHash,
+    pub mined_in_block: FixedHash,
     pub value: u64,
 }
 
 #[derive(Debug, Clone)]
 pub struct ConfirmedOutput {
-    pub hash: Vec<u8>,
+    pub hash: FixedHash,
     pub original_height: u64,
     pub confirmation_height: u64,
 }

@@ -2,7 +2,7 @@ use log::{debug, info, warn};
 use rusqlite::{Connection, OptionalExtension, named_params};
 use serde::Deserialize;
 use serde_rusqlite::from_rows;
-
+use tari_common_types::types::FixedHash;
 use crate::db::error::{WalletDbError, WalletDbResult};
 use crate::log::mask_amount;
 use crate::models::Id;
@@ -264,7 +264,7 @@ pub fn get_displayed_transaction_by_id(conn: &Connection, id: &str) -> WalletDbR
 pub fn find_pending_outbound_by_output_hash(
     conn: &Connection,
     account_id: Id,
-    output_hash: &str,
+    output_hash: &FixedHash,
 ) -> WalletDbResult<Option<DisplayedTransaction>> {
     let pending_status = format!("{:?}", TransactionDisplayStatus::Pending).to_lowercase();
     let outgoing_direction = "outgoing";
@@ -287,8 +287,8 @@ pub fn find_pending_outbound_by_output_hash(
         .filter_map(|res| res.ok())
         .filter_map(|r| serde_json::from_str::<DisplayedTransaction>(&r.transaction_json).ok())
         .find(|tx| {
-            tx.details.sent_output_hashes.contains(&output_hash.to_string())
-                || tx.details.inputs.iter().any(|input| input.output_hash == output_hash)
+            tx.details.sent_output_hashes.contains(&output_hash)
+                || tx.details.inputs.iter().any(|input| &input.output_hash == output_hash)
         });
 
     Ok(found)

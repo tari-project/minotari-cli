@@ -61,6 +61,7 @@ use r2d2::PooledConnection;
 use r2d2_sqlite::SqliteConnectionManager;
 use tari_common::configuration::Network;
 use tari_common_types::{tari_address::TariAddressFeatures, transaction::TxId};
+use tari_common_types::types::FixedHash;
 use tari_transaction_components::{
     MicroMinotari, TransactionBuilder,
     consensus::ConsensusConstantsBuilder,
@@ -588,12 +589,9 @@ impl TransactionSender {
             .map(hex::encode);
 
         // Collect sent_output_hashes before moving signed_transaction
-        let sent_output_hashes: Vec<String> = signed_transaction
+        let sent_output_hashes: Vec<FixedHash> = signed_transaction
             .signed_transaction
-            .sent_hashes
-            .iter()
-            .map(hex::encode)
-            .collect();
+            .sent_hashes.clone();
 
         db::update_pending_transaction_status(
             &connection,
@@ -682,7 +680,7 @@ impl TransactionSender {
     fn build_pending_displayed_transaction(
         &self,
         processed_tx: &ProcessedTransaction,
-        sent_output_hashes: Vec<String>,
+        sent_output_hashes: Vec<FixedHash>,
         completed_tx_id: &str,
         amount: u64,
         fee: u64,
@@ -695,8 +693,9 @@ impl TransactionSender {
             .selected_utxos
             .iter()
             .map(|utxo| TransactionInput {
-                output_hash: hex::encode(utxo.output_hash().as_bytes()),
+                output_hash: utxo.output_hash(),
                 amount: utxo.value().as_u64(),
+                mined_in_block_hash: FixedHash::default(),
                 matched_output_id: None,
                 is_matched: false,
             })
@@ -711,7 +710,7 @@ impl TransactionSender {
             .credits_and_debits(0, amount + fee)
             .message(recipient.payment_id.clone())
             .counterparty(Some(recipient.address.to_base58()), None)
-            .blockchain_info(0, now, 0) // No block height yet
+            .blockchain_info(0, FixedHash::default(), now, 0) // No block height yet
             .fee(Some(fee))
             .inputs(inputs)
             .sent_output_hashes(sent_output_hashes)

@@ -1,5 +1,6 @@
 use chrono::NaiveDateTime;
-
+use tari_common_types::payment_reference::generate_payment_reference;
+use tari_common_types::types::FixedHash;
 use super::error::ProcessorError;
 use super::formatting::format_micro_tari;
 use super::types::{
@@ -20,6 +21,7 @@ pub struct DisplayedTransactionBuilder {
     counterparty_address: Option<String>,
     counterparty_emoji: Option<String>,
     block_height: Option<u64>,
+    block_hash: Option<FixedHash>,
     timestamp: Option<NaiveDateTime>,
     confirmations: Option<u64>,
     fee: Option<u64>,
@@ -30,7 +32,7 @@ pub struct DisplayedTransactionBuilder {
     output_type: Option<String>,
     coinbase_extra: Option<String>,
     memo_hex: Option<String>,
-    sent_output_hashes: Vec<String>,
+    sent_output_hashes: Vec<FixedHash>,
 }
 
 impl DisplayedTransactionBuilder {
@@ -90,10 +92,11 @@ impl DisplayedTransactionBuilder {
         self
     }
 
-    pub fn blockchain_info(mut self, height: u64, timestamp: NaiveDateTime, confirmations: u64) -> Self {
+    pub fn blockchain_info(mut self, height: u64, hash: FixedHash, timestamp: NaiveDateTime, confirmations: u64) -> Self {
         self.block_height = Some(height);
         self.timestamp = Some(timestamp);
         self.confirmations = Some(confirmations);
+        self.block_hash = Some(hash);
         self
     }
 
@@ -127,7 +130,7 @@ impl DisplayedTransactionBuilder {
         self
     }
 
-    pub fn sent_output_hashes(mut self, hashes: Vec<String>) -> Self {
+    pub fn sent_output_hashes(mut self, hashes: Vec<FixedHash>) -> Self {
         self.sent_output_hashes = hashes;
         self
     }
@@ -154,6 +157,14 @@ impl DisplayedTransactionBuilder {
             TransactionDirection::Incoming => None,
         };
 
+        let mut payrefs = Vec::new();
+        if let Some(block_hash) = &self.block_hash {
+
+            for output_hash in self.sent_output_hashes.iter() {
+                let payref = generate_payment_reference(block_hash, output_hash);
+                payrefs.push(payref);
+            }
+        }
         Ok(DisplayedTransaction {
             id: self.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
             direction,
@@ -167,6 +178,7 @@ impl DisplayedTransactionBuilder {
                 block_height: self.block_height.unwrap_or(0),
                 timestamp: self.timestamp.unwrap_or_default(),
                 confirmations: self.confirmations.unwrap_or(0),
+                block_hash: self.block_hash.unwrap_or_default(),
             },
             fee,
             details: TransactionDetails {
@@ -179,6 +191,7 @@ impl DisplayedTransactionBuilder {
                 coinbase_extra: self.coinbase_extra,
                 memo_hex: self.memo_hex,
                 sent_output_hashes: self.sent_output_hashes,
+                sent_payrefs: payrefs,
             },
         })
     }

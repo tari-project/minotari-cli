@@ -2,9 +2,9 @@ use std::collections::HashMap;
 
 use log::warn;
 use rusqlite::{OptionalExtension, named_params};
-
+use tari_common_types::types::FixedHash;
 use super::{OutputDetails, TransactionDataResolver};
-use crate::db::SqlitePool;
+use crate::db::{SqlitePool};
 use crate::models::{BalanceChange, Id, OutputStatus};
 use crate::transactions::ProcessorError;
 use crate::transactions::displayed_transaction_processor::parsing::ParsedWalletOutput;
@@ -31,7 +31,7 @@ impl TransactionDataResolver for DatabaseResolver {
         let row = conn
             .query_row(
                 r#"
-                SELECT output_hash, confirmed_height, status, wallet_output_json
+                SELECT output_hash, mined_in_block_height, status, mined_in_block_hash, wallet_output_json
                 FROM outputs
                 WHERE id = :id AND deleted_at IS NULL
                 "#,
@@ -39,8 +39,9 @@ impl TransactionDataResolver for DatabaseResolver {
                 |row| {
                     Ok((
                         row.get::<_, Vec<u8>>("output_hash")?,
-                        row.get::<_, Option<i64>>("confirmed_height")?,
+                        row.get::<_, i64>("mined_in_block_height")?,
                         row.get::<_, String>("status")?,
+                        row.get::<_, Vec<u8>>("mined_in_block_hash")?,
                         row.get::<_, Option<String>>("wallet_output_json")?,
                     ))
                 },
@@ -48,7 +49,7 @@ impl TransactionDataResolver for DatabaseResolver {
             .optional()
             .map_err(|e| ProcessorError::DbError(e.into()))?;
 
-        let Some((output_hash, confirmed_height, status_str, wallet_output_json)) = row else {
+        let Some((output_hash, mined_in_block_height, status_str, block_hash, wallet_output_json)) = row else {
             return Ok(None);
         };
 
@@ -77,10 +78,11 @@ impl TransactionDataResolver for DatabaseResolver {
             } else {
                 ("Unknown".to_string(), None, false, Vec::new())
             };
-
+        let hash = FixedHash::try_from(output_hash).map_err(|e| ProcessorError::ParseError(e.to_string()))?;
         Ok(Some(OutputDetails {
-            hash_hex: hex::encode(output_hash),
-            confirmed_height: confirmed_height.map(|h| h as u64),
+            hash,
+            mined_in_block_height: mined_in_block_height as u64,
+            mined_hash: FixedHash::try_from(block_hash).map_err(|e| ProcessorError::ParseError(e.to_string()))?,
             status,
             output_type,
             coinbase_extra,
@@ -89,31 +91,41 @@ impl TransactionDataResolver for DatabaseResolver {
         }))
     }
 
-    fn get_input_output_hash(&self, change: &BalanceChange) -> Result<Option<String>, ProcessorError> {
+    fn get_input_output_hash(&self, change: &BalanceChange) -> Result<Option<(FixedHash, FixedHash)>, ProcessorError> {
         let Some(input_id) = change.caused_by_input_id else {
             return Ok(None);
         };
 
         let conn = self.pool.get().map_err(|e| ProcessorError::DbError(e.into()))?;
-
-        let output_hash: Option<Vec<u8>> = conn
-            .query_row(
-                r#"
-                SELECT o.output_hash
+        let mut stmt = conn.prepare_cached(
+            r#"
+                SELECT o.output_hash, i.mined_in_block_hash
                 FROM inputs i
                 JOIN outputs o ON i.output_id = o.id
                 WHERE i.id = :id AND i.deleted_at IS NULL
                 "#,
-                named_params! { ":id": input_id },
-                |row| row.get(0),
-            )
-            .optional()
-            .map_err(|e| ProcessorError::DbError(e.into()))?;
+        ).map_err(|e| ProcessorError::DbError(e.into()))?;
 
-        Ok(output_hash.map(hex::encode))
+        let result = stmt
+            .query_row(named_params! { ":id": input_id },
+                |row| {
+                    let output_hash: Vec<u8> = row.get("output_hash")?;
+                    let mined_hash: Vec<u8> = row.get("mined_in_block_hash")?;
+
+                    Ok((output_hash, mined_hash))
+                },
+            )
+            .optional().map_err(|e| ProcessorError::DbError(e.into()))?;
+
+        result.map(|(output_hash, mined_hash)| {
+            let input = FixedHash::try_from(output_hash).map_err(|e| ProcessorError::ParseError(e.to_string()))?;
+            let mined = FixedHash::try_from(mined_hash).map_err(|e| ProcessorError::ParseError(e.to_string()))?;
+            Ok((input, mined))
+        }).transpose()
+
     }
 
-    fn get_sent_output_hashes(&self, change: &BalanceChange) -> Result<Vec<String>, ProcessorError> {
+    fn get_sent_output_hashes(&self, change: &BalanceChange) -> Result<Vec<FixedHash>, ProcessorError> {
         if let Some(details) = self.get_output_details(change)? {
             Ok(details.sent_output_hashes)
         } else {
@@ -121,7 +133,7 @@ impl TransactionDataResolver for DatabaseResolver {
         }
     }
 
-    fn build_output_hash_map(&self) -> Result<HashMap<String, Id>, ProcessorError> {
+    fn build_output_hash_map(&self) -> Result<HashMap<FixedHash, Id>, ProcessorError> {
         let conn = self.pool.get().map_err(|e| ProcessorError::DbError(e.into()))?;
 
         let mut stmt = conn
@@ -137,8 +149,9 @@ impl TransactionDataResolver for DatabaseResolver {
         let rows = stmt
             .query_map([], |row| {
                 let id: i64 = row.get("id")?;
-                let hash: Vec<u8> = row.get("output_hash")?;
-                Ok((hex::encode(hash), id))
+                let raw_hash: Vec<u8> = row.get("output_hash")?;
+                let hash = FixedHash::try_from(raw_hash).map_err(|e| rusqlite::Error::FromSqlConversionFailure(0, rusqlite::types::Type::Blob, Box::new(e)))?;
+                Ok((hash, id))
             })
             .map_err(|e| ProcessorError::DbError(e.into()))?;
 
