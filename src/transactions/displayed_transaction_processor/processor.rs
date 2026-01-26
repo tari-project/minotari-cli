@@ -10,7 +10,6 @@ use crate::db::{self, SqlitePool};
 use crate::models::{BalanceChange, Id};
 use log::debug;
 use rusqlite::Connection;
-use tari_common_types::types::FixedHash;
 
 /// Processes balance changes into user-displayable transactions.
 pub struct DisplayedTransactionProcessor {
@@ -121,7 +120,11 @@ impl DisplayedTransactionProcessor {
         let mined_hash = match (outputs.first(), inputs.first()) {
             (Some(output), _) => output.mined_in_block_hash,
             (_, Some(input)) => input.mined_in_block_hash,
-            _ => FixedHash::default(), //this should not happen as the display tx should have at least one input or output,
+            _ => {
+                return Err(ProcessorError::ParseError(
+                    "Display transaction has no inputs or outputs".to_string(),
+                ));
+            },
         };
 
         let source = self.determine_source(&group, is_coinbase);

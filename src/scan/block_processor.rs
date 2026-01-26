@@ -375,7 +375,7 @@ impl<E: EventSender> BlockProcessor<E> {
                     acc.outputs.push(DetectedOutput {
                         hash: *hash,
                         height: block.height,
-                        mined_in_block_hash: block.block_hash.clone(),
+                        mined_in_block_hash: block.block_hash,
                         value: output.value().as_u64(),
                         is_coinbase: output.features().is_coinbase(),
                         memo: memo.parsed,
@@ -456,8 +456,8 @@ impl<E: EventSender> BlockProcessor<E> {
 
                 if let Some(ref mut acc) = self.current_block {
                     acc.inputs.push(SpentInput {
-                        output_hash: input_hash.clone(),
-                        mined_in_block: block.block_hash.clone(),
+                        output_hash: *input_hash,
+                        mined_in_block: block.block_hash,
                         value,
                     });
                     acc.add_balance_change(balance_change);
@@ -522,7 +522,7 @@ impl<E: EventSender> BlockProcessor<E> {
             info!(
                 target: "audit",
                 account_id = self.account_id,
-                output_hash = &*mask_string(&hex::encode(&unconfirmed_output.output_hash)),
+                output_hash = &*mask_string(&hex::encode(unconfirmed_output.output_hash)),
                 original_height = unconfirmed_output.mined_in_block_height,
                 confirmed_at = block.height;
                 "Output confirmed"
@@ -548,7 +548,7 @@ impl<E: EventSender> BlockProcessor<E> {
 
             if let Some(ref mut acc) = self.current_block {
                 acc.confirmations.push(ConfirmedOutput {
-                    hash: unconfirmed_output.output_hash.clone(),
+                    hash: unconfirmed_output.output_hash,
                     original_height: unconfirmed_output.mined_in_block_height as u64,
                     confirmation_height: block.height,
                 });
@@ -571,7 +571,7 @@ impl<E: EventSender> BlockProcessor<E> {
             id: 0,
             account_id: self.account_id,
             event_type: WalletEventType::OutputConfirmed {
-                hash: output_hash.clone(),
+                hash: *output_hash,
                 block_height: original_height,
                 confirmation_height,
                 memo_parsed,

@@ -58,9 +58,9 @@ impl TransactionDataResolver for InMemoryResolver<'_> {
 
         if let Some(output) = self.output_by_value.get(&change.balance_credit) {
             return Ok(Some(OutputDetails {
-                hash: output.hash.clone(),
+                hash: output.hash,
                 mined_in_block_height: output.height,
-                mined_hash: output.mined_in_block_hash.clone(),
+                mined_hash: output.mined_in_block_hash,
                 status: OutputStatus::Unspent,
                 output_type: if output.is_coinbase {
                     "Coinbase".to_string()
@@ -82,7 +82,7 @@ impl TransactionDataResolver for InMemoryResolver<'_> {
         }
 
         if let Some(input) = self.input_by_value.get(&change.balance_debit) {
-            return Ok(Some((input.output_hash.clone(), input.mined_in_block.clone())));
+            return Ok(Some((input.output_hash, input.mined_in_block)));
         }
 
         Ok(None)

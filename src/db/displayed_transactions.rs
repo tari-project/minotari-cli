@@ -52,7 +52,7 @@ pub fn insert_displayed_transaction(conn: &Connection, transaction: &DisplayedTr
 
     let transaction_json = serialize_tx(transaction)?;
     let now = current_db_timestamp();
-    let payref = serde_json::to_string(&transaction.details.sent_payrefs).ok();
+    let payref = Some(serde_json::to_string(&transaction.details.sent_payrefs)?);
 
     conn.execute(
         r#"
@@ -290,7 +290,7 @@ pub fn find_pending_outbound_by_output_hash(
         .filter_map(|res| res.ok())
         .filter_map(|r| serde_json::from_str::<DisplayedTransaction>(&r.transaction_json).ok())
         .find(|tx| {
-            tx.details.sent_output_hashes.contains(&output_hash)
+            tx.details.sent_output_hashes.contains(output_hash)
                 || tx.details.inputs.iter().any(|input| &input.output_hash == output_hash)
         });
 
@@ -308,7 +308,7 @@ pub fn update_displayed_transaction_mined(conn: &Connection, tx: &DisplayedTrans
 
     let status_str = format!("{:?}", tx.status).to_lowercase();
     let transaction_json = serialize_tx(tx)?;
-    let payref = serde_json::to_string(&tx.details.sent_payrefs).ok();
+    let payref = Some(serde_json::to_string(&tx.details.sent_payrefs)?);
 
     let rows_affected = conn.execute(
         r#"
