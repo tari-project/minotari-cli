@@ -483,3 +483,50 @@ pub fn get_completed_transactions_by_account(
 
     Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
+
+/// Retrieves a completed transaction by its payment reference.
+///
+/// The sent_payref field is populated when a transaction is confirmed.
+///
+/// # Parameters
+///
+/// * `conn` - Database connection
+/// * `account_id` - The account to query transactions for
+/// * `payref` - The payment reference to search for
+///
+/// # Returns
+///
+/// The completed transaction if found, or None if no match.
+pub fn get_completed_transaction_by_payref(
+    conn: &Connection,
+    account_id: i64,
+    payref: &str,
+) -> WalletDbResult<Option<CompletedTransaction>> {
+    debug!(
+        account_id = account_id,
+        payref = payref;
+        "DB: Fetching completed transaction by payref"
+    );
+
+    let mut stmt = conn.prepare_cached(
+        r#"
+        SELECT id, account_id, pending_tx_id, status, last_rejected_reason, kernel_excess,
+               sent_payref, sent_output_hash, mined_height, mined_block_hash, confirmation_height,
+               broadcast_attempts, serialized_transaction, created_at, updated_at
+        FROM completed_transactions
+        WHERE account_id = :account_id AND sent_payref = :payref
+        "#,
+    )?;
+
+    let result = stmt
+        .query_row(
+            named_params! {
+                ":account_id": account_id,
+                ":payref": payref
+            },
+            map_row,
+        )
+        .optional()?;
+
+    Ok(result)
+}

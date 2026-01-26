@@ -15,7 +15,9 @@
 //! - `GET /accounts/{name}/scan_status` - Retrieve last scanned block height and timestamp
 //! - `GET /accounts/{name}/events` - Retrieve all wallet events for an account
 //! - `GET /accounts/{name}/completed_transactions` - Retrieve all completed transactions for an account
+//! - `GET /accounts/{name}/completed_transactions/by_payref/{payref}` - Retrieve completed transaction by payment reference
 //! - `GET /accounts/{name}/displayed_transactions` - Retrieve all displayed transactions for an account
+//! - `GET /accounts/{name}/displayed_transactions/by_payref/{payref}` - Retrieve displayed transactions by payment reference
 //! - `POST /accounts/{name}/lock_funds` - Lock UTXOs for transaction creation
 //! - `POST /accounts/{name}/create_unsigned_transaction` - Create an unsigned one-sided transaction
 //! - `GET /swagger-ui` - Interactive Swagger UI documentation
@@ -109,7 +111,9 @@ impl FromRef<AppState> for SqlitePool {
 /// - `/accounts/{name}/scan_status` - Get last scanned block info
 /// - `/accounts/{name}/events` - Get wallet events
 /// - `/accounts/{name}/completed_transactions` - Get completed transactions
+/// - `/accounts/{name}/completed_transactions/by_payref/{payref}` - Get completed transaction by payment reference
 /// - `/accounts/{name}/displayed_transactions` - Get displayed transactions
+/// - `/accounts/{name}/displayed_transactions/by_payref/{payref}` - Get displayed transactions by payment reference
 /// - `/accounts/{name}/lock_funds` - Lock funds for transaction
 /// - `/accounts/{name}/create_unsigned_transaction` - Create unsigned transaction
 ///
@@ -137,7 +141,9 @@ impl FromRef<AppState> for SqlitePool {
         accounts::api_get_scan_status,
         accounts::api_get_events,
         accounts::api_get_completed_transactions,
+        accounts::api_get_completed_transaction_by_payref,
         accounts::api_get_displayed_transactions,
+        accounts::api_get_displayed_transactions_by_payref,
         accounts::api_lock_funds,
         accounts::api_create_unsigned_transaction,
     ),
@@ -240,8 +246,16 @@ pub fn create_router(db_pool: SqlitePool, network: Network, password: String) ->
             get(accounts::api_get_completed_transactions),
         )
         .route(
+            "/accounts/{name}/completed_transactions/by_payref/{payref}",
+            get(accounts::api_get_completed_transaction_by_payref),
+        )
+        .route(
             "/accounts/{name}/displayed_transactions",
             get(accounts::api_get_displayed_transactions),
+        )
+        .route(
+            "/accounts/{name}/displayed_transactions/by_payref/{payref}",
+            get(accounts::api_get_displayed_transactions_by_payref),
         )
         .route("/accounts/{name}/lock_funds", post(accounts::api_lock_funds))
         .route(

@@ -87,11 +87,11 @@ pub use pending_transactions::{
 mod completed_transactions;
 pub use completed_transactions::{
     CompletedTransaction, CompletedTransactionStatus, create_completed_transaction, get_completed_transaction_by_id,
-    get_completed_transactions_by_account, get_completed_transactions_by_status, get_pending_completed_transactions,
-    mark_completed_transaction_as_broadcasted, mark_completed_transaction_as_confirmed,
-    mark_completed_transaction_as_mined_unconfirmed, mark_completed_transaction_as_rejected,
-    reset_mined_completed_transactions_from_height, revert_completed_transaction_to_completed,
-    update_completed_transaction_status,
+    get_completed_transaction_by_payref, get_completed_transactions_by_account, get_completed_transactions_by_status,
+    get_pending_completed_transactions, mark_completed_transaction_as_broadcasted,
+    mark_completed_transaction_as_confirmed, mark_completed_transaction_as_mined_unconfirmed,
+    mark_completed_transaction_as_rejected, reset_mined_completed_transactions_from_height,
+    revert_completed_transaction_to_completed, update_completed_transaction_status,
 };
 
 mod events;
@@ -106,12 +106,12 @@ pub use inputs::{get_input_details_for_balance_change_by_id, insert_input, soft_
 mod displayed_transactions;
 pub use displayed_transactions::{
     find_pending_outbound_by_output_hash, get_displayed_transaction_by_id, get_displayed_transactions_by_account,
-    get_displayed_transactions_by_status, get_displayed_transactions_excluding_reorged,
-    get_displayed_transactions_from_height, get_displayed_transactions_needing_confirmation_update,
-    get_displayed_transactions_paginated, insert_displayed_transaction, mark_displayed_transaction_rejected,
-    mark_displayed_transactions_reorganized, mark_displayed_transactions_reorganized_and_return,
-    update_displayed_transaction_confirmations, update_displayed_transaction_mined,
-    update_displayed_transaction_status,
+    get_displayed_transactions_by_payref, get_displayed_transactions_by_status,
+    get_displayed_transactions_excluding_reorged, get_displayed_transactions_from_height,
+    get_displayed_transactions_needing_confirmation_update, get_displayed_transactions_paginated,
+    insert_displayed_transaction, mark_displayed_transaction_rejected, mark_displayed_transactions_reorganized,
+    mark_displayed_transactions_reorganized_and_return, update_displayed_transaction_confirmations,
+    update_displayed_transaction_mined, update_displayed_transaction_status,
 };
 
 const DB_POOL_SIZE: u32 = 5;

@@ -59,6 +59,7 @@ use crate::{
     db::{
         AccountBalance, DbWalletEvent, get_account_by_name, get_balance, get_completed_transactions_by_account,
         get_displayed_transactions_paginated, get_events_by_account_id, get_latest_scanned_block_with_timestamp,
+        get_completed_transaction_by_payref, get_displayed_transactions_by_payref,
     },
     log::mask_amount,
     transactions::{
@@ -1263,3 +1264,153 @@ pub async fn api_create_unsigned_transaction(
 
     Ok(Json(serde_json::to_value(result)?))
 }
+
+/// Path parameters for payref lookup.
+///
+/// Used to extract the payment reference from URL path segments.
+#[derive(Debug, Deserialize, IntoParams, utoipa::ToSchema)]
+pub struct PayrefParams {
+    /// The unique name identifying the wallet account.
+    name: String,
+    /// The payment reference to search for.
+    payref: String,
+}
+
+/// Retrieves a completed transaction by its payment reference.
+///
+/// Returns a completed transaction that matches the specified payment reference.
+/// The payment reference is typically assigned when a transaction is confirmed
+/// on the blockchain.
+///
+/// # Path Parameters
+///
+/// - `name`: The unique account name to query
+/// - `payref`: The payment reference to search for
+///
+/// # Response
+///
+/// Returns a [`CompletedTransactionResponse`] object if found, containing:
+/// - Transaction ID and status
+/// - Kernel excess (hex encoded)
+/// - Mining and confirmation details
+/// - Creation and update timestamps
+///
+/// # Errors
+///
+/// - [`ApiError::AccountNotFound`]: The specified account does not exist
+/// - [`ApiError::NotFound`]: No transaction found with the given payment reference
+/// - [`ApiError::DbError`]: Database connection or query failure
+///
+/// # Example Request
+///
+/// ```bash
+/// curl -X GET http://localhost:8080/accounts/default/completed_transactions/by_payref/my-payment-ref-123
+/// ```
+#[utoipa::path(
+    get,
+    path = "/accounts/{name}/completed_transactions/by_payref/{payref}",
+    responses(
+        (status = 200, description = "Completed transaction retrieved successfully", body = CompletedTransactionResponse),
+        (status = 404, description = "Account or transaction not found", body = ApiError),
+        (status = 500, description = "Internal server error", body = ApiError),
+    ),
+    params(
+        ("name" = String, Path, description = "Name of the account to retrieve transaction from"),
+        ("payref" = String, Path, description = "Payment reference to search for"),
+    )
+)]
+pub async fn api_get_completed_transaction_by_payref(
+    State(app_state): State<AppState>,
+    Path(PayrefParams { name, payref }): Path<PayrefParams>,
+) -> Result<Json<CompletedTransactionResponse>, ApiError> {
+    debug!(
+        account = &*name,
+        payref = &*payref;
+        "API: Get completed transaction by payref request"
+    );
+
+    let pool = app_state.db_pool.clone();
+    let name = name.clone();
+
+    let transaction = tokio::task::spawn_blocking(move || {
+        let conn = pool.get().map_err(|e| ApiError::DbError(e.to_string()))?;
+
+        let account = get_account_by_name(&conn, &name)
+            .map_err(|e| ApiError::DbError(e.to_string()))?
+            .ok_or_else(|| ApiError::AccountNotFound(name.clone()))?;
+
+        get_completed_transaction_by_payref(&conn, account.id, &payref)
+            .map_err(|e| ApiError::DbError(e.to_string()))?
+            .ok_or_else(|| ApiError::NotFound(format!("No completed transaction found with payref: {}", payref)))
+    })
+    .await
+    .map_err(|e| ApiError::InternalServerError(format!("Task join error: {}", e)))??;
+
+    Ok(Json(CompletedTransactionResponse::from(transaction)))
+}
+
+/// Retrieves displayed transactions by payment reference.
+///
+/// Returns displayed transactions that contain the specified payment reference.
+/// This searches within the payment references stored in each transaction.
+///
+/// # Path Parameters
+///
+/// - `name`: The unique account name to query
+/// - `payref`: The payment reference to search for
+///
+/// # Response
+///
+/// Returns a list of [`DisplayedTransaction`] objects that contain the payment reference.
+///
+/// # Errors
+///
+/// - [`ApiError::AccountNotFound`]: The specified account does not exist
+/// - [`ApiError::DbError`]: Database connection or query failure
+///
+/// # Example Request
+///
+/// ```bash
+/// curl -X GET http://localhost:8080/accounts/default/displayed_transactions/by_payref/my-payment-ref-123
+/// ```
+#[utoipa::path(
+    get,
+    path = "/accounts/{name}/displayed_transactions/by_payref/{payref}",
+    responses(
+        (status = 200, description = "Displayed transactions retrieved successfully", body = Vec<DisplayedTransaction>),
+        (status = 404, description = "Account not found", body = ApiError),
+        (status = 500, description = "Internal server error", body = ApiError),
+    ),
+    params(
+        ("name" = String, Path, description = "Name of the account to retrieve transactions from"),
+        ("payref" = String, Path, description = "Payment reference to search for"),
+    )
+)]
+pub async fn api_get_displayed_transactions_by_payref(
+    State(app_state): State<AppState>,
+    Path(PayrefParams { name, payref }): Path<PayrefParams>,
+) -> Result<Json<Vec<DisplayedTransaction>>, ApiError> {
+    debug!(
+        account = &*name,
+        payref = &*payref;
+        "API: Get displayed transactions by payref request"
+    );
+
+    let pool = app_state.db_pool.clone();
+    let name = name.clone();
+
+    let transactions = tokio::task::spawn_blocking(move || {
+        let conn = pool.get().map_err(|e| ApiError::DbError(e.to_string()))?;
+
+        let account = get_account_by_name(&conn, &name)
+            .map_err(|e| ApiError::DbError(e.to_string()))?
+            .ok_or_else(|| ApiError::AccountNotFound(name.clone()))?;
+
+        get_displayed_transactions_by_payref(&conn, account.id, &payref).map_err(|e| ApiError::DbError(e.to_string()))
+    })
+    .await
+    .map_err(|e| ApiError::InternalServerError(format!("Task join error: {}", e)))??;
+
+    Ok(Json(transactions))
+}
+
