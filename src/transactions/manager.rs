@@ -56,7 +56,7 @@
 
 use anyhow::anyhow;
 use chrono::{Duration, Utc};
-use log::{info, warn};
+use log::{error, info, warn};
 use r2d2::PooledConnection;
 use r2d2_sqlite::SqliteConnectionManager;
 use tari_common::configuration::Network;
@@ -467,41 +467,65 @@ impl TransactionSender {
         let pending_transaction_id = self.create_or_find_pending_transaction(&mut processed_transaction)?;
         processed_transaction.update_id(pending_transaction_id.clone());
 
-        let mut utxo_selection = processed_transaction.selected_utxos.clone();
-        if utxo_selection.is_empty() {
-            let db_utxo_selection = db::fetch_outputs_by_lock_request_id(&connection, processed_transaction.id())?;
-            utxo_selection = db_utxo_selection.into_iter().map(|db_out| db_out.output).collect();
+        let result: Result<PrepareOneSidedTransactionForSigningResult, anyhow::Error> = (|| {
+            let mut utxo_selection = processed_transaction.selected_utxos.clone();
+            if utxo_selection.is_empty() {
+                let db_utxo_selection = db::fetch_outputs_by_lock_request_id(&connection, processed_transaction.id())?;
+                utxo_selection = db_utxo_selection.into_iter().map(|db_out| db_out.output).collect();
+            }
+
+            let tx_builder = self.prepare_transaction_builder(utxo_selection)?;
+
+            let sender_address = self.account.get_address(self.network, &self.password)?;
+            let tx_id = TxId::new_random();
+
+            let payment_id = match &recipient.payment_id {
+                Some(s) => MemoField::new_open_from_string(s, TxType::PaymentToOther).map_err(|e| anyhow!(e))?,
+                None => MemoField::new_empty(),
+            };
+            let output_features = OutputFeatures::default();
+
+            let payment_recipient = PaymentRecipient {
+                amount: recipient.amount,
+                output_features: output_features.clone(),
+                address: recipient.address.clone(),
+                payment_id: payment_id.clone(),
+            };
+
+            let res = prepare_one_sided_transaction_for_signing(
+                tx_id,
+                tx_builder,
+                &[payment_recipient],
+                payment_id,
+                sender_address,
+            )?;
+
+            Ok(res)
+        })();
+
+        match result {
+            Ok(res) => {
+                self.processed_transactions = processed_transaction;
+                Ok(res)
+            },
+            Err(e) => {
+                warn!(target: "audit", error:% = e; "Transaction creation failed, unlocking funds");
+
+                if let Err(e) = db::update_pending_transaction_status(
+                    &connection,
+                    &pending_transaction_id,
+                    PendingTransactionStatus::Expired,
+                ) {
+                    error!(target: "audit", error:% = e; "Failed to update pending transaction status during cleanup");
+                }
+
+                if let Err(e) = db::unlock_outputs_for_request(&connection, &pending_transaction_id) {
+                    error!(target: "audit", error:% = e; "Failed to unlock outputs during cleanup");
+                }
+
+                Err(e)
+            },
         }
-
-        let tx_builder = self.prepare_transaction_builder(utxo_selection)?;
-
-        let sender_address = self.account.get_address(self.network, &self.password)?;
-        let tx_id = TxId::new_random();
-
-        let payment_id = match &recipient.payment_id {
-            Some(s) => MemoField::new_open_from_string(s, TxType::PaymentToOther).map_err(|e| anyhow!(e))?,
-            None => MemoField::new_empty(),
-        };
-        let output_features = OutputFeatures::default();
-
-        let payment_recipient = PaymentRecipient {
-            amount: recipient.amount,
-            output_features: output_features.clone(),
-            address: recipient.address.clone(),
-            payment_id: payment_id.clone(),
-        };
-
-        let result = prepare_one_sided_transaction_for_signing(
-            tx_id,
-            tx_builder,
-            &[payment_recipient],
-            payment_id,
-            sender_address,
-        )?;
-
-        self.processed_transactions = processed_transaction;
-
-        Ok(result)
     }
 
     /// Finalizes a signed transaction and broadcasts it to the network.
