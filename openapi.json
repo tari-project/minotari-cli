@@ -264,6 +264,68 @@
         }
       }
     },
+    "/accounts/{name}/completed_transactions/by_payref/{payref}": {
+      "get": {
+        "tags": [
+          "accounts"
+        ],
+        "summary": "Retrieves a completed transaction by its payment reference.",
+        "description": "Returns a completed transaction that matches the specified payment reference.\nThe payment reference is typically assigned when a transaction is confirmed\non the blockchain.\n\n# Path Parameters\n\n- `name`: The unique account name to query\n- `payref`: The payment reference to search for\n\n# Response\n\nReturns a [`CompletedTransactionResponse`] object if found, containing:\n- Transaction ID and status\n- Kernel excess (hex encoded)\n- Mining and confirmation details\n- Creation and update timestamps\n\n# Errors\n\n- [`ApiError::AccountNotFound`]: The specified account does not exist\n- [`ApiError::NotFound`]: No transaction found with the given payment reference\n- [`ApiError::DbError`]: Database connection or query failure\n\n# Example Request\n\n```bash\ncurl -X GET http://localhost:8080/accounts/default/completed_transactions/by_payref/my-payment-ref-123\n```",
+        "operationId": "api_get_completed_transaction_by_payref",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Name of the account to retrieve transaction from",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "payref",
+            "in": "path",
+            "description": "Payment reference to search for",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Completed transaction retrieved successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/CompletedTransactionResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Account or transaction not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/accounts/{name}/create_unsigned_transaction": {
       "post": {
         "tags": [
@@ -373,6 +435,71 @@
             "schema": {
               "type": "integer",
               "format": "int64"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Displayed transactions retrieved successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/DisplayedTransaction"
+                  }
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Account not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/accounts/{name}/displayed_transactions/by_payref/{payref}": {
+      "get": {
+        "tags": [
+          "accounts"
+        ],
+        "summary": "Retrieves displayed transactions by payment reference.",
+        "description": "Returns displayed transactions that contain the specified payment reference.\nThis searches within the payment references stored in each transaction.\n\n# Path Parameters\n\n- `name`: The unique account name to query\n- `payref`: The payment reference to search for\n\n# Response\n\nReturns a list of [`DisplayedTransaction`] objects that contain the payment reference.\n\n# Errors\n\n- [`ApiError::AccountNotFound`]: The specified account does not exist\n- [`ApiError::DbError`]: Database connection or query failure\n\n# Example Request\n\n```bash\ncurl -X GET http://localhost:8080/accounts/default/displayed_transactions/by_payref/my-payment-ref-123\n```",
+        "operationId": "api_get_displayed_transactions_by_payref",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Name of the account to retrieve transactions from",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "payref",
+            "in": "path",
+            "description": "Payment reference to search for",
+            "required": true,
+            "schema": {
+              "type": "string"
             }
           }
         ],
@@ -848,9 +975,13 @@
         "required": [
           "block_height",
           "timestamp",
-          "confirmations"
+          "confirmations",
+          "block_hash"
         ],
         "properties": {
+          "block_hash": {
+            "$ref": "#/components/schemas/FixedHash"
+          },
           "block_height": {
             "type": "integer",
             "format": "int64",
@@ -1165,6 +1296,14 @@
           }
         }
       },
+      "FixedHash": {
+        "type": "array",
+        "items": {
+          "type": "integer",
+          "format": "int32",
+          "minimum": 0
+        }
+      },
       "LockFundsRequest": {
         "type": "object",
         "description": "Request body for locking funds in preparation for a transaction.\n\nThis request reserves (locks) a specified amount of funds from the account's\navailable UTXOs. Locked funds cannot be used in other transactions until\neither the lock expires or the transaction is completed/cancelled.\n\n# JSON Example\n\n```json\n{\n  \"amount\": 1000000,\n  \"num_outputs\": 2,\n  \"fee_per_gram\": 5,\n  \"estimated_output_size\": 1024,\n  \"seconds_to_lock_utxos\": 3600,\n  \"idempotency_key\": \"unique-request-id-12345\"\n}\n```\n\n# Minimal Request\n\nOnly `amount` is required; all other fields have sensible defaults:\n\n```json\n{\n  \"amount\": 1000000\n}\n```",
@@ -1381,9 +1520,15 @@
           "sent_output_hashes": {
             "type": "array",
             "items": {
-              "type": "string"
+              "$ref": "#/components/schemas/FixedHash"
             },
             "description": "Hashes of outputs sent in this transaction (hex encoded).\nUsed to match pending broadcasted transactions with scanned ones."
+          },
+          "sent_payrefs": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/FixedHash"
+            }
           },
           "total_credit": {
             "type": "integer",
@@ -1421,7 +1566,8 @@
         "required": [
           "output_hash",
           "amount",
-          "is_matched"
+          "is_matched",
+          "mined_in_block_hash"
         ],
         "properties": {
           "amount": {
@@ -1440,8 +1586,11 @@
             "format": "int64",
             "description": "ID of the matched output in our database (if found)."
           },
+          "mined_in_block_hash": {
+            "$ref": "#/components/schemas/FixedHash"
+          },
           "output_hash": {
-            "type": "string"
+            "$ref": "#/components/schemas/FixedHash"
           }
         }
       },
@@ -1452,6 +1601,8 @@
           "hash",
           "amount",
           "status",
+          "mined_in_block_height",
+          "mined_in_block_hash",
           "output_type",
           "is_change"
         ],
@@ -1461,19 +1612,19 @@
             "format": "int64",
             "minimum": 0
           },
-          "confirmed_height": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
-            "minimum": 0
-          },
           "hash": {
-            "type": "string"
+            "$ref": "#/components/schemas/FixedHash"
           },
           "is_change": {
             "type": "boolean"
+          },
+          "mined_in_block_hash": {
+            "$ref": "#/components/schemas/FixedHash"
+          },
+          "mined_in_block_height": {
+            "type": "integer",
+            "format": "int64",
+            "minimum": 0
           },
           "output_type": {
             "type": "string"
