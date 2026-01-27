@@ -100,7 +100,7 @@ impl DisplayedTransactionProcessor {
         let context = ProcessingContext::Database(db_pool);
         let mut transactions = self.process_balance_changes(balance_changes, context)?;
 
-        transactions.sort_by(|a, b| b.blockchain.timestamp.cmp(&a.blockchain.timestamp));
+        transactions.sort_by_key(|b| std::cmp::Reverse(b.blockchain.timestamp));
 
         Ok(transactions)
     }

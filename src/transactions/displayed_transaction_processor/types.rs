@@ -1,9 +1,9 @@
 use crate::models::{Id, OutputStatus};
 use chrono::NaiveDateTime;
 use serde::{Deserialize, Serialize};
+use tari_common_types::payment_reference::PaymentReference;
+use tari_common_types::types::FixedHash;
 use utoipa::ToSchema;
-
-use crate::models::{Id, OutputStatus};
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
 #[serde(rename_all = "lowercase")]
