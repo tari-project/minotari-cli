@@ -13,15 +13,16 @@
 //!
 //! # Usage Example
 //!
-//! ```no_run
+//! ```ignore
 //! use minotari::daemon::Daemon;
 //! use tari_common::configuration::Network;
+//! use std::path::PathBuf;
 //!
 //! # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 //! let daemon = Daemon::new(
 //!     "password".to_string(),
 //!     "https://rpc.tari.com".to_string(),
-//!     "wallet.db".to_string(),
+//!     PathBuf::from("wallet.db"),
 //!     100,    // max_blocks per scan
 //!     10,     // batch_size
 //!     60,     // scan_interval_secs

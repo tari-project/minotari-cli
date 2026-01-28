@@ -25,18 +25,20 @@
 //!
 //! # Usage Example
 //!
-//! ```no_run
+//! ```ignore
 //! use minotari::db::{init_db, get_accounts, get_balance};
+//! use std::path::PathBuf;
 //!
-//! # async fn example() -> Result<(), anyhow::Error> {
+//! # fn example() -> Result<(), anyhow::Error> {
 //! // Initialize database and run migrations
-//! let pool = init_db("wallet.db")?;
+//! let pool = init_db(PathBuf::from("wallet.db"))?;
+//! let conn = pool.get()?;
 //!
 //! // Query accounts
-//! let accounts = get_accounts(&pool, None)?;
+//! let accounts = get_accounts(&conn, None)?;
 //!
-//! // Check balance
-//! let balance = get_balance(&pool, "default")?;
+//! // Check balance (account_id = 1)
+//! let balance = get_balance(&conn, 1)?;
 //! println!("Available: {} µT", balance.available);
 //! # Ok(())
 //! # }
@@ -61,8 +63,9 @@ pub use accounts::{AccountBalance, AccountRow, create_account, get_account_by_na
 
 mod scanned_tip_blocks;
 pub use scanned_tip_blocks::{
-    delete_scanned_tip_blocks_from_height, get_latest_scanned_tip_block_by_account, get_scanned_tip_blocks_by_account,
-    insert_scanned_tip_block, prune_scanned_tip_blocks,
+    LatestScannedBlock, delete_scanned_tip_blocks_from_height, get_latest_scanned_block_with_timestamp,
+    get_latest_scanned_tip_block_by_account, get_scanned_tip_blocks_by_account, insert_scanned_tip_block,
+    prune_scanned_tip_blocks,
 };
 
 mod outputs;
@@ -84,15 +87,15 @@ pub use pending_transactions::{
 mod completed_transactions;
 pub use completed_transactions::{
     CompletedTransaction, CompletedTransactionStatus, create_completed_transaction, get_completed_transaction_by_id,
-    get_completed_transactions_by_status, get_pending_completed_transactions,
-    mark_completed_transaction_as_broadcasted, mark_completed_transaction_as_confirmed,
-    mark_completed_transaction_as_mined_unconfirmed, mark_completed_transaction_as_rejected,
-    reset_mined_completed_transactions_from_height, revert_completed_transaction_to_completed,
-    update_completed_transaction_status,
+    get_completed_transaction_by_payref, get_completed_transactions_by_account, get_completed_transactions_by_status,
+    get_pending_completed_transactions, mark_completed_transaction_as_broadcasted,
+    mark_completed_transaction_as_confirmed, mark_completed_transaction_as_mined_unconfirmed,
+    mark_completed_transaction_as_rejected, reset_mined_completed_transactions_from_height,
+    revert_completed_transaction_to_completed, update_completed_transaction_status,
 };
 
 mod events;
-pub use events::insert_wallet_event;
+pub use events::{DbWalletEvent, get_events_by_account_id, insert_wallet_event};
 
 mod balance_changes;
 pub use balance_changes::{get_all_balance_changes_by_account_id, insert_balance_change};
@@ -103,12 +106,12 @@ pub use inputs::{get_input_details_for_balance_change_by_id, insert_input, soft_
 mod displayed_transactions;
 pub use displayed_transactions::{
     find_pending_outbound_by_output_hash, get_displayed_transaction_by_id, get_displayed_transactions_by_account,
-    get_displayed_transactions_by_status, get_displayed_transactions_excluding_reorged,
-    get_displayed_transactions_from_height, get_displayed_transactions_needing_confirmation_update,
-    get_displayed_transactions_paginated, insert_displayed_transaction, mark_displayed_transaction_rejected,
-    mark_displayed_transactions_reorganized, mark_displayed_transactions_reorganized_and_return,
-    update_displayed_transaction_confirmations, update_displayed_transaction_mined,
-    update_displayed_transaction_status,
+    get_displayed_transactions_by_payref, get_displayed_transactions_by_status,
+    get_displayed_transactions_excluding_reorged, get_displayed_transactions_from_height,
+    get_displayed_transactions_needing_confirmation_update, get_displayed_transactions_paginated,
+    insert_displayed_transaction, mark_displayed_transaction_rejected, mark_displayed_transactions_reorganized,
+    mark_displayed_transactions_reorganized_and_return, update_displayed_transaction_confirmations,
+    update_displayed_transaction_mined, update_displayed_transaction_status,
 };
 
 const DB_POOL_SIZE: u32 = 5;
@@ -145,15 +148,16 @@ static MIGRATIONS: LazyLock<Migrations<'static>> = LazyLock::new(|| {
 ///
 /// # Example
 ///
-/// ```no_run
+/// ```ignore
 /// use minotari::db::init_db;
+/// use std::path::PathBuf;
 ///
-/// # async fn example() -> Result<(), anyhow::Error> {
+/// # fn example() -> Result<(), anyhow::Error> {
 /// // Initialize database in current directory
-/// let pool = init_db("wallet.db")?;
+/// let pool = init_db(PathBuf::from("wallet.db"))?;
 ///
 /// // Or use absolute path
-/// let pool = init_db("/path/to/wallet.db")?;
+/// let pool = init_db(PathBuf::from("/path/to/wallet.db"))?;
 /// # Ok(())
 /// # }
 /// ```

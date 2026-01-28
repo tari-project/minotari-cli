@@ -531,3 +531,50 @@ pub fn mark_displayed_transactions_reorganized_and_return(
 
     Ok(updated_transactions)
 }
+
+/// Retrieves displayed transactions that contain a specific payment reference.
+///
+/// The payref column stores a JSON array of payment references. This function
+/// searches for transactions where the payref column contains the specified
+/// payment reference string.
+///
+/// # Parameters
+///
+/// * `conn` - Database connection
+/// * `account_id` - The account to query transactions for
+/// * `payref` - The payment reference to search for
+///
+/// # Returns
+///
+/// A vector of displayed transactions that contain the payment reference.
+pub fn get_displayed_transactions_by_payref(
+    conn: &Connection,
+    account_id: Id,
+    payref: &str,
+) -> WalletDbResult<Vec<DisplayedTransaction>> {
+    debug!(
+        account_id = account_id,
+        payref = payref;
+        "DB: Fetching displayed transactions by payref"
+    );
+
+    // The payref column stores a JSON array, so we use LIKE to search within it
+    // We search for the payref as a substring since it's stored as JSON
+    let search_pattern = format!("%{}%", payref);
+
+    let mut stmt = conn.prepare_cached(
+        r#"
+        SELECT transaction_json
+        FROM displayed_transactions
+        WHERE account_id = :account_id AND payref LIKE :pattern
+        ORDER BY block_height DESC, timestamp DESC
+        "#,
+    )?;
+
+    let rows = stmt.query(named_params! {
+        ":account_id": account_id,
+        ":pattern": search_pattern
+    })?;
+
+    process_json_rows(from_rows::<TransactionJsonRow>(rows))
+}

@@ -197,6 +197,32 @@ impl AccountRow {
         Ok(address)
     }
 
+    pub fn get_address_with_payment_id(
+        &self,
+        network: Network,
+        password: &str,
+        payment_id: &[u8],
+    ) -> WalletDbResult<TariAddress> {
+        let wallet = self.decrypt_wallet_type(password)?;
+
+        let view_private_key = wallet.get_view_key();
+        let spend_public_key = wallet.get_public_spend_key();
+
+        let view_public_key = RistrettoPublicKey::from_secret_key(view_private_key);
+        let view_public_compressed = CompressedPublicKey::new_from_pk(view_public_key);
+
+        let address = TariAddress::new_dual_address(
+            view_public_compressed,
+            spend_public_key,
+            network,
+            TariAddressFeatures::create_one_sided_only(),
+            Some(payment_id.to_vec()),
+        )
+        .map_err(|e| WalletDbError::Unexpected(format!("Failed to generate address with payment ID: {}", e)))?;
+
+        Ok(address)
+    }
+
     pub fn get_key_manager(&self, password: &str) -> WalletDbResult<KeyManager> {
         let wallet = self.decrypt_wallet_type(password)?;
         let key_manager = KeyManager::new(wallet)

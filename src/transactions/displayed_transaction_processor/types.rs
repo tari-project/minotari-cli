@@ -3,8 +3,9 @@ use chrono::NaiveDateTime;
 use serde::{Deserialize, Serialize};
 use tari_common_types::payment_reference::PaymentReference;
 use tari_common_types::types::FixedHash;
+use utoipa::ToSchema;
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum TransactionDirection {
     Incoming,
@@ -20,7 +21,7 @@ impl TransactionDirection {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum TransactionSource {
     Transfer,
@@ -40,7 +41,7 @@ impl TransactionSource {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, ToSchema)]
 #[serde(rename_all = "lowercase")]
 pub enum TransactionDisplayStatus {
     Pending,
@@ -65,7 +66,7 @@ impl TransactionDisplayStatus {
 }
 
 /// User-friendly transaction representation.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct DisplayedTransaction {
     pub id: String,
     pub direction: TransactionDirection,
@@ -83,7 +84,7 @@ pub struct DisplayedTransaction {
     pub details: TransactionDetails,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct CounterpartyInfo {
     pub address: String,
     pub address_emoji: Option<String>,
@@ -91,23 +92,25 @@ pub struct CounterpartyInfo {
     pub label: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct BlockchainInfo {
     pub block_height: u64,
+    #[schema(value_type = String)]
     pub timestamp: NaiveDateTime,
     pub confirmations: u64,
     pub block_hash: FixedHash,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct FeeInfo {
     pub amount: u64,
     pub amount_display: String,
 }
 
 /// Advanced transaction details.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct TransactionDetails {
+    #[schema(value_type = i64)]
     pub account_id: Id,
     pub total_credit: u64,
     pub total_debit: u64,
@@ -126,18 +129,19 @@ pub struct TransactionDetails {
 }
 
 /// A transaction input (spent UTXO).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct TransactionInput {
     pub output_hash: FixedHash,
     pub amount: u64,
     /// ID of the matched output in our database (if found).
+    #[schema(value_type = Option<i64>)]
     pub matched_output_id: Option<Id>,
     pub is_matched: bool,
     pub mined_in_block_hash: FixedHash,
 }
 
 /// A transaction output (created UTXO).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, ToSchema)]
 pub struct TransactionOutput {
     pub hash: FixedHash,
     pub amount: u64,

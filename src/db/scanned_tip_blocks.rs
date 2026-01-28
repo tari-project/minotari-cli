@@ -17,6 +17,21 @@ struct ScannedTipBlockRow {
     pub hash: Vec<u8>,
 }
 
+#[derive(Deserialize)]
+struct ScannedTipBlockWithTimestampRow {
+    pub height: i64,
+    pub hash: Vec<u8>,
+    pub created_at: String,
+}
+
+/// Information about the latest scanned block including timestamp.
+#[derive(Debug, Clone)]
+pub struct LatestScannedBlock {
+    pub height: u64,
+    pub hash: Vec<u8>,
+    pub scanned_at: String,
+}
+
 pub fn get_scanned_tip_blocks_by_account(conn: &Connection, account_id: i64) -> WalletDbResult<Vec<ScannedTipBlock>> {
     let mut stmt = conn.prepare_cached(
         r#"
@@ -55,6 +70,45 @@ pub fn get_latest_scanned_tip_block_by_account(
         account_id: r.account_id,
         height: r.height as u64,
         hash: r.hash,
+    }))
+}
+
+/// Retrieves the latest scanned block for an account including the timestamp.
+///
+/// # Parameters
+///
+/// * `conn` - Database connection
+/// * `account_id` - The account to query
+///
+/// # Returns
+///
+/// The latest scanned block with height, hash, and timestamp, or None if no blocks scanned.
+pub fn get_latest_scanned_block_with_timestamp(
+    conn: &Connection,
+    account_id: i64,
+) -> WalletDbResult<Option<LatestScannedBlock>> {
+    debug!(
+        account_id = account_id;
+        "DB: Get latest scanned block with timestamp"
+    );
+
+    let mut stmt = conn.prepare_cached(
+        r#"
+        SELECT height, hash, created_at
+        FROM scanned_tip_blocks
+        WHERE account_id = :account_id
+        ORDER BY height DESC
+        LIMIT 1
+        "#,
+    )?;
+
+    let rows = stmt.query(named_params! { ":account_id": account_id })?;
+    let row = from_rows::<ScannedTipBlockWithTimestampRow>(rows).next().transpose()?;
+
+    Ok(row.map(|r| LatestScannedBlock {
+        height: r.height as u64,
+        hash: r.hash,
+        scanned_at: r.created_at,
     }))
 }
 

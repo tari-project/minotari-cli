@@ -39,23 +39,20 @@
 //!
 //! Use [`init_with_view_key`] to import a view-only wallet:
 //!
-//! ```no_run
+//! ```ignore
 //! use minotari::utils::init_wallet::init_with_view_key;
-//! use minotari::init_db;
+//! use std::path::Path;
 //!
 //! # fn example() -> anyhow::Result<()> {
-//! // Initialize the database
-//! let db = init_db("wallet.db");
-//!
 //! // Import a view-only wallet
 //! init_with_view_key(
-//!     &db,
 //!     "view_private_key_hex",
 //!     "spend_public_key_hex",
 //!     "secure_password",
-//!     None,      // account name (uses "default")
-//!     Some(0),   // birthday height
-//! );
+//!     Path::new("wallet.db"),
+//!     0,         // birthday height
+//!     Some("default"),
+//! )?;
 //! # Ok(())
 //! # }
 //! ```
@@ -64,24 +61,21 @@
 //!
 //! Use the [`Scanner`] to scan for outputs:
 //!
-//! ```no_run
-//! use minotari::{Scanner, ScanMode, get_accounts};
-//! use minotari::init_db;
+//! ```ignore
+//! use minotari::{Scanner, ScanMode};
+//! use std::path::PathBuf;
 //!
 //! # async fn example() -> anyhow::Result<()> {
-//! # let db = init_db("wallet.db");
-//! // Load accounts
-//! let accounts = get_accounts(&db, None)?;
-//!
 //! // Create and run scanner
-//! let mut scanner = Scanner::new(
-//!     db,
-//!     "https://rpc.tari.com".to_string(),
-//!     accounts,
-//!     None, // event sender
-//! )?;
-//!
-//! scanner.scan(ScanMode::MaxBlocks(100), 10).await?;
+//! let (events, more_blocks) = Scanner::new(
+//!     "password",
+//!     "https://rpc.tari.com",
+//!     PathBuf::from("wallet.db"),
+//!     100, // batch_size
+//! )
+//! .mode(ScanMode::Full)
+//! .run()
+//! .await?;
 //! # Ok(())
 //! # }
 //! ```
@@ -90,12 +84,14 @@
 //!
 //! Use [`get_balance`] to retrieve current wallet balance:
 //!
-//! ```no_run
+//! ```ignore
 //! use minotari::{get_balance, init_db};
+//! use std::path::PathBuf;
 //!
 //! # fn example() -> anyhow::Result<()> {
-//! let db = init_db("wallet.db")?;
-//! let balance = get_balance(&db, "default")?;
+//! let db = init_db(PathBuf::from("wallet.db"))?;
+//! let conn = db.get()?;
+//! let balance = get_balance(&conn, 1)?;  // account_id = 1
 //! println!("Available balance: {} µT", balance.available);
 //! # Ok(())
 //! # }
