@@ -143,15 +143,10 @@ impl FeeEstimator {
 pub fn get_default_features_and_scripts_size() -> Result<usize> {
     let fee_calc = Fee::new(TransactionWeight::latest());
 
-    let output_features_size = OutputFeatures::default()
-        .get_serialized_size()
-        .map_err(|e| anyhow!("Serialization error: {}", e))?;
-    let tari_script_size = TariScript::default()
-        .get_serialized_size()
-        .map_err(|e| anyhow!("Serialization error: {}", e))?;
-    let covenant_size = Covenant::default()
-        .get_serialized_size()
-        .map_err(|e| anyhow!("Serialization error: {}", e))?;
+    let get_size = |res: Result<usize, _>| res.map_err(|e| anyhow!("Serialization error: {}", e));
+    let output_features_size = get_size(OutputFeatures::default().get_serialized_size())?;
+    let tari_script_size = get_size(TariScript::default().get_serialized_size())?;
+    let covenant_size = get_size(Covenant::default().get_serialized_size())?;
 
     Ok(fee_calc
         .weighting()
