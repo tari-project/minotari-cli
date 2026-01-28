@@ -97,32 +97,16 @@ impl FeeEstimator {
             None => get_default_features_and_scripts_size()?,
         };
 
-        let results = vec![
-            self.calculate_single_estimate(
-                FeePriority::Slow,
-                stats.min_fee_per_gram,
-                amount,
-                input_count,
-                total_outputs,
-                output_size,
-            ),
-            self.calculate_single_estimate(
-                FeePriority::Medium,
-                stats.avg_fee_per_gram,
-                amount,
-                input_count,
-                total_outputs,
-                output_size,
-            ),
-            self.calculate_single_estimate(
-                FeePriority::Fast,
-                stats.max_fee_per_gram,
-                amount,
-                input_count,
-                total_outputs,
-                output_size,
-            ),
-        ];
+        let results = [
+            (FeePriority::Slow, stats.min_fee_per_gram),
+            (FeePriority::Medium, stats.avg_fee_per_gram),
+            (FeePriority::Fast, stats.max_fee_per_gram),
+        ]
+        .into_iter()
+        .map(|(priority, fee_per_gram)| {
+            self.calculate_single_estimate(priority, fee_per_gram, amount, input_count, total_outputs, output_size)
+        })
+        .collect();
 
         debug!(
             account = account_name,
