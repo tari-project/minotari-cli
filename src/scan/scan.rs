@@ -577,12 +577,6 @@ async fn run_scan_loop<E: EventSender + Clone + Send + 'static>(
             return Ok((all_events, false));
         }
 
-        info!(
-            count = batch_size,
-            account_id = scanner_context.account_id;
-            "Processing scanned blocks"
-        );
-
         let has_pending_outbound = scanner_context.transaction_monitor.has_pending_outbound();
         let processing_events = db_handler
             .process_blocks(
