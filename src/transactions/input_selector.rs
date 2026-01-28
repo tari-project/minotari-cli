@@ -44,19 +44,13 @@
 
 use log::{debug, warn};
 use rusqlite::Connection;
-use tari_script::TariScript;
-use tari_transaction_components::{
-    fee::Fee,
-    helpers::borsh::SerializedSize,
-    tari_amount::MicroMinotari,
-    transaction_components::{OutputFeatures, covenants::Covenant},
-    weight::TransactionWeight,
-};
+use tari_transaction_components::{fee::Fee, tari_amount::MicroMinotari, weight::TransactionWeight};
 use thiserror::Error;
 
 use crate::{
     db::{DbWalletOutput, WalletDbError, get_latest_scanned_tip_block_by_account},
     log::mask_amount,
+    transactions::fee_estimator::get_default_features_and_scripts_size,
 };
 
 /// Errors that can occur during UTXO selection.
@@ -201,39 +195,6 @@ impl InputSelector {
         }
     }
 
-    /// Calculates the byte size of default output features and scripts.
-    ///
-    /// This is used for fee estimation when no custom output size is provided.
-    /// The calculation includes:
-    /// - Default output features
-    /// - Default Tari script
-    /// - Default covenant
-    ///
-    /// # Returns
-    ///
-    /// The rounded-up byte size for fee calculation purposes.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`UtxoSelectionError::SerializationError`] if any component
-    /// fails to serialize.
-    fn get_features_and_scripts_byte_size(&self) -> Result<usize, UtxoSelectionError> {
-        let output_features_size = OutputFeatures::default()
-            .get_serialized_size()
-            .map_err(|e| UtxoSelectionError::SerializationError(e.to_string()))?;
-        let tari_script_size = TariScript::default()
-            .get_serialized_size()
-            .map_err(|e| UtxoSelectionError::SerializationError(e.to_string()))?;
-        let covenant_size = Covenant::default()
-            .get_serialized_size()
-            .map_err(|e| UtxoSelectionError::SerializationError(e.to_string()))?;
-
-        Ok(self
-            .fee_calc
-            .weighting()
-            .round_up_features_and_scripts_size(output_features_size + tari_script_size + covenant_size))
-    }
-
     /// Fetches and selects UTXOs sufficient to cover the requested amount plus fees.
     ///
     /// This method queries the database for unspent outputs and accumulates them
@@ -311,7 +272,8 @@ impl InputSelector {
 
         let features_and_scripts_byte_size = match estimated_output_size {
             Some(sz) => sz,
-            None => self.get_features_and_scripts_byte_size()?,
+            None => get_default_features_and_scripts_size()
+                .map_err(|err| UtxoSelectionError::SerializationError(err.to_string()))?,
         };
 
         let mut sufficient_funds = false;

@@ -61,6 +61,7 @@
 //! # Modules
 //!
 //! - [`displayed_transaction_processor`]: Processes raw blockchain data into displayable transactions
+//! - [`fee_estimator`]: Estimates fees
 //! - [`fund_locker`]: Manages UTXO locking for transaction construction
 //! - [`input_selector`]: Implements UTXO selection algorithms with fee estimation
 //! - [`manager`]: High-level transaction creation and broadcasting
@@ -69,6 +70,7 @@
 //! - [`transaction_history`]: Provides transaction history querying capabilities
 
 pub mod displayed_transaction_processor;
+pub mod fee_estimator;
 pub mod fund_locker;
 pub mod input_selector;
 pub mod manager;
