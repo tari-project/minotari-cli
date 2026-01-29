@@ -239,4 +239,18 @@ cargo run --bin generate-openapi
 - **clap**: Command-line argument parsing
 - **tokio**: Async runtime
 
+## Testing
+
+The project includes a comprehensive Cucumber BDD integration testing suite that covers all major features:
+
+```bash
+# Run all integration tests
+cargo test --test integration_tests
+
+# Run specific test (requires building first)
+cargo test --test integration_tests -- --nocapture
+```
+
+See [tests/cucumber/README.md](tests/cucumber/README.md) for detailed testing documentation.
+
 ## Contributing
