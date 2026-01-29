@@ -510,19 +510,7 @@ impl TransactionSender {
             },
             Err(e) => {
                 warn!(target: "audit", error:% = e; "Transaction creation failed, unlocking funds");
-
-                if let Err(e) = db::update_pending_transaction_status(
-                    &connection,
-                    &pending_transaction_id,
-                    PendingTransactionStatus::Expired,
-                ) {
-                    error!(target: "audit", error:% = e; "Failed to update pending transaction status during cleanup");
-                }
-
-                if let Err(e) = db::unlock_outputs_for_request(&connection, &pending_transaction_id) {
-                    error!(target: "audit", error:% = e; "Failed to unlock outputs during cleanup");
-                }
-
+                self.fail_and_unlock_pending_transaction(&connection, &pending_transaction_id);
                 Err(e)
             },
         }
@@ -586,51 +574,68 @@ impl TransactionSender {
             "Finalizing and broadcasting transaction"
         );
 
-        self.check_if_transaction_expired(processed_transaction)?;
+        let (completed_tx_id, sent_output_hashes, recipient_amount, actual_fee, wallet_http_client) = match (|| {
+            self.check_if_transaction_expired(processed_transaction)?;
 
-        // Extract transaction info from the signed result for building DisplayedTransaction
-        let tx_info = &signed_transaction.request.info;
-        let actual_fee = tx_info.fee.as_u64();
-        // Get the first recipient's amount (for one-sided transactions there's typically one recipient)
-        let recipient_amount = tx_info.recipients.first().map(|r| r.amount.as_u64()).unwrap_or(0);
+            // Extract transaction info from the signed result for building DisplayedTransaction
+            let tx_info = &signed_transaction.request.info;
+            let actual_fee = tx_info.fee.as_u64();
+            // Get the first recipient's amount (for one-sided transactions there's typically one recipient)
+            let recipient_amount = tx_info.recipients.first().map(|r| r.amount.as_u64()).unwrap_or(0);
 
-        let kernel_excess = signed_transaction
-            .signed_transaction
-            .transaction
-            .body()
-            .kernels()
-            .first()
-            .map(|k| k.excess.as_bytes().to_vec())
-            .unwrap_or_default();
+            let kernel_excess = signed_transaction
+                .signed_transaction
+                .transaction
+                .body()
+                .kernels()
+                .first()
+                .map(|k| k.excess.as_bytes().to_vec())
+                .unwrap_or_default();
 
-        let serialized_transaction = serde_json::to_vec(&signed_transaction.signed_transaction.transaction)
-            .map_err(|e| anyhow!("Failed to serialize transaction: {}", e))?;
+            let serialized_transaction = serde_json::to_vec(&signed_transaction.signed_transaction.transaction)
+                .map_err(|e| anyhow!("Failed to serialize transaction: {}", e))?;
 
-        let sent_output_hash = signed_transaction
-            .signed_transaction
-            .sent_hashes
-            .first()
-            .map(hex::encode);
+            let sent_output_hash = signed_transaction
+                .signed_transaction
+                .sent_hashes
+                .first()
+                .map(hex::encode);
 
-        // Collect sent_output_hashes before moving signed_transaction
-        let sent_output_hashes: Vec<FixedHash> = signed_transaction.signed_transaction.sent_hashes.clone();
+            // Collect sent_output_hashes before moving signed_transaction
+            let sent_output_hashes: Vec<FixedHash> = signed_transaction.signed_transaction.sent_hashes.clone();
 
-        db::update_pending_transaction_status(
-            &connection,
-            processed_transaction.id(),
-            crate::models::PendingTransactionStatus::Completed,
-        )?;
+            db::update_pending_transaction_status(
+                &connection,
+                processed_transaction.id(),
+                crate::models::PendingTransactionStatus::Completed,
+            )?;
 
-        let completed_tx_id = db::create_completed_transaction(
-            &connection,
-            account_id,
-            processed_transaction.id(),
-            &kernel_excess,
-            &serialized_transaction,
-            sent_output_hash,
-        )?;
+            let completed_tx_id = db::create_completed_transaction(
+                &connection,
+                account_id,
+                processed_transaction.id(),
+                &kernel_excess,
+                &serialized_transaction,
+                sent_output_hash,
+            )?;
 
-        let wallet_http_client = WalletHttpClient::new(grpc_address.parse()?)?;
+            let wallet_http_client = WalletHttpClient::new(grpc_address.parse()?)?;
+
+            Ok((
+                completed_tx_id,
+                sent_output_hashes,
+                recipient_amount,
+                actual_fee,
+                wallet_http_client,
+            ))
+        })() {
+            Ok(res) => res,
+            Err(e) => {
+                warn!(target: "audit", error:% = e; "Transaction finalization preparation failed");
+                self.fail_and_unlock_pending_transaction(&connection, processed_transaction.id());
+                return Err(e);
+            },
+        };
 
         let response = wallet_http_client
             .submit_transaction(signed_transaction.signed_transaction.transaction)
@@ -649,6 +654,7 @@ impl TransactionSender {
                     &completed_tx_id,
                     &format!("Transaction submission failed: {}", e),
                 )?;
+                self.fail_and_unlock_pending_transaction(&connection, processed_transaction.id());
 
                 return Err(anyhow!("Transaction submission failed: {}", e));
             },
@@ -672,6 +678,7 @@ impl TransactionSender {
                         &completed_tx_id,
                         &response.rejection_reason.to_string(),
                     )?;
+                    self.fail_and_unlock_pending_transaction(&connection, processed_transaction.id());
 
                     return Err(anyhow!(
                         "Transaction was not accepted by the network: {}",
@@ -740,5 +747,21 @@ impl TransactionSender {
             .map_err(|e| anyhow!("Failed to build displayed transaction: {}", e))?;
 
         Ok(tx)
+    }
+
+    fn fail_and_unlock_pending_transaction(
+        &self,
+        connection: &PooledConnection<SqliteConnectionManager>,
+        pending_tx_id: &str,
+    ) {
+        if let Err(e) =
+            db::update_pending_transaction_status(connection, pending_tx_id, PendingTransactionStatus::Expired)
+        {
+            error!(target: "audit", error:% = e; "Failed to update pending transaction status during cleanup");
+        }
+
+        if let Err(e) = db::unlock_outputs_for_request(connection, pending_tx_id) {
+            error!(target: "audit", error:% = e; "Failed to unlock outputs during cleanup");
+        }
     }
 }
