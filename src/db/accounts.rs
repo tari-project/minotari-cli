@@ -321,16 +321,9 @@ pub fn delete_account(conn: &Connection, friendly_name: &str) -> WalletDbResult<
         "DB: Deleting account and all associated data"
     );
 
-    let account_opt = get_account_by_name(conn, friendly_name)?;
-    let account_id = match account_opt {
-        Some(a) => a.id,
-        None => {
-            return Err(WalletDbError::InvalidInput(format!(
-                "Account '{}' not found",
-                friendly_name
-            )));
-        },
-    };
+    let account = get_account_by_name(conn, friendly_name)?
+        .ok_or_else(|| WalletDbError::InvalidInput(format!("Account '{}' not found", friendly_name)))?;
+    let account_id = account.id;
 
     // Dependent tables must be cleared first to satisfy Foreign Key constraints
     // Deletion Order (Child -> Parent):
