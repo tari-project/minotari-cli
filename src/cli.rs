@@ -444,6 +444,15 @@ pub enum Commands {
         )]
         seconds_to_lock_utxos: Option<u64>,
     },
+    /// Delete a wallet account and all associated data.
+    ///
+    /// This permanently removes the account, transaction history, and keys from the database.
+    Delete {
+        #[command(flatten)]
+        db: DatabaseArgs,
+        #[command(flatten)]
+        account: AccountArgs,
+    },
 }
 
 pub trait ApplyArgs {

@@ -409,6 +409,16 @@ async fn main() -> Result<(), anyhow::Error> {
             };
             handle_lock_funds(wallet_config.database_path.clone(), account_name, output_file, request)
         },
+        Commands::Delete { db, account } => {
+            let name = account.account_name.as_deref().unwrap_or("default");
+            info!(target: "audit", account = name; "Deleting wallet...");
+
+            wallet_config.apply_database(&db);
+
+            utils::delete_wallet::delete_wallet(&wallet_config.database_path, name)?;
+            println!("Wallet account '{}' deleted successfully.", name);
+            Ok(())
+        },
     }
 }
 

@@ -313,3 +313,44 @@ pub fn get_balance(conn: &Connection, account_id: i64) -> WalletDbResult<Account
         max_date: max_date_str,
     })
 }
+
+pub fn delete_account(conn: &Connection, friendly_name: &str) -> WalletDbResult<()> {
+    info!(
+        target: "audit",
+        account = friendly_name;
+        "DB: Deleting account and all associated data"
+    );
+
+    let account = get_account_by_name(conn, friendly_name)?
+        .ok_or_else(|| WalletDbError::InvalidInput(format!("Account '{}' not found", friendly_name)))?;
+    let account_id = account.id;
+
+    // The order of table deletion is important to respect foreign key constraints.
+    // The tables are ordered from child to parent.
+    let tables_to_clear = [
+        "balance_changes",
+        "inputs",
+        "outputs",
+        "completed_transactions",
+        "pending_transactions",
+        "scanned_tip_blocks",
+        "events",
+        "displayed_transactions",
+    ];
+
+    for table_name in tables_to_clear {
+        debug!(account_id = account_id, table = table_name; "Deleting from {}", table_name);
+        let query = format!("DELETE FROM {} WHERE account_id = :id", table_name);
+        conn.execute(&query, named_params! { ":id": account_id })?;
+    }
+
+    debug!(account_id = account_id; "Deleting account record");
+    conn.execute(
+        "DELETE FROM accounts WHERE id = :id",
+        named_params! { ":id": account_id },
+    )?;
+
+    info!(target: "audit", account = friendly_name; "Account successfully deleted");
+
+    Ok(())
+}
