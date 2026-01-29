@@ -54,3 +54,8 @@ url = "2.5"
 utoipa = "5.4.0"
 utoipa-swagger-ui = { version = "9.0.2", features = ["axum"] }
 uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+cucumber = "0.21"
+tempfile = "3.15"
+serial_test = "3.2"
