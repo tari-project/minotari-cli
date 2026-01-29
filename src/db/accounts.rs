@@ -325,63 +325,24 @@ pub fn delete_account(conn: &Connection, friendly_name: &str) -> WalletDbResult<
         .ok_or_else(|| WalletDbError::InvalidInput(format!("Account '{}' not found", friendly_name)))?;
     let account_id = account.id;
 
-    // Dependent tables must be cleared first to satisfy Foreign Key constraints
-    // Deletion Order (Child -> Parent):
-    // 1. balance_changes (refs inputs, outputs, accounts)
-    // 2. inputs (refs outputs, accounts)
-    // 3. outputs (refs accounts)
-    // 4. completed_transactions (refs pending_transactions, accounts)
-    // 5. pending_transactions (refs accounts)
-    // 6. scanned_tip_blocks, events, displayed_transactions (refs accounts)
-    // 7. accounts
+    // The order of table deletion is important to respect foreign key constraints.
+    // The tables are ordered from child to parent.
+    let tables_to_clear = [
+        "balance_changes",
+        "inputs",
+        "outputs",
+        "completed_transactions",
+        "pending_transactions",
+        "scanned_tip_blocks",
+        "events",
+        "displayed_transactions",
+    ];
 
-    debug!(account_id = account_id; "Deleting balance_changes");
-    conn.execute(
-        "DELETE FROM balance_changes WHERE account_id = :id",
-        named_params! { ":id": account_id },
-    )?;
-
-    debug!(account_id = account_id; "Deleting inputs");
-    conn.execute(
-        "DELETE FROM inputs WHERE account_id = :id",
-        named_params! { ":id": account_id },
-    )?;
-
-    debug!(account_id = account_id; "Deleting outputs");
-    conn.execute(
-        "DELETE FROM outputs WHERE account_id = :id",
-        named_params! { ":id": account_id },
-    )?;
-
-    debug!(account_id = account_id; "Deleting completed_transactions");
-    conn.execute(
-        "DELETE FROM completed_transactions WHERE account_id = :id",
-        named_params! { ":id": account_id },
-    )?;
-
-    debug!(account_id = account_id; "Deleting pending_transactions");
-    conn.execute(
-        "DELETE FROM pending_transactions WHERE account_id = :id",
-        named_params! { ":id": account_id },
-    )?;
-
-    debug!(account_id = account_id; "Deleting scanned_tip_blocks");
-    conn.execute(
-        "DELETE FROM scanned_tip_blocks WHERE account_id = :id",
-        named_params! { ":id": account_id },
-    )?;
-
-    debug!(account_id = account_id; "Deleting events");
-    conn.execute(
-        "DELETE FROM events WHERE account_id = :id",
-        named_params! { ":id": account_id },
-    )?;
-
-    debug!(account_id = account_id; "Deleting displayed_transactions");
-    conn.execute(
-        "DELETE FROM displayed_transactions WHERE account_id = :id",
-        named_params! { ":id": account_id },
-    )?;
+    for table_name in tables_to_clear {
+        debug!(account_id = account_id, table = table_name; "Deleting from {}", table_name);
+        let query = format!("DELETE FROM {} WHERE account_id = :id", table_name);
+        conn.execute(&query, named_params! { ":id": account_id })?;
+    }
 
     debug!(account_id = account_id; "Deleting account record");
     conn.execute(
