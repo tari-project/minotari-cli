@@ -518,24 +518,21 @@ impl TransactionMonitor {
             if tx.broadcast_attempts >= MAX_BROADCAST_ATTEMPTS {
                 warn!(
                     target: "audit",
-                    id = tx.id.as_str();
+                    id = tx.id.to_string().as_str();
                     "Transaction exceeded max broadcast attempts"
                 );
                 let reason = format!("Exceeded {} broadcast attempts", MAX_BROADCAST_ATTEMPTS);
-                mark_completed_transaction_as_rejected(&conn, &tx.id, &reason)?;
+                mark_completed_transaction_as_rejected(&conn, tx.id, &reason)?;
                 db::unlock_outputs_for_pending_transaction(&conn, &tx.pending_tx_id)?;
 
-                if let Some(rejected_displayed_tx) = db::mark_displayed_transaction_rejected(&conn, &tx.id)? {
+                if let Some(rejected_displayed_tx) = db::mark_displayed_transaction_rejected(&conn, tx.id)? {
                     result.updated_displayed_transactions.push(rejected_displayed_tx);
                 }
 
                 result.wallet_events.push(WalletEvent {
                     id: 0,
                     account_id,
-                    event_type: WalletEventType::TransactionRejected {
-                        tx_id: tx.id.clone(),
-                        reason,
-                    },
+                    event_type: WalletEventType::TransactionRejected { tx_id: tx.id, reason },
                     description: format!("Transaction {} exceeded broadcast attempts", tx.id),
                 });
                 continue;
@@ -545,10 +542,10 @@ impl TransactionMonitor {
                 Ok(()) => {
                     info!(
                         target: "audit",
-                        id = tx.id.as_str();
+                        id = tx.id.to_string().as_str();
                         "Rebroadcasting transaction"
                     );
-                    mark_completed_transaction_as_broadcasted(&conn, &tx.id, tx.broadcast_attempts + 1)?;
+                    mark_completed_transaction_as_broadcasted(&conn, tx.id, tx.broadcast_attempts + 1)?;
 
                     result.wallet_events.push(WalletEvent {
                         id: 0,
@@ -563,14 +560,14 @@ impl TransactionMonitor {
                 Err(reason) => {
                     warn!(
                         target: "audit",
-                        id = tx.id.as_str(),
+                        id = tx.id.to_string().as_str(),
                         reason:% = reason;
                         "Transaction rejected on rebroadcast"
                     );
-                    mark_completed_transaction_as_rejected(&conn, &tx.id, &reason)?;
+                    mark_completed_transaction_as_rejected(&conn, tx.id, &reason)?;
                     db::unlock_outputs_for_pending_transaction(&conn, &tx.pending_tx_id)?;
 
-                    if let Some(rejected_displayed_tx) = db::mark_displayed_transaction_rejected(&conn, &tx.id)? {
+                    if let Some(rejected_displayed_tx) = db::mark_displayed_transaction_rejected(&conn, tx.id)? {
                         result.updated_displayed_transactions.push(rejected_displayed_tx);
                     }
 
@@ -602,12 +599,12 @@ impl TransactionMonitor {
             if let Some((block_height, block_hash)) = Self::find_kernel_on_chain(wallet_client, &tx).await? {
                 info!(
                     target: "audit",
-                    id = tx.id.as_str(),
+                    id = tx.id.to_string().as_str(),
                     height = block_height;
                     "Transaction mined (unconfirmed)"
                 );
                 let conn = Self::get_connection(db_pool)?;
-                mark_completed_transaction_as_mined_unconfirmed(&conn, &tx.id, block_height as i64, &block_hash)?;
+                mark_completed_transaction_as_mined_unconfirmed(&conn, tx.id, block_height as i64, &block_hash)?;
 
                 events.push(WalletEvent {
                     id: 0,
@@ -643,7 +640,7 @@ impl TransactionMonitor {
             if confirmations >= REQUIRED_CONFIRMATIONS {
                 info!(
                     target: "audit",
-                    id = tx.id.as_str(),
+                    id = tx.id.to_string().as_str(),
                     confirmations = confirmations;
                     "Transaction confirmed"
                 );
@@ -662,7 +659,7 @@ impl TransactionMonitor {
                 let payref = hex::encode(generate_payment_reference(&mined_block_hash, &sent_output_hash));
 
                 let conn = Self::get_connection(db_pool)?;
-                mark_completed_transaction_as_confirmed(&conn, &tx.id, current_height as i64, payref)?;
+                mark_completed_transaction_as_confirmed(&conn, tx.id, current_height as i64, payref)?;
 
                 events.push(WalletEvent {
                     id: 0,

@@ -3,13 +3,13 @@ pub mod structured_console_encoder;
 use std::path::Path;
 use std::sync::OnceLock;
 
+use crate::log::structured_console_encoder::StructuredConsoleEncoderDeserializer;
 use log::{debug, info};
 use log4rs::{
     Config,
     config::{Deserializers, RawConfig},
 };
 use tari_transaction_components::MicroMinotari;
-use crate::log::structured_console_encoder::StructuredConsoleEncoderDeserializer;
 
 /// Initializes logging
 pub fn init_logging() {

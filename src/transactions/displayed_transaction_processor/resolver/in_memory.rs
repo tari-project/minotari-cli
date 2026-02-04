@@ -18,14 +18,14 @@ pub struct InMemoryResolver<'a> {
 
 impl<'a> InMemoryResolver<'a> {
     pub fn new(detected_outputs: &'a [DetectedOutput], spent_inputs: &'a [SpentInput]) -> Self {
-        let output_by_value: HashMap<MicroMinotari, &DetectedOutput> = detected_outputs.iter().map(|o| (o.output.value(), o)).collect();
+        let output_by_value: HashMap<MicroMinotari, &DetectedOutput> =
+            detected_outputs.iter().map(|o| (o.output.value(), o)).collect();
 
-        let input_by_value: HashMap<MicroMinotari, &SpentInput> = spent_inputs.iter().map(|i| (i.output.value(), i)).collect();
+        let input_by_value: HashMap<MicroMinotari, &SpentInput> =
+            spent_inputs.iter().map(|i| (i.output.value(), i)).collect();
 
-        let output_hashes: std::collections::HashSet<FixedHash> = detected_outputs
-            .iter()
-            .map(|o| o.output.output_hash())
-            .collect();
+        let output_hashes: std::collections::HashSet<FixedHash> =
+            detected_outputs.iter().map(|o| o.output.output_hash()).collect();
 
         Self {
             detected_outputs,
@@ -65,7 +65,7 @@ impl TransactionDataResolver for InMemoryResolver<'_> {
                 mined_hash: output.mined_in_block_hash,
                 status: OutputStatus::Unspent,
                 output_type: if output.output.is_coinbase() {
-                   OutputType::Coinbase
+                    OutputType::Coinbase
                 } else {
                     OutputType::Standard
                 },

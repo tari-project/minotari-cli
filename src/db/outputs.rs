@@ -93,9 +93,10 @@ pub fn insert_output(
     Ok(id)
 }
 
-
-
-pub fn get_output_info_by_hash(conn: &Connection, output_hash: &FixedHash) -> WalletDbResult<Option<(i64, WalletOutput)>> {
+pub fn get_output_info_by_hash(
+    conn: &Connection,
+    output_hash: &FixedHash,
+) -> WalletDbResult<Option<(i64, WalletOutput)>> {
     let mut stmt = conn.prepare_cached(
         r#"
         SELECT id, wallet_output_json
@@ -111,8 +112,9 @@ pub fn get_output_info_by_hash(conn: &Connection, output_hash: &FixedHash) -> Wa
         None => return Ok(None),
     };
 
-
-    let json_str = data.wallet_output_json.ok_or_else(|| WalletDbError::Unexpected("Output JSON is null".to_string()))?;
+    let json_str = data
+        .wallet_output_json
+        .ok_or_else(|| WalletDbError::Unexpected("Output JSON is null".to_string()))?;
     let output: WalletOutput = serde_json::from_str(&json_str)?;
     Ok(Some((data.id, output)))
 }

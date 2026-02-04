@@ -1,7 +1,7 @@
 use super::error::ProcessorError;
 use super::types::{
-    BlockchainInfo, DisplayedTransaction, FeeInfo, TransactionDetails, TransactionDirection,
-    TransactionDisplayStatus, TransactionInput, TransactionOutput, TransactionSource,
+    BlockchainInfo, DisplayedTransaction, FeeInfo, TransactionDetails, TransactionDirection, TransactionDisplayStatus,
+    TransactionInput, TransactionOutput, TransactionSource,
 };
 use crate::models::Id;
 use chrono::NaiveDateTime;
@@ -150,11 +150,8 @@ impl DisplayedTransactionBuilder {
             .direction
             .ok_or_else(|| ProcessorError::ParseError("direction is required".to_string()))?;
 
-
         let fee = match direction {
-            TransactionDirection::Outgoing => self.fee.map(|f| FeeInfo {
-                amount: f,
-            }),
+            TransactionDirection::Outgoing => self.fee.map(|f| FeeInfo { amount: f }),
             TransactionDirection::Incoming => None,
         };
 

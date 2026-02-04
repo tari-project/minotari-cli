@@ -62,11 +62,13 @@ impl TransactionDataResolver for DatabaseResolver {
             );
             OutputStatus::Unspent
         });
-        let json_string = wallet_output_json.ok_or_else(|| ProcessorError::MissingError("No wallet output".to_string()))?;
-        let output = serde_json::from_str::<WalletOutput>(&json_string).map_err(|e| ProcessorError::ParseError(e.to_string()))?;
+        let json_string =
+            wallet_output_json.ok_or_else(|| ProcessorError::MissingError("No wallet output".to_string()))?;
+        let output = serde_json::from_str::<WalletOutput>(&json_string)
+            .map_err(|e| ProcessorError::ParseError(e.to_string()))?;
         //
         let output_type = output.features().output_type;
-        let coinbase_extra = output.features().coinbase_extra;
+        let coinbase_extra = output.features().coinbase_extra.clone();
         let sent_output_hashes = output.payment_id().get_sent_hashes().unwrap_or_default();
 
         let hash = FixedHash::try_from(output_hash).map_err(|e| ProcessorError::ParseError(e.to_string()))?;

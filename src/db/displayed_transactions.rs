@@ -7,6 +7,7 @@ use log::{debug, info, warn};
 use rusqlite::{Connection, OptionalExtension, named_params};
 use serde::Deserialize;
 use serde_rusqlite::from_rows;
+use tari_common_types::transaction::TxId;
 use tari_common_types::types::FixedHash;
 
 #[derive(Deserialize)]
@@ -414,11 +415,11 @@ pub fn update_displayed_transaction_confirmations(
 
 pub fn mark_displayed_transaction_rejected(
     conn: &Connection,
-    tx_id: &str,
+    tx_id: TxId,
 ) -> WalletDbResult<Option<DisplayedTransaction>> {
     warn!(
         target: "audit",
-        id = tx_id;
+        id = tx_id.to_string().as_str();
         "DB: Marking displayed transaction as rejected"
     );
 
@@ -428,7 +429,7 @@ pub fn mark_displayed_transaction_rejected(
     let mut stmt = conn.prepare_cached("SELECT transaction_json FROM displayed_transactions WHERE id = :id")?;
 
     let json_row: Option<String> = stmt
-        .query_row(named_params! { ":id": tx_id }, |r| r.get(0))
+        .query_row(named_params! { ":id": tx_id.to_string() }, |r| r.get(0))
         .optional()?;
 
     let Some(json) = json_row else {
@@ -450,7 +451,7 @@ pub fn mark_displayed_transaction_rejected(
             ":status": status_str,
             ":json": updated_json,
             ":now": now,
-            ":id": tx_id
+            ":id": tx_id.to_string()
         },
     )?;
 

@@ -113,10 +113,14 @@ impl DisplayedTransactionProcessor {
         group: GroupedTransaction,
         resolver: &R,
     ) -> Result<DisplayedTransaction, ProcessorError> {
-        let total_credit = group.output_change.as_ref().map(|c| c.balance_credit).unwrap_or_default();
+        let total_credit = group
+            .output_change
+            .as_ref()
+            .map(|c| c.balance_credit)
+            .unwrap_or_default();
         let total_debit: MicroMinotari = group.input_changes.iter().map(|c| c.balance_debit).sum();
 
-        let (outputs, output_type_str, coinbase_extra, is_coinbase, sent_output_hashes) =
+        let (outputs, output_type_str, coinbase_extra, sent_output_hashes) =
             self.collect_output_details(&group, resolver)?;
 
         let inputs = self.collect_input_details(&group, resolver)?;
@@ -165,7 +169,6 @@ impl DisplayedTransactionProcessor {
             Vec<TransactionOutput>,
             Option<OutputType>,
             Option<CoinBaseExtra>,
-            bool,
             Vec<FixedHash>,
         ),
         ProcessorError,
@@ -173,13 +176,11 @@ impl DisplayedTransactionProcessor {
         let mut outputs = Vec::new();
         let mut output_type: Option<OutputType> = None;
         let mut coinbase_extra: Option<CoinBaseExtra> = None;
-        let mut is_coinbase = false;
         let mut sent_output_hashes = Vec::new();
 
         if let Some(ref output_change) = group.output_change
             && let Some(details) = resolver.get_output_details(output_change)?
         {
-            is_coinbase = details.output_type == OutputType::Coinbase;
             output_type = Some(details.output_type);
             coinbase_extra = Some(details.coinbase_extra);
             sent_output_hashes = details.sent_output_hashes;
@@ -195,13 +196,7 @@ impl DisplayedTransactionProcessor {
             });
         }
 
-        Ok((
-            outputs,
-            output_type,
-            coinbase_extra,
-            is_coinbase,
-            sent_output_hashes,
-        ))
+        Ok((outputs, output_type, coinbase_extra, sent_output_hashes))
     }
 
     fn collect_input_details<R: TransactionDataResolver>(
@@ -232,7 +227,7 @@ impl DisplayedTransactionProcessor {
         match (has_sender, has_recipient) {
             (false, false) => TransactionSource::Coinbase,
             (true, true) => TransactionSource::Transfer,
-            _=> TransactionSource::OneSided,
+            _ => TransactionSource::OneSided,
         }
     }
 
@@ -252,13 +247,9 @@ impl DisplayedTransactionProcessor {
         total_debit: MicroMinotari,
     ) -> Option<TariAddress> {
         if total_debit > total_credit {
-
-                group.recipient.clone()
-
+            group.recipient.clone()
         } else {
-
-                group.sender.clone()
-
+            group.sender.clone()
         }
     }
 

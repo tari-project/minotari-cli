@@ -40,10 +40,10 @@
 
 use std::time::Duration;
 
+use crate::transactions::DisplayedTransaction;
 use tari_common_types::types::FixedHash;
 use tari_transaction_components::MicroMinotari;
 use tari_transaction_components::transaction_components::WalletOutput;
-use crate::transactions::DisplayedTransaction;
 
 /// Top-level event enum for all scanner notifications.
 ///

@@ -1,14 +1,14 @@
 mod database;
 mod in_memory;
 
+pub use self::context::ProcessingContext;
 use super::error::ProcessorError;
 use crate::models::{BalanceChange, Id, OutputStatus};
+pub use database::DatabaseResolver;
+pub use in_memory::InMemoryResolver;
 use std::collections::HashMap;
 use tari_common_types::types::FixedHash;
 use tari_transaction_components::transaction_components::{CoinBaseExtra, OutputType};
-pub use self::context::ProcessingContext;
-pub use database::DatabaseResolver;
-pub use in_memory::InMemoryResolver;
 
 mod context {
     use crate::{

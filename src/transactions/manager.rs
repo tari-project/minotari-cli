@@ -454,7 +454,7 @@ impl TransactionSender {
         info!(
             target: "audit",
             idempotency_key = idempotency_key.as_str(),
-            amount = &*mask_amount(recipient.amount.as_u64() as i64);
+            amount = &*mask_amount(recipient.amount);
             "Starting new transaction"
         );
         let connection = self.get_connection()?;
@@ -574,125 +574,121 @@ impl TransactionSender {
             "Finalizing and broadcasting transaction"
         );
 
-        let (completed_tx_id, sent_output_hashes, recipient_amount, actual_fee, wallet_http_client) = match (|| {
-            self.check_if_transaction_expired(processed_transaction)?;
-
-            // Extract transaction info from the signed result for building DisplayedTransaction
-            let tx_info = &signed_transaction.request.info;
-            let actual_fee = tx_info.fee.as_u64();
-            // Get the first recipient's amount (for one-sided transactions there's typically one recipient)
-            let recipient_amount = tx_info.recipients.first().map(|r| r.amount.as_u64()).unwrap_or(0);
-
-            let kernel_excess = signed_transaction
-                .signed_transaction
-                .transaction
-                .body()
-                .kernels()
-                .first()
-                .map(|k| k.excess.as_bytes().to_vec())
-                .unwrap_or_default();
-
-            let serialized_transaction = serde_json::to_vec(&signed_transaction.signed_transaction.transaction)
-                .map_err(|e| anyhow!("Failed to serialize transaction: {}", e))?;
-
-            let sent_output_hash = signed_transaction
-                .signed_transaction
-                .sent_hashes
-                .first()
-                .map(hex::encode);
-
-            // Collect sent_output_hashes before moving signed_transaction
-            let sent_output_hashes: Vec<FixedHash> = signed_transaction.signed_transaction.sent_hashes.clone();
-
-            db::update_pending_transaction_status(
-                &connection,
-                processed_transaction.id(),
-                crate::models::PendingTransactionStatus::Completed,
-            )?;
-
-            let completed_tx_id = db::create_completed_transaction(
-                &connection,
-                account_id,
-                processed_transaction.id(),
-                &kernel_excess,
-                &serialized_transaction,
-                sent_output_hash,
-            )?;
-
-            let wallet_http_client = WalletHttpClient::new(grpc_address.parse()?)?;
-
-            Ok((
-                completed_tx_id,
-                sent_output_hashes,
-                recipient_amount,
-                actual_fee,
-                wallet_http_client,
-            ))
-        })() {
-            Ok(res) => res,
-            Err(e) => {
+        self.check_if_transaction_expired(processed_transaction)
+            .inspect_err(|e| {
                 warn!(target: "audit", error:% = e; "Transaction finalization preparation failed");
                 self.fail_and_unlock_pending_transaction(&connection, processed_transaction.id());
-                return Err(e);
-            },
-        };
+            })?;
 
+        // Extract transaction info from the signed result for building DisplayedTransaction
+        let tx_info = &signed_transaction.request.info;
+        let actual_fee = tx_info.fee;
+        // Get the first recipient's amount (for one-sided transactions there's typically one recipient)
+        let recipient_amount = tx_info.recipients.first().map(|r| r.amount).unwrap_or_default();
+        let kernel_excess = signed_transaction
+            .signed_transaction
+            .transaction
+            .body()
+            .kernels()
+            .first()
+            .map(|k| k.excess.as_bytes().to_vec())
+            .unwrap_or_default();
+
+        let serialized_transaction = serde_json::to_vec(&signed_transaction.signed_transaction.transaction)
+            .inspect_err(|e| {
+                warn!(target: "audit", error:% = e; "Transaction finalization preparation failed");
+                self.fail_and_unlock_pending_transaction(&connection, processed_transaction.id());
+            })
+            .map_err(|e| anyhow!("Failed to serialize transaction: {}", e))?;
+
+        let sent_output_hash = signed_transaction
+            .signed_transaction
+            .sent_hashes
+            .first()
+            .map(hex::encode);
+
+        // Collect sent_output_hashes before moving signed_transaction
+        let sent_output_hashes: Vec<FixedHash> = signed_transaction.signed_transaction.sent_hashes.clone();
+
+        db::update_pending_transaction_status(
+            &connection,
+            processed_transaction.id(),
+            crate::models::PendingTransactionStatus::Completed,
+        )
+        .inspect_err(|e| {
+            warn!(target: "audit", error:% = e; "Transaction finalization preparation failed");
+            self.fail_and_unlock_pending_transaction(&connection, processed_transaction.id());
+        })?;
+        let completed_tx_id = signed_transaction.signed_transaction.tx_id;
+        db::create_completed_transaction(
+            &connection,
+            account_id,
+            processed_transaction.id(),
+            &kernel_excess,
+            &serialized_transaction,
+            sent_output_hash,
+            completed_tx_id,
+        )
+        .inspect_err(|e| {
+            warn!(target: "audit", error:% = e; "Transaction finalization preparation failed");
+            self.fail_and_unlock_pending_transaction(&connection, processed_transaction.id());
+        })?;
+
+        let wallet_http_client = WalletHttpClient::new(grpc_address.parse()?)?;
         let response = wallet_http_client
             .submit_transaction(signed_transaction.signed_transaction.transaction)
             .await;
 
-        match response {
-            Err(e) => {
-                warn!(
-                    target: "audit",
-                    id = processed_transaction.id(),
-                    reason:% = e;
-                    "Transaction submission failed"
-                );
-                db::mark_completed_transaction_as_rejected(
-                    &connection,
-                    &completed_tx_id,
-                    &format!("Transaction submission failed: {}", e),
-                )?;
-                self.fail_and_unlock_pending_transaction(&connection, processed_transaction.id());
+        if let Err(e) = response {
+            warn!(
+                target: "audit",
+                id = processed_transaction.id(),
+                reason:% = e;
+                "Transaction submission failed"
+            );
+            db::mark_completed_transaction_as_rejected(
+                &connection,
+                completed_tx_id,
+                &format!("Transaction submission failed: {}", e),
+            )?;
+            self.fail_and_unlock_pending_transaction(&connection, processed_transaction.id());
 
-                return Err(anyhow!("Transaction submission failed: {}", e));
-            },
-            Ok(response) => {
-                if response.accepted {
-                    info!(
-                        target: "audit",
-                        id = &*completed_tx_id;
-                        "Transaction accepted by network"
-                    );
-                    db::mark_completed_transaction_as_broadcasted(&connection, &completed_tx_id, 1)?;
-                } else if !response.accepted && response.rejection_reason != TxSubmissionRejectionReason::AlreadyMined {
-                    warn!(
-                        target: "audit",
-                        id = &*completed_tx_id,
-                        reason:% = response.rejection_reason;
-                        "Transaction rejected by network"
-                    );
-                    db::mark_completed_transaction_as_rejected(
-                        &connection,
-                        &completed_tx_id,
-                        &response.rejection_reason.to_string(),
-                    )?;
-                    self.fail_and_unlock_pending_transaction(&connection, processed_transaction.id());
+            return Err(anyhow!("Transaction submission failed: {}", e));
+        }
+        let submission_response = response.expect("Already checked for Err above");
 
-                    return Err(anyhow!(
-                        "Transaction was not accepted by the network: {}",
-                        response.rejection_reason
-                    ));
-                }
-            },
+        if submission_response.accepted {
+            info!(
+                target: "audit",
+                id = completed_tx_id.to_string().as_str();
+                "Transaction accepted by network"
+            );
+            db::mark_completed_transaction_as_broadcasted(&connection, completed_tx_id, 1)?;
+        } else if submission_response.rejection_reason != TxSubmissionRejectionReason::AlreadyMined {
+            warn!(
+                target: "audit",
+                id = completed_tx_id.to_string().as_str(),
+                reason:% = submission_response.rejection_reason;
+                "Transaction rejected by network"
+            );
+            db::mark_completed_transaction_as_rejected(
+                &connection,
+                completed_tx_id,
+                &submission_response.rejection_reason.to_string(),
+            )?;
+            self.fail_and_unlock_pending_transaction(&connection, processed_transaction.id());
+
+            return Err(anyhow!(
+                "Transaction was not accepted by the network: {}",
+                submission_response.rejection_reason
+            ));
         }
 
         // Build and save DisplayedTransaction for immediate UI display
         let displayed_transaction = self.build_pending_displayed_transaction(
             processed_transaction,
             sent_output_hashes,
-            &completed_tx_id,
+            completed_tx_id,
             recipient_amount,
             actual_fee,
         )?;
@@ -710,9 +706,9 @@ impl TransactionSender {
         &self,
         processed_tx: &ProcessedTransaction,
         sent_output_hashes: Vec<FixedHash>,
-        completed_tx_id: &str,
-        amount: u64,
-        fee: u64,
+        completed_tx_id: TxId,
+        amount: MicroMinotari,
+        fee: MicroMinotari,
     ) -> Result<DisplayedTransaction, anyhow::Error> {
         let recipient = &processed_tx.recipient;
         let now = Utc::now().naive_utc();
@@ -723,7 +719,7 @@ impl TransactionSender {
             .iter()
             .map(|utxo| TransactionInput {
                 output_hash: utxo.output_hash(),
-                amount: utxo.value().as_u64(),
+                amount: utxo.value(),
                 mined_in_block_hash: FixedHash::default(),
                 matched_output_id: None,
                 is_matched: false,
@@ -736,11 +732,11 @@ impl TransactionSender {
             .direction(TransactionDirection::Outgoing)
             .status(TransactionDisplayStatus::Pending)
             .source(TransactionSource::OneSided)
-            .credits_and_debits(0, amount + fee)
+            .credits_and_debits(0.into(), amount + fee)
             .message(recipient.payment_id.clone())
-            .counterparty(Some(recipient.address.to_base58()), None)
+            .counterparty(Some(recipient.address.clone()))
             .blockchain_info(0, FixedHash::default(), now, 0) // No block height yet
-            .fee(Some(fee))
+            .fee(Some(fee.into()))
             .inputs(inputs)
             .sent_output_hashes(sent_output_hashes)
             .build()

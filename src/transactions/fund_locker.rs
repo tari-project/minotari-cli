@@ -149,7 +149,7 @@ impl FundLocker {
         info!(
             target: "audit",
             account_id = account_id,
-            amount = &*mask_amount(amount.as_u64() as i64);
+            amount = &*mask_amount(amount);
             "Locking funds"
         );
 
@@ -194,7 +194,7 @@ impl FundLocker {
         info!(
             target: "audit",
             utxos_count = utxo_selection.utxos.len(),
-            total_value = &*mask_amount(utxo_selection.total_value.as_u64() as i64);
+            total_value = &*mask_amount(utxo_selection.total_value);
             "Funds locked successfully"
         );
 

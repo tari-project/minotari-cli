@@ -258,7 +258,7 @@ impl InputSelector {
     ) -> Result<UtxoSelection, UtxoSelectionError> {
         debug!(
             account_id = self.account_id,
-            amount = &*mask_amount(amount.as_u64() as i64);
+            amount = &*mask_amount(amount);
             "Selecting UTXOs"
         );
 
@@ -316,8 +316,8 @@ impl InputSelector {
         if !sufficient_funds {
             warn!(
                 target: "audit",
-                available = &*mask_amount(total_value.as_u64() as i64),
-                required = &*mask_amount((amount + fee_with_change).as_u64() as i64);
+                available = &*mask_amount(total_value),
+                required = &*mask_amount(amount + fee_with_change);
                 "Insufficient funds for transaction"
             );
             return Err(UtxoSelectionError::InsufficientFunds {
@@ -328,7 +328,7 @@ impl InputSelector {
 
         debug!(
             count = utxos.len(),
-            total = &*mask_amount(total_value.as_u64() as i64),
+            total = &*mask_amount(total_value),
             change = requires_change_output;
             "UTXOs selected"
         );

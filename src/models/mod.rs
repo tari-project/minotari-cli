@@ -23,6 +23,7 @@
 use chrono::NaiveDateTime;
 use serde::{Deserialize, Serialize};
 use tari_common_types::tari_address::TariAddress;
+use tari_common_types::transaction::TxId;
 use tari_common_types::types::FixedHash;
 use tari_transaction_components::MicroMinotari;
 
@@ -97,25 +98,25 @@ pub enum WalletEventType {
         reason: String,
     },
     TransactionBroadcast {
-        tx_id: String,
+        tx_id: TxId,
         kernel_excess: Vec<u8>,
     },
     TransactionUnconfirmed {
-        tx_id: String,
+        tx_id: TxId,
         mined_height: u64,
         confirmations: u64,
     },
     TransactionConfirmed {
-        tx_id: String,
+        tx_id: TxId,
         mined_height: u64,
         confirmation_height: u64,
     },
     TransactionRejected {
-        tx_id: String,
+        tx_id: TxId,
         reason: String,
     },
     TransactionReorged {
-        tx_id: String,
+        tx_id: TxId,
         original_mined_height: u64,
     },
 }

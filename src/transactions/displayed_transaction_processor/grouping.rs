@@ -161,7 +161,7 @@ impl<'a, R: TransactionDataResolver> BalanceChangeGrouper<'a, R> {
         let mut inputs = Vec::new();
 
         for change in changes {
-            if change.is_credit(){
+            if change.is_credit() {
                 outputs.push(change);
             } else if change.is_debit() {
                 inputs.push(change);
@@ -258,7 +258,11 @@ impl<'a, R: TransactionDataResolver> BalanceChangeGrouper<'a, R> {
                 }
 
                 let claimed_amount = group.output_change.as_ref().and_then(|c| c.claimed_amount);
-                let output_credit = group.output_change.as_ref().map(|c| c.balance_credit).unwrap_or_default();
+                let output_credit = group
+                    .output_change
+                    .as_ref()
+                    .map(|c| c.balance_credit)
+                    .unwrap_or_default();
 
                 if let Some(claimed_amount) = claimed_amount {
                     let target_sum = output_credit + claimed_amount;

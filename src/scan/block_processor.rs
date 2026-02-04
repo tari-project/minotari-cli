@@ -367,20 +367,19 @@ impl<E: EventSender> BlockProcessor<E> {
                 payment_reference,
             )?;
 
-                db::insert_wallet_event(tx, self.account_id, &event)?;
+            db::insert_wallet_event(tx, self.account_id, &event)?;
 
-                let balance_change = self.record_output_balance_change(tx, output_id, block, output)?;
+            let balance_change = self.record_output_balance_change(tx, output_id, block, output)?;
 
-                if let Some(ref mut acc) = self.current_block {
-                    acc.outputs.push(DetectedOutput {
-                        height: block.height,
-                        mined_in_block_hash: block.block_hash,
-                        output: output.clone(),
-                    });
-                    acc.add_balance_change(balance_change);
-                }
+            if let Some(ref mut acc) = self.current_block {
+                acc.outputs.push(DetectedOutput {
+                    height: block.height,
+                    mined_in_block_hash: block.block_hash,
+                    output: output.clone(),
+                });
+                acc.add_balance_change(balance_change);
             }
-
+        }
 
         Ok(())
     }
@@ -447,16 +446,16 @@ impl<E: EventSender> BlockProcessor<E> {
                 block.mined_timestamp,
             )?;
 
-                let balance_change = self.record_input_balance_change(tx, input_id, output.value(), block)?;
-                db::update_output_status(tx, output_id, OutputStatus::Spent)?;
+            let balance_change = self.record_input_balance_change(tx, input_id, output.value(), block)?;
+            db::update_output_status(tx, output_id, OutputStatus::Spent)?;
 
-                if let Some(ref mut acc) = self.current_block {
-                    acc.inputs.push(SpentInput {
-                        mined_in_block: block.block_hash,
-                        output
-                    });
-                    acc.add_balance_change(balance_change);
-                }
+            if let Some(ref mut acc) = self.current_block {
+                acc.inputs.push(SpentInput {
+                    mined_in_block: block.block_hash,
+                    output,
+                });
+                acc.add_balance_change(balance_change);
+            }
         }
 
         Ok(())

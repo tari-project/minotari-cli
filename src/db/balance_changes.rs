@@ -1,10 +1,10 @@
+use crate::db::error::{WalletDbError, WalletDbResult};
+use crate::log::mask_amount;
+use crate::models::BalanceChange;
 use log::debug;
 use rusqlite::{Connection, named_params};
 use serde::Deserialize;
 use serde_rusqlite::from_rows;
-use crate::db::error::{WalletDbError, WalletDbResult};
-use crate::log::mask_amount;
-use crate::models::BalanceChange;
 
 pub fn insert_balance_change(conn: &Connection, change: &BalanceChange) -> WalletDbResult<()> {
     debug!(
@@ -64,8 +64,8 @@ pub fn insert_balance_change(conn: &Connection, change: &BalanceChange) -> Walle
             ":balance_debit": balance_debit,
             ":effective_date": change.effective_date,
             ":effective_height": effective_height,
-            ":claimed_recipient_address": change.claimed_recipient_address.map(|v| v.to_base58()),
-            ":claimed_sender_address": change.claimed_sender_address.map(|v| v.to_base58()),
+            ":claimed_recipient_address": change.claimed_recipient_address.as_ref().map(|v| v.to_base58()),
+            ":claimed_sender_address": change.claimed_sender_address.as_ref().map(|v| v.to_base58()),
             ":memo_parsed": change.memo_parsed,
             ":memo_hex": change.memo_hex,
             ":claimed_fee": claimed_fee,
