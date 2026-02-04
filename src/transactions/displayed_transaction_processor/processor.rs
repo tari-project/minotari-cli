@@ -10,6 +10,7 @@ use crate::db::{self, SqlitePool};
 use crate::models::{BalanceChange, Id};
 use log::debug;
 use rusqlite::Connection;
+use tari_common_types::types::FixedHash;
 
 /// Processes balance changes into user-displayable transactions.
 pub struct DisplayedTransactionProcessor {
@@ -113,7 +114,8 @@ impl DisplayedTransactionProcessor {
         let total_credit = group.output_change.as_ref().map(|c| c.balance_credit).unwrap_or(0);
         let total_debit: u64 = group.input_changes.iter().map(|c| c.balance_debit).sum();
 
-        let (outputs, output_type_str, coinbase_extra, is_coinbase) = self.collect_output_details(&group, resolver)?;
+        let (outputs, output_type_str, coinbase_extra, is_coinbase, sent_output_hashes) =
+            self.collect_output_details(&group, resolver)?;
 
         let inputs = self.collect_input_details(&group, resolver)?;
 
@@ -147,6 +149,7 @@ impl DisplayedTransactionProcessor {
             .output_type(output_type_str)
             .coinbase_extra(coinbase_extra)
             .memo_hex(group.memo_hex)
+            .sent_output_hashes(sent_output_hashes)
             .build()
     }
 
@@ -155,11 +158,21 @@ impl DisplayedTransactionProcessor {
         &self,
         group: &GroupedTransaction,
         resolver: &R,
-    ) -> Result<(Vec<TransactionOutput>, Option<String>, Option<String>, bool), ProcessorError> {
+    ) -> Result<
+        (
+            Vec<TransactionOutput>,
+            Option<String>,
+            Option<String>,
+            bool,
+            Vec<FixedHash>,
+        ),
+        ProcessorError,
+    > {
         let mut outputs = Vec::new();
         let mut output_type_str: Option<String> = None;
         let mut coinbase_extra: Option<String> = None;
         let mut is_coinbase = false;
+        let mut sent_output_hashes = Vec::new();
 
         if let Some(ref output_change) = group.output_change
             && let Some(details) = resolver.get_output_details(output_change)?
@@ -167,6 +180,7 @@ impl DisplayedTransactionProcessor {
             is_coinbase = details.is_coinbase;
             output_type_str = Some(details.output_type.clone());
             coinbase_extra = details.coinbase_extra.clone();
+            sent_output_hashes = details.sent_output_hashes;
 
             outputs.push(TransactionOutput {
                 hash: details.hash,
@@ -179,7 +193,13 @@ impl DisplayedTransactionProcessor {
             });
         }
 
-        Ok((outputs, output_type_str, coinbase_extra, is_coinbase))
+        Ok((
+            outputs,
+            output_type_str,
+            coinbase_extra,
+            is_coinbase,
+            sent_output_hashes,
+        ))
     }
 
     fn collect_input_details<R: TransactionDataResolver>(
