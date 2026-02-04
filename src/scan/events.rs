@@ -41,7 +41,8 @@
 use std::time::Duration;
 
 use tari_common_types::types::FixedHash;
-
+use tari_transaction_components::MicroMinotari;
+use tari_transaction_components::transaction_components::WalletOutput;
 use crate::transactions::DisplayedTransaction;
 
 /// Top-level event enum for all scanner notifications.
@@ -93,19 +94,15 @@ pub struct BlockProcessedEvent {
 
 #[derive(Debug, Clone)]
 pub struct DetectedOutput {
-    pub hash: FixedHash,
     pub height: u64,
     pub mined_in_block_hash: FixedHash,
-    pub value: u64,
-    pub is_coinbase: bool,
-    pub memo: Option<String>,
+    pub output: WalletOutput,
 }
 
 #[derive(Debug, Clone)]
 pub struct SpentInput {
-    pub output_hash: FixedHash,
     pub mined_in_block: FixedHash,
-    pub value: u64,
+    pub output: WalletOutput,
 }
 
 #[derive(Debug, Clone)]
@@ -117,8 +114,8 @@ pub struct ConfirmedOutput {
 
 #[derive(Debug, Clone)]
 pub struct BalanceChangeSummary {
-    pub credit: u64,
-    pub debit: u64,
+    pub credit: MicroMinotari,
+    pub debit: MicroMinotari,
     pub description: String,
 }
 

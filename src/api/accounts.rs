@@ -1094,7 +1094,7 @@ pub async fn api_lock_funds(
     info!(
         target: "audit",
         account = &*name,
-        amount = &*mask_amount(body.amount.0 as i64),
+        amount = &*mask_amount(body.amount.0.into()),
         idempotency_key:? = body.idempotency_key;
         "API: Lock funds request"
     );

@@ -1,6 +1,5 @@
 use super::builder::DisplayedTransactionBuilder;
 use super::error::ProcessorError;
-use super::formatting::{address_to_emoji, determine_transaction_source};
 use super::grouping::{BalanceChangeGrouper, GroupedTransaction, build_input_hash_map};
 use super::resolver::{DatabaseResolver, InMemoryResolver, ProcessingContext, TransactionDataResolver};
 use super::types::{
@@ -10,7 +9,10 @@ use crate::db::{self, SqlitePool};
 use crate::models::{BalanceChange, Id};
 use log::debug;
 use rusqlite::Connection;
+use tari_common_types::tari_address::TariAddress;
 use tari_common_types::types::FixedHash;
+use tari_transaction_components::MicroMinotari;
+use tari_transaction_components::transaction_components::{CoinBaseExtra, OutputType};
 
 /// Processes balance changes into user-displayable transactions.
 pub struct DisplayedTransactionProcessor {
@@ -111,8 +113,8 @@ impl DisplayedTransactionProcessor {
         group: GroupedTransaction,
         resolver: &R,
     ) -> Result<DisplayedTransaction, ProcessorError> {
-        let total_credit = group.output_change.as_ref().map(|c| c.balance_credit).unwrap_or(0);
-        let total_debit: u64 = group.input_changes.iter().map(|c| c.balance_debit).sum();
+        let total_credit = group.output_change.as_ref().map(|c| c.balance_credit).unwrap_or_default();
+        let total_debit: MicroMinotari = group.input_changes.iter().map(|c| c.balance_debit).sum();
 
         let (outputs, output_type_str, coinbase_extra, is_coinbase, sent_output_hashes) =
             self.collect_output_details(&group, resolver)?;
@@ -129,9 +131,9 @@ impl DisplayedTransactionProcessor {
             },
         };
 
-        let source = self.determine_source(&group, is_coinbase);
+        let source = self.determine_source(&group);
         let status = self.determine_status(group.effective_height);
-        let (counterparty_addr, counterparty_emoji) = self.determine_counterparty(&group, total_credit, total_debit);
+        let counterparty_addr = self.determine_counterparty(&group, total_credit, total_debit);
 
         let confirmations = self.current_tip_height.saturating_sub(group.effective_height);
 
@@ -141,7 +143,7 @@ impl DisplayedTransactionProcessor {
             .status(status)
             .credits_and_debits(total_credit, total_debit)
             .message(group.memo_parsed)
-            .counterparty(counterparty_addr, counterparty_emoji)
+            .counterparty(counterparty_addr)
             .blockchain_info(group.effective_height, mined_hash, group.effective_date, confirmations)
             .fee(group.claimed_fee)
             .inputs(inputs)
@@ -161,25 +163,25 @@ impl DisplayedTransactionProcessor {
     ) -> Result<
         (
             Vec<TransactionOutput>,
-            Option<String>,
-            Option<String>,
+            Option<OutputType>,
+            Option<CoinBaseExtra>,
             bool,
             Vec<FixedHash>,
         ),
         ProcessorError,
     > {
         let mut outputs = Vec::new();
-        let mut output_type_str: Option<String> = None;
-        let mut coinbase_extra: Option<String> = None;
+        let mut output_type: Option<OutputType> = None;
+        let mut coinbase_extra: Option<CoinBaseExtra> = None;
         let mut is_coinbase = false;
         let mut sent_output_hashes = Vec::new();
 
         if let Some(ref output_change) = group.output_change
             && let Some(details) = resolver.get_output_details(output_change)?
         {
-            is_coinbase = details.is_coinbase;
-            output_type_str = Some(details.output_type.clone());
-            coinbase_extra = details.coinbase_extra.clone();
+            is_coinbase = details.output_type == OutputType::Coinbase;
+            output_type = Some(details.output_type);
+            coinbase_extra = Some(details.coinbase_extra);
             sent_output_hashes = details.sent_output_hashes;
 
             outputs.push(TransactionOutput {
@@ -195,7 +197,7 @@ impl DisplayedTransactionProcessor {
 
         Ok((
             outputs,
-            output_type_str,
+            output_type,
             coinbase_extra,
             is_coinbase,
             sent_output_hashes,
@@ -224,10 +226,14 @@ impl DisplayedTransactionProcessor {
         Ok(inputs)
     }
 
-    fn determine_source(&self, group: &GroupedTransaction, is_coinbase: bool) -> TransactionSource {
+    fn determine_source(&self, group: &GroupedTransaction) -> TransactionSource {
         let has_sender = group.sender.is_some();
         let has_recipient = group.recipient.is_some();
-        determine_transaction_source(is_coinbase, has_sender, has_recipient)
+        match (has_sender, has_recipient) {
+            (false, false) => TransactionSource::Coinbase,
+            (true, true) => TransactionSource::Transfer,
+            _=> TransactionSource::OneSided,
+        }
     }
 
     fn determine_status(&self, effective_height: u64) -> TransactionDisplayStatus {
@@ -242,19 +248,17 @@ impl DisplayedTransactionProcessor {
     fn determine_counterparty(
         &self,
         group: &GroupedTransaction,
-        total_credit: u64,
-        total_debit: u64,
-    ) -> (Option<String>, Option<String>) {
+        total_credit: MicroMinotari,
+        total_debit: MicroMinotari,
+    ) -> Option<TariAddress> {
         if total_debit > total_credit {
-            (
-                group.recipient.clone(),
-                group.recipient.as_ref().and_then(|a| address_to_emoji(a)),
-            )
+
+                group.recipient.clone()
+
         } else {
-            (
-                group.sender.clone(),
-                group.sender.as_ref().and_then(|a| address_to_emoji(a)),
-            )
+
+                group.sender.clone()
+
         }
     }
 

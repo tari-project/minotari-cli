@@ -8,7 +8,7 @@ use log4rs::{
     Config,
     config::{Deserializers, RawConfig},
 };
-
+use tari_transaction_components::MicroMinotari;
 use crate::log::structured_console_encoder::StructuredConsoleEncoderDeserializer;
 
 /// Initializes logging
@@ -83,7 +83,7 @@ pub fn mask_string(s: &str) -> String {
 
 /// Returns a redacted placeholder for amounts.
 /// If REVEAL_PII is true, returns the actual amount.
-pub fn mask_amount(amount: i64) -> String {
+pub fn mask_amount(amount: MicroMinotari) -> String {
     if reveal_pii() {
         return amount.to_string();
     }

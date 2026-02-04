@@ -26,11 +26,11 @@ pub fn insert_output(
     memo_parsed: Option<String>,
     memo_hex: Option<String>,
     payment_reference: PaymentReference,
-) -> WalletDbResult<(i64, bool)> {
+) -> WalletDbResult<i64> {
     info!(
         target: "audit",
         account_id = account_id,
-        value = &*mask_amount(output.value().as_u64() as i64),
+        value = &*mask_amount(output.value()),
         height = block_height;
         "DB: Inserting output"
     );
@@ -46,9 +46,9 @@ pub fn insert_output(
     let value = output.value().as_u64() as i64;
     let payment_reference_hex = hex::encode(payment_reference.as_slice());
 
-    let rows_affected = conn.execute(
+    conn.execute(
         r#"
-       INSERT OR IGNORE INTO outputs (
+       INSERT INTO outputs (
             id,
             account_id,
             output_hash,
@@ -90,28 +90,31 @@ pub fn insert_output(
         },
     )?;
 
-    Ok((id, rows_affected > 0))
+    Ok(id)
 }
 
-#[derive(Deserialize)]
-struct OutputInfoRow {
-    id: i64,
-    value: i64,
-}
 
-pub fn get_output_info_by_hash(conn: &Connection, output_hash: &FixedHash) -> WalletDbResult<Option<(i64, u64)>> {
+
+pub fn get_output_info_by_hash(conn: &Connection, output_hash: &FixedHash) -> WalletDbResult<Option<(i64, WalletOutput)>> {
     let mut stmt = conn.prepare_cached(
         r#"
-        SELECT id, value
+        SELECT id, wallet_output_json
         FROM outputs
         WHERE output_hash = :output_hash AND deleted_at IS NULL
         "#,
     )?;
 
     let rows = stmt.query(named_params! { ":output_hash": output_hash.as_slice() })?;
-    let result: Option<OutputInfoRow> = from_rows(rows).next().transpose()?;
+    let row: Option<WalletOutputRow> = from_rows(rows).next().transpose()?;
+    let data = match row {
+        Some(r) => r,
+        None => return Ok(None),
+    };
 
-    Ok(result.map(|r| (r.id, r.value as u64)))
+
+    let json_str = data.wallet_output_json.ok_or_else(|| WalletDbError::Unexpected("Output JSON is null".to_string()))?;
+    let output: WalletOutput = serde_json::from_str(&json_str)?;
+    Ok(Some((data.id, output)))
 }
 
 #[derive(Deserialize)]
@@ -220,8 +223,8 @@ pub fn soft_delete_outputs_from_height(conn: &Connection, account_id: i64, heigh
             caused_by_output_id: Some(output_row.id),
             caused_by_input_id: None,
             description: format!("Reversal: Output found in blockchain scan (reorg at height {})", height),
-            balance_credit: 0,
-            balance_debit: output_row.value as u64,
+            balance_credit: 0.into(),
+            balance_debit: (output_row.value as u64).into(),
             effective_date: now.naive_utc(),
             effective_height: height,
             claimed_recipient_address: None,
