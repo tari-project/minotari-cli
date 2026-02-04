@@ -8,4 +8,6 @@ pub enum ProcessorError {
 
     #[error("Failed to parse output data: {0}")]
     ParseError(String),
+    #[error("Missing data: {0}")]
+    MissingError(String),
 }

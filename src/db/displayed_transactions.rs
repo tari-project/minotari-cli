@@ -7,6 +7,7 @@ use log::{debug, info, warn};
 use rusqlite::{Connection, OptionalExtension, named_params};
 use serde::Deserialize;
 use serde_rusqlite::from_rows;
+use tari_common_types::transaction::TxId;
 use tari_common_types::types::FixedHash;
 
 #[derive(Deserialize)]
@@ -39,8 +40,8 @@ fn process_json_rows(
 
 pub fn insert_displayed_transaction(conn: &Connection, transaction: &DisplayedTransaction) -> WalletDbResult<()> {
     debug!(
-        id = &*transaction.id,
-        amount = &*mask_amount(transaction.amount as i64),
+        id = transaction.id.to_string().as_str(),
+        amount = &*mask_amount(transaction.amount.as_u64() as i64),
         status:? = transaction.status;
         "DB: Inserting displayed transaction"
     );
@@ -71,12 +72,12 @@ pub fn insert_displayed_transaction(conn: &Connection, transaction: &DisplayedTr
             updated_at = excluded.updated_at
         "#,
         named_params! {
-            ":id": transaction.id,
+            ":id": transaction.id.to_string(),
             ":account_id": transaction.details.account_id,
             ":direction": direction,
             ":source": source,
             ":status": status,
-            ":amount": transaction.amount as i64,
+            ":amount": transaction.amount.as_u64() as i64,
             ":block_height": transaction.blockchain.block_height as i64,
             ":timestamp": timestamp,
             ":json": transaction_json,
@@ -291,7 +292,7 @@ pub fn find_pending_outbound_by_output_hash(
         .filter_map(|r| serde_json::from_str::<DisplayedTransaction>(&r.transaction_json).ok())
         .find(|tx| {
             tx.details.sent_output_hashes.contains(output_hash)
-                || tx.details.inputs.iter().any(|input| &input.output_hash == output_hash)
+                || tx.details.outputs.iter().any(|output| &output.hash == output_hash)
         });
 
     Ok(found)
@@ -301,7 +302,7 @@ pub fn find_pending_outbound_by_output_hash(
 pub fn update_displayed_transaction_mined(conn: &Connection, tx: &DisplayedTransaction) -> WalletDbResult<bool> {
     info!(
         target: "audit",
-        id = &*tx.id,
+        id = tx.id.to_string().as_str(),
         height = tx.blockchain.block_height;
         "DB: Displayed Transaction Mined"
     );
@@ -322,7 +323,7 @@ pub fn update_displayed_transaction_mined(conn: &Connection, tx: &DisplayedTrans
             ":json": transaction_json,
             ":payref": payref,
             ":now": current_db_timestamp(),
-            ":id": tx.id
+            ":id": tx.id.to_string()
         },
     )?;
 
@@ -403,7 +404,7 @@ pub fn update_displayed_transaction_confirmations(
             ":status": status_str,
             ":json": transaction_json,
             ":now": current_db_timestamp(),
-            ":id": transaction.id
+            ":id": transaction.id.to_string()
         },
     )?;
 
@@ -412,11 +413,12 @@ pub fn update_displayed_transaction_confirmations(
 
 pub fn mark_displayed_transaction_rejected(
     conn: &Connection,
-    tx_id: &str,
+    tx_id: TxId,
 ) -> WalletDbResult<Option<DisplayedTransaction>> {
+    let tx_id = tx_id.to_string();
     warn!(
         target: "audit",
-        id = tx_id;
+        id = tx_id.as_str();
         "DB: Marking displayed transaction as rejected"
     );
 

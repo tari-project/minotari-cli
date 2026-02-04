@@ -80,7 +80,7 @@ pub mod transaction_history;
 
 pub use displayed_transaction_processor::{
     BlockchainInfo, CounterpartyInfo, DisplayedTransaction, DisplayedTransactionBuilder, DisplayedTransactionProcessor,
-    FeeInfo, ProcessingContext, ProcessorError, TransactionDetails, TransactionDirection, TransactionDisplayStatus,
+    ProcessingContext, ProcessorError, TransactionDetails, TransactionDirection, TransactionDisplayStatus,
     TransactionInput, TransactionOutput, TransactionSource,
 };
 pub use monitor::{MonitoringResult, MonitoringState, TransactionMonitor};

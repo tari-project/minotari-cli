@@ -14,7 +14,7 @@ pub fn insert_input(
     mined_in_block_height: u64,
     mined_in_block_hash: &[u8],
     mined_timestamp: u64,
-) -> WalletDbResult<(i64, bool)> {
+) -> WalletDbResult<i64> {
     debug!(
         target: "audit",
         account_id = account_id,
@@ -28,9 +28,9 @@ pub fn insert_input(
 
     let mined_in_block_height = mined_in_block_height as i64;
 
-    let rows_affected = conn.execute(
+    conn.execute(
         r#"
-       INSERT OR IGNORE INTO inputs (
+       INSERT INTO inputs (
             account_id,
             output_id,
             mined_in_block_height,
@@ -60,7 +60,7 @@ pub fn insert_input(
         |row| row.get(0),
     )?;
 
-    Ok((input_id, rows_affected > 0))
+    Ok(input_id)
 }
 
 // retrieve output_id
@@ -124,8 +124,8 @@ pub fn soft_delete_inputs_from_height(conn: &Connection, account_id: i64, height
             caused_by_output_id: Some(row.output_id),
             caused_by_input_id: Some(row.input_id),
             description: format!("Reversal: Input spent as input (reorg at height {})", height),
-            balance_credit: row.output_value as u64, // Reversing a debit, so credit the value back
-            balance_debit: 0,
+            balance_credit: (row.output_value as u64).into(), // Reversing a debit, so credit the value back
+            balance_debit: 0.into(),
             effective_date: now.naive_utc(),
             effective_height: height,
             claimed_recipient_address: None,

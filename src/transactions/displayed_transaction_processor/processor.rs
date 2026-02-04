@@ -1,6 +1,5 @@
 use super::builder::DisplayedTransactionBuilder;
 use super::error::ProcessorError;
-use super::formatting::{address_to_emoji, determine_transaction_source};
 use super::grouping::{BalanceChangeGrouper, GroupedTransaction, build_input_hash_map};
 use super::resolver::{DatabaseResolver, InMemoryResolver, ProcessingContext, TransactionDataResolver};
 use super::types::{
@@ -10,6 +9,7 @@ use crate::db::{self, SqlitePool};
 use crate::models::{BalanceChange, Id};
 use log::debug;
 use rusqlite::Connection;
+use tari_transaction_components::transaction_components::OutputType;
 
 /// Processes balance changes into user-displayable transactions.
 pub struct DisplayedTransactionProcessor {
@@ -110,8 +110,8 @@ impl DisplayedTransactionProcessor {
         group: GroupedTransaction,
         resolver: &R,
     ) -> Result<DisplayedTransaction, ProcessorError> {
-        let total_credit = group.output_change.as_ref().map(|c| c.balance_credit).unwrap_or(0);
-        let total_debit: u64 = group.input_changes.iter().map(|c| c.balance_debit).sum();
+        let total_credit = group.output_change.as_ref().map(|c| c.balance_credit).unwrap_or_default();
+        let total_debit: u64 = group.input_changes.iter().map(|c| c.balance_debit.as_u64()).sum();
 
         let (outputs, output_type_str, coinbase_extra, is_coinbase) = self.collect_output_details(&group, resolver)?;
 
@@ -129,7 +129,7 @@ impl DisplayedTransactionProcessor {
 
         let source = self.determine_source(&group, is_coinbase);
         let status = self.determine_status(group.effective_height);
-        let (counterparty_addr, counterparty_emoji) = self.determine_counterparty(&group, total_credit, total_debit);
+        let (counterparty_addr, counterparty_emoji) = self.determine_counterparty(&group, total_credit.into(), total_debit);
 
         let confirmations = self.current_tip_height.saturating_sub(group.effective_height);
 
@@ -137,7 +137,7 @@ impl DisplayedTransactionProcessor {
             .account_id(group.account_id)
             .source(source)
             .status(status)
-            .credits_and_debits(total_credit, total_debit)
+            .credits_and_debits(total_credit, total_debit.into())
             .message(group.memo_parsed)
             .counterparty(counterparty_addr, counterparty_emoji)
             .blockchain_info(group.effective_height, mined_hash, group.effective_date, confirmations)
@@ -155,7 +155,7 @@ impl DisplayedTransactionProcessor {
         &self,
         group: &GroupedTransaction,
         resolver: &R,
-    ) -> Result<(Vec<TransactionOutput>, Option<String>, Option<String>, bool), ProcessorError> {
+    ) -> Result<(Vec<TransactionOutput>, OutputType, Option<String>, bool), ProcessorError> {
         let mut outputs = Vec::new();
         let mut output_type_str: Option<String> = None;
         let mut coinbase_extra: Option<String> = None;
@@ -179,7 +179,7 @@ impl DisplayedTransactionProcessor {
             });
         }
 
-        Ok((outputs, output_type_str, coinbase_extra, is_coinbase))
+        Ok((outputs, details.output_type, coinbase_extra, is_coinbase))
     }
 
     fn collect_input_details<R: TransactionDataResolver>(

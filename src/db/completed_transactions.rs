@@ -5,7 +5,7 @@ use crate::db::error::WalletDbResult;
 use chrono::{DateTime, Utc};
 use log::{debug, info, warn};
 use rusqlite::{Connection, OptionalExtension, Row, named_params};
-use uuid::Uuid;
+use tari_common_types::transaction::TxId;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum CompletedTransactionStatus {
@@ -48,7 +48,7 @@ impl FromStr for CompletedTransactionStatus {
 
 #[derive(Debug, Clone)]
 pub struct CompletedTransaction {
-    pub id: String,
+    pub id: TxId,
     pub pending_tx_id: String,
     pub account_id: i64,
     pub status: CompletedTransactionStatus,
@@ -69,9 +69,10 @@ fn map_row(row: &Row) -> Result<CompletedTransaction, rusqlite::Error> {
     let status_str: String = row.get("status")?;
     let status =
         CompletedTransactionStatus::from_str(&status_str).map_err(|_| rusqlite::Error::ExecuteReturnedResults)?;
-
+    let num_id: i64 = row.get("id")?;
+    let id = TxId::from(num_id as u64);
     Ok(CompletedTransaction {
-        id: row.get("id")?,
+        id,
         account_id: row.get("account_id")?,
         pending_tx_id: row.get("pending_tx_id")?,
         status,
@@ -96,14 +97,15 @@ pub fn create_completed_transaction(
     kernel_excess: &[u8],
     serialized_transaction: &[u8],
     sent_output_hash: Option<String>,
-) -> WalletDbResult<String> {
+    tx_id: TxId,
+) -> WalletDbResult<()> {
     debug!(
         account_id = account_id,
         pending_id = pending_tx_id;
         "DB: Creating completed transaction"
     );
 
-    let id = Uuid::new_v4().to_string();
+    let id = tx_id.to_string();
     let status_str = CompletedTransactionStatus::Completed.to_string();
 
     conn.execute(
@@ -146,7 +148,7 @@ pub fn create_completed_transaction(
         "DB: Transaction Completed"
     );
 
-    Ok(id)
+    Ok(())
 }
 
 pub fn get_completed_transaction_by_id(conn: &Connection, id: &str) -> WalletDbResult<Option<CompletedTransaction>> {
@@ -223,10 +225,11 @@ pub fn update_completed_transaction_status(
     Ok(())
 }
 
-pub fn mark_completed_transaction_as_broadcasted(conn: &Connection, id: &str, attempts: i32) -> WalletDbResult<()> {
+pub fn mark_completed_transaction_as_broadcasted(conn: &Connection, tx_id: TxId, attempts: i32) -> WalletDbResult<()> {
+    let id = tx_id.to_string();
     info!(
         target: "audit",
-        id = id,
+        id = id.as_str(),
         attempts = attempts;
         "DB: Marking completed tx as broadcasted"
     );
@@ -253,13 +256,14 @@ pub fn mark_completed_transaction_as_broadcasted(conn: &Connection, id: &str, at
 
 pub fn mark_completed_transaction_as_mined_unconfirmed(
     conn: &Connection,
-    id: &str,
+    tx_id: TxId,
     block_height: i64,
     block_hash: &[u8],
 ) -> WalletDbResult<()> {
+    let id = tx_id.to_string();
     info!(
         target: "audit",
-        id = id,
+        id = id.as_str(),
         height = block_height;
         "DB: Transaction Mined (Unconfirmed)"
     );
@@ -287,13 +291,14 @@ pub fn mark_completed_transaction_as_mined_unconfirmed(
 
 pub fn mark_completed_transaction_as_confirmed(
     conn: &Connection,
-    id: &str,
+    tx_id: TxId,
     confirmation_height: i64,
     sent_payref: String,
 ) -> WalletDbResult<()> {
+    let id = tx_id.to_string();
     info!(
         target: "audit",
-        id = id,
+        id = id.as_str(),
         height = confirmation_height;
         "DB: Transaction Confirmed"
     );
@@ -385,9 +390,14 @@ pub fn reset_mined_completed_transactions_from_height(
     Ok(rows_affected as u64)
 }
 
-pub fn mark_completed_transaction_as_rejected(conn: &Connection, id: &str, reject_reason: &str) -> WalletDbResult<()> {
+pub fn mark_completed_transaction_as_rejected(
+    conn: &Connection,
+    tx_id: TxId,
+    reject_reason: &str,
+) -> WalletDbResult<()> {
+    let id = tx_id.to_string();
     warn!(
-        id = id,
+        id = id.as_str(),
         reason = reject_reason;
         "DB: Transaction Rejected"
     );

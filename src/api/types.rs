@@ -180,7 +180,7 @@ pub struct CompletedTransactionResponse {
 impl From<crate::db::CompletedTransaction> for CompletedTransactionResponse {
     fn from(tx: crate::db::CompletedTransaction) -> Self {
         Self {
-            id: tx.id,
+            id: tx.id.to_string(),
             pending_tx_id: tx.pending_tx_id,
             account_id: tx.account_id,
             status: tx.status.to_string(),

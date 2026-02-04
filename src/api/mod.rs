@@ -170,7 +170,6 @@ impl FromRef<AppState> for SqlitePool {
             crate::transactions::TransactionDisplayStatus,
             crate::transactions::CounterpartyInfo,
             crate::transactions::BlockchainInfo,
-            crate::transactions::FeeInfo,
             crate::transactions::TransactionDetails,
             crate::transactions::TransactionInput,
             crate::transactions::TransactionOutput,

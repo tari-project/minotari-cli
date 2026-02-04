@@ -26,7 +26,7 @@ pub fn insert_output(
     memo_parsed: Option<String>,
     memo_hex: Option<String>,
     payment_reference: PaymentReference,
-) -> WalletDbResult<(i64, bool)> {
+) -> WalletDbResult<i64> {
     info!(
         target: "audit",
         account_id = account_id,
@@ -48,7 +48,7 @@ pub fn insert_output(
 
     let rows_affected = conn.execute(
         r#"
-       INSERT OR IGNORE INTO outputs (
+       INSERT INTO outputs (
             id,
             account_id,
             output_hash,
@@ -90,7 +90,7 @@ pub fn insert_output(
         },
     )?;
 
-    Ok((id, rows_affected > 0))
+    Ok(id)
 }
 
 #[derive(Deserialize)]
@@ -220,8 +220,8 @@ pub fn soft_delete_outputs_from_height(conn: &Connection, account_id: i64, heigh
             caused_by_output_id: Some(output_row.id),
             caused_by_input_id: None,
             description: format!("Reversal: Output found in blockchain scan (reorg at height {})", height),
-            balance_credit: 0,
-            balance_debit: output_row.value as u64,
+            balance_credit: 0.into(),
+            balance_debit: (output_row.value as u64).into(),
             effective_date: now.naive_utc(),
             effective_height: height,
             claimed_recipient_address: None,

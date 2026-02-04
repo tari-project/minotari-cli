@@ -11,16 +11,16 @@ pub fn insert_balance_change(conn: &Connection, change: &BalanceChange) -> Walle
     debug!(
         target: "audit",
         account_id = change.account_id,
-        credit = &*mask_amount(change.balance_credit as i64),
-        debit = &*mask_amount(change.balance_debit as i64);
+        credit = &*mask_amount(change.balance_credit.as_u64() as i64),
+        debit = &*mask_amount(change.balance_debit.as_u64() as i64);
         "DB: Inserting balance change"
     );
 
-    let balance_credit = change.balance_credit as i64;
-    let balance_debit = change.balance_debit as i64;
+    let balance_credit = change.balance_credit.as_u64() as i64;
+    let balance_debit = change.balance_debit.as_u64() as i64;
     let effective_height = change.effective_height as i64;
-    let claimed_fee = change.claimed_fee.map(|v| v as i64);
-    let claimed_amount = change.claimed_amount.map(|v| v as i64);
+    let claimed_fee = change.claimed_fee.map(|v| v.as_u64() as i64);
+    let claimed_amount = change.claimed_amount.map(|v| v.as_u64() as i64);
 
     conn.execute(
         r#"

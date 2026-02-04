@@ -1,22 +1,24 @@
 use super::error::ProcessorError;
-use super::formatting::format_micro_tari;
 use super::types::{
-    BlockchainInfo, CounterpartyInfo, DisplayedTransaction, FeeInfo, TransactionDetails, TransactionDirection,
+    BlockchainInfo, CounterpartyInfo, DisplayedTransaction, TransactionDetails, TransactionDirection,
     TransactionDisplayStatus, TransactionInput, TransactionOutput, TransactionSource,
 };
 use crate::models::Id;
 use chrono::NaiveDateTime;
 use tari_common_types::payment_reference::generate_payment_reference;
+use tari_common_types::transaction::TxId;
 use tari_common_types::types::FixedHash;
+use tari_transaction_components::MicroMinotari;
+use tari_transaction_components::transaction_components::OutputType;
 
 #[derive(Debug, Default)]
 pub struct DisplayedTransactionBuilder {
-    id: Option<String>,
+    id: Option<TxId>,
     account_id: Option<Id>,
     direction: Option<TransactionDirection>,
     source: Option<TransactionSource>,
     status: Option<TransactionDisplayStatus>,
-    amount: Option<u64>,
+    amount: Option<MicroMinotari>,
     message: Option<String>,
     counterparty_address: Option<String>,
     counterparty_emoji: Option<String>,
@@ -24,12 +26,12 @@ pub struct DisplayedTransactionBuilder {
     block_hash: Option<FixedHash>,
     timestamp: Option<NaiveDateTime>,
     confirmations: Option<u64>,
-    fee: Option<u64>,
-    total_credit: u64,
-    total_debit: u64,
+    fee: Option<MicroMinotari>,
+    total_credit: MicroMinotari,
+    total_debit: MicroMinotari,
     inputs: Vec<TransactionInput>,
     outputs: Vec<TransactionOutput>,
-    output_type: Option<String>,
+    output_type: Option<OutputType>,
     coinbase_extra: Option<String>,
     memo_hex: Option<String>,
     sent_output_hashes: Vec<FixedHash>,
@@ -40,8 +42,8 @@ impl DisplayedTransactionBuilder {
         Self::default()
     }
 
-    pub fn id(mut self, id: impl Into<String>) -> Self {
-        self.id = Some(id.into());
+    pub fn id(mut self, id: TxId) -> Self {
+        self.id = Some(id);
         self
     }
 
@@ -66,7 +68,7 @@ impl DisplayedTransactionBuilder {
     }
 
     /// Set credits and debits, auto-calculating amount and direction.
-    pub fn credits_and_debits(mut self, credit: u64, debit: u64) -> Self {
+    pub fn credits_and_debits(mut self, credit: MicroMinotari, debit: MicroMinotari) -> Self {
         self.total_credit = credit;
         self.total_debit = debit;
 
@@ -106,8 +108,8 @@ impl DisplayedTransactionBuilder {
         self
     }
 
-    pub fn fee(mut self, fee: Option<u64>) -> Self {
-        self.fee = fee;
+    pub fn fee(mut self, fee: MicroMinotari) -> Self {
+        self.fee = Some(fee);
         self
     }
 
@@ -121,8 +123,8 @@ impl DisplayedTransactionBuilder {
         self
     }
 
-    pub fn output_type(mut self, output_type: Option<String>) -> Self {
-        self.output_type = output_type;
+    pub fn output_type(mut self, output_type: OutputType) -> Self {
+        self.output_type = Some(output_type);
         self
     }
 
@@ -155,13 +157,6 @@ impl DisplayedTransactionBuilder {
             label: None,
         });
 
-        let fee = match direction {
-            TransactionDirection::Outgoing => self.fee.map(|f| FeeInfo {
-                amount: f,
-                amount_display: format_micro_tari(f),
-            }),
-            TransactionDirection::Incoming => None,
-        };
 
         let mut payrefs = Vec::new();
         if let Some(block_hash) = &self.block_hash {
@@ -170,13 +165,15 @@ impl DisplayedTransactionBuilder {
                 payrefs.push(payref);
             }
         }
+        let id = self
+            .id
+            .ok_or_else(|| ProcessorError::MissingError("No transaction id".to_string()))?;
         Ok(DisplayedTransaction {
-            id: self.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+            id,
             direction,
             source: self.source.unwrap_or(TransactionSource::Unknown),
             status: self.status.unwrap_or(TransactionDisplayStatus::Pending),
             amount,
-            amount_display: format_micro_tari(amount),
             message: self.message,
             counterparty,
             blockchain: BlockchainInfo {
@@ -185,7 +182,7 @@ impl DisplayedTransactionBuilder {
                 confirmations: self.confirmations.unwrap_or(0),
                 block_hash: self.block_hash.unwrap_or_default(),
             },
-            fee,
+            fee: self.fee.unwrap_or_default(),
             details: TransactionDetails {
                 account_id: self.account_id.unwrap_or(0),
                 total_credit: self.total_credit,

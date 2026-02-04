@@ -271,9 +271,9 @@ impl<E: EventSender> BlockProcessor<E> {
             return Ok(None);
         }
 
-        // Check if any of the scanned transaction's inputs match a pending outbound transaction
-        for input in &scanned_transaction.details.inputs {
-            if let Some(pending) = db::find_pending_outbound_by_output_hash(tx, self.account_id, &input.output_hash)? {
+        // Check if any of the scanned transaction's outputs match a pending outbound transaction
+        for output in &scanned_transaction.details.outputs {
+            if let Some(pending) = db::find_pending_outbound_by_output_hash(tx, self.account_id, &output.hash)? {
                 return Ok(Some(pending));
             }
         }
@@ -352,7 +352,7 @@ impl<E: EventSender> BlockProcessor<E> {
             // Compute the payment reference from block hash and output hash
             let payment_reference = generate_payment_reference(&block.block_hash, hash);
 
-            let (output_id, is_new) = db::insert_output(
+            let output_id = db::insert_output(
                 tx,
                 self.account_id,
                 &self.account_view_key,
@@ -366,22 +366,20 @@ impl<E: EventSender> BlockProcessor<E> {
                 payment_reference,
             )?;
 
-            if is_new {
-                db::insert_wallet_event(tx, self.account_id, &event)?;
+            db::insert_wallet_event(tx, self.account_id, &event)?;
 
-                let balance_change = self.record_output_balance_change(tx, output_id, block, output)?;
+            let balance_change = self.record_output_balance_change(tx, output_id, block, output)?;
 
-                if let Some(ref mut acc) = self.current_block {
-                    acc.outputs.push(DetectedOutput {
-                        hash: *hash,
-                        height: block.height,
-                        mined_in_block_hash: block.block_hash,
-                        value: output.value().as_u64(),
-                        is_coinbase: output.features().is_coinbase(),
-                        memo: memo.parsed,
-                    });
-                    acc.add_balance_change(balance_change);
-                }
+            if let Some(ref mut acc) = self.current_block {
+                acc.outputs.push(DetectedOutput {
+                    hash: *hash,
+                    height: block.height,
+                    mined_in_block_hash: block.block_hash,
+                    value: output.value().as_u64(),
+                    is_coinbase: output.features().is_coinbase(),
+                    memo: memo.parsed,
+                });
+                acc.add_balance_change(balance_change);
             }
         }
 
@@ -441,7 +439,7 @@ impl<E: EventSender> BlockProcessor<E> {
                 "Detected spent input"
             );
 
-            let (input_id, is_new) = db::insert_input(
+            let input_id = db::insert_input(
                 tx,
                 self.account_id,
                 output_id,
@@ -450,18 +448,16 @@ impl<E: EventSender> BlockProcessor<E> {
                 block.mined_timestamp,
             )?;
 
-            if is_new {
-                let balance_change = self.record_input_balance_change(tx, input_id, value, block)?;
-                db::update_output_status(tx, output_id, OutputStatus::Spent)?;
+            let balance_change = self.record_input_balance_change(tx, input_id, value, block)?;
+            db::update_output_status(tx, output_id, OutputStatus::Spent)?;
 
-                if let Some(ref mut acc) = self.current_block {
-                    acc.inputs.push(SpentInput {
-                        output_hash: *input_hash,
-                        mined_in_block: block.block_hash,
-                        value,
-                    });
-                    acc.add_balance_change(balance_change);
-                }
+            if let Some(ref mut acc) = self.current_block {
+                acc.inputs.push(SpentInput {
+                    output_hash: *input_hash,
+                    mined_in_block: block.block_hash,
+                    value,
+                });
+                acc.add_balance_change(balance_change);
             }
         }
 
@@ -485,8 +481,8 @@ impl<E: EventSender> BlockProcessor<E> {
             caused_by_output_id: None,
             caused_by_input_id: Some(input_id),
             description: "Output spent as input".to_string(),
-            balance_credit: 0,
-            balance_debit: value,
+            balance_credit: 0.into(),
+            balance_debit: value.into(),
             effective_date,
             effective_height: block.height,
             claimed_recipient_address: None,
@@ -632,8 +628,8 @@ impl BlockEventAccumulator {
             .full_balance_changes
             .iter()
             .map(|c| BalanceChangeSummary {
-                credit: c.balance_credit,
-                debit: c.balance_debit,
+                credit: c.balance_credit.into(),
+                debit: c.balance_debit.into(),
                 description: c.description.clone(),
             })
             .collect();
@@ -697,39 +693,30 @@ fn make_balance_change_for_output(
     let payment_info = output.payment_id();
     let memo_bytes = payment_info.get_payment_id();
 
-    if output.features().is_coinbase() {
-        return BalanceChange {
-            account_id,
-            caused_by_output_id: Some(output_id),
-            caused_by_input_id: None,
-            description: "Coinbase output found in blockchain scan".to_string(),
-            balance_credit: output.value().as_u64(),
-            balance_debit: 0,
-            effective_date,
-            effective_height: height,
-            claimed_recipient_address: None,
-            claimed_sender_address: None,
-            memo_parsed: Some(String::from_utf8_lossy(&memo_bytes).to_string()),
-            memo_hex: Some(hex::encode(&memo_bytes)),
-            claimed_fee: payment_info.get_fee().map(|v| v.0),
-            claimed_amount: payment_info.get_amount().map(|v| v.0),
-        };
-    }
+    let (description, claimed_recipient_address, claimed_sender_address) = if output.features().is_coinbase() {
+        let description = "Coinbase output found in blockchain scan".to_string();
+        (description, None, None)
+    } else {
+        let description = "Output found in blockchain scan".to_string();
+        let claimed_recipient_address = payment_info.get_recipient_address().map(|a| a.to_base58());
+        let claimed_sender_address = payment_info.get_sender_address().map(|a| a.to_base58());
+        (description, claimed_recipient_address, claimed_sender_address)
+    };
 
     BalanceChange {
         account_id,
         caused_by_output_id: Some(output_id),
         caused_by_input_id: None,
-        description: "Output found in blockchain scan".to_string(),
-        balance_credit: output.value().as_u64(),
-        balance_debit: 0,
+        description,
+        balance_credit: output.value().as_u64().into(),
+        balance_debit: 0.into(),
         effective_date,
         effective_height: height,
-        claimed_recipient_address: payment_info.get_recipient_address().map(|a| a.to_base58()),
-        claimed_sender_address: payment_info.get_sender_address().map(|a| a.to_base58()),
+        claimed_recipient_address,
+        claimed_sender_address,
         memo_parsed: Some(String::from_utf8_lossy(&memo_bytes).to_string()),
         memo_hex: Some(hex::encode(&memo_bytes)),
-        claimed_fee: payment_info.get_fee().map(|v| v.0),
-        claimed_amount: payment_info.get_amount().map(|v| v.0),
+        claimed_fee: payment_info.get_fee().map(|v| v.0.into()),
+        claimed_amount: payment_info.get_amount().map(|v| v.0.into()),
     }
 }

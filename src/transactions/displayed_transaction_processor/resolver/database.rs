@@ -4,10 +4,10 @@ use super::{OutputDetails, TransactionDataResolver};
 use crate::db::SqlitePool;
 use crate::models::{BalanceChange, Id, OutputStatus};
 use crate::transactions::ProcessorError;
-use crate::transactions::displayed_transaction_processor::parsing::ParsedWalletOutput;
 use log::warn;
 use rusqlite::{OptionalExtension, named_params};
 use tari_common_types::types::FixedHash;
+use tari_transaction_components::transaction_components::WalletOutput;
 
 /// Resolver that fetches transaction data from the database.
 pub struct DatabaseResolver {
@@ -52,6 +52,7 @@ impl TransactionDataResolver for DatabaseResolver {
         let Some((output_hash, mined_in_block_height, status_str, block_hash, wallet_output_json)) = row else {
             return Ok(None);
         };
+        let json_string = wallet_output_json.ok_or_else(|| ProcessorError::MissingError("No wallet output".to_string()))?;
 
         let status = status_str.parse::<OutputStatus>().unwrap_or_else(|_| {
             warn!(
@@ -62,10 +63,12 @@ impl TransactionDataResolver for DatabaseResolver {
             );
             OutputStatus::Unspent
         });
+        let output: WalletOutput = serde_json::from_str(&json_str)?;
+        let output = WalletOutput::from_json(json_str)
 
         let (output_type, coinbase_extra, is_coinbase, sent_output_hashes) =
             if let Some(ref json_str) = wallet_output_json {
-                if let Some(parsed) = ParsedWalletOutput::from_json(json_str) {
+                if let Some(parsed) = WalletOutput::from_json(json_str) {
                     (
                         parsed.output_type,
                         parsed.coinbase_extra,
