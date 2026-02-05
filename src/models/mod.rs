@@ -202,3 +202,25 @@ impl BalanceChange {
         self.balance_debit > MicroMinotari::from(0)
     }
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebhookPayload {
+    /// The unique ID of the event in the wallet DB
+    pub event_id: i64,
+    /// The specific type of event (string representation)
+    pub event_type: String,
+    /// ISO 8601 Timestamp
+    pub created_at: String,
+    /// Snapshot of the account balance at the time of the event
+    pub balance: Option<WebhookBalanceSnapshot>,
+    /// The actual event data
+    pub data: WalletEventType,
+}
+
+/// A simplified balance view for the webhook payload
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WebhookBalanceSnapshot {
+    pub available: u64,
+    pub pending_incoming: u64,
+    pub pending_outgoing: u64,
+}

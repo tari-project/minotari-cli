@@ -32,6 +32,7 @@
 //! - [`tasks`]: Background task management for periodic operations
 //! - [`transactions`]: Transaction history service and display formatting
 //! - [`utils`]: Utility functions for wallet initialization and key management
+//! - [`webhooks`]: Webhook management
 //!
 //! # Getting Started
 //!
@@ -129,6 +130,7 @@ pub mod scan;
 pub mod tasks;
 pub mod transactions;
 pub mod utils;
+pub mod webhooks;
 
 pub use crate::api::ApiDoc;
 pub use crate::db::{get_accounts, get_balance, init_db};

@@ -99,6 +99,9 @@ pub use completed_transactions::{
 mod events;
 pub use events::{DbWalletEvent, get_events_by_account_id, insert_wallet_event};
 
+mod webhooks;
+pub use webhooks::{delete_webhooks_older_than, enqueue_webhook, fetch_due_webhooks, update_webhook_status};
+
 mod balance_changes;
 pub use balance_changes::{
     get_all_active_balance_changes_by_account_id, get_all_balance_changes_by_account_id, insert_balance_change,

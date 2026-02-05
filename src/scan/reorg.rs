@@ -2,6 +2,7 @@ use crate::{
     db::{self, get_active_outputs_from_height},
     models::{PendingTransactionStatus, WalletEvent, WalletEventType},
     transactions::DisplayedTransaction,
+    webhooks::{WebhookTriggerConfig, utils::trigger_webhook_with_balance},
 };
 use anyhow::anyhow;
 use lightweight_wallet_libs::{HttpBlockchainScanner, scanning::BlockchainScanner};
@@ -32,6 +33,7 @@ pub async fn handle_reorgs(
     scanner: &mut HttpBlockchainScanner<KeyManager>,
     conn: &mut Connection,
     account_id: i64,
+    webhook_config: Option<WebhookTriggerConfig>,
 ) -> Result<ReorgResult, anyhow::Error> {
     let last_blocks = db::get_scanned_tip_blocks_by_account(conn, account_id)?;
 
@@ -74,7 +76,7 @@ pub async fn handle_reorgs(
             "REORG DETECTED. Rolling back chain state."
         );
         let tx = conn.transaction()?;
-        let reorg_info = rollback_from_height(&tx, account_id, reorg_start_height)?;
+        let reorg_info = rollback_from_height(&tx, account_id, reorg_start_height, webhook_config)?;
         tx.commit()?;
         Ok(ReorgResult {
             resume_height: reorg_start_height,
@@ -93,7 +95,10 @@ pub fn rollback_from_height(
     tx: &Connection,
     account_id: i64,
     reorg_start_height: u64,
+    webhook_config: Option<WebhookTriggerConfig>,
 ) -> Result<ReorgInformation, anyhow::Error> {
+    let mut generated_events: Vec<(i64, WalletEvent)> = Vec::new();
+
     // 1. Log BlockRolledBack events
     let rolled_back_blocks = db::get_scanned_tip_blocks_by_account(tx, account_id)?
         .into_iter()
@@ -112,7 +117,8 @@ pub fn rollback_from_height(
             },
             description: format!("Block at height {} was rolled back due to reorg", block.height),
         };
-        db::insert_wallet_event(tx, account_id, &event)?;
+        let event_id = db::insert_wallet_event(tx, account_id, &event)?;
+        generated_events.push((event_id, event));
     }
 
     // 2. Get outputs that will be affected to log OutputRolledBack events
@@ -138,7 +144,8 @@ pub fn rollback_from_height(
                 output_row.output_hash, output_row.mined_in_block_height
             ),
         };
-        db::insert_wallet_event(tx, account_id, &event)?;
+        let event_id = db::insert_wallet_event(tx, account_id, &event)?;
+        generated_events.push((event_id, event));
 
         if let Some(request_id) = &output_row.locked_by_request_id {
             cancelled_pending_tx_ids.insert(request_id.clone());
@@ -160,7 +167,8 @@ pub fn rollback_from_height(
                 },
                 description: format!("Pending transaction {} cancelled due to reorg", tx_id),
             };
-            db::insert_wallet_event(tx, account_id, &event)?;
+            let event_id = db::insert_wallet_event(tx, account_id, &event)?;
+            generated_events.push((event_id, event));
         }
     }
 
@@ -179,6 +187,12 @@ pub fn rollback_from_height(
             count = affected_count;
             "Reset completed transaction(s) to Completed status due to reorg"
         );
+    }
+
+    if let Some(config) = webhook_config {
+        for (event_id, event) in generated_events {
+            trigger_webhook_with_balance(tx, account_id, event_id, &event, &config)?;
+        }
     }
 
     Ok(ReorgInformation {

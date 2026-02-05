@@ -17,6 +17,7 @@ chrono = "0.4.42"
 clap = { version = "4.5.47", features = ["derive"] }
 config = { version = "0.14.0", default-features = false, features = ["toml"] }
 hex = "0.4.3"
+hmac = "0.12.1"
 include_dir = "0.7.4"
 #lightweight_wallet_libs = { path = "../tari-wallet", features = ["grpc","http",] }
 lightweight_wallet_libs = { git = "https://github.com/tari-project/tari-wallet", rev = "60ece73ca9ba08dfa747eb3d968fb4a95c55f126", features = [
@@ -27,6 +28,7 @@ log = { version = "0.4.29", features = ["kv"] }
 log4rs = { version = "1.4.0", features = ["yaml_format", "console_appender", "file_appender", "log_kv"] }
 r2d2 = "0.8.10"
 r2d2_sqlite = "0.31.0"
+rand = "0.8"
 reqwest = { version = "0.12", features = ["json"] }
 reqwest-middleware = "0.4"
 reqwest-retry = "0.7"
@@ -36,6 +38,7 @@ serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 serde_rusqlite = "0.40.1"
 serde_yaml = "0.9.34"
+sha2 = "0.10"
 tari_common = { git = "https://github.com/tari-project/tari/", rev = "766f80ccc20596413ee208311750c11e02a2841d" }
 tari_common_types = { git = "https://github.com/tari-project/tari/", rev = "766f80ccc20596413ee208311750c11e02a2841d" }
 tari_crypto = { version = "0.22.1", features = ["borsh"] }
@@ -53,3 +56,8 @@ url = "2.5"
 utoipa = "5.4.0"
 utoipa-swagger-ui = { version = "9.0.2", features = ["axum"] }
 uuid = { version = "1", features = ["v4"] }
+
+[dev-dependencies]
+tempfile = "3.24.0"
+tokio = { version = "1.47.1", features = ["full", "test-util"] }
+wiremock = "0.6.5"

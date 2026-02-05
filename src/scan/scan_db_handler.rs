@@ -2,6 +2,7 @@ use crate::{
     ScanError, WalletEvent,
     db::{SqlitePool, WalletDbError, prune_scanned_tip_blocks},
     scan::{BlockProcessor, EventSender},
+    webhooks::WebhookTriggerConfig,
 };
 use log::{debug, error};
 use r2d2::PooledConnection;
@@ -41,6 +42,7 @@ impl ScanDbHandler {
         view_key: PrivateKey,
         event_sender: E,
         has_pending_outbound: bool,
+        webhook_config: Option<WebhookTriggerConfig>,
     ) -> Result<Vec<WalletEvent>, ScanError> {
         if blocks.is_empty() {
             return Ok(Vec::new());
@@ -69,6 +71,7 @@ impl ScanDbHandler {
                     has_pending_outbound,
                     required_confirmations,
                 );
+                processor.set_webhook_config(webhook_config.clone());
 
                 processor
                     .process_block(&tx, &block)

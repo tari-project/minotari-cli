@@ -24,6 +24,7 @@ use crate::{
         SpentInput,
     },
     transactions::displayed_transaction_processor::DisplayedTransactionProcessor,
+    webhooks::{WebhookTriggerConfig, utils::trigger_webhook_with_balance},
 };
 
 /// Errors that can occur during block processing.
@@ -92,6 +93,8 @@ pub struct BlockProcessor<E: EventSender = NoopEventSender> {
     has_pending_outbound: bool,
     /// Required confirmations
     required_confirmations: u64,
+    /// Webhook Configuration                                                                                        
+    webhook_config: Option<WebhookTriggerConfig>,
 }
 
 impl BlockProcessor<NoopEventSender> {
@@ -115,6 +118,7 @@ impl BlockProcessor<NoopEventSender> {
             current_tip_height: 0,
             has_pending_outbound: false,
             required_confirmations,
+            webhook_config: None,
         }
     }
 }
@@ -148,6 +152,7 @@ impl<E: EventSender> BlockProcessor<E> {
             current_tip_height: 0,
             has_pending_outbound,
             required_confirmations,
+            webhook_config: None,
         }
     }
 
@@ -157,6 +162,11 @@ impl<E: EventSender> BlockProcessor<E> {
     /// be matched against scanned inputs to link them with blockchain data.
     pub fn set_has_pending_outbound(&mut self, value: bool) {
         self.has_pending_outbound = value;
+    }
+
+    /// Sets webhook config
+    pub fn set_webhook_config(&mut self, config: Option<WebhookTriggerConfig>) {
+        self.webhook_config = config;
     }
 
     /// Processes a single scanned block.
@@ -277,6 +287,8 @@ impl<E: EventSender> BlockProcessor<E> {
     /// - Records the balance change (credit)
     /// - Adds to the block accumulator for event emission
     fn process_outputs(&mut self, tx: &Connection, block: &BlockScanResult) -> Result<(), BlockProcessorError> {
+        let mut generated_events: Vec<(i64, WalletEvent)> = Vec::new();
+
         for (hash, output, _wallet_id) in &block.wallet_outputs {
             let memo = MemoInfo::from_output(output);
 
@@ -309,7 +321,8 @@ impl<E: EventSender> BlockProcessor<E> {
                 payment_reference,
             )?;
 
-            db::insert_wallet_event(tx, self.account_id, &event)?;
+            let event_id = db::insert_wallet_event(tx, self.account_id, &event)?;
+            generated_events.push((event_id, event));
 
             let balance_change = self.record_output_balance_change(tx, output_id, block, output)?;
 
@@ -322,6 +335,12 @@ impl<E: EventSender> BlockProcessor<E> {
                         output: output.clone(),
                     },
                 );
+            }
+        }
+
+        if let Some(config) = &self.webhook_config {
+            for (event_id, event) in generated_events {
+                trigger_webhook_with_balance(tx, self.account_id, event_id, &event, config)?;
             }
         }
 
@@ -460,6 +479,8 @@ impl<E: EventSender> BlockProcessor<E> {
     /// Finds outputs that have reached the required confirmation depth
     /// and updates their status to confirmed.
     fn process_confirmations(&mut self, tx: &Connection, block: &BlockScanResult) -> Result<(), BlockProcessorError> {
+        let mut generated_events: Vec<(i64, WalletEvent)> = Vec::new();
+
         let unconfirmed_outputs =
             db::get_unconfirmed_outputs(tx, self.account_id, block.height, self.required_confirmations)?;
 
@@ -482,7 +503,8 @@ impl<E: EventSender> BlockProcessor<E> {
             );
 
             self.wallet_events.push(event.clone());
-            db::insert_wallet_event(tx, self.account_id, &event)?;
+            let event_id = db::insert_wallet_event(tx, self.account_id, &event)?;
+            generated_events.push((event_id, event));
 
             db::mark_output_confirmed(
                 tx,
@@ -490,6 +512,12 @@ impl<E: EventSender> BlockProcessor<E> {
                 block.height,
                 block.block_hash.as_slice(),
             )?;
+        }
+
+        if let Some(config) = &self.webhook_config {
+            for (event_id, event) in generated_events {
+                trigger_webhook_with_balance(tx, self.account_id, event_id, &event, config)?;
+            }
         }
 
         Ok(())
