@@ -43,7 +43,7 @@ impl DisplayedTransactionBuilder {
     }
 
     pub fn id(mut self, id: TxId) -> Self {
-        self.id = Some(id.into());
+        self.id = Some(id);
         self
     }
 
@@ -163,7 +163,7 @@ impl DisplayedTransactionBuilder {
             }
         }
         Ok(DisplayedTransaction {
-            id: self.id.unwrap_or_else(|| TxId::new_random()),
+            id: self.id.unwrap_or_else(TxId::new_random),
             direction,
             source: self.source.unwrap_or(TransactionSource::Unknown),
             status: self.status.unwrap_or(TransactionDisplayStatus::Pending),

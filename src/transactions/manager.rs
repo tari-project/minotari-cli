@@ -736,7 +736,7 @@ impl TransactionSender {
             .message(recipient.payment_id.clone())
             .counterparty(Some(recipient.address.clone()))
             .blockchain_info(0, FixedHash::default(), now, 0) // No block height yet
-            .fee(Some(fee.into()))
+            .fee(Some(fee))
             .inputs(inputs)
             .sent_output_hashes(sent_output_hashes)
             .build()

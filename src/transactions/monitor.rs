@@ -551,7 +551,7 @@ impl TransactionMonitor {
                         id: 0,
                         account_id,
                         event_type: WalletEventType::TransactionBroadcast {
-                            tx_id: tx.id.clone(),
+                            tx_id: tx.id,
                             kernel_excess: tx.kernel_excess.clone(),
                         },
                         description: format!("Transaction {} broadcast", tx.id),
@@ -574,10 +574,7 @@ impl TransactionMonitor {
                     result.wallet_events.push(WalletEvent {
                         id: 0,
                         account_id,
-                        event_type: WalletEventType::TransactionRejected {
-                            tx_id: tx.id.clone(),
-                            reason,
-                        },
+                        event_type: WalletEventType::TransactionRejected { tx_id: tx.id, reason },
                         description: format!("Transaction {} rejected", tx.id),
                     });
                 },
@@ -610,7 +607,7 @@ impl TransactionMonitor {
                     id: 0,
                     account_id,
                     event_type: WalletEventType::TransactionUnconfirmed {
-                        tx_id: tx.id.clone(),
+                        tx_id: tx.id,
                         mined_height: block_height,
                         confirmations: 0,
                     },
@@ -665,7 +662,7 @@ impl TransactionMonitor {
                     id: 0,
                     account_id,
                     event_type: WalletEventType::TransactionConfirmed {
-                        tx_id: tx.id.clone(),
+                        tx_id: tx.id,
                         mined_height,
                         confirmation_height: current_height,
                     },
