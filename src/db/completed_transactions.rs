@@ -131,7 +131,7 @@ pub fn create_completed_transaction(
         )
         "#,
         named_params! {
-            ":id": id,
+            ":id": tx_id.as_i64_wrapped(),
             ":account_id": account_id,
             ":pending_id": pending_tx_id,
             ":status": status_str,
@@ -152,7 +152,7 @@ pub fn create_completed_transaction(
     Ok(())
 }
 
-pub fn get_completed_transaction_by_id(conn: &Connection, id: &str) -> WalletDbResult<Option<CompletedTransaction>> {
+pub fn get_completed_transaction_by_id(conn: &Connection, tx_id: TxId) -> WalletDbResult<Option<CompletedTransaction>> {
     let mut stmt = conn.prepare_cached(
         r#"
         SELECT id, account_id, pending_tx_id, status, last_rejected_reason, kernel_excess, 
@@ -163,7 +163,9 @@ pub fn get_completed_transaction_by_id(conn: &Connection, id: &str) -> WalletDbR
         "#,
     )?;
 
-    let result = stmt.query_row(named_params! { ":id": id }, map_row).optional()?;
+    let result = stmt
+        .query_row(named_params! { ":id": tx_id.as_i64_wrapped() }, map_row)
+        .optional()?;
 
     Ok(result)
 }
@@ -198,11 +200,11 @@ pub fn get_completed_transactions_by_status(
 
 pub fn update_completed_transaction_status(
     conn: &Connection,
-    id: &str,
+    tx_id: TxId,
     status: CompletedTransactionStatus,
 ) -> WalletDbResult<()> {
     debug!(
-        id = id,
+        id = tx_id.to_string().as_str(),
         status:% = status;
         "DB: Updating completed tx status"
     );
@@ -219,7 +221,7 @@ pub fn update_completed_transaction_status(
         named_params! {
             ":status": status_str,
             ":now": now,
-            ":id": id
+            ":id": tx_id.as_i64_wrapped()
         },
     )?;
 
@@ -248,7 +250,7 @@ pub fn mark_completed_transaction_as_broadcasted(conn: &Connection, tx_id: TxId,
             ":status": status,
             ":attempts": attempts,
             ":now": now,
-            ":id": id
+            ":id": tx_id.as_i64_wrapped()
         },
     )?;
 
@@ -283,7 +285,7 @@ pub fn mark_completed_transaction_as_mined_unconfirmed(
             ":height": block_height,
             ":hash": block_hash,
             ":now": now,
-            ":id": id
+            ":id": tx_id.as_i64_wrapped()
         },
     )?;
 
@@ -318,17 +320,17 @@ pub fn mark_completed_transaction_as_confirmed(
             ":height": confirmation_height,
             ":payref": sent_payref,
             ":now": now,
-            ":id": id
+            ":id": tx_id.as_i64_wrapped()
         },
     )?;
 
     Ok(())
 }
 
-pub fn revert_completed_transaction_to_completed(conn: &Connection, id: &str) -> WalletDbResult<()> {
+pub fn revert_completed_transaction_to_completed(conn: &Connection, tx_id: TxId) -> WalletDbResult<()> {
     warn!(
         target: "audit",
-        id = id;
+        id = tx_id.to_string().as_str();
         "DB: Reverting transaction to completed state (Reorg)"
     );
 
@@ -345,7 +347,7 @@ pub fn revert_completed_transaction_to_completed(conn: &Connection, id: &str) ->
         named_params! {
             ":status": status,
             ":now": now,
-            ":id": id
+            ":id": tx_id.as_i64_wrapped()
         },
     )?;
 
@@ -416,7 +418,7 @@ pub fn mark_completed_transaction_as_rejected(
             ":status": status_str,
             ":reason": reject_reason,
             ":now": now,
-            ":id": id
+            ":id": tx_id.as_i64_wrapped()
         },
     )?;
 
