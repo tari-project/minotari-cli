@@ -75,6 +75,7 @@ use tari_transaction_components::{
 };
 use tari_utilities::ByteArray;
 
+use crate::db::DbWalletOutput;
 use crate::{
     db::{self, AccountRow, SqlitePool},
     http::{TxSubmissionRejectionReason, WalletHttpClient},
@@ -113,7 +114,7 @@ pub struct ProcessedTransaction {
     /// How long to lock UTXOs before they expire.
     seconds_to_lock_utxos: u64,
     /// The UTXOs selected for this transaction.
-    selected_utxos: Vec<WalletOutput>,
+    selected_utxos: Vec<DbWalletOutput>,
 }
 
 impl ProcessedTransaction {
@@ -358,12 +359,7 @@ impl TransactionSender {
         }
 
         if processed_transaction.selected_utxos.is_empty() {
-            let locked_utxos = utxo_selection
-                .utxos
-                .iter()
-                .map(|db_utxo| db_utxo.output.clone())
-                .collect();
-            processed_transaction.selected_utxos = locked_utxos;
+            processed_transaction.selected_utxos = utxo_selection.utxos.clone();
         }
 
         Ok(pending_tx_id)
@@ -471,10 +467,11 @@ impl TransactionSender {
             let mut utxo_selection = processed_transaction.selected_utxos.clone();
             if utxo_selection.is_empty() {
                 let db_utxo_selection = db::fetch_outputs_by_lock_request_id(&connection, processed_transaction.id())?;
-                utxo_selection = db_utxo_selection.into_iter().map(|db_out| db_out.output).collect();
+                utxo_selection = db_utxo_selection;
             }
+            let utxos = utxo_selection.into_iter().map(|db_out| db_out.output).collect();
 
-            let tx_builder = self.prepare_transaction_builder(utxo_selection)?;
+            let tx_builder = self.prepare_transaction_builder(utxos)?;
 
             let sender_address = self.account.get_address(self.network, &self.password)?;
             let tx_id = TxId::new_random();
@@ -718,11 +715,10 @@ impl TransactionSender {
             .selected_utxos
             .iter()
             .map(|utxo| TransactionInput {
-                output_hash: utxo.output_hash(),
-                amount: utxo.value(),
+                output_hash: utxo.output.output_hash(),
+                amount: utxo.output.value(),
                 mined_in_block_hash: FixedHash::default(),
-                matched_output_id: None,
-                is_matched: false,
+                matched_output_id: utxo.id,
             })
             .collect();
 

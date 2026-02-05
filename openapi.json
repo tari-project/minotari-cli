@@ -1578,7 +1578,7 @@
         "required": [
           "output_hash",
           "amount",
-          "is_matched",
+          "matched_output_id",
           "mined_in_block_hash"
         ],
         "properties": {
@@ -1590,14 +1590,8 @@
               }
             }
           },
-          "is_matched": {
-            "type": "boolean"
-          },
           "matched_output_id": {
-            "type": [
-              "integer",
-              "null"
-            ],
+            "type": "integer",
             "format": "int64",
             "description": "ID of the matched output in our database (if found)."
           },
