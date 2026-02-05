@@ -10,6 +10,7 @@ use log::{error, info};
 use rusqlite::Connection;
 use tari_common_types::payment_reference::generate_payment_reference;
 use tari_common_types::types::FixedHash;
+use tari_transaction_components::MicroMinotari;
 use tari_transaction_components::transaction_components::WalletOutput;
 use thiserror::Error;
 
@@ -341,7 +342,7 @@ impl<E: EventSender> BlockProcessor<E> {
                 target: "audit",
                 account_id = self.account_id,
                 block_height = block.height,
-                value = &*mask_amount(output.value().as_u64() as i64),
+                value = &*mask_amount(output.value()),
                 is_coinbase = output.features().is_coinbase();
                 "Detected wallet output"
             );
@@ -352,7 +353,7 @@ impl<E: EventSender> BlockProcessor<E> {
             // Compute the payment reference from block hash and output hash
             let payment_reference = generate_payment_reference(&block.block_hash, hash);
 
-            let (output_id, is_new) = db::insert_output(
+            let output_id = db::insert_output(
                 tx,
                 self.account_id,
                 &self.account_view_key,
@@ -366,22 +367,17 @@ impl<E: EventSender> BlockProcessor<E> {
                 payment_reference,
             )?;
 
-            if is_new {
-                db::insert_wallet_event(tx, self.account_id, &event)?;
+            db::insert_wallet_event(tx, self.account_id, &event)?;
 
-                let balance_change = self.record_output_balance_change(tx, output_id, block, output)?;
+            let balance_change = self.record_output_balance_change(tx, output_id, block, output)?;
 
-                if let Some(ref mut acc) = self.current_block {
-                    acc.outputs.push(DetectedOutput {
-                        hash: *hash,
-                        height: block.height,
-                        mined_in_block_hash: block.block_hash,
-                        value: output.value().as_u64(),
-                        is_coinbase: output.features().is_coinbase(),
-                        memo: memo.parsed,
-                    });
-                    acc.add_balance_change(balance_change);
-                }
+            if let Some(ref mut acc) = self.current_block {
+                acc.outputs.push(DetectedOutput {
+                    height: block.height,
+                    mined_in_block_hash: block.block_hash,
+                    output: output.clone(),
+                });
+                acc.add_balance_change(balance_change);
             }
         }
 
@@ -429,7 +425,7 @@ impl<E: EventSender> BlockProcessor<E> {
     /// - Adds to the block accumulator for event emission
     fn process_inputs(&mut self, tx: &Connection, block: &BlockScanResult) -> Result<(), BlockProcessorError> {
         for input_hash in &block.inputs {
-            let Some((output_id, value)) = db::get_output_info_by_hash(tx, input_hash)? else {
+            let Some((output_id, output)) = db::get_output_info_by_hash(tx, input_hash)? else {
                 continue;
             };
 
@@ -437,11 +433,11 @@ impl<E: EventSender> BlockProcessor<E> {
                 target: "audit",
                 account_id = self.account_id,
                 block_height = block.height,
-                value = &*mask_amount(value as i64);
+                value = &*mask_amount(output.value());
                 "Detected spent input"
             );
 
-            let (input_id, is_new) = db::insert_input(
+            let input_id = db::insert_input(
                 tx,
                 self.account_id,
                 output_id,
@@ -450,18 +446,15 @@ impl<E: EventSender> BlockProcessor<E> {
                 block.mined_timestamp,
             )?;
 
-            if is_new {
-                let balance_change = self.record_input_balance_change(tx, input_id, value, block)?;
-                db::update_output_status(tx, output_id, OutputStatus::Spent)?;
+            let balance_change = self.record_input_balance_change(tx, input_id, output.value(), block)?;
+            db::update_output_status(tx, output_id, OutputStatus::Spent)?;
 
-                if let Some(ref mut acc) = self.current_block {
-                    acc.inputs.push(SpentInput {
-                        output_hash: *input_hash,
-                        mined_in_block: block.block_hash,
-                        value,
-                    });
-                    acc.add_balance_change(balance_change);
-                }
+            if let Some(ref mut acc) = self.current_block {
+                acc.inputs.push(SpentInput {
+                    mined_in_block: block.block_hash,
+                    output,
+                });
+                acc.add_balance_change(balance_change);
             }
         }
 
@@ -473,7 +466,7 @@ impl<E: EventSender> BlockProcessor<E> {
         &self,
         tx: &Connection,
         input_id: i64,
-        value: u64,
+        value: MicroMinotari,
         block: &BlockScanResult,
     ) -> Result<BalanceChange, BlockProcessorError> {
         let effective_date = DateTime::<Utc>::from_timestamp(block.mined_timestamp as i64, 0)
@@ -485,7 +478,7 @@ impl<E: EventSender> BlockProcessor<E> {
             caused_by_output_id: None,
             caused_by_input_id: Some(input_id),
             description: "Output spent as input".to_string(),
-            balance_credit: 0,
+            balance_credit: 0.into(),
             balance_debit: value,
             effective_date,
             effective_height: block.height,
@@ -703,16 +696,16 @@ fn make_balance_change_for_output(
             caused_by_output_id: Some(output_id),
             caused_by_input_id: None,
             description: "Coinbase output found in blockchain scan".to_string(),
-            balance_credit: output.value().as_u64(),
-            balance_debit: 0,
+            balance_credit: output.value(),
+            balance_debit: 0.into(),
             effective_date,
             effective_height: height,
             claimed_recipient_address: None,
             claimed_sender_address: None,
             memo_parsed: Some(String::from_utf8_lossy(&memo_bytes).to_string()),
             memo_hex: Some(hex::encode(&memo_bytes)),
-            claimed_fee: payment_info.get_fee().map(|v| v.0),
-            claimed_amount: payment_info.get_amount().map(|v| v.0),
+            claimed_fee: payment_info.get_fee(),
+            claimed_amount: payment_info.get_amount(),
         };
     }
 
@@ -721,15 +714,15 @@ fn make_balance_change_for_output(
         caused_by_output_id: Some(output_id),
         caused_by_input_id: None,
         description: "Output found in blockchain scan".to_string(),
-        balance_credit: output.value().as_u64(),
-        balance_debit: 0,
+        balance_credit: output.value(),
+        balance_debit: 0.into(),
         effective_date,
         effective_height: height,
-        claimed_recipient_address: payment_info.get_recipient_address().map(|a| a.to_base58()),
-        claimed_sender_address: payment_info.get_sender_address().map(|a| a.to_base58()),
+        claimed_recipient_address: payment_info.get_recipient_address(),
+        claimed_sender_address: payment_info.get_sender_address(),
         memo_parsed: Some(String::from_utf8_lossy(&memo_bytes).to_string()),
         memo_hex: Some(hex::encode(&memo_bytes)),
-        claimed_fee: payment_info.get_fee().map(|v| v.0),
-        claimed_amount: payment_info.get_amount().map(|v| v.0),
+        claimed_fee: payment_info.get_fee(),
+        claimed_amount: payment_info.get_amount(),
     }
 }

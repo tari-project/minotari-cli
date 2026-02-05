@@ -17,7 +17,9 @@
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer, de};
 use tari_common_types::tari_address::TariAddress;
+use tari_common_types::transaction::TxId;
 use tari_transaction_components::{tari_amount::MicroMinotari, transaction_components::WalletOutput};
+use utoipa::openapi::{Object, Schema, Type};
 
 /// A wrapper type for [`TariAddress`] with Base58 serialization.
 ///
@@ -120,6 +122,14 @@ pub struct LockFundsResult {
     pub fee_with_change: MicroMinotari,
 }
 
+pub fn tx_id_schema() -> Schema {
+    Schema::Object(
+        Object::builder()
+            .property("Tx_id", Schema::Object(Object::with_type(Type::Integer)))
+            .build(),
+    )
+}
+
 /// API response type for a completed transaction.
 ///
 /// This structure represents a completed transaction in the API response.
@@ -148,7 +158,8 @@ pub struct LockFundsResult {
 #[derive(Debug, serde::Serialize, utoipa::ToSchema)]
 pub struct CompletedTransactionResponse {
     /// Unique identifier for this completed transaction
-    pub id: String,
+    #[schema(schema_with = tx_id_schema)]
+    pub id: TxId,
     /// Reference to the original pending transaction
     pub pending_tx_id: String,
     /// Account this transaction belongs to

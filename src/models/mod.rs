@@ -22,7 +22,10 @@
 
 use chrono::NaiveDateTime;
 use serde::{Deserialize, Serialize};
+use tari_common_types::tari_address::TariAddress;
+use tari_common_types::transaction::TxId;
 use tari_common_types::types::FixedHash;
+use tari_transaction_components::MicroMinotari;
 
 pub mod output_status;
 pub use output_status::OutputStatus;
@@ -95,25 +98,25 @@ pub enum WalletEventType {
         reason: String,
     },
     TransactionBroadcast {
-        tx_id: String,
+        tx_id: TxId,
         kernel_excess: Vec<u8>,
     },
     TransactionUnconfirmed {
-        tx_id: String,
+        tx_id: TxId,
         mined_height: u64,
         confirmations: u64,
     },
     TransactionConfirmed {
-        tx_id: String,
+        tx_id: TxId,
         mined_height: u64,
         confirmation_height: u64,
     },
     TransactionRejected {
-        tx_id: String,
+        tx_id: TxId,
         reason: String,
     },
     TransactionReorged {
-        tx_id: String,
+        tx_id: TxId,
         original_mined_height: u64,
     },
 }
@@ -159,23 +162,35 @@ pub struct BalanceChange {
     /// Human-readable description of the change
     pub description: String,
     /// Amount credited to the balance (in µT)
-    pub balance_credit: u64,
+    pub balance_credit: MicroMinotari,
     /// Amount debited from the balance (in µT)
-    pub balance_debit: u64,
+    pub balance_debit: MicroMinotari,
     /// Timestamp when the change becomes effective
     pub effective_date: NaiveDateTime,
     /// Block height when the change becomes effective
     pub effective_height: u64,
     /// Recipient address from transaction metadata
-    pub claimed_recipient_address: Option<String>,
+    pub claimed_recipient_address: Option<TariAddress>,
     /// Sender address from transaction metadata
-    pub claimed_sender_address: Option<String>,
+    pub claimed_sender_address: Option<TariAddress>,
     /// Parsed memo text
     pub memo_parsed: Option<String>,
-    /// Raw memo in hexadecimal
+    /// Raw memo
     pub memo_hex: Option<String>,
     /// Transaction fee from metadata
-    pub claimed_fee: Option<u64>,
+    pub claimed_fee: Option<MicroMinotari>,
     /// Transaction amount from metadata
-    pub claimed_amount: Option<u64>,
+    pub claimed_amount: Option<MicroMinotari>,
+}
+
+impl BalanceChange {
+    /// Returns true if this balance change is a credit.
+    pub fn is_credit(&self) -> bool {
+        self.balance_credit > MicroMinotari::from(0)
+    }
+
+    /// Returns true if this balance change is a debit.
+    pub fn is_debit(&self) -> bool {
+        self.balance_debit > MicroMinotari::from(0)
+    }
 }

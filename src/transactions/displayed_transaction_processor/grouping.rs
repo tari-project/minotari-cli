@@ -1,12 +1,14 @@
 use std::collections::{HashMap, HashSet};
 
 use super::error::ProcessorError;
-use super::formatting::AMOUNT_MATCHING_TOLERANCE;
 use super::resolver::TransactionDataResolver;
 use crate::models::{BalanceChange, Id};
 use chrono::NaiveDateTime;
+use tari_common_types::tari_address::TariAddress;
 use tari_common_types::types::FixedHash;
+use tari_transaction_components::MicroMinotari;
 
+pub const AMOUNT_MATCHING_TOLERANCE: u64 = 999_999;
 /// A grouped transaction consisting of one output (credit) and zero or more inputs (debits).
 #[derive(Debug, Clone)]
 pub struct GroupedTransaction {
@@ -15,11 +17,11 @@ pub struct GroupedTransaction {
     pub account_id: Id,
     pub effective_height: u64,
     pub effective_date: NaiveDateTime,
-    pub sender: Option<String>,
-    pub recipient: Option<String>,
+    pub sender: Option<TariAddress>,
+    pub recipient: Option<TariAddress>,
     pub memo_parsed: Option<String>,
     pub memo_hex: Option<String>,
-    pub claimed_fee: Option<u64>,
+    pub claimed_fee: Option<MicroMinotari>,
 }
 
 /// Groups related balance changes into logical transactions.
@@ -75,7 +77,7 @@ impl<'a, R: TransactionDataResolver> BalanceChangeGrouper<'a, R> {
         let mut regular = Vec::new();
 
         for change in changes {
-            if change.balance_credit > 0 && change.description.to_lowercase().contains("coinbase") {
+            if change.is_credit() && change.description.to_lowercase().contains("coinbase") {
                 coinbase.push(change);
             } else {
                 regular.push(change);
@@ -159,9 +161,9 @@ impl<'a, R: TransactionDataResolver> BalanceChangeGrouper<'a, R> {
         let mut inputs = Vec::new();
 
         for change in changes {
-            if change.balance_credit > 0 {
+            if change.is_credit() {
                 outputs.push(change);
-            } else if change.balance_debit > 0 {
+            } else if change.is_debit() {
                 inputs.push(change);
             }
         }
@@ -256,11 +258,15 @@ impl<'a, R: TransactionDataResolver> BalanceChangeGrouper<'a, R> {
                 }
 
                 let claimed_amount = group.output_change.as_ref().and_then(|c| c.claimed_amount);
-                let output_credit = group.output_change.as_ref().map(|c| c.balance_credit).unwrap_or(0);
+                let output_credit = group
+                    .output_change
+                    .as_ref()
+                    .map(|c| c.balance_credit)
+                    .unwrap_or_default();
 
                 if let Some(claimed_amount) = claimed_amount {
                     let target_sum = output_credit + claimed_amount;
-                    let diff = input.balance_debit.abs_diff(target_sum);
+                    let diff = input.balance_debit.as_u64().abs_diff(target_sum.as_u64());
 
                     if diff <= AMOUNT_MATCHING_TOLERANCE {
                         groups[group_idx].input_changes.push(input.clone());
@@ -299,11 +305,11 @@ struct BlockKey {
 pub(crate) struct MergedGroup {
     pub output_change: Option<BalanceChange>,
     pub input_changes: Vec<BalanceChange>,
-    pub sender: Option<String>,
-    pub recipient: Option<String>,
+    pub sender: Option<TariAddress>,
+    pub recipient: Option<TariAddress>,
     pub memo_parsed: Option<String>,
     pub memo_hex: Option<String>,
-    pub claimed_fee: Option<u64>,
+    pub claimed_fee: Option<MicroMinotari>,
 }
 
 /// Build a map from output_hash (hex) to the BalanceChange that represents the input spending it.
@@ -314,7 +320,7 @@ pub fn build_input_hash_map<R: TransactionDataResolver>(
     let mut map: HashMap<FixedHash, BalanceChange> = HashMap::new();
 
     for change in balance_changes {
-        if change.balance_debit > 0
+        if change.is_debit()
             && let Some((output_hash, _mined_hash)) = resolver.get_input_output_hash(change)?
         {
             map.insert(output_hash, change.clone());

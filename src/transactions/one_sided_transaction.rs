@@ -221,7 +221,7 @@ impl OneSidedTransaction {
         info!(
             target: "audit",
             recipient = &*mask_string(&recipient.address.to_string()),
-            amount = &*mask_amount(recipient.amount.as_u64() as i64);
+            amount = &*mask_amount(recipient.amount);
             "Creating unsigned one-sided transaction"
         );
 

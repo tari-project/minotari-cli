@@ -1,14 +1,14 @@
 mod database;
 mod in_memory;
 
+pub use self::context::ProcessingContext;
 use super::error::ProcessorError;
 use crate::models::{BalanceChange, Id, OutputStatus};
-use std::collections::HashMap;
-use tari_common_types::types::FixedHash;
-
-pub use self::context::ProcessingContext;
 pub use database::DatabaseResolver;
 pub use in_memory::InMemoryResolver;
+use std::collections::HashMap;
+use tari_common_types::types::FixedHash;
+use tari_transaction_components::transaction_components::{CoinBaseExtra, OutputType};
 
 mod context {
     use crate::{
@@ -31,9 +31,8 @@ pub struct OutputDetails {
     pub mined_in_block_height: u64,
     pub mined_hash: FixedHash,
     pub status: OutputStatus,
-    pub output_type: String,
-    pub coinbase_extra: Option<String>,
-    pub is_coinbase: bool,
+    pub output_type: OutputType,
+    pub coinbase_extra: CoinBaseExtra,
     pub sent_output_hashes: Vec<FixedHash>,
 }
 

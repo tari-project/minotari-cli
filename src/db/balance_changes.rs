@@ -1,26 +1,25 @@
+use crate::db::error::{WalletDbError, WalletDbResult};
+use crate::log::mask_amount;
+use crate::models::BalanceChange;
 use log::debug;
 use rusqlite::{Connection, named_params};
 use serde::Deserialize;
 use serde_rusqlite::from_rows;
 
-use crate::db::error::{WalletDbError, WalletDbResult};
-use crate::log::mask_amount;
-use crate::models::BalanceChange;
-
 pub fn insert_balance_change(conn: &Connection, change: &BalanceChange) -> WalletDbResult<()> {
     debug!(
         target: "audit",
         account_id = change.account_id,
-        credit = &*mask_amount(change.balance_credit as i64),
-        debit = &*mask_amount(change.balance_debit as i64);
+        credit = &*mask_amount(change.balance_credit),
+        debit = &*mask_amount(change.balance_debit);
         "DB: Inserting balance change"
     );
 
-    let balance_credit = change.balance_credit as i64;
-    let balance_debit = change.balance_debit as i64;
+    let balance_credit = change.balance_credit.as_u64() as i64;
+    let balance_debit = change.balance_debit.as_u64() as i64;
     let effective_height = change.effective_height as i64;
-    let claimed_fee = change.claimed_fee.map(|v| v as i64);
-    let claimed_amount = change.claimed_amount.map(|v| v as i64);
+    let claimed_fee = change.claimed_fee.map(|v| v.as_u64() as i64);
+    let claimed_amount = change.claimed_amount.map(|v| v.as_u64() as i64);
 
     conn.execute(
         r#"
@@ -65,8 +64,8 @@ pub fn insert_balance_change(conn: &Connection, change: &BalanceChange) -> Walle
             ":balance_debit": balance_debit,
             ":effective_date": change.effective_date,
             ":effective_height": effective_height,
-            ":claimed_recipient_address": change.claimed_recipient_address,
-            ":claimed_sender_address": change.claimed_sender_address,
+            ":claimed_recipient_address": change.claimed_recipient_address.as_ref().map(|v| v.to_base58()),
+            ":claimed_sender_address": change.claimed_sender_address.as_ref().map(|v| v.to_base58()),
             ":memo_parsed": change.memo_parsed,
             ":memo_hex": change.memo_hex,
             ":claimed_fee": claimed_fee,
