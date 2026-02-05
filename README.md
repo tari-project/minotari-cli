@@ -19,11 +19,7 @@ transactions without requiring a full node.
 
 ## Build
 
-- A starting database is required to build the application.
-  - [Install the prerequisite tooling.](#prerequisites)
-  - [Create a database file](#create) if you don't have one.
-
-Then, you can build as usual:
+You can build the application using the standard Rust toolchain:
 
 ```bash
 cargo build --release
@@ -32,11 +28,6 @@ cargo build --release
 ### Prerequisites
 
 - Rust toolchain (2024 edition)
-- [SQLx CLI](https://crates.io/crates/sqlx) for database migrations
-
-```bash
-cargo install sqlx-cli --no-default-features --features sqlite
-```
 
 ## Usage
 
@@ -150,42 +141,23 @@ The wallet uses SQLite to store:
 - **Wallet Events**: Timeline of wallet activity
 - **Scanned Blocks**: Track scanning progress and detect reorgs
 
-### Create
+### Initialization and Migrations
 
-- A database is required for building the application.
-
-```shell
-mkdir -p data
-sqlx database create
-sqlx migrate run
-```
-
-### Migrations
-
-- Database migrations are located in the `migrations/` directory.
-- It is always recommended that you backup your `data/wallet.db` if it's precious.
-
-```shell
-sqlx migrate run
-```
+The database is initialized automatically when the application starts. 
+- If the database file does not exist, it will be created.
+- Database migrations are embedded in the binary and applied automatically on startup.
+- If you are moving from an older version that used `sqlx`, the system will attempt to adopt the existing database by updating the `user_version` and removing the legacy `_sqlx_migrations` table.
 
 ### Reset
 
-To reset the database via a powershell script:
-
-```powershell
-# PowerShell
-.\rerun_migrations.ps1
-```
-
-Or manually:
+To reset the database, simply remove the database file and its associated WAL files:
 
 ```bash
-mkdir -p data
-rm data/wallet.db
-sqlx database create
-sqlx migrate run
+# Manual Reset
+rm data/wallet.db*
 ```
+
+The application will recreate the schema automatically on the next run.
 
 ## Security
 
@@ -202,6 +174,7 @@ sqlx migrate run
 - **`src/main.rs`**: CLI interface and core scanning logic
 - **`src/log/`**: Structured logging implementation and PII masking utilities.
 - **`src/db/`**: Database layer with SQLite queries
+  - `mod.rs`: Connection pooling and automatic migration logic
   - `accounts.rs`: Account management
   - `outputs.rs`: Output tracking and confirmations
   - `inputs.rs`: Input (spent output) tracking
@@ -234,9 +207,8 @@ cargo run --bin generate-openapi
 ## Dependencies
 
 - **lightweight_wallet_libs**: Tari blockchain scanning library
-- **sqlx**: Async SQLite database access
+- **rusqlite**: Synchronous SQLite database access
+- **rusqlite_migration**: Automatic migration management
 - **chacha20poly1305**: Encryption for wallet keys
 - **clap**: Command-line argument parsing
 - **tokio**: Async runtime
-
-## Contributing
