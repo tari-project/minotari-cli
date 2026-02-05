@@ -35,7 +35,7 @@ pub fn insert_output(
         "DB: Inserting output"
     );
 
-    let id = TxId::new_deterministic(account_view_key, &output.output_hash()).as_i64_wrapped();
+    let tx_id = TxId::new_deterministic(account_view_key, &output.output_hash()).as_i64_wrapped();
 
     let output_json = serde_json::to_string(&output)?;
 
@@ -49,8 +49,8 @@ pub fn insert_output(
     conn.execute(
         r#"
        INSERT INTO outputs (
-            id,
             account_id,
+            tx_id,
             output_hash,
             mined_in_block_height,
             mined_in_block_hash,
@@ -62,8 +62,8 @@ pub fn insert_output(
             payment_reference
        )
        VALUES (
-            :id,
             :account_id,
+            :tx_id,
             :output_hash,
             :block_height,
             :block_hash,
@@ -76,8 +76,8 @@ pub fn insert_output(
        )
         "#,
         named_params! {
-            ":id": id,
             ":account_id": account_id,
+            ":tx_id": tx_id,
             ":output_hash": output_hash,
             ":block_height": block_height,
             ":block_hash": block_hash.as_slice(),
@@ -90,7 +90,7 @@ pub fn insert_output(
         },
     )?;
 
-    Ok(id)
+    Ok(conn.last_insert_rowid())
 }
 
 pub fn get_output_info_by_hash(
