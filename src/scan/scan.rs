@@ -415,6 +415,7 @@ async fn prepare_account_scan(
     reorg_check_interval: u64,
     monitoring_state: MonitoringState,
     conn: &mut Connection,
+    required_confirmations: u64,
 ) -> Result<ScanContext, ScanError> {
     let key_manager = account.get_key_manager(password)?;
     let account_view_key = key_manager.get_private_view_key().as_bytes().to_vec();
@@ -453,7 +454,7 @@ async fn prepare_account_scan(
         .initialize(conn, account.id)
         .map_err(ScanError::Fatal)?;
 
-    let transaction_monitor = TransactionMonitor::new(monitoring_state);
+    let transaction_monitor = TransactionMonitor::new(monitoring_state, required_confirmations);
 
     Ok(ScanContext {
         scanner,
@@ -501,6 +502,7 @@ async fn run_scan_loop<E: EventSender + Clone + Send + 'static>(
     mode: &ScanMode,
     retry_config: &ScanRetryConfig,
     cancel_token: Option<&CancellationToken>,
+    required_confirmations: u64,
 ) -> Result<(Vec<WalletEvent>, bool), ScanError> {
     info!(
         target: "audit",
@@ -509,7 +511,7 @@ async fn run_scan_loop<E: EventSender + Clone + Send + 'static>(
         "Starting scan for account"
     );
 
-    let db_handler = ScanDbHandler::new(pool.clone());
+    let db_handler = ScanDbHandler::new(pool.clone(), required_confirmations);
     let mut all_events = Vec::new();
     let mut total_scanned: u64 = 0;
     let mut blocks_since_reorg_check: u64 = 0;
@@ -768,6 +770,8 @@ pub struct Scanner {
     retry_config: ScanRetryConfig,
     /// Optional cancellation token for graceful shutdown.
     cancel_token: Option<CancellationToken>,
+    /// Required confirmations
+    required_confirmations: u64,
 }
 
 impl Scanner {
@@ -792,7 +796,13 @@ impl Scanner {
     /// ```rust,ignore
     /// let scanner = Scanner::new("password", "http://localhost:18142", "wallet.db", 100);
     /// ```
-    pub fn new(password: &str, base_url: &str, database_file: PathBuf, batch_size: u64) -> Self {
+    pub fn new(
+        password: &str,
+        base_url: &str,
+        database_file: PathBuf,
+        batch_size: u64,
+        required_confirmations: u64,
+    ) -> Self {
         Self {
             password: password.to_string(),
             base_url: base_url.to_string(),
@@ -805,6 +815,7 @@ impl Scanner {
             mode: ScanMode::Full,
             retry_config: ScanRetryConfig::default(),
             cancel_token: None,
+            required_confirmations,
         }
     }
 
@@ -1020,6 +1031,7 @@ impl Scanner {
                 self.reorg_check_interval,
                 monitoring_state,
                 &mut conn,
+                self.required_confirmations,
             )
             .await?;
 
@@ -1030,6 +1042,7 @@ impl Scanner {
                 &self.mode,
                 &self.retry_config,
                 self.cancel_token.as_ref(),
+                self.required_confirmations,
             )
             .await?;
 

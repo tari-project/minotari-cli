@@ -343,6 +343,7 @@ async fn main() -> Result<(), anyhow::Error> {
                 scan_interval_secs,
                 api_port,
                 wallet_config.network,
+                wallet_config.confirmation_window,
             );
             daemon.run().await?;
             Ok(())
@@ -558,6 +559,7 @@ async fn scan(
         &config.base_url,
         config.database_path.clone(),
         config.batch_size,
+        config.confirmation_window,
     )
     .mode(scan::ScanMode::Partial { max_blocks });
 
@@ -600,6 +602,7 @@ async fn rescan(
         &config.base_url,
         config.database_path.clone(),
         config.batch_size,
+        config.confirmation_window,
     )
     .mode(scan::ScanMode::Partial {
         max_blocks: max_blocks_to_scan,

@@ -25,7 +25,6 @@ use crate::{
     transactions::{
         DisplayedTransaction, TransactionDirection, TransactionDisplayStatus,
         displayed_transaction_processor::{DisplayedTransactionProcessor, ProcessingContext},
-        monitor::REQUIRED_CONFIRMATIONS,
     },
 };
 
@@ -93,6 +92,8 @@ pub struct BlockProcessor<E: EventSender = NoopEventSender> {
     current_tip_height: u64,
     /// Whether there are pending outbound transactions to match against.
     has_pending_outbound: bool,
+    /// Required confirmations
+    required_confirmations: u64,
 }
 
 impl BlockProcessor<NoopEventSender> {
@@ -106,7 +107,7 @@ impl BlockProcessor<NoopEventSender> {
     ///
     /// * `account_id` - Database ID of the account to process blocks for
     /// * `account_view_key` - The account's view key bytes
-    pub fn new(account_id: i64, account_view_key: Vec<u8>) -> Self {
+    pub fn new(account_id: i64, account_view_key: Vec<u8>, required_confirmations: u64) -> Self {
         Self {
             account_id,
             account_view_key,
@@ -115,6 +116,7 @@ impl BlockProcessor<NoopEventSender> {
             current_block: None,
             current_tip_height: 0,
             has_pending_outbound: false,
+            required_confirmations,
         }
     }
 }
@@ -137,6 +139,7 @@ impl<E: EventSender> BlockProcessor<E> {
         account_view_key: Vec<u8>,
         event_sender: E,
         has_pending_outbound: bool,
+        required_confirmations: u64,
     ) -> Self {
         Self {
             account_id,
@@ -146,6 +149,7 @@ impl<E: EventSender> BlockProcessor<E> {
             current_block: None,
             current_tip_height: 0,
             has_pending_outbound,
+            required_confirmations,
         }
     }
 
@@ -294,7 +298,7 @@ impl<E: EventSender> BlockProcessor<E> {
         pending.blockchain.confirmations = scanned.blockchain.confirmations;
 
         // Update status based on confirmations
-        if pending.blockchain.confirmations >= REQUIRED_CONFIRMATIONS {
+        if pending.blockchain.confirmations >= self.required_confirmations {
             pending.status = TransactionDisplayStatus::Confirmed;
         } else if pending.blockchain.confirmations > 0 {
             pending.status = TransactionDisplayStatus::Unconfirmed;
@@ -509,7 +513,7 @@ impl<E: EventSender> BlockProcessor<E> {
     /// and updates their status to confirmed.
     fn process_confirmations(&mut self, tx: &Connection, block: &BlockScanResult) -> Result<(), BlockProcessorError> {
         let unconfirmed_outputs =
-            db::get_unconfirmed_outputs(tx, self.account_id, block.height, REQUIRED_CONFIRMATIONS)?;
+            db::get_unconfirmed_outputs(tx, self.account_id, block.height, self.required_confirmations)?;
 
         for unconfirmed_output in unconfirmed_outputs {
             info!(

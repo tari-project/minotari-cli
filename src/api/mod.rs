@@ -85,6 +85,7 @@ pub struct AppState {
     pub db_pool: SqlitePool,
     pub network: Network,
     pub password: String,
+    pub required_confirmations: u64,
 }
 
 impl FromRef<AppState> for SqlitePool {
@@ -211,14 +212,14 @@ pub struct ApiDoc;
 ///
 /// # async fn example() -> anyhow::Result<()> {
 /// let db_pool = init_db(PathBuf::from("wallet.db"))?;
-/// let router = create_router(db_pool, Network::Esmeralda, "password".to_string());
+/// let router = create_router(db_pool, Network::Esmeralda, "password".to_string(), 3);
 ///
 /// let listener = tokio::net::TcpListener::bind("0.0.0.0:3000").await?;
 /// axum::serve(listener, router).await?;
 /// # Ok(())
 /// # }
 /// ```
-pub fn create_router(db_pool: SqlitePool, network: Network, password: String) -> Router {
+pub fn create_router(db_pool: SqlitePool, network: Network, password: String, required_confirmations: u64) -> Router {
     info!(
         network:% = network;
         "Creating API router"
@@ -228,6 +229,7 @@ pub fn create_router(db_pool: SqlitePool, network: Network, password: String) ->
         db_pool,
         network,
         password,
+        required_confirmations,
     };
 
     Router::new()
