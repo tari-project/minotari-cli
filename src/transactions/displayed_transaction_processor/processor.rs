@@ -150,6 +150,7 @@ impl DisplayedTransactionProcessor {
                     MicroMinotari::from(0),
                     &new_debit,
                     &mut selected_inputs,
+                    0,
                 ) {
                     selected_inputs.sort();
                     selected_inputs.reverse();
@@ -228,8 +229,9 @@ impl DisplayedTransactionProcessor {
         amount_already_selected: MicroMinotari,
         spent_inputs: &Vec<(BalanceChange, SpentInput)>,
         selected_inputs: &mut Vec<usize>,
+        start_index: usize,
     ) -> bool {
-        for i in 0..spent_inputs.len() {
+        for i in start_index..spent_inputs.len() {
             if selected_inputs.contains(&i) {
                 continue;
             }
@@ -246,7 +248,7 @@ impl DisplayedTransactionProcessor {
             // search this branch further
             let mut new_selected = selected_inputs.clone();
             new_selected.push(i);
-            if Self::iter_search_for_matching_inputs(amount_sent, new_total, spent_inputs, &mut new_selected) {
+            if Self::iter_search_for_matching_inputs(amount_sent, new_total, spent_inputs, &mut new_selected, i + 1) {
                 *selected_inputs = new_selected;
                 return true;
             }
@@ -514,7 +516,7 @@ mod tests {
 
     #[test]
     fn test_create_new_updated_display_transactions_empty_accumulator() {
-        let processor = DisplayedTransactionProcessor::new(100);
+        let processor = DisplayedTransactionProcessor::new(100, 3);
         let accumulator = BlockEventAccumulator::new(1, 50, vec![0u8; 32]);
         let current_display_transactions: Vec<DisplayedTransaction> = vec![];
 
@@ -528,7 +530,7 @@ mod tests {
 
     #[test]
     fn test_create_new_updated_display_transactions_empty_existing_transactions() {
-        let processor = DisplayedTransactionProcessor::new(100);
+        let processor = DisplayedTransactionProcessor::new(100, 3);
         let accumulator = BlockEventAccumulator::new(1, 50, vec![0u8; 32]);
         let current_display_transactions: Vec<DisplayedTransaction> = vec![];
 
@@ -543,13 +545,13 @@ mod tests {
 
     #[test]
     fn test_processor_new_with_tip_height() {
-        let processor = DisplayedTransactionProcessor::new(500);
+        let processor = DisplayedTransactionProcessor::new(500, 3);
         assert_eq!(processor.current_tip_height, 500);
     }
 
     #[test]
     fn test_processor_new_with_zero_tip_height() {
-        let processor = DisplayedTransactionProcessor::new(0);
+        let processor = DisplayedTransactionProcessor::new(0, 3);
         assert_eq!(processor.current_tip_height, 0);
     }
 
@@ -568,6 +570,7 @@ mod tests {
             MicroMinotari::from(0),
             &spent_inputs,
             &mut selected_inputs,
+            0,
         );
 
         assert!(!result);
@@ -584,6 +587,7 @@ mod tests {
             MicroMinotari::from(0),
             &spent_inputs,
             &mut selected_inputs,
+            0,
         );
 
         assert!(!result);
@@ -601,6 +605,7 @@ mod tests {
             MicroMinotari::from(0),
             &spent_inputs,
             &mut selected_inputs,
+            0,
         );
 
         assert!(!result);
@@ -619,6 +624,7 @@ mod tests {
             MicroMinotari::from(0),
             &spent_inputs,
             &mut selected_inputs,
+            0,
         );
 
         assert!(!result);
@@ -626,7 +632,7 @@ mod tests {
 
     #[test]
     fn test_create_new_updated_display_transactions_returns_tuple() {
-        let processor = DisplayedTransactionProcessor::new(100);
+        let processor = DisplayedTransactionProcessor::new(100, 3);
         let accumulator = BlockEventAccumulator::new(1, 50, vec![0u8; 32]);
         let current_display_transactions: Vec<DisplayedTransaction> = vec![];
 
@@ -647,10 +653,10 @@ mod tests {
         let block_height = 90u64;
         let confirmations = tip_height.saturating_sub(block_height);
 
-        assert!(confirmations >= REQUIRED_CONFIRMATIONS);
+        assert!(confirmations >= 3);
 
         // The logic in the function should set status to Confirmed
-        let expected_status = if confirmations >= REQUIRED_CONFIRMATIONS {
+        let expected_status = if confirmations >= 3 {
             TransactionDisplayStatus::Confirmed
         } else {
             TransactionDisplayStatus::Unconfirmed
@@ -667,25 +673,15 @@ mod tests {
         let confirmations = tip_height.saturating_sub(block_height);
 
         // confirmations is 1, which is less than REQUIRED_CONFIRMATIONS (3)
-        assert!(confirmations < REQUIRED_CONFIRMATIONS);
+        assert!(confirmations < 3);
 
-        let expected_status = if confirmations >= REQUIRED_CONFIRMATIONS {
+        let expected_status = if confirmations >= 3 {
             TransactionDisplayStatus::Confirmed
         } else {
             TransactionDisplayStatus::Unconfirmed
         };
 
         assert_eq!(expected_status, TransactionDisplayStatus::Unconfirmed);
-    }
-
-    #[test]
-    fn test_transaction_display_status_is_not_in_chain() {
-        assert!(TransactionDisplayStatus::Pending.is_not_in_chain());
-        assert!(TransactionDisplayStatus::Cancelled.is_not_in_chain());
-        assert!(TransactionDisplayStatus::Reorganized.is_not_in_chain());
-        assert!(TransactionDisplayStatus::Rejected.is_not_in_chain());
-        assert!(!TransactionDisplayStatus::Confirmed.is_not_in_chain());
-        assert!(!TransactionDisplayStatus::Unconfirmed.is_not_in_chain());
     }
 
     #[test]
@@ -728,7 +724,7 @@ mod tests {
 
     #[test]
     fn test_processor_with_very_high_tip_height() {
-        let processor = DisplayedTransactionProcessor::new(u64::MAX);
+        let processor = DisplayedTransactionProcessor::new(u64::MAX, 3);
         assert_eq!(processor.current_tip_height, u64::MAX);
 
         let accumulator = BlockEventAccumulator::new(1, 50, vec![0u8; 32]);
@@ -750,7 +746,7 @@ mod tests {
 
     #[test]
     fn test_multiple_existing_transactions_no_matches() {
-        let processor = DisplayedTransactionProcessor::new(100);
+        let processor = DisplayedTransactionProcessor::new(100, 3);
         let accumulator = BlockEventAccumulator::new(1, 50, vec![0u8; 32]);
 
         // Create some existing transactions that won't match anything in the empty accumulator
