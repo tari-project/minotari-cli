@@ -41,7 +41,7 @@ use axum::{
 };
 use log::{debug, info};
 use serde::Deserialize;
-use serde_json::{Value as JsonValue, json};
+use serde_json::Value as JsonValue;
 use utoipa::{
     IntoParams,
     openapi::{ObjectBuilder, Schema, Type, schema::SchemaType},
@@ -65,7 +65,6 @@ use crate::{
     transactions::{
         DisplayedTransaction,
         fund_locker::FundLocker,
-        monitor::REQUIRED_CONFIRMATIONS,
         one_sided_transaction::{OneSidedTransaction, Recipient},
     },
 };
@@ -95,14 +94,9 @@ fn default_fee_per_gram() -> Option<MicroMinotari> {
     Some(MicroMinotari(5))
 }
 
-fn default_confirmation_window() -> Option<u64> {
-    Some(REQUIRED_CONFIRMATIONS)
-}
-
 fn confirmation_window_schema() -> Schema {
     ObjectBuilder::new()
         .schema_type(SchemaType::new(Type::Integer))
-        .default(Some(json!(REQUIRED_CONFIRMATIONS)))
         .description(Some("Number of confirmations required"))
         .build()
         .into()
@@ -216,7 +210,6 @@ pub struct LockFundsRequest {
     pub idempotency_key: Option<String>,
 
     /// Number of confirmations required before spending locked UTXOs.
-    #[serde(default = "default_confirmation_window")]
     #[schema(schema_with = confirmation_window_schema)]
     pub confirmation_window: Option<u64>,
 }
@@ -310,7 +303,6 @@ pub struct CreateTransactionRequest {
     /// return the original transaction rather than creating a new one.
     idempotency_key: Option<String>,
 
-    #[serde(default = "default_confirmation_window")]
     #[schema(schema_with = confirmation_window_schema)]
     pub confirmation_window: Option<u64>,
 }
@@ -1101,6 +1093,7 @@ pub async fn api_lock_funds(
 
     let pool = app_state.db_pool.clone();
     let name = name.clone();
+    let default_confirmations = app_state.required_confirmations;
 
     let response = tokio::task::spawn_blocking(move || {
         let conn = pool.get().map_err(|e| ApiError::DbError(e.to_string()))?;
@@ -1110,6 +1103,7 @@ pub async fn api_lock_funds(
             .ok_or_else(|| ApiError::AccountNotFound(name.clone()))?;
 
         let lock_amount = FundLocker::new(pool);
+        let confirmation_window = body.confirmation_window.unwrap_or(default_confirmations);
 
         lock_amount
             .lock(
@@ -1120,7 +1114,7 @@ pub async fn api_lock_funds(
                 body.estimated_output_size,
                 body.idempotency_key,
                 body.seconds_to_lock_utxos.expect("must be defaulted"),
-                body.confirmation_window.expect("must be defaulted"),
+                confirmation_window,
             )
             .map_err(|e| ApiError::FailedToLockFunds(e.to_string()))
     })
@@ -1216,6 +1210,7 @@ pub async fn api_create_unsigned_transaction(
     let name = name.clone();
     let network = app_state.network;
     let password = app_state.password.clone();
+    let default_confirmations = app_state.required_confirmations;
 
     let recipients: Vec<Recipient> = body
         .recipients
@@ -1240,6 +1235,7 @@ pub async fn api_create_unsigned_transaction(
         let estimated_output_size = None;
         let seconds_to_lock_utxos = body.seconds_to_lock_utxos.unwrap_or(86400); // 24 hours
 
+        let confirmation_window = body.confirmation_window.unwrap_or(default_confirmations);
         let lock_amount = FundLocker::new(pool.clone());
         let locked_funds = lock_amount
             .lock(
@@ -1250,7 +1246,7 @@ pub async fn api_create_unsigned_transaction(
                 estimated_output_size,
                 body.idempotency_key,
                 seconds_to_lock_utxos,
-                body.confirmation_window.expect("must be defaulted"),
+                confirmation_window,
             )
             .map_err(|e| ApiError::FailedToLockFunds(e.to_string()))?;
 

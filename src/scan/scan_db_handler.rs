@@ -11,11 +11,15 @@ use crate::{
 #[derive(Clone)]
 pub struct ScanDbHandler {
     pool: SqlitePool,
+    required_confirmations: u64,
 }
 
 impl ScanDbHandler {
-    pub fn new(pool: SqlitePool) -> Self {
-        Self { pool }
+    pub fn new(pool: SqlitePool, required_confirmations: u64) -> Self {
+        Self {
+            pool,
+            required_confirmations,
+        }
     }
 
     pub async fn get_connection(&self) -> Result<PooledConnection<SqliteConnectionManager>, ScanError> {
@@ -49,6 +53,7 @@ impl ScanDbHandler {
         );
 
         let pool = self.pool.clone();
+        let required_confirmations = self.required_confirmations;
 
         tokio::task::spawn_blocking(move || {
             let mut conn = pool.get().map_err(WalletDbError::from)?;
@@ -62,6 +67,7 @@ impl ScanDbHandler {
                     view_key.clone(),
                     event_sender.clone(),
                     has_pending_outbound,
+                    required_confirmations,
                 );
 
                 processor

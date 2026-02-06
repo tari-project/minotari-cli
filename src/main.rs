@@ -343,6 +343,7 @@ async fn main() -> Result<(), anyhow::Error> {
                 scan_interval_secs,
                 api_port,
                 wallet_config.network,
+                wallet_config.confirmation_window,
             );
             daemon.run().await?;
             Ok(())
@@ -398,6 +399,8 @@ async fn main() -> Result<(), anyhow::Error> {
             wallet_config.apply_database(&db);
             wallet_config.apply_transaction(&tx);
 
+            let confirmation_window = tx.confirmation_window.or(Some(wallet_config.confirmation_window));
+
             let request = LockFundsRequest {
                 amount,
                 num_outputs: Some(num_outputs),
@@ -405,7 +408,7 @@ async fn main() -> Result<(), anyhow::Error> {
                 estimated_output_size,
                 seconds_to_lock_utxos,
                 idempotency_key: tx.idempotency_key,
-                confirmation_window: tx.confirmation_window,
+                confirmation_window,
             };
             handle_lock_funds(wallet_config.database_path.clone(), account_name, output_file, request)
         },
@@ -558,6 +561,7 @@ async fn scan(
         &config.base_url,
         config.database_path.clone(),
         config.batch_size,
+        config.confirmation_window,
     )
     .mode(scan::ScanMode::Partial { max_blocks });
 
@@ -600,6 +604,7 @@ async fn rescan(
         &config.base_url,
         config.database_path.clone(),
         config.batch_size,
+        config.confirmation_window,
     )
     .mode(scan::ScanMode::Partial {
         max_blocks: max_blocks_to_scan,

@@ -78,12 +78,6 @@ use crate::transactions::{DisplayedTransaction, TransactionDisplayStatus};
 use tari_transaction_components::transaction_components::Transaction;
 use tari_utilities::ByteArray;
 
-/// Number of confirmations required before a transaction is considered final.
-///
-/// This provides protection against short chain reorganizations. A transaction
-/// must be buried under this many blocks before it is marked as confirmed.
-pub const REQUIRED_CONFIRMATIONS: u64 = 3;
-
 /// Maximum number of times to attempt broadcasting a transaction before giving up.
 const MAX_BROADCAST_ATTEMPTS: i32 = 10;
 
@@ -290,6 +284,7 @@ impl PendingTransactionsByStatus {
 /// is essentially a no-op.
 pub struct TransactionMonitor {
     state: MonitoringState,
+    required_confirmations: u64,
 }
 
 impl TransactionMonitor {
@@ -298,8 +293,11 @@ impl TransactionMonitor {
     /// # Arguments
     ///
     /// * `state` - Shared monitoring state for tracking pending transactions
-    pub fn new(state: MonitoringState) -> Self {
-        Self { state }
+    pub fn new(state: MonitoringState, required_confirmations: u64) -> Self {
+        Self {
+            state,
+            required_confirmations,
+        }
     }
 
     fn get_connection(pool: &SqlitePool) -> Result<PooledConnection<SqliteConnectionManager>, anyhow::Error> {
@@ -425,7 +423,7 @@ impl TransactionMonitor {
             conn,
             account_id,
             current_chain_height,
-            REQUIRED_CONFIRMATIONS,
+            self.required_confirmations,
         )?;
 
         if transactions_needing_update.is_empty() {
@@ -440,7 +438,7 @@ impl TransactionMonitor {
             if new_confirmations != displayed_tx.blockchain.confirmations {
                 displayed_tx.blockchain.confirmations = new_confirmations;
 
-                let new_status = Self::determine_status_from_confirmations(new_confirmations);
+                let new_status = self.determine_status_from_confirmations(new_confirmations);
                 if displayed_tx.status != new_status
                     && matches!(
                         displayed_tx.status,
@@ -464,8 +462,8 @@ impl TransactionMonitor {
     /// - 0 confirmations: Pending
     /// - 1 to REQUIRED_CONFIRMATIONS-1: Unconfirmed
     /// - REQUIRED_CONFIRMATIONS or more: Confirmed
-    fn determine_status_from_confirmations(confirmations: u64) -> TransactionDisplayStatus {
-        if confirmations >= REQUIRED_CONFIRMATIONS {
+    fn determine_status_from_confirmations(&self, confirmations: u64) -> TransactionDisplayStatus {
+        if confirmations >= self.required_confirmations {
             TransactionDisplayStatus::Confirmed
         } else if confirmations > 0 {
             TransactionDisplayStatus::Unconfirmed
@@ -499,7 +497,7 @@ impl TransactionMonitor {
         result.wallet_events.extend(broadcast_events);
 
         let confirmation_events =
-            Self::check_confirmation_status(db_pool, account_id, current_chain_height, by_status.mined_unconfirmed)?;
+            self.check_confirmation_status(db_pool, account_id, current_chain_height, by_status.mined_unconfirmed)?;
         result.wallet_events.extend(confirmation_events);
 
         Ok(result)
@@ -620,6 +618,7 @@ impl TransactionMonitor {
     }
 
     fn check_confirmation_status(
+        &self,
         db_pool: &SqlitePool,
         account_id: i64,
         current_height: u64,
@@ -634,7 +633,7 @@ impl TransactionMonitor {
             };
 
             let confirmations = current_height.saturating_sub(mined_height);
-            if confirmations >= REQUIRED_CONFIRMATIONS {
+            if confirmations >= self.required_confirmations {
                 info!(
                     target: "audit",
                     id = tx.id.to_string().as_str(),

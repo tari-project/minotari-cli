@@ -1141,8 +1141,7 @@
         "properties": {
           "confirmation_window": {
             "type": "integer",
-            "description": "Number of confirmations required",
-            "default": 3
+            "description": "Number of confirmations required"
           },
           "idempotency_key": {
             "type": [
@@ -1322,8 +1321,7 @@
           },
           "confirmation_window": {
             "type": "integer",
-            "description": "Number of confirmations required",
-            "default": 3
+            "description": "Number of confirmations required"
           },
           "estimated_output_size": {
             "type": [
