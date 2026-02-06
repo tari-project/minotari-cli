@@ -48,7 +48,7 @@ use tari_transaction_components::{fee::Fee, tari_amount::MicroMinotari, weight::
 use thiserror::Error;
 
 use crate::{
-    db::{DbWalletOutput, WalletDbError, get_latest_scanned_tip_block_by_account},
+    db::{DbWalletOutput, WalletDbError, get_latest_scanned_tip_block_by_account, get_total_unspent_balance},
     log::mask_amount,
     transactions::fee_estimator::get_default_features_and_scripts_size,
 };
@@ -69,6 +69,17 @@ pub enum UtxoSelectionError {
         /// The total value of all available UTXOs.
         available: MicroMinotari,
         /// The amount needed (transaction amount + estimated fees).
+        required: MicroMinotari,
+    },
+
+    /// The account has enough funds, but some are currently pending confirmation.
+    #[error("Funds are pending. Available: {available}, Pending: {pending}, Required: {required}")]
+    FundsPending {
+        /// The total value of currently spendable UTXOs.
+        available: MicroMinotari,
+        /// The value of UTXOs that are unspent but not yet confirmed enough to spend.
+        pending: MicroMinotari,
+        /// The amount needed.
         required: MicroMinotari,
     },
 
@@ -314,15 +325,38 @@ impl InputSelector {
         }
 
         if !sufficient_funds {
+            let required = amount + fee_with_change;
+
+            let total_unspent_balance = get_total_unspent_balance(conn, self.account_id)?;
+            let total_unspent_micro = MicroMinotari(total_unspent_balance);
+
+            if total_unspent_micro >= required {
+                let pending = total_unspent_micro.saturating_sub(total_value);
+
+                warn!(
+                    target: "audit",
+                    available = &*mask_amount(total_value),
+                    pending = &*mask_amount(pending),
+                    required = &*mask_amount(required);
+                    "Insufficient funds (pending confirmations)"
+                );
+
+                return Err(UtxoSelectionError::FundsPending {
+                    available: total_value,
+                    pending,
+                    required,
+                });
+            }
+
             warn!(
                 target: "audit",
                 available = &*mask_amount(total_value),
-                required = &*mask_amount(amount + fee_with_change);
+                required = &*mask_amount(required);
                 "Insufficient funds for transaction"
             );
             return Err(UtxoSelectionError::InsufficientFunds {
                 available: total_value,
-                required: amount + fee_with_change,
+                required,
             });
         }
 

@@ -492,3 +492,28 @@ pub fn get_active_outputs_from_height(
 
     Ok(results)
 }
+
+pub fn get_total_unspent_balance(conn: &Connection, account_id: i64) -> WalletDbResult<u64> {
+    let unspent_status = OutputStatus::Unspent.to_string();
+
+    let mut stmt = conn.prepare_cached(
+        r#"
+        SELECT COALESCE(SUM(value), 0)
+        FROM outputs
+        WHERE account_id = :account_id
+          AND status = :unspent_status
+          AND wallet_output_json IS NOT NULL
+          AND deleted_at IS NULL
+        "#,
+    )?;
+
+    let total = stmt.query_row(
+        named_params! {
+            ":account_id": account_id,
+            ":unspent_status": unspent_status
+        },
+        |row| row.get(0),
+    )?;
+
+    Ok(total)
+}
