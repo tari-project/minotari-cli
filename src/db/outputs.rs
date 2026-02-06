@@ -96,10 +96,10 @@ pub fn insert_output(
 pub fn get_output_info_by_hash(
     conn: &Connection,
     output_hash: &FixedHash,
-) -> WalletDbResult<Option<(i64, WalletOutput)>> {
+) -> WalletDbResult<Option<(i64, TxId, WalletOutput)>> {
     let mut stmt = conn.prepare_cached(
         r#"
-        SELECT id, wallet_output_json
+        SELECT id, tx_id, wallet_output_json
         FROM outputs
         WHERE output_hash = :output_hash AND deleted_at IS NULL
         "#,
@@ -116,7 +116,10 @@ pub fn get_output_info_by_hash(
         .wallet_output_json
         .ok_or_else(|| WalletDbError::Unexpected("Output JSON is null".to_string()))?;
     let output: WalletOutput = serde_json::from_str(&json_str)?;
-    Ok(Some((data.id, output)))
+
+    let tx_id = TxId::from(data.tx_id as u64);
+
+    Ok(Some((data.id, tx_id, output)))
 }
 
 #[derive(Deserialize)]
@@ -125,6 +128,7 @@ pub struct UnconfirmedOutputRow {
     pub mined_in_block_height: i64,
     pub memo_parsed: Option<String>,
     pub memo_hex: Option<String>,
+    pub tx_id: i64,
 }
 
 pub fn get_unconfirmed_outputs(
@@ -138,7 +142,7 @@ pub fn get_unconfirmed_outputs(
 
     let mut stmt = conn.prepare_cached(
         r#"
-        SELECT output_hash, mined_in_block_height, memo_parsed, memo_hex
+        SELECT output_hash, mined_in_block_height, memo_parsed, memo_hex, tx_id
         FROM outputs o
         WHERE o.account_id = :account_id
           AND o.mined_in_block_height <= :min_height
@@ -315,12 +319,14 @@ pub fn lock_output(
 #[derive(Debug)]
 pub struct DbWalletOutput {
     pub id: i64,
+    pub tx_id: TxId,
     pub output: WalletOutput,
 }
 
 #[derive(Deserialize)]
 struct WalletOutputRow {
     id: i64,
+    tx_id: i64,
     wallet_output_json: Option<String>,
 }
 
@@ -334,7 +340,7 @@ pub fn fetch_unspent_outputs(
 
     let mut stmt = conn.prepare_cached(
         r#"
-        SELECT id, wallet_output_json
+        SELECT id, tx_id, wallet_output_json
         FROM outputs
         WHERE account_id = :account_id
           AND status = :unspent_status
@@ -354,7 +360,11 @@ pub fn fetch_unspent_outputs(
     for row in raw_rows {
         if let Some(json_str) = row.wallet_output_json {
             let output: WalletOutput = serde_json::from_str(&json_str)?;
-            outputs.push(DbWalletOutput { id: row.id, output });
+            outputs.push(DbWalletOutput {
+                id: row.id,
+                tx_id: TxId::from(row.tx_id as u64),
+                output,
+            });
         }
     }
     Ok(outputs)
@@ -390,7 +400,7 @@ pub fn fetch_outputs_by_lock_request_id(
     locked_by_request_id: &str,
 ) -> WalletDbResult<Vec<DbWalletOutput>> {
     let mut stmt = conn.prepare_cached(
-        "SELECT id, wallet_output_json FROM outputs WHERE locked_by_request_id = :req_id and wallet_output_json IS NOT NULL"
+        "SELECT id, tx_id, wallet_output_json FROM outputs WHERE locked_by_request_id = :req_id and wallet_output_json IS NOT NULL"
     )?;
 
     let rows = stmt.query(named_params! { ":req_id": locked_by_request_id })?;
@@ -400,7 +410,11 @@ pub fn fetch_outputs_by_lock_request_id(
     for row in raw_rows {
         if let Some(json_str) = row.wallet_output_json {
             let output: WalletOutput = serde_json::from_str(&json_str)?;
-            outputs.push(DbWalletOutput { id: row.id, output });
+            outputs.push(DbWalletOutput {
+                id: row.id,
+                tx_id: TxId::from(row.tx_id as u64),
+                output,
+            });
         }
     }
     Ok(outputs)

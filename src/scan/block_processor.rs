@@ -425,13 +425,14 @@ impl<E: EventSender> BlockProcessor<E> {
     /// - Adds to the block accumulator for event emission
     fn process_inputs(&mut self, tx: &Connection, block: &BlockScanResult) -> Result<(), BlockProcessorError> {
         for input_hash in &block.inputs {
-            let Some((output_id, output)) = db::get_output_info_by_hash(tx, input_hash)? else {
+            let Some((output_id, tx_id, output)) = db::get_output_info_by_hash(tx, input_hash)? else {
                 continue;
             };
 
             info!(
                 target: "audit",
                 account_id = self.account_id,
+                tx_id:% = tx_id,
                 block_height = block.height,
                 value = &*mask_amount(output.value());
                 "Detected spent input"
