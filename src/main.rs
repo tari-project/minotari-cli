@@ -399,6 +399,8 @@ async fn main() -> Result<(), anyhow::Error> {
             wallet_config.apply_database(&db);
             wallet_config.apply_transaction(&tx);
 
+            let confirmation_window = tx.confirmation_window.or(Some(wallet_config.confirmation_window));
+
             let request = LockFundsRequest {
                 amount,
                 num_outputs: Some(num_outputs),
@@ -406,7 +408,7 @@ async fn main() -> Result<(), anyhow::Error> {
                 estimated_output_size,
                 seconds_to_lock_utxos,
                 idempotency_key: tx.idempotency_key,
-                confirmation_window: tx.confirmation_window,
+                confirmation_window,
             };
             handle_lock_funds(wallet_config.database_path.clone(), account_name, output_file, request)
         },
