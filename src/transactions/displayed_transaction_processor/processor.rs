@@ -258,56 +258,6 @@ impl DisplayedTransactionProcessor {
         false
     }
 
-    // pub fn process_balance_changes(
-    //     &self,
-    //     balance_changes: Vec<BalanceChange>,
-    //     context: ProcessingContext<'_>,
-    // ) -> Result<Vec<DisplayedTransaction>, ProcessorError> {
-    //     debug!(
-    //         count = balance_changes.len();
-    //         "Processing balance changes"
-    //     );
-    //
-    //     match context {
-    //         ProcessingContext::Database(pool) => {
-    //             let resolver = DatabaseResolver::new(pool.clone());
-    //             self.process_with_resolver(balance_changes, &resolver)
-    //         },
-    //         ProcessingContext::InMemory {
-    //             detected_outputs,
-    //             spent_inputs,
-    //         } => {
-    //             let resolver = InMemoryResolver::new(detected_outputs, spent_inputs);
-    //             self.process_with_resolver(balance_changes, &resolver)
-    //         },
-    //     }
-    // }
-    //
-    // pub fn process_with_resolver<R: TransactionDataResolver>(
-    //     &self,
-    //     balance_changes: Vec<BalanceChange>,
-    //     resolver: &R,
-    // ) -> Result<Vec<DisplayedTransaction>, ProcessorError> {
-    //     if balance_changes.is_empty() {
-    //         return Ok(Vec::new());
-    //     }
-    //
-    //     let input_hash_map = build_input_hash_map(&balance_changes, resolver)?;
-    //
-    //     let grouper = BalanceChangeGrouper::new(resolver);
-    //     let groups = grouper.group(balance_changes, &input_hash_map)?;
-    //
-    //     let mut transactions = Vec::with_capacity(groups.len());
-    //     for group in groups {
-    //         let tx = self.build_transaction(group, resolver)?;
-    //         transactions.push(tx);
-    //     }
-    //
-    //     self.match_inputs(&mut transactions, resolver)?;
-    //
-    //     Ok(transactions)
-    // }
-
     pub fn process_all_stored_with_conn(
         &self,
         account_id: Id,
