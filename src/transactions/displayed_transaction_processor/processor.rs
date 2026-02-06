@@ -809,8 +809,14 @@ mod tests {
         assert!(result.is_ok());
         let (updated, new) = result.unwrap();
         // No updates since accumulator is empty
-        assert!(updated.is_empty(), "No transactions should be updated when accumulator is empty");
-        assert!(new.is_empty(), "No new transactions should be created when accumulator is empty");
+        assert!(
+            updated.is_empty(),
+            "No transactions should be updated when accumulator is empty"
+        );
+        assert!(
+            new.is_empty(),
+            "No new transactions should be created when accumulator is empty"
+        );
     }
 
     #[test]
@@ -820,8 +826,14 @@ mod tests {
         let accumulator = BlockEventAccumulator::new(1, 50, vec![0u8; 32]);
 
         // Create existing transactions with inputs
-        let tx1 = create_test_displayed_transaction_with_input(1, mock_fixed_hash(10), TransactionDisplayStatus::Pending, 45);
-        let tx2 = create_test_displayed_transaction_with_input(2, mock_fixed_hash(20), TransactionDisplayStatus::Unconfirmed, 40);
+        let tx1 =
+            create_test_displayed_transaction_with_input(1, mock_fixed_hash(10), TransactionDisplayStatus::Pending, 45);
+        let tx2 = create_test_displayed_transaction_with_input(
+            2,
+            mock_fixed_hash(20),
+            TransactionDisplayStatus::Unconfirmed,
+            40,
+        );
         let current_display_transactions = vec![tx1, tx2];
 
         let result = processor.create_new_updated_display_transactions(&accumulator, &current_display_transactions);
@@ -829,8 +841,14 @@ mod tests {
         assert!(result.is_ok());
         let (updated, new) = result.unwrap();
         // No updates since accumulator has no debit changes
-        assert!(updated.is_empty(), "No transactions should be updated when accumulator has no debit changes");
-        assert!(new.is_empty(), "No new transactions should be created when accumulator is empty");
+        assert!(
+            updated.is_empty(),
+            "No transactions should be updated when accumulator has no debit changes"
+        );
+        assert!(
+            new.is_empty(),
+            "No new transactions should be created when accumulator is empty"
+        );
     }
 
     #[test]
@@ -861,8 +879,14 @@ mod tests {
         let processor = DisplayedTransactionProcessor::new(100, 3);
         let accumulator = BlockEventAccumulator::new(1, 50, vec![0u8; 32]);
 
-        let tx_with_output = create_test_displayed_transaction(1, mock_fixed_hash(10), TransactionDisplayStatus::Pending, 45);
-        let tx_with_input = create_test_displayed_transaction_with_input(2, mock_fixed_hash(20), TransactionDisplayStatus::Unconfirmed, 40);
+        let tx_with_output =
+            create_test_displayed_transaction(1, mock_fixed_hash(10), TransactionDisplayStatus::Pending, 45);
+        let tx_with_input = create_test_displayed_transaction_with_input(
+            2,
+            mock_fixed_hash(20),
+            TransactionDisplayStatus::Unconfirmed,
+            40,
+        );
         let current_display_transactions = vec![tx_with_output, tx_with_input];
 
         let result = processor.create_new_updated_display_transactions(&accumulator, &current_display_transactions);
@@ -1254,9 +1278,21 @@ mod tests {
         let current_display_transactions: Vec<DisplayedTransaction> = vec![];
 
         // All should work without panicking
-        assert!(processor.create_new_updated_display_transactions(&acc_low, &current_display_transactions).is_ok());
-        assert!(processor.create_new_updated_display_transactions(&acc_mid, &current_display_transactions).is_ok());
-        assert!(processor.create_new_updated_display_transactions(&acc_high, &current_display_transactions).is_ok());
+        assert!(
+            processor
+                .create_new_updated_display_transactions(&acc_low, &current_display_transactions)
+                .is_ok()
+        );
+        assert!(
+            processor
+                .create_new_updated_display_transactions(&acc_mid, &current_display_transactions)
+                .is_ok()
+        );
+        assert!(
+            processor
+                .create_new_updated_display_transactions(&acc_high, &current_display_transactions)
+                .is_ok()
+        );
     }
 
     #[test]
@@ -1267,15 +1303,27 @@ mod tests {
 
         // Zero hash
         let acc_zero = BlockEventAccumulator::new(1, 50, vec![0u8; 32]);
-        assert!(processor.create_new_updated_display_transactions(&acc_zero, &current_display_transactions).is_ok());
+        assert!(
+            processor
+                .create_new_updated_display_transactions(&acc_zero, &current_display_transactions)
+                .is_ok()
+        );
 
         // All ones hash
         let acc_ones = BlockEventAccumulator::new(1, 50, vec![255u8; 32]);
-        assert!(processor.create_new_updated_display_transactions(&acc_ones, &current_display_transactions).is_ok());
+        assert!(
+            processor
+                .create_new_updated_display_transactions(&acc_ones, &current_display_transactions)
+                .is_ok()
+        );
 
         // Sequential bytes
         let sequential: Vec<u8> = (0u8..32).collect();
         let acc_seq = BlockEventAccumulator::new(1, 50, sequential);
-        assert!(processor.create_new_updated_display_transactions(&acc_seq, &current_display_transactions).is_ok());
+        assert!(
+            processor
+                .create_new_updated_display_transactions(&acc_seq, &current_display_transactions)
+                .is_ok()
+        );
     }
 }
