@@ -1,4 +1,6 @@
-use crate::db::balance_changes::insert_balance_change;
+use crate::db::balance_changes::{
+    get_balance_change_id_by_output, insert_balance_change, mark_balance_change_as_reversed,
+};
 use crate::db::error::{WalletDbError, WalletDbResult};
 use crate::log::mask_amount;
 use crate::models::BalanceChange;
@@ -224,6 +226,12 @@ pub fn soft_delete_outputs_from_height(conn: &Connection, account_id: i64, heigh
     };
 
     for output_row in outputs_to_delete {
+        // Find and mark the original balance change as reversed
+        let original_balance_change_id = get_balance_change_id_by_output(conn, output_row.id)?;
+        if let Some(original_id) = original_balance_change_id {
+            mark_balance_change_as_reversed(conn, original_id)?;
+        }
+
         let balance_change = BalanceChange {
             account_id,
             caused_by_output_id: Some(output_row.id),
@@ -239,6 +247,9 @@ pub fn soft_delete_outputs_from_height(conn: &Connection, account_id: i64, heigh
             memo_hex: None,
             claimed_fee: None,
             claimed_amount: None,
+            is_reversal: true,
+            reversal_of_balance_change_id: original_balance_change_id,
+            is_reversed: false,
         };
         insert_balance_change(conn, &balance_change)?;
     }
@@ -316,7 +327,7 @@ pub fn lock_output(
     Ok(())
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DbWalletOutput {
     pub id: i64,
     pub tx_id: TxId,
@@ -328,6 +339,57 @@ struct WalletOutputRow {
     id: i64,
     tx_id: i64,
     wallet_output_json: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DbOutput {
+    pub id: i64,
+    pub account_id: i64,
+    pub output_hash: Vec<u8>,
+    pub mined_in_block_hash: Vec<u8>,
+    pub mined_in_block_height: i64,
+    pub value: i64,
+    pub created_at: chrono::NaiveDateTime,
+    pub wallet_output_json: Option<String>,
+    pub mined_timestamp: chrono::NaiveDateTime,
+    pub confirmed_height: Option<i64>,
+    pub confirmed_hash: Option<Vec<u8>>,
+    pub memo_parsed: Option<String>,
+    pub memo_hex: Option<String>,
+    pub status: String,
+    pub locked_at: Option<chrono::NaiveDateTime>,
+    pub locked_by_request_id: Option<String>,
+    pub deleted_at: Option<chrono::NaiveDateTime>,
+    pub deleted_in_block_height: Option<i64>,
+    pub payment_reference: Option<String>,
+}
+
+impl DbOutput {
+    pub fn to_wallet_output(&self) -> WalletDbResult<WalletOutput> {
+        let output_str = self
+            .wallet_output_json
+            .as_ref()
+            .ok_or_else(|| WalletDbError::Unexpected("Output JSON is null".to_string()))?;
+        let output: WalletOutput = serde_json::from_str(output_str)?;
+        Ok(output)
+    }
+}
+
+pub fn get_output_by_id(conn: &Connection, output_id: i64) -> WalletDbResult<Option<DbOutput>> {
+    let mut stmt = conn.prepare_cached(
+        r#"
+        SELECT id, account_id, output_hash, mined_in_block_hash, mined_in_block_height,
+               value, created_at, wallet_output_json, mined_timestamp, confirmed_height,
+               confirmed_hash, memo_parsed, memo_hex, status, locked_at, locked_by_request_id,
+               deleted_at, deleted_in_block_height, payment_reference
+        FROM outputs
+        WHERE id = :id
+        "#,
+    )?;
+
+    let rows = stmt.query(named_params! { ":id": output_id })?;
+    let output: Option<DbOutput> = from_rows(rows).next().transpose()?;
+    Ok(output)
 }
 
 pub fn fetch_unspent_outputs(

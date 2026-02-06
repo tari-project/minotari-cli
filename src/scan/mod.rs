@@ -91,6 +91,8 @@ mod reorg;
 pub mod scan;
 pub mod scan_db_handler;
 
+pub mod block_event_accumulator;
+
 pub use block_processor::BlockProcessor;
 pub use events::{
     BalanceChangeSummary, BlockProcessedEvent, ChannelEventSender, ConfirmedOutput, DetectedOutput,

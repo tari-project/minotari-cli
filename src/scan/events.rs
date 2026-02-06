@@ -40,6 +40,7 @@
 
 use std::time::Duration;
 
+use crate::models::Id;
 use crate::transactions::DisplayedTransaction;
 use tari_common_types::types::FixedHash;
 use tari_transaction_components::MicroMinotari;
@@ -88,7 +89,6 @@ pub struct BlockProcessedEvent {
     pub block_hash: Vec<u8>,
     pub outputs_detected: Vec<DetectedOutput>,
     pub inputs_spent: Vec<SpentInput>,
-    pub outputs_confirmed: Vec<ConfirmedOutput>,
     pub balance_changes: Vec<BalanceChangeSummary>,
 }
 
@@ -101,7 +101,9 @@ pub struct DetectedOutput {
 
 #[derive(Debug, Clone)]
 pub struct SpentInput {
+    pub output_id: Id,
     pub mined_in_block: FixedHash,
+    pub mined_in_block_height: u64,
     pub output: WalletOutput,
 }
 

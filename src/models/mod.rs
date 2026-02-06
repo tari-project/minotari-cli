@@ -181,6 +181,14 @@ pub struct BalanceChange {
     pub claimed_fee: Option<MicroMinotari>,
     /// Transaction amount from metadata
     pub claimed_amount: Option<MicroMinotari>,
+    /// Whether this balance change is a reversal of another balance change (e.g., due to reorg)
+    #[serde(default)]
+    pub is_reversal: bool,
+    /// The ID of the original balance change that this reverses (if is_reversal is true)
+    pub reversal_of_balance_change_id: Option<Id>,
+    /// Whether this balance change has been reversed (e.g., due to reorg)
+    #[serde(default)]
+    pub is_reversed: bool,
 }
 
 impl BalanceChange {

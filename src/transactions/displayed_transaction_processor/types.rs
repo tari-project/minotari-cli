@@ -184,9 +184,8 @@ pub struct TransactionInput {
     #[schema(schema_with = micro_minotari_schema)]
     pub amount: MicroMinotari,
     /// ID of the matched output in our database (if found).
-    #[schema(value_type = Option<i64>)]
-    pub matched_output_id: Option<Id>,
-    pub is_matched: bool,
+    #[schema(value_type = i64)]
+    pub matched_output_id: Id,
     pub mined_in_block_hash: FixedHash,
 }
 

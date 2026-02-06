@@ -47,8 +47,9 @@ use rusqlite::Connection;
 use tari_transaction_components::{fee::Fee, tari_amount::MicroMinotari, weight::TransactionWeight};
 use thiserror::Error;
 
+use crate::db::get_total_unspent_balance;
 use crate::{
-    db::{DbWalletOutput, WalletDbError, get_latest_scanned_tip_block_by_account, get_total_unspent_balance},
+    db::{DbWalletOutput, WalletDbError, get_latest_scanned_tip_block_by_account},
     log::mask_amount,
     transactions::fee_estimator::get_default_features_and_scripts_size,
 };
