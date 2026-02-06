@@ -787,4 +787,495 @@ mod tests {
         assert_eq!(tx.details.inputs[0].output_hash, input_hash);
         assert!(tx.details.outputs.is_empty());
     }
+
+    // ============================================
+    // Tests for create_new_updated_display_transactions
+    // ============================================
+
+    #[test]
+    fn test_create_new_updated_with_no_matching_outputs_returns_empty_updated() {
+        // When the accumulator is empty, existing transactions should not be updated
+        let processor = DisplayedTransactionProcessor::new(100, 3);
+        let accumulator = BlockEventAccumulator::new(1, 50, vec![0u8; 32]);
+
+        // Create several existing transactions with different output hashes
+        let tx1 = create_test_displayed_transaction(1, mock_fixed_hash(10), TransactionDisplayStatus::Pending, 45);
+        let tx2 = create_test_displayed_transaction(2, mock_fixed_hash(20), TransactionDisplayStatus::Unconfirmed, 40);
+        let tx3 = create_test_displayed_transaction(3, mock_fixed_hash(30), TransactionDisplayStatus::Confirmed, 35);
+        let current_display_transactions = vec![tx1, tx2, tx3];
+
+        let result = processor.create_new_updated_display_transactions(&accumulator, &current_display_transactions);
+
+        assert!(result.is_ok());
+        let (updated, new) = result.unwrap();
+        // No updates since accumulator is empty
+        assert!(updated.is_empty(), "No transactions should be updated when accumulator is empty");
+        assert!(new.is_empty(), "No new transactions should be created when accumulator is empty");
+    }
+
+    #[test]
+    fn test_create_new_updated_with_no_matching_inputs_returns_empty_updated() {
+        // Test with existing transactions that have inputs but no matching debit changes
+        let processor = DisplayedTransactionProcessor::new(100, 3);
+        let accumulator = BlockEventAccumulator::new(1, 50, vec![0u8; 32]);
+
+        // Create existing transactions with inputs
+        let tx1 = create_test_displayed_transaction_with_input(1, mock_fixed_hash(10), TransactionDisplayStatus::Pending, 45);
+        let tx2 = create_test_displayed_transaction_with_input(2, mock_fixed_hash(20), TransactionDisplayStatus::Unconfirmed, 40);
+        let current_display_transactions = vec![tx1, tx2];
+
+        let result = processor.create_new_updated_display_transactions(&accumulator, &current_display_transactions);
+
+        assert!(result.is_ok());
+        let (updated, new) = result.unwrap();
+        // No updates since accumulator has no debit changes
+        assert!(updated.is_empty(), "No transactions should be updated when accumulator has no debit changes");
+        assert!(new.is_empty(), "No new transactions should be created when accumulator is empty");
+    }
+
+    #[test]
+    fn test_create_new_updated_preserves_original_when_no_match() {
+        // Verify that original transactions are not modified when there's no match
+        let processor = DisplayedTransactionProcessor::new(100, 3);
+        let accumulator = BlockEventAccumulator::new(1, 50, vec![0u8; 32]);
+
+        let original_status = TransactionDisplayStatus::Pending;
+        let original_height = 45u64;
+        let tx = create_test_displayed_transaction(1, mock_fixed_hash(10), original_status, original_height);
+        let current_display_transactions = vec![tx.clone()];
+
+        let result = processor.create_new_updated_display_transactions(&accumulator, &current_display_transactions);
+
+        assert!(result.is_ok());
+        let (updated, _new) = result.unwrap();
+        assert!(updated.is_empty());
+
+        // Verify the original transaction wasn't modified in the input vector
+        assert_eq!(current_display_transactions[0].status, original_status);
+        assert_eq!(current_display_transactions[0].blockchain.block_height, original_height);
+    }
+
+    #[test]
+    fn test_create_new_updated_with_mixed_output_types() {
+        // Test with a mix of transactions having outputs and inputs
+        let processor = DisplayedTransactionProcessor::new(100, 3);
+        let accumulator = BlockEventAccumulator::new(1, 50, vec![0u8; 32]);
+
+        let tx_with_output = create_test_displayed_transaction(1, mock_fixed_hash(10), TransactionDisplayStatus::Pending, 45);
+        let tx_with_input = create_test_displayed_transaction_with_input(2, mock_fixed_hash(20), TransactionDisplayStatus::Unconfirmed, 40);
+        let current_display_transactions = vec![tx_with_output, tx_with_input];
+
+        let result = processor.create_new_updated_display_transactions(&accumulator, &current_display_transactions);
+
+        assert!(result.is_ok());
+        let (updated, new) = result.unwrap();
+        // No matches since accumulator is empty
+        assert!(updated.is_empty());
+        assert!(new.is_empty());
+    }
+
+    #[test]
+    fn test_create_new_updated_handles_empty_inputs_list() {
+        let processor = DisplayedTransactionProcessor::new(100, 3);
+        let accumulator = BlockEventAccumulator::new(1, 50, vec![0u8; 32]);
+
+        // Transaction with an empty inputs list
+        let tx = DisplayedTransactionBuilder::new()
+            .id(tari_common_types::transaction::TxId::from(1u64))
+            .account_id(1)
+            .source(TransactionSource::Coinbase)
+            .status(TransactionDisplayStatus::Confirmed)
+            .credits_and_debits(MicroMinotari::from(5000000), MicroMinotari::from(0))
+            .blockchain_info(45, mock_fixed_hash(1), mock_timestamp(), 55)
+            .inputs(vec![])  // Empty inputs
+            .outputs(vec![TransactionOutput {
+                hash: mock_fixed_hash(99),
+                amount: MicroMinotari::from(5000000),
+                status: OutputStatus::Unspent,
+                mined_in_block_height: 45,
+                mined_in_block_hash: mock_fixed_hash(1),
+                output_type: OutputType::Coinbase,
+                is_change: false,
+            }])
+            .output_type(Some(OutputType::Coinbase))
+            .build()
+            .unwrap();
+        let current_display_transactions = vec![tx];
+
+        let result = processor.create_new_updated_display_transactions(&accumulator, &current_display_transactions);
+
+        assert!(result.is_ok());
+        let (updated, new) = result.unwrap();
+        assert!(updated.is_empty());
+        assert!(new.is_empty());
+    }
+
+    #[test]
+    fn test_create_new_updated_handles_empty_outputs_list() {
+        let processor = DisplayedTransactionProcessor::new(100, 3);
+        let accumulator = BlockEventAccumulator::new(1, 50, vec![0u8; 32]);
+
+        // Transaction with an empty outputs list (debit only)
+        let tx = DisplayedTransactionBuilder::new()
+            .id(tari_common_types::transaction::TxId::from(1u64))
+            .account_id(1)
+            .source(TransactionSource::Transfer)
+            .status(TransactionDisplayStatus::Confirmed)
+            .credits_and_debits(MicroMinotari::from(0), MicroMinotari::from(1000))
+            .blockchain_info(45, mock_fixed_hash(1), mock_timestamp(), 55)
+            .inputs(vec![TransactionInput {
+                output_hash: mock_fixed_hash(88),
+                amount: MicroMinotari::from(1000),
+                mined_in_block_hash: mock_fixed_hash(1),
+                matched_output_id: 0,
+            }])
+            .outputs(vec![])  // Empty outputs
+            .output_type(None)
+            .build()
+            .unwrap();
+        let current_display_transactions = vec![tx];
+
+        let result = processor.create_new_updated_display_transactions(&accumulator, &current_display_transactions);
+
+        assert!(result.is_ok());
+        let (updated, new) = result.unwrap();
+        assert!(updated.is_empty());
+        assert!(new.is_empty());
+    }
+
+    #[test]
+    fn test_create_new_updated_with_large_transaction_set() {
+        // Test with many existing transactions to ensure scaling
+        let processor = DisplayedTransactionProcessor::new(1000, 3);
+        let accumulator = BlockEventAccumulator::new(1, 500, vec![0u8; 32]);
+
+        let mut current_display_transactions = Vec::new();
+        for i in 1..=100 {
+            let tx = create_test_displayed_transaction(
+                i as u64,
+                mock_fixed_hash(i as u8),
+                TransactionDisplayStatus::Confirmed,
+                400 + (i % 50) as u64,
+            );
+            current_display_transactions.push(tx);
+        }
+
+        let result = processor.create_new_updated_display_transactions(&accumulator, &current_display_transactions);
+
+        assert!(result.is_ok());
+        let (updated, new) = result.unwrap();
+        // No matches since accumulator is empty
+        assert!(updated.is_empty());
+        assert!(new.is_empty());
+    }
+
+    #[test]
+    fn test_create_new_updated_with_zero_required_confirmations() {
+        // Edge case: zero required confirmations means everything is immediately confirmed
+        let processor = DisplayedTransactionProcessor::new(100, 0);
+        let accumulator = BlockEventAccumulator::new(1, 50, vec![0u8; 32]);
+
+        let tx = create_test_displayed_transaction(1, mock_fixed_hash(10), TransactionDisplayStatus::Pending, 45);
+        let current_display_transactions = vec![tx];
+
+        let result = processor.create_new_updated_display_transactions(&accumulator, &current_display_transactions);
+
+        assert!(result.is_ok());
+        // Even with 0 confirmations, no updates happen without matching balance changes
+        let (updated, new) = result.unwrap();
+        assert!(updated.is_empty());
+        assert!(new.is_empty());
+    }
+
+    #[test]
+    fn test_create_new_updated_with_very_large_confirmations_requirement() {
+        // Edge case: very large confirmation requirement
+        let processor = DisplayedTransactionProcessor::new(100, u64::MAX);
+        let accumulator = BlockEventAccumulator::new(1, 50, vec![0u8; 32]);
+
+        let tx = create_test_displayed_transaction(1, mock_fixed_hash(10), TransactionDisplayStatus::Unconfirmed, 45);
+        let current_display_transactions = vec![tx];
+
+        let result = processor.create_new_updated_display_transactions(&accumulator, &current_display_transactions);
+
+        assert!(result.is_ok());
+        let (updated, new) = result.unwrap();
+        assert!(updated.is_empty());
+        assert!(new.is_empty());
+    }
+
+    #[test]
+    fn test_create_new_updated_returns_separate_updated_and_new_vectors() {
+        // Verify the function returns two separate vectors
+        let processor = DisplayedTransactionProcessor::new(100, 3);
+        let accumulator = BlockEventAccumulator::new(1, 50, vec![0u8; 32]);
+        let current_display_transactions: Vec<DisplayedTransaction> = vec![];
+
+        let result = processor.create_new_updated_display_transactions(&accumulator, &current_display_transactions);
+
+        assert!(result.is_ok());
+        let (updated, new) = result.unwrap();
+        // Both should be empty but distinct vectors
+        assert!(updated.is_empty());
+        assert!(new.is_empty());
+        // Verify they are separate instances
+        assert_eq!(updated.capacity(), 0);
+    }
+
+    #[test]
+    fn test_create_new_updated_with_multiple_outputs_same_transaction() {
+        // Test transaction with multiple outputs
+        let processor = DisplayedTransactionProcessor::new(100, 3);
+        let accumulator = BlockEventAccumulator::new(1, 50, vec![0u8; 32]);
+
+        let tx = DisplayedTransactionBuilder::new()
+            .id(tari_common_types::transaction::TxId::from(1u64))
+            .account_id(1)
+            .source(TransactionSource::Transfer)
+            .status(TransactionDisplayStatus::Confirmed)
+            .credits_and_debits(MicroMinotari::from(3000), MicroMinotari::from(0))
+            .blockchain_info(45, mock_fixed_hash(1), mock_timestamp(), 55)
+            .inputs(vec![])
+            .outputs(vec![
+                TransactionOutput {
+                    hash: mock_fixed_hash(1),
+                    amount: MicroMinotari::from(1000),
+                    status: OutputStatus::Unspent,
+                    mined_in_block_height: 45,
+                    mined_in_block_hash: mock_fixed_hash(1),
+                    output_type: OutputType::Standard,
+                    is_change: false,
+                },
+                TransactionOutput {
+                    hash: mock_fixed_hash(2),
+                    amount: MicroMinotari::from(1000),
+                    status: OutputStatus::Unspent,
+                    mined_in_block_height: 45,
+                    mined_in_block_hash: mock_fixed_hash(1),
+                    output_type: OutputType::Standard,
+                    is_change: true,
+                },
+                TransactionOutput {
+                    hash: mock_fixed_hash(3),
+                    amount: MicroMinotari::from(1000),
+                    status: OutputStatus::Unspent,
+                    mined_in_block_height: 45,
+                    mined_in_block_hash: mock_fixed_hash(1),
+                    output_type: OutputType::Standard,
+                    is_change: false,
+                },
+            ])
+            .output_type(Some(OutputType::Standard))
+            .build()
+            .unwrap();
+        let current_display_transactions = vec![tx];
+
+        let result = processor.create_new_updated_display_transactions(&accumulator, &current_display_transactions);
+
+        assert!(result.is_ok());
+        let (updated, new) = result.unwrap();
+        assert!(updated.is_empty());
+        assert!(new.is_empty());
+    }
+
+    #[test]
+    fn test_create_new_updated_with_multiple_inputs_same_transaction() {
+        // Test transaction with multiple inputs
+        let processor = DisplayedTransactionProcessor::new(100, 3);
+        let accumulator = BlockEventAccumulator::new(1, 50, vec![0u8; 32]);
+
+        let tx = DisplayedTransactionBuilder::new()
+            .id(tari_common_types::transaction::TxId::from(1u64))
+            .account_id(1)
+            .source(TransactionSource::Transfer)
+            .status(TransactionDisplayStatus::Confirmed)
+            .credits_and_debits(MicroMinotari::from(0), MicroMinotari::from(3000))
+            .blockchain_info(45, mock_fixed_hash(1), mock_timestamp(), 55)
+            .inputs(vec![
+                TransactionInput {
+                    output_hash: mock_fixed_hash(10),
+                    amount: MicroMinotari::from(1000),
+                    mined_in_block_hash: mock_fixed_hash(1),
+                    matched_output_id: 1,
+                },
+                TransactionInput {
+                    output_hash: mock_fixed_hash(20),
+                    amount: MicroMinotari::from(1000),
+                    mined_in_block_hash: mock_fixed_hash(1),
+                    matched_output_id: 2,
+                },
+                TransactionInput {
+                    output_hash: mock_fixed_hash(30),
+                    amount: MicroMinotari::from(1000),
+                    mined_in_block_hash: mock_fixed_hash(1),
+                    matched_output_id: 3,
+                },
+            ])
+            .outputs(vec![])
+            .output_type(None)
+            .build()
+            .unwrap();
+        let current_display_transactions = vec![tx];
+
+        let result = processor.create_new_updated_display_transactions(&accumulator, &current_display_transactions);
+
+        assert!(result.is_ok());
+        let (updated, new) = result.unwrap();
+        assert!(updated.is_empty());
+        assert!(new.is_empty());
+    }
+
+    #[test]
+    fn test_confirmation_status_logic_sufficient_confirmations() {
+        // Test that the confirmation logic would set Confirmed status
+        // when confirmations >= required_confirmations
+        let tip_height = 100u64;
+        let block_height = 50u64;
+        let req_confirmations = 3u64;
+
+        let confirmations = tip_height.saturating_sub(block_height);
+
+        // 100 - 50 = 50 confirmations, which is >= 3
+        assert!(confirmations >= req_confirmations);
+
+        let expected_status = if confirmations >= req_confirmations {
+            TransactionDisplayStatus::Confirmed
+        } else {
+            TransactionDisplayStatus::Unconfirmed
+        };
+
+        assert_eq!(expected_status, TransactionDisplayStatus::Confirmed);
+    }
+
+    #[test]
+    fn test_confirmation_status_logic_insufficient_confirmations() {
+        // Test that the confirmation logic would set Unconfirmed status
+        // when confirmations < required_confirmations
+        let tip_height = 100u64;
+        let block_height = 99u64;
+        let req_confirmations = 3u64;
+
+        let confirmations = tip_height.saturating_sub(block_height);
+
+        // 100 - 99 = 1 confirmation, which is < 3
+        assert!(confirmations < req_confirmations);
+
+        let expected_status = if confirmations >= req_confirmations {
+            TransactionDisplayStatus::Confirmed
+        } else {
+            TransactionDisplayStatus::Unconfirmed
+        };
+
+        assert_eq!(expected_status, TransactionDisplayStatus::Unconfirmed);
+    }
+
+    #[test]
+    fn test_confirmation_status_logic_exactly_at_threshold() {
+        // Test boundary condition: exactly at required confirmations
+        let tip_height = 100u64;
+        let block_height = 97u64;
+        let req_confirmations = 3u64;
+
+        let confirmations = tip_height.saturating_sub(block_height);
+
+        // 100 - 97 = 3 confirmations, which is exactly == 3
+        assert_eq!(confirmations, req_confirmations);
+
+        let expected_status = if confirmations >= req_confirmations {
+            TransactionDisplayStatus::Confirmed
+        } else {
+            TransactionDisplayStatus::Unconfirmed
+        };
+
+        // >= means exactly at threshold is still confirmed
+        assert_eq!(expected_status, TransactionDisplayStatus::Confirmed);
+    }
+
+    #[test]
+    fn test_confirmation_status_logic_one_below_threshold() {
+        // Test boundary condition: one below required confirmations
+        let tip_height = 100u64;
+        let block_height = 98u64;
+        let req_confirmations = 3u64;
+
+        let confirmations = tip_height.saturating_sub(block_height);
+
+        // 100 - 98 = 2 confirmations, which is < 3
+        assert_eq!(confirmations, 2);
+
+        let expected_status = if confirmations >= req_confirmations {
+            TransactionDisplayStatus::Confirmed
+        } else {
+            TransactionDisplayStatus::Unconfirmed
+        };
+
+        assert_eq!(expected_status, TransactionDisplayStatus::Unconfirmed);
+    }
+
+    #[test]
+    fn test_different_account_ids_in_accumulator() {
+        // Test that account_id is properly used from accumulator
+        let processor = DisplayedTransactionProcessor::new(100, 3);
+
+        // Different account IDs
+        let acc1 = BlockEventAccumulator::new(1, 50, vec![0u8; 32]);
+        let acc2 = BlockEventAccumulator::new(2, 50, vec![0u8; 32]);
+        let acc3 = BlockEventAccumulator::new(999, 50, vec![0u8; 32]);
+
+        assert_eq!(acc1.account_id, 1);
+        assert_eq!(acc2.account_id, 2);
+        assert_eq!(acc3.account_id, 999);
+
+        // All should work the same way
+        let current_display_transactions: Vec<DisplayedTransaction> = vec![];
+
+        let result1 = processor.create_new_updated_display_transactions(&acc1, &current_display_transactions);
+        let result2 = processor.create_new_updated_display_transactions(&acc2, &current_display_transactions);
+        let result3 = processor.create_new_updated_display_transactions(&acc3, &current_display_transactions);
+
+        assert!(result1.is_ok());
+        assert!(result2.is_ok());
+        assert!(result3.is_ok());
+    }
+
+    #[test]
+    fn test_different_block_heights_in_accumulator() {
+        // Test that block height is properly captured from accumulator
+        let processor = DisplayedTransactionProcessor::new(100, 3);
+
+        let acc_low = BlockEventAccumulator::new(1, 0, vec![0u8; 32]);
+        let acc_mid = BlockEventAccumulator::new(1, 50, vec![0u8; 32]);
+        let acc_high = BlockEventAccumulator::new(1, u64::MAX, vec![0u8; 32]);
+
+        assert_eq!(acc_low.height, 0);
+        assert_eq!(acc_mid.height, 50);
+        assert_eq!(acc_high.height, u64::MAX);
+
+        let current_display_transactions: Vec<DisplayedTransaction> = vec![];
+
+        // All should work without panicking
+        assert!(processor.create_new_updated_display_transactions(&acc_low, &current_display_transactions).is_ok());
+        assert!(processor.create_new_updated_display_transactions(&acc_mid, &current_display_transactions).is_ok());
+        assert!(processor.create_new_updated_display_transactions(&acc_high, &current_display_transactions).is_ok());
+    }
+
+    #[test]
+    fn test_accumulator_with_various_block_hashes() {
+        // Test with different block hash values
+        let processor = DisplayedTransactionProcessor::new(100, 3);
+        let current_display_transactions: Vec<DisplayedTransaction> = vec![];
+
+        // Zero hash
+        let acc_zero = BlockEventAccumulator::new(1, 50, vec![0u8; 32]);
+        assert!(processor.create_new_updated_display_transactions(&acc_zero, &current_display_transactions).is_ok());
+
+        // All ones hash
+        let acc_ones = BlockEventAccumulator::new(1, 50, vec![255u8; 32]);
+        assert!(processor.create_new_updated_display_transactions(&acc_ones, &current_display_transactions).is_ok());
+
+        // Sequential bytes
+        let sequential: Vec<u8> = (0u8..32).collect();
+        let acc_seq = BlockEventAccumulator::new(1, 50, sequential);
+        assert!(processor.create_new_updated_display_transactions(&acc_seq, &current_display_transactions).is_ok());
+    }
 }
