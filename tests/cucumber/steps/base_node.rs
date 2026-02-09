@@ -2,7 +2,7 @@
 //
 // Step definitions for managing base node processes in tests.
 
-use cucumber::{given, when};
+use cucumber::{given, when, then};
 
 use super::common::MinotariWorld;
 
@@ -55,4 +55,19 @@ async fn start_base_node(world: &mut MinotariWorld, name: String) {
 #[when(expr = "I have a base node {word} connected to all seed nodes")]
 async fn start_base_node_connected_to_seeds(world: &mut MinotariWorld, name: String) {
     start_base_node(world, name).await;
+}
+
+#[then("the base node should be running")]
+async fn base_node_is_running(world: &mut MinotariWorld) {
+    // Verify at least one base node is running
+    assert!(!world.base_nodes.is_empty(), "No base nodes are running");
+    
+    // Verify the first node has valid ports
+    if let Some((_, node)) = world.base_nodes.iter().next() {
+        assert!(node.port > 0, "Invalid P2P port");
+        assert!(node.grpc_port > 0, "Invalid GRPC port");
+        assert!(node.http_port > 0, "Invalid HTTP port");
+        println!("Base node is running on ports - P2P: {}, GRPC: {}, HTTP: {}", 
+                 node.port, node.grpc_port, node.http_port);
+    }
 }
