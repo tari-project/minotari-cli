@@ -53,7 +53,7 @@ use crate::{
     log::mask_amount,
     transactions::fee_estimator::get_default_features_and_scripts_size,
 };
-
+use tari_transaction_components::utxo_selection::branch_and_bound::branch_bound_builder::BranchAndBoundUtxoSelectionBuilder;
 /// Errors that can occur during UTXO selection.
 #[derive(Debug, Error)]
 pub enum UtxoSelectionError {
@@ -87,6 +87,10 @@ pub enum UtxoSelectionError {
     /// DB execution failed
     #[error("Database execution error: {0}")]
     DbError(#[from] WalletDbError),
+
+    /// General service error during UTXO selection (e.g., from the selection algorithm)
+    #[error("UTXO selection service error: {0}")]
+    ServiceError(String),
 }
 
 /// Result of UTXO selection for a transaction.
@@ -279,6 +283,25 @@ impl InputSelector {
             .map(|b| b.height)
             .unwrap_or(0)
             .saturating_sub(self.confirmation_window);
+        let (locked_amount, _unconfirmed_amount, _locked_and_unconfirmed_amount) =
+            crate::db::get_output_totals_for_account(conn, self.account_id)?;
+        let locked_amount: MicroMinotari = locked_amount.into();
+        let total_unspent_balance: MicroMinotari = get_total_unspent_balance(conn, self.account_id)?.into();
+        if total_unspent_balance.saturating_sub(locked_amount) <= amount {
+            let pending = total_unspent_balance.saturating_sub(locked_amount);
+            warn!(
+                target: "audit",
+                available = &*mask_amount(total_unspent_balance),
+                pending = &*mask_amount(pending),
+                required = &*mask_amount(amount);
+                "Insufficient funds for transaction (pending confirmations)"
+            );
+            return Err(UtxoSelectionError::FundsPending {
+                available: total_unspent_balance - locked_amount,
+                pending,
+                required: amount,
+            });
+        }
 
         let uo = crate::db::fetch_unspent_outputs(conn, self.account_id, min_height)?;
 
@@ -288,82 +311,51 @@ impl InputSelector {
                 .map_err(|err| UtxoSelectionError::SerializationError(err.to_string()))?,
         };
 
-        let mut sufficient_funds = false;
-        let mut utxos = Vec::new();
-        let mut requires_change_output = false;
-        let mut total_value = MicroMinotari::zero();
-        let mut fee_without_change = MicroMinotari::zero();
-        let mut fee_with_change = MicroMinotari::zero();
+        let kernel_fee = self.fee_calc.calculate(fee_per_gram, 1, 0, 0, 0);
+        let default_output_fee = self
+            .fee_calc
+            .calculate(fee_per_gram, 0, 0, 1, features_and_scripts_byte_size);
+        let output_fee = self
+            .fee_calc
+            .calculate(fee_per_gram, 0, 0, num_outputs, features_and_scripts_byte_size);
+        let input_fee = self.fee_calc.calculate(fee_per_gram, 0, 1, 0, 0);
+        let bnb = BranchAndBoundUtxoSelectionBuilder::new(uo)
+            .with_target_amount(amount + kernel_fee)
+            .with_fee_per_input(input_fee)
+            .with_total_output_fee(output_fee)
+            .with_change_fee(default_output_fee)
+            .build()
+            .map_err(|e| UtxoSelectionError::ServiceError(e.to_string()))?;
 
-        for o in uo {
-            total_value += o.output.value();
-            utxos.push(o);
+        let selection_result = bnb.search();
 
-            fee_without_change = self.fee_calc.calculate(
-                fee_per_gram,
-                1,
-                utxos.len(),
-                num_outputs,
-                features_and_scripts_byte_size,
-            );
-            if total_value == amount + fee_without_change {
-                sufficient_funds = true;
-                break;
-            }
-            fee_with_change = self.fee_calc.calculate(
-                fee_per_gram,
-                1,
-                utxos.len(),
-                num_outputs + 1,
-                2 * features_and_scripts_byte_size,
-            );
-
-            if total_value > amount + fee_with_change {
-                sufficient_funds = true;
-                requires_change_output = true;
-                break;
-            }
-        }
-
-        if !sufficient_funds {
-            let required = amount + fee_with_change;
-
-            let total_unspent_balance = get_total_unspent_balance(conn, self.account_id)?;
-            let total_unspent_micro = MicroMinotari(total_unspent_balance);
-
-            if total_unspent_micro >= required {
-                let pending = total_unspent_micro.saturating_sub(total_value);
-
-                warn!(
-                    target: "audit",
-                    available = &*mask_amount(total_value),
-                    pending = &*mask_amount(pending),
-                    required = &*mask_amount(required);
-                    "Insufficient funds (pending confirmations)"
-                );
-
-                return Err(UtxoSelectionError::FundsPending {
-                    available: total_value,
-                    pending,
-                    required,
-                });
-            }
-
+        if selection_result.is_none() {
             warn!(
                 target: "audit",
-                available = &*mask_amount(total_value),
-                required = &*mask_amount(required);
+                available = &*mask_amount(total_unspent_balance),
+                required = &*mask_amount(amount);
                 "Insufficient funds for transaction"
             );
+            // the total is not enough to cover fees. So we just need to notify the user its not enough so we add 1 to it.
             return Err(UtxoSelectionError::InsufficientFunds {
-                available: total_value,
-                required,
+                available: total_unspent_balance,
+                required: amount + MicroMinotari(1),
             });
         }
+        let selection = selection_result.expect("Selection should be valid here");
+        let selected_amount = selection.current_value;
+        let requires_change_output = selection.has_change;
+        let final_fee = selection.final_fee + kernel_fee;
+        let (fee_with_change, fee_without_change) = if requires_change_output {
+            (final_fee, final_fee - default_output_fee)
+        } else {
+            (final_fee + default_output_fee, final_fee)
+        };
+        let utxos = selection.selected_utxos;
 
         debug!(
             count = utxos.len(),
-            total = &*mask_amount(total_value),
+            total = &*mask_amount(selected_amount),
             change = requires_change_output;
             "UTXOs selected"
         );
@@ -371,7 +363,7 @@ impl InputSelector {
         Ok(UtxoSelection {
             utxos,
             requires_change_output,
-            total_value,
+            total_value: selected_amount,
             fee_without_change,
             fee_with_change,
         })

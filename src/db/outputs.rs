@@ -15,6 +15,7 @@ use tari_common_types::transaction::TxId;
 use tari_common_types::types::FixedHash;
 use tari_transaction_components::MicroMinotari;
 use tari_transaction_components::transaction_components::WalletOutput;
+use tari_transaction_components::utxo_selection::UtxoValue;
 
 #[allow(clippy::too_many_arguments)]
 pub fn insert_output(
@@ -328,11 +329,17 @@ pub fn lock_output(
     Ok(())
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DbWalletOutput {
     pub id: i64,
     pub tx_id: TxId,
     pub output: WalletOutput,
+}
+
+impl UtxoValue for DbWalletOutput {
+    fn value(&self) -> MicroMinotari {
+        self.output.value()
+    }
 }
 
 #[derive(Deserialize)]
