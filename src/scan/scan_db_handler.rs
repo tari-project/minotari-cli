@@ -1,12 +1,12 @@
-use log::{debug, error};
-use r2d2::PooledConnection;
-use r2d2_sqlite::SqliteConnectionManager;
-
 use crate::{
     ScanError, WalletEvent,
     db::{SqlitePool, WalletDbError, prune_scanned_tip_blocks},
     scan::{BlockProcessor, EventSender},
 };
+use log::{debug, error};
+use r2d2::PooledConnection;
+use r2d2_sqlite::SqliteConnectionManager;
+use tari_common_types::types::PrivateKey;
 
 #[derive(Clone)]
 pub struct ScanDbHandler {
@@ -38,7 +38,7 @@ impl ScanDbHandler {
         &self,
         blocks: Vec<lightweight_wallet_libs::BlockScanResult>,
         account_id: i64,
-        view_key: Vec<u8>,
+        view_key: PrivateKey,
         event_sender: E,
         has_pending_outbound: bool,
     ) -> Result<Vec<WalletEvent>, ScanError> {

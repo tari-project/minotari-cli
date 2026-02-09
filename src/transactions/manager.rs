@@ -723,7 +723,6 @@ impl TransactionSender {
             .collect();
 
         let tx = DisplayedTransactionBuilder::new()
-            .id(completed_tx_id)
             .account_id(self.account.id)
             .direction(TransactionDirection::Outgoing)
             .status(TransactionDisplayStatus::Pending)
@@ -735,7 +734,7 @@ impl TransactionSender {
             .fee(Some(fee))
             .inputs(inputs)
             .sent_output_hashes(sent_output_hashes)
-            .build()
+            .build(completed_tx_id)
             .map_err(|e| anyhow!("Failed to build displayed transaction: {}", e))?;
 
         Ok(tx)
