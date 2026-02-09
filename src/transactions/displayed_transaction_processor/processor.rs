@@ -45,6 +45,8 @@ impl DisplayedTransactionProcessor {
             accumulator.account_id as Id,
             TransactionDisplayStatus::Pending,
         )?;
+        let existing_ids: std::collections::HashSet<_> = current_display_transactions.iter().map(|tx| tx.id).collect();
+        pending_txs.retain(|tx| !existing_ids.contains(&tx.id));
         current_display_transactions.append(&mut pending_txs);
         self.create_new_updated_display_transactions(accumulator, &current_display_transactions)
     }
