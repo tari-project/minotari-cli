@@ -312,14 +312,12 @@ impl TransactionMonitor {
         pool.get().map_err(|e| anyhow!("Failed to get DB connection: {}", e))
     }
 
-    fn persist_event(&self, conn: &Connection, account_id: i64, event: WalletEvent) -> Result<WalletEvent> {
-        let event_id = db::insert_wallet_event(conn, account_id, &event)?;
-
+    fn persist_event(&self, conn: &Connection, account_id: i64, event: &WalletEvent) -> Result<()> {
+        let event_id = db::insert_wallet_event(conn, account_id, event)?;
         if let Some(config) = &self.webhook_config {
-            trigger_webhook_with_balance(conn, account_id, event_id, &event, config)?;
+            trigger_webhook_with_balance(conn, account_id, event_id, event, config)?;
         }
-
-        Ok(event)
+        Ok(())
     }
 
     /// Returns whether there are pending outbound transactions to monitor.
@@ -554,8 +552,8 @@ impl TransactionMonitor {
                     event_type: WalletEventType::TransactionRejected { tx_id: tx.id, reason },
                     description: format!("Transaction {} exceeded broadcast attempts", tx.id),
                 };
-                let saved_event = self.persist_event(&conn, account_id, event)?;
-                result.wallet_events.push(saved_event);
+                self.persist_event(&conn, account_id, &event)?;
+                result.wallet_events.push(event);
                 continue;
             }
 
@@ -577,8 +575,8 @@ impl TransactionMonitor {
                         },
                         description: format!("Transaction {} broadcast", tx.id),
                     };
-                    let saved_event = self.persist_event(&conn, account_id, event)?;
-                    result.wallet_events.push(saved_event);
+                    self.persist_event(&conn, account_id, &event)?;
+                    result.wallet_events.push(event);
                 },
                 Err(reason) => {
                     warn!(
@@ -600,8 +598,8 @@ impl TransactionMonitor {
                         event_type: WalletEventType::TransactionRejected { tx_id: tx.id, reason },
                         description: format!("Transaction {} rejected", tx.id),
                     };
-                    let saved_event = self.persist_event(&conn, account_id, event)?;
-                    result.wallet_events.push(saved_event);
+                    self.persist_event(&conn, account_id, &event)?;
+                    result.wallet_events.push(event);
                 },
             }
         }
@@ -639,8 +637,8 @@ impl TransactionMonitor {
                     },
                     description: format!("Transaction {} mined at height {}", tx.id, block_height),
                 };
-                let saved_event = self.persist_event(&conn, account_id, event)?;
-                events.push(saved_event);
+                self.persist_event(&conn, account_id, &event)?;
+                events.push(event);
             }
         }
 
@@ -697,8 +695,8 @@ impl TransactionMonitor {
                     },
                     description: format!("Transaction {} confirmed", tx.id),
                 };
-                let saved_event = self.persist_event(&conn, account_id, event)?;
-                events.push(saved_event);
+                self.persist_event(&conn, account_id, &event)?;
+                events.push(event);
             }
         }
 
