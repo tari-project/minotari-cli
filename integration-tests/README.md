@@ -1,0 +1,208 @@
+# Cucumber BDD Integration Tests
+
+This directory contains Behavior-Driven Development (BDD) integration tests for the Minotari CLI wallet using the Cucumber framework.
+
+## Prerequisites
+
+Before building or running the tests, you need to install the Protocol Buffers compiler (`protoc`):
+
+### Ubuntu/Debian
+```bash
+sudo apt-get install protobuf-compiler
+```
+
+### macOS
+```bash
+brew install protobuf
+```
+
+### Other platforms
+Download from: https://github.com/protocolbuffers/protobuf/releases
+
+## Overview
+
+The test suite covers all major functionality of the Minotari CLI wallet:
+
+- **Wallet Creation**: Creating new wallets with/without encryption
+- **Wallet Import**: Importing wallets using view/spend keys or seed words
+- **Balance Operations**: Checking wallet balances
+- **Blockchain Scanning**: Scanning for transactions, re-scanning, and incremental scans
+- **Transaction Creation**: Creating unsigned one-sided transactions
+- **Fund Locking**: Locking UTXOs for pending transactions
+- **Daemon Mode**: Running the wallet daemon with REST API
+- **Base Node Integration**: Real base node integration for testing
+
+## Structure
+
+```
+integration-tests/
+├── Cargo.toml          # Package configuration
+├── features/           # Gherkin feature files
+│   ├── wallet_creation.feature
+│   ├── wallet_import.feature
+│   ├── balance.feature
+│   ├── scanning.feature
+│   ├── transactions.feature
+│   ├── fund_locking.feature
+│   ├── daemon.feature
+│   └── base_node.feature
+├── steps/              # Step definitions (Rust code)
+│   ├── mod.rs
+│   ├── common.rs       # Shared world and utilities
+│   ├── wallet_creation.rs
+│   ├── wallet_import.rs
+│   ├── balance.rs
+│   ├── scanning.rs
+│   ├── transactions.rs
+│   ├── fund_locking.rs
+│   ├── daemon.rs
+│   └── base_node.rs
+├── src/                # Support code
+│   ├── lib.rs
+│   └── base_node_process.rs
+└── tests/              # Test runners
+    └── cucumber.rs
+```
+
+## Running the Tests
+
+### From workspace root
+
+```bash
+# Run all integration tests
+cargo test -p integration-tests
+
+# Run with output
+cargo test -p integration-tests -- --nocapture
+```
+
+### From integration-tests directory
+
+```bash
+cd integration-tests
+
+# Run all tests
+cargo test
+
+# Run with output
+cargo test -- --nocapture
+```
+
+```bash
+cargo test --test cucumber_integration -- --nocapture
+```
+
+## Writing New Tests
+
+### 1. Create a Feature File
+
+Create a new `.feature` file in `features/`:
+
+```gherkin
+Feature: My New Feature
+  As a user
+  I want to do something
+  So that I achieve some goal
+
+  Scenario: Do something specific
+    Given some precondition
+    When I perform an action
+    Then I should see the expected result
+```
+
+### 2. Implement Step Definitions
+
+Create or update a step definition file in `steps/`:
+
+```rust
+use cucumber::{given, when, then};
+use super::common::MinotariWorld;
+
+#[given("some precondition")]
+async fn setup_precondition(world: &mut MinotariWorld) {
+    // Setup code
+}
+
+#[when("I perform an action")]
+async fn perform_action(world: &mut MinotariWorld) {
+    // Action code
+}
+
+#[then("I should see the expected result")]
+async fn verify_result(world: &mut MinotariWorld) {
+    // Assertion code
+}
+```
+
+### 3. Register the Module
+
+Add your new module to `steps/mod.rs`:
+
+```rust
+pub mod my_new_feature;
+```
+
+## Test World
+
+The `MinotariWorld` struct in `common.rs` provides shared state across steps:
+
+- `temp_dir`: Temporary directory for test files
+- `database_path`: Path to test database
+- `output_file`: Path to output files (wallet.json, transactions, etc.)
+- `wallet_data`: Parsed wallet JSON data
+- `last_command_output`: stdout from last command
+- `last_command_error`: stderr from last command
+- `last_command_exit_code`: Exit code from last command
+- `daemon_handle`: Handle to running daemon process
+- `api_port`: Port number for API server
+
+## Dependencies
+
+The integration tests use the following crates:
+
+- `cucumber` - BDD testing framework
+- `tempfile` - Temporary file/directory management
+- `serial_test` - Sequential test execution
+- `tokio` - Async runtime
+- `reqwest` - HTTP client for API testing
+
+## Notes
+
+- Tests run sequentially (`max_concurrent_scenarios(1)`) to avoid port conflicts when testing daemon mode
+- Each test gets its own temporary directory that is cleaned up automatically
+- Tests use a consistent test password and keys for deterministic behavior
+- Some tests may require a running Tari node to fully execute (scanning scenarios)
+- Database operations are tested using SQLite in temporary directories
+
+## Troubleshooting
+
+### Tests fail to connect to node
+
+Most scanning tests will gracefully handle connection failures to real nodes. This is expected in the test environment. The tests verify that the commands execute correctly even if they can't connect to a blockchain node.
+
+### Port already in use
+
+If daemon tests fail with port conflicts, ensure no other instances are running:
+
+```bash
+pkill -f minotari
+```
+
+### Database locked errors
+
+Ensure previous test runs have cleaned up properly. Delete any stale test databases:
+
+```bash
+find /tmp -name "test_wallet.db" -delete
+```
+
+## Future Enhancements
+
+Potential improvements to the test suite:
+
+1. Mock blockchain node for more deterministic scanning tests
+2. Test fixtures with pre-populated wallets and outputs
+3. Performance benchmarks for scanning operations
+4. Integration with CI/CD pipeline
+5. Code coverage reporting
+6. Parallel test execution where safe
