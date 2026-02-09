@@ -120,9 +120,13 @@ app.post('/webhook', (req, res) => {
   if (!signatureHeader) return res.status(400).send('Missing signature');
 
   // 1. Extract timestamp and signature
-  const parts = signatureHeader.split(',');
-  const timestamp = parts.find(p => p.startsWith('t=')).split('=')[1];
-  const signature = parts.find(p => p.startsWith('v1=')).split('=')[1];
+  const tPart = parts.find(p => p.startsWith('t='));
+  const v1Part = parts.find(p => p.startsWith('v1='));
+  if (!tPart || !v1Part) {
+    return res.status(400).send('Invalid signature header format');
+  }
+  const timestamp = tPart.split('=')[1];
+  const signature = v1Part.split('=')[1];
 
   // 2. Prevent Replay Attacks (e.g., 5 minute tolerance)
   const now = Math.floor(Date.now() / 1000);
@@ -167,9 +171,17 @@ def handle_webhook():
         abort(400, 'Missing signature header')
 
     # Parse header
-    parts = {k: v for k, v in [p.split('=') for p in sig_header.split(',')]}
-    timestamp = parts.get('t')
-    signature = parts.get('v1')
+    timestamp = None
+    signature = None
+    for part in sig_header.split(','):
+        kv = part.split('=', 1)
+        if len(kv) == 2:
+            if kv[0] == 't':
+                timestamp = kv[1]
+            elif kv[0] == 'v1':
+                signature = kv[1]
+    if not timestamp or not signature:
+        abort(400, 'Invalid signature header format')
 
     # Prevent Replay
     if abs(time.time() - int(timestamp)) > 300:
@@ -228,10 +240,12 @@ func webhookHandler(w http.ResponseWriter, r *http.Request) {
 	// Parse Header
 	parts := strings.Split(sigHeader, ",")
 	var timestamp, signature string
-	for _, part := range parts {
-		kv := strings.Split(part, "=")
-		if kv[0] == "t" { timestamp = kv[1] }
-		if kv[0] == "v1" { signature = kv[1] }
+  for _, part := range parts {
+		kv := strings.SplitN(part, "=", 2)
+		if len(kv) == 2 {
+			if kv[0] == "t" { timestamp = kv[1] }
+			if kv[0] == "v1" { signature = kv[1] }
+		}
 	}
 
 	// Prevent Replay
