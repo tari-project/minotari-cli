@@ -412,15 +412,16 @@ impl TransactionHistoryService {
     pub fn rebuild_from_balance_changes(
         &self,
         account_id: Id,
-    ) -> Result<Vec<DisplayedTransaction>, TransactionHistoryError> {
+        required_confirmations: u64,
+    ) -> Result<(Vec<DisplayedTransaction>, Vec<DisplayedTransaction>), TransactionHistoryError> {
         let conn = self.get_connection()?;
 
         let tip_height = db::get_latest_scanned_tip_block_by_account(&conn, account_id)?
             .map(|block| block.height)
             .unwrap_or(0);
 
-        let processor = DisplayedTransactionProcessor::new(tip_height);
-        let transactions = processor.process_all_stored_with_conn(account_id, &conn, &self.db_pool)?;
+        let processor = DisplayedTransactionProcessor::new(tip_height, required_confirmations);
+        let transactions = processor.process_all_stored_with_conn(account_id, &conn)?;
 
         Ok(transactions)
     }
