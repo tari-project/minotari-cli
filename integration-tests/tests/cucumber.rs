@@ -3,8 +3,8 @@ use std::path::PathBuf;
 
 mod steps;
 
-#[tokio::test]
-async fn run_cucumber_tests() {
+#[tokio::main]
+async fn main() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let features_path = manifest_dir.join("features");
     
