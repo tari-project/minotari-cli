@@ -1834,7 +1834,6 @@ dependencies = [
  "lightweight_wallet_libs",
  "log",
  "log4rs",
- "num-format",
  "r2d2",
  "r2d2_sqlite",
  "reqwest",
