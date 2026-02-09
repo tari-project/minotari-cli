@@ -111,6 +111,10 @@ impl DisplayedTransactionProcessor {
             if output.output.is_coinbase() {
                 //create new display transaction for this coinbase output
                 let id = TxId::new_deterministic(self.view_key.as_bytes(), &output.output.output_hash());
+                let payment_id_string = match output.output.payment_id().get_payment_id().is_empty() {
+                    true => None,
+                    false => Some(String::from_utf8_lossy(&output.output.payment_id().get_payment_id()).to_string()),
+                };
                 let display_tx = DisplayedTransactionBuilder::new()
                     .account_id(accumulator.account_id as Id)
                     .source(TransactionSource::Coinbase)
@@ -134,6 +138,7 @@ impl DisplayedTransactionProcessor {
                         output_type: OutputType::Coinbase,
                         is_change: false,
                     }])
+                    .message(payment_id_string)
                     .output_type(Some(OutputType::Coinbase))
                     .coinbase_extra(Some(output.output.features().coinbase_extra.clone()))
                     .build(id)?;
@@ -144,12 +149,17 @@ impl DisplayedTransactionProcessor {
             let mut inputs = Vec::new();
             let mut other_party = output.output.payment_id().get_sender_address();
             let mut id = TxId::new_random();
+            let mut payment_id_string = None;
             //create new display transaction for each
             if let Some((sender, amount, _tx_type, _one_sided)) =
                 output.output.payment_id().get_transaction_info_details()
             {
                 // So this is change from our wallet.
                 id = TxId::new_deterministic(self.view_key.as_bytes(), &output.output.output_hash());
+                payment_id_string = match output.output.payment_id().get_payment_id().is_empty() {
+                    true => None,
+                    false => Some(String::from_utf8_lossy(&output.output.payment_id().get_payment_id()).to_string()),
+                };
                 let total_send =
                     amount + output.output.value() + output.output.payment_id().get_fee().unwrap_or_default();
                 let mut selected_inputs = Vec::new();
@@ -191,6 +201,7 @@ impl DisplayedTransactionProcessor {
                 )
                 .fee(output.output.payment_id().get_fee())
                 .inputs(inputs)
+                .message(payment_id_string)
                 .outputs(vec![TransactionOutput {
                     hash: output.output.output_hash(),
                     amount: output.output.value(),
