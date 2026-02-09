@@ -9,7 +9,7 @@ use lightweight_wallet_libs::BlockScanResult;
 use log::{error, info};
 use rusqlite::Connection;
 use tari_common_types::payment_reference::generate_payment_reference;
-use tari_common_types::types::FixedHash;
+use tari_common_types::types::{FixedHash, PrivateKey};
 use tari_transaction_components::MicroMinotari;
 use tari_transaction_components::transaction_components::WalletOutput;
 use thiserror::Error;
@@ -78,8 +78,8 @@ pub enum BlockProcessorError {
 pub struct BlockProcessor<E: EventSender = NoopEventSender> {
     /// Database ID of the account being processed.
     account_id: i64,
-    /// The account's view key bytes for output ownership verification.
-    account_view_key: Vec<u8>,
+    /// The account's view key for output ownership verification.
+    account_view_key: PrivateKey,
     /// Accumulated wallet events for the current processing session.
     wallet_events: Vec<WalletEvent>,
     /// Event sender for real-time notifications.
@@ -105,7 +105,7 @@ impl BlockProcessor<NoopEventSender> {
     ///
     /// * `account_id` - Database ID of the account to process blocks for
     /// * `account_view_key` - The account's view key bytes
-    pub fn new(account_id: i64, account_view_key: Vec<u8>, required_confirmations: u64) -> Self {
+    pub fn new(account_id: i64, account_view_key: PrivateKey, required_confirmations: u64) -> Self {
         Self {
             account_id,
             account_view_key,
@@ -134,7 +134,7 @@ impl<E: EventSender> BlockProcessor<E> {
     ///   that should be matched against scanned inputs
     pub fn with_event_sender(
         account_id: i64,
-        account_view_key: Vec<u8>,
+        account_view_key: PrivateKey,
         event_sender: E,
         has_pending_outbound: bool,
         required_confirmations: u64,
@@ -215,7 +215,11 @@ impl<E: EventSender> BlockProcessor<E> {
             return Ok(());
         }
 
-        let processor = DisplayedTransactionProcessor::new(self.current_tip_height, self.required_confirmations);
+        let processor = DisplayedTransactionProcessor::new(
+            self.current_tip_height,
+            self.required_confirmations,
+            self.account_view_key.clone(),
+        );
         let (mut updated_transactions, mut new_transactions) = processor
             .create_new_updated_display_transactions_for_height(accumulator, tx)
             .map_err(|e| {

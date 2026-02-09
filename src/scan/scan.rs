@@ -7,8 +7,8 @@ use lightweight_wallet_libs::{HttpBlockchainScanner, ScanConfig, scanning::Block
 use log::{info, warn};
 use rusqlite::Connection;
 use std::{path::PathBuf, time::Duration};
+use tari_common_types::types::PrivateKey;
 use tari_transaction_components::key_manager::{KeyManager, TransactionKeyManagerInterface};
-use tari_utilities::ByteArray;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
@@ -97,8 +97,8 @@ struct ScanContext {
     scanner: HttpBlockchainScanner<KeyManager>,
     /// Database ID of the account being scanned.
     account_id: i64,
-    /// The account's view key bytes for output detection.
-    account_view_key: Vec<u8>,
+    /// The account's view key for output detection.
+    account_view_key: PrivateKey,
     /// Configuration for the scan operation (start height, batch size).
     scan_config: ScanConfig,
     /// Number of blocks between reorg checks during scanning.
@@ -418,7 +418,7 @@ async fn prepare_account_scan(
     required_confirmations: u64,
 ) -> Result<ScanContext, ScanError> {
     let key_manager = account.get_key_manager(password)?;
-    let account_view_key = key_manager.get_private_view_key().as_bytes().to_vec();
+    let account_view_key = key_manager.get_private_view_key();
 
     let mut scanner = HttpBlockchainScanner::new(base_url.to_string(), vec![key_manager.clone()], processing_threads)
         .await

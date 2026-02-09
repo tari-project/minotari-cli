@@ -13,14 +13,16 @@ use serde_rusqlite::from_rows;
 use tari_common_types::payment_reference::PaymentReference;
 use tari_common_types::transaction::TxId;
 use tari_common_types::types::FixedHash;
+use tari_common_types::types::PrivateKey;
 use tari_transaction_components::MicroMinotari;
 use tari_transaction_components::transaction_components::WalletOutput;
+use tari_utilities::ByteArray;
 
 #[allow(clippy::too_many_arguments)]
 pub fn insert_output(
     conn: &Connection,
     account_id: i64,
-    account_view_key: &[u8],
+    account_view_key: &PrivateKey,
     output_hash: Vec<u8>,
     output: &WalletOutput,
     block_height: u64,
@@ -38,7 +40,7 @@ pub fn insert_output(
         "DB: Inserting output"
     );
 
-    let tx_id = TxId::new_deterministic(account_view_key, &output.output_hash()).as_i64_wrapped();
+    let tx_id = TxId::new_deterministic(account_view_key.as_bytes(), &output.output_hash()).as_i64_wrapped();
 
     let output_json = serde_json::to_string(&output)?;
 

@@ -14,7 +14,6 @@ use tari_transaction_components::transaction_components::{CoinBaseExtra, OutputT
 
 #[derive(Debug, Default)]
 pub struct DisplayedTransactionBuilder {
-    id: Option<TxId>,
     account_id: Option<Id>,
     direction: Option<TransactionDirection>,
     source: Option<TransactionSource>,
@@ -40,11 +39,6 @@ pub struct DisplayedTransactionBuilder {
 impl DisplayedTransactionBuilder {
     pub fn new() -> Self {
         Self::default()
-    }
-
-    pub fn id(mut self, id: TxId) -> Self {
-        self.id = Some(id);
-        self
     }
 
     pub fn account_id(mut self, id: Id) -> Self {
@@ -142,7 +136,7 @@ impl DisplayedTransactionBuilder {
         self
     }
 
-    pub fn build(self) -> Result<DisplayedTransaction, ProcessorError> {
+    pub fn build(self, id: TxId) -> Result<DisplayedTransaction, ProcessorError> {
         let amount = self
             .amount
             .ok_or_else(|| ProcessorError::ParseError("amount is required".to_string()))?;
@@ -163,7 +157,7 @@ impl DisplayedTransactionBuilder {
             }
         }
         Ok(DisplayedTransaction {
-            id: self.id.unwrap_or_else(TxId::new_random),
+            id,
             direction,
             source: self.source.unwrap_or(TransactionSource::Unknown),
             status: self.status.unwrap_or(TransactionDisplayStatus::Pending),
