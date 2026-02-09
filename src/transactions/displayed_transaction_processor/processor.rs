@@ -154,14 +154,13 @@ impl DisplayedTransactionProcessor {
             let mut debit_value = 0.into();
             let mut inputs = Vec::new();
             let mut other_party = output.output.payment_id().get_sender_address();
-            let mut id = TxId::new_random();
+            let id = TxId::new_deterministic(self.view_key.as_bytes(), &output.output.output_hash());
             let mut payment_id_string = None;
             //create new display transaction for each
             if let Some((sender, amount, _tx_type, _one_sided)) =
                 output.output.payment_id().get_transaction_info_details()
             {
                 // So this is change from our wallet.
-                id = TxId::new_deterministic(self.view_key.as_bytes(), &output.output.output_hash());
                 payment_id_string = match output.output.payment_id().get_payment_id().is_empty() {
                     true => None,
                     false => Some(String::from_utf8_lossy(&output.output.payment_id().get_payment_id()).to_string()),
@@ -242,7 +241,10 @@ impl DisplayedTransactionProcessor {
                     matched_output_id: input.output_id,
                 }])
                 .output_type(None)
-                .build(TxId::new_random())?;
+                .build(TxId::new_deterministic(
+                    self.view_key.as_bytes(),
+                    &input.output.output_hash(),
+                ))?;
             new_transactions.push(display_tx);
         }
         Ok((updated_transactions.into_values().collect(), new_transactions))
