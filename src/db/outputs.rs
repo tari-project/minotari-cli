@@ -13,6 +13,7 @@ use serde_rusqlite::from_rows;
 use tari_common_types::payment_reference::PaymentReference;
 use tari_common_types::transaction::TxId;
 use tari_common_types::types::FixedHash;
+use tari_transaction_components::MicroMinotari;
 use tari_transaction_components::transaction_components::WalletOutput;
 
 #[allow(clippy::too_many_arguments)]
@@ -491,7 +492,10 @@ struct OutputTotals {
 
 /// Retrieves the sum of LOCKED values, the sum of UNCONFIRMED values, and the sum of values that are both LOCKED and UNCONFIRMED for an account.
 /// Returns (locked_balance, unconfirmed_balance, locked_and_unconfirmed_balance)
-pub fn get_output_totals_for_account(conn: &Connection, account_id: i64) -> WalletDbResult<(u64, u64, u64)> {
+pub fn get_output_totals_for_account(
+    conn: &Connection,
+    account_id: i64,
+) -> WalletDbResult<(MicroMinotari, MicroMinotari, MicroMinotari)> {
     let locked_status = OutputStatus::Locked.to_string();
 
     let mut stmt = conn.prepare_cached(
@@ -515,9 +519,9 @@ pub fn get_output_totals_for_account(conn: &Connection, account_id: i64) -> Wall
         .ok_or_else(|| WalletDbError::Unexpected("Aggregate query returned no rows".to_string()))??;
 
     Ok((
-        result.locked_val as u64,
-        result.unconfirmed_val as u64,
-        result.locked_and_unconfirmed_val as u64,
+        (result.locked_val as u64).into(),
+        (result.unconfirmed_val as u64).into(),
+        (result.locked_and_unconfirmed_val as u64).into(),
     ))
 }
 

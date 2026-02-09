@@ -72,7 +72,6 @@ use minotari::{
     },
     utils,
 };
-use num_format::{Locale, ToFormattedString};
 use std::str::FromStr;
 use tari_common::{DefaultConfigLoader, configuration::Network};
 use tari_common_types::{
@@ -431,15 +430,11 @@ fn handle_balance(config: &WalletConfig) -> Result<(), anyhow::Error> {
     let accounts = get_accounts(&conn, config.account_name.as_deref())?;
     for account in accounts {
         let agg_result = get_balance(&conn, account.id)?;
-        let tari_balance = agg_result.total / 1_000_000;
-        let remainder = agg_result.total % 1_000_000;
         println!(
-            "Balance at height {}({}): {} microTari ({}.{} Tari)",
+            "Balance at height {}({}): {} ",
             agg_result.max_height.unwrap_or(0),
             agg_result.max_date.unwrap_or_else(|| "N/A".to_string()),
-            agg_result.total.to_formatted_string(&Locale::en),
-            tari_balance.to_formatted_string(&Locale::en),
-            remainder.to_formatted_string(&Locale::en),
+            agg_result.total,
         );
     }
     Ok(())

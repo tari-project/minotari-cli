@@ -12,6 +12,7 @@ use tari_common_types::{
     types::CompressedPublicKey,
 };
 use tari_crypto::{keys::PublicKey, ristretto::RistrettoPublicKey};
+use tari_transaction_components::MicroMinotari;
 use tari_transaction_components::key_manager::{KeyManager, wallet_types::WalletType};
 use utoipa::ToSchema;
 
@@ -24,6 +25,15 @@ use crate::utils::{
 };
 use crate::{db::balance_changes::get_balance_aggregates_for_account, utils::crypto::FullEncryptedData};
 use tari_utilities::hex::Hex;
+use utoipa::openapi::{Object, Schema, Type};
+
+pub fn micro_minotari_schema() -> Schema {
+    Schema::Object(
+        Object::builder()
+            .property("amount", Schema::Object(Object::with_type(Type::Integer)))
+            .build(),
+    )
+}
 
 pub fn create_account(
     conn: &Connection,
@@ -260,17 +270,23 @@ impl AccountRow {
 #[derive(Debug, Clone, ToSchema, Serialize)]
 pub struct AccountBalance {
     /// The total balance of the account (Total Credits - Total Debits).
-    pub total: u64,
+    #[schema(schema_with = micro_minotari_schema)]
+    pub total: MicroMinotari,
     /// The portion of the total balance that is currently spendable.
-    pub available: u64,
+    #[schema(schema_with = micro_minotari_schema)]
+    pub available: MicroMinotari,
     /// The portion of the balance that is locked.
-    pub locked: u64,
+    #[schema(schema_with = micro_minotari_schema)]
+    pub locked: MicroMinotari,
     /// The amount from incoming transactions that have not yet been confirmed.
-    pub unconfirmed: u64,
+    #[schema(schema_with = micro_minotari_schema)]
+    pub unconfirmed: MicroMinotari,
     /// The total sum of all incoming (credit) transactions.
-    pub total_credits: Option<i64>,
+    #[schema(schema_with = micro_minotari_schema)]
+    pub total_credits: Option<MicroMinotari>,
     /// The total sum of all outgoing (debit) transactions.
-    pub total_debits: Option<i64>,
+    #[schema(schema_with = micro_minotari_schema)]
+    pub total_debits: Option<MicroMinotari>,
     /// The maximum blockchain height among all transactions for this account.
     ///
     /// Will be `None` if the account has no transactions.
@@ -291,8 +307,8 @@ pub fn get_balance(conn: &Connection, account_id: i64) -> WalletDbResult<Account
     let (locked_amount, unconfirmed_amount, locked_and_unconfirmed_amount) =
         get_output_totals_for_account(conn, account_id)?;
 
-    let total_credits = history_agg.total_credits.unwrap_or(0) as u64;
-    let total_debits = history_agg.total_debits.unwrap_or(0) as u64;
+    let total_credits = history_agg.total_credits.unwrap_or_default();
+    let total_debits = history_agg.total_debits.unwrap_or_default();
     let total_balance = total_credits.saturating_sub(total_debits);
 
     let unavailable_balance = locked_amount
