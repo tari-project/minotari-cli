@@ -9,6 +9,11 @@ use std::path::PathBuf;
 use std::process::Command;
 use tempfile::TempDir;
 
+// Import the mock base node from the test support library
+#[path = "../src/lib.rs"]
+mod test_support;
+use test_support::MockBaseNode;
+
 // =============================
 // World Definition
 // =============================
@@ -29,6 +34,8 @@ pub struct MinotariWorld {
     pub daemon_handle: Option<std::process::Child>,
     pub api_port: Option<u16>,
     pub locked_funds: HashMap<String, serde_json::Value>,
+    pub mock_base_node: Option<MockBaseNode>,
+    pub base_node_port: Option<u16>,
 }
 
 impl MinotariWorld {
@@ -47,6 +54,8 @@ impl MinotariWorld {
             daemon_handle: None,
             api_port: None,
             locked_funds: HashMap::new(),
+            mock_base_node: None,
+            base_node_port: None,
         }
     }
 
@@ -77,6 +86,14 @@ impl MinotariWorld {
             let _ = child.wait();
         }
         self.temp_dir = None;
+    }
+    
+    pub fn get_base_node_url(&self) -> String {
+        if let Some(port) = self.base_node_port {
+            format!("http://127.0.0.1:{}", port)
+        } else {
+            "http://127.0.0.1:18080".to_string()
+        }
     }
 }
 
