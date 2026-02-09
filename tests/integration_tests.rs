@@ -1,6 +1,6 @@
 use cucumber::World;
 
-#[path = "cucumber/steps.rs"]
+#[path = "cucumber/steps/mod.rs"]
 mod steps;
 
 #[tokio::test]
