@@ -59,6 +59,15 @@ uuid = { version = "1", features = ["v4"] }
 cucumber = "0.21"
 tempfile = "3.15"
 serial_test = "3.2"
-axum = "0.8"
-tower = "0.5"
-hyper = "1.0"
+# Base node integration dependencies
+minotari_app_utilities = { git = "https://github.com/tari-project/tari/", rev = "766f80ccc20596413ee208311750c11e02a2841d" }
+minotari_node = { git = "https://github.com/tari-project/tari/", rev = "766f80ccc20596413ee208311750c11e02a2841d", features = ["metrics"] }
+minotari_node_grpc_client = { git = "https://github.com/tari-project/tari/", rev = "766f80ccc20596413ee208311750c11e02a2841d" }
+tari_common_sqlite = { git = "https://github.com/tari-project/tari/", rev = "766f80ccc20596413ee208311750c11e02a2841d" }
+tari_comms = { git = "https://github.com/tari-project/tari/", rev = "766f80ccc20596413ee208311750c11e02a2841d" }
+tari_comms_dht = { git = "https://github.com/tari-project/tari/", rev = "766f80ccc20596413ee208311750c11e02a2841d" }
+tari_p2p = { git = "https://github.com/tari-project/tari/", rev = "766f80ccc20596413ee208311750c11e02a2841d" }
+tari_shutdown = { git = "https://github.com/tari-project/tari/", rev = "766f80ccc20596413ee208311750c11e02a2841d" }
+rand = "0.8"
+tonic = "0.13"
+indexmap = "1.9"

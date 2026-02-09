@@ -11,6 +11,7 @@ pub mod scanning;
 pub mod transactions;
 pub mod fund_locking;
 pub mod daemon;
+pub mod base_node;
 
 // Re-export the World type for easy access
 pub use common::MinotariWorld;

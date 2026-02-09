@@ -8,11 +8,12 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Command;
 use tempfile::TempDir;
+use indexmap::IndexMap;
 
-// Import the mock base node from the test support library
+// Import the base node process from the test support library
 #[path = "../src/lib.rs"]
 mod test_support;
-use test_support::MockBaseNode;
+use test_support::BaseNodeProcess;
 
 // =============================
 // World Definition
@@ -34,12 +35,19 @@ pub struct MinotariWorld {
     pub daemon_handle: Option<std::process::Child>,
     pub api_port: Option<u16>,
     pub locked_funds: HashMap<String, serde_json::Value>,
-    pub mock_base_node: Option<MockBaseNode>,
-    pub base_node_port: Option<u16>,
+    // Base node infrastructure
+    pub base_nodes: IndexMap<String, BaseNodeProcess>,
+    pub assigned_ports: IndexMap<u64, u64>,
+    pub current_base_dir: Option<PathBuf>,
+    pub seed_nodes: Vec<String>,
 }
 
 impl MinotariWorld {
     pub fn new() -> Self {
+        // Create a temp base directory for this test session
+        let base_dir = std::env::temp_dir().join(format!("minotari_cli_test_{}", std::process::id()));
+        std::fs::create_dir_all(&base_dir).ok();
+        
         Self {
             temp_dir: None,
             database_path: None,
@@ -54,8 +62,10 @@ impl MinotariWorld {
             daemon_handle: None,
             api_port: None,
             locked_funds: HashMap::new(),
-            mock_base_node: None,
-            base_node_port: None,
+            base_nodes: IndexMap::new(),
+            assigned_ports: IndexMap::new(),
+            current_base_dir: Some(base_dir),
+            seed_nodes: Vec::new(),
         }
     }
 
@@ -85,15 +95,22 @@ impl MinotariWorld {
             let _ = child.kill();
             let _ = child.wait();
         }
+        // Base nodes are dropped automatically via their Drop impl
+        self.base_nodes.clear();
         self.temp_dir = None;
     }
     
     pub fn get_base_node_url(&self) -> String {
-        if let Some(port) = self.base_node_port {
-            format!("http://127.0.0.1:{}", port)
+        // Get the first base node's HTTP URL if available
+        if let Some((_, node)) = self.base_nodes.iter().next() {
+            format!("http://127.0.0.1:{}", node.http_port)
         } else {
             "http://127.0.0.1:18080".to_string()
         }
+    }
+    
+    pub fn all_seed_nodes(&self) -> &[String] {
+        &self.seed_nodes
     }
 }
 
