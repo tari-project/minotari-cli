@@ -14,13 +14,17 @@ use super::common::MinotariWorld;
 #[when(regex = r#"^I check the balance for account "([^"]*)"$"#)]
 async fn check_balance_for_account(world: &mut MinotariWorld, account_name: String) {
     let db_path = world.database_path.as_ref().expect("Database not set up");
+    let (cmd, mut args) = world.get_minotari_command();
+    args.extend_from_slice(&[
+        "balance".to_string(),
+        "--database-path".to_string(),
+        db_path.to_str().unwrap().to_string(),
+        "--account-name".to_string(),
+        account_name,
+    ]);
     
-    let output = Command::new("cargo")
-        .args(&[
-            "run", "--bin", "minotari", "--", "balance",
-            "--database-path", db_path.to_str().unwrap(),
-            "--account-name", &account_name,
-        ])
+    let output = Command::new(&cmd)
+        .args(&args)
         .output()
         .expect("Failed to execute command");
 
@@ -32,12 +36,15 @@ async fn check_balance_for_account(world: &mut MinotariWorld, account_name: Stri
 #[when("I check the balance without specifying an account")]
 async fn check_balance_all_accounts(world: &mut MinotariWorld) {
     let db_path = world.database_path.as_ref().expect("Database not set up");
+    let (cmd, mut args) = world.get_minotari_command();
+    args.extend_from_slice(&[
+        "balance".to_string(),
+        "--database-path".to_string(),
+        db_path.to_str().unwrap().to_string(),
+    ]);
     
-    let output = Command::new("cargo")
-        .args(&[
-            "run", "--bin", "minotari", "--", "balance",
-            "--database-path", db_path.to_str().unwrap(),
-        ])
+    let output = Command::new(&cmd)
+        .args(&args)
         .output()
         .expect("Failed to execute command");
 

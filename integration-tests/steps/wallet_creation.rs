@@ -16,12 +16,15 @@ use super::common::MinotariWorld;
 #[when("I create a new address without a password")]
 async fn create_address_without_password(world: &mut MinotariWorld) {
     let output_file = world.get_temp_path("wallet.json");
+    let (cmd, mut args) = world.get_minotari_command();
+    args.extend_from_slice(&[
+        "create-address".to_string(),
+        "--output-file".to_string(),
+        output_file.to_str().unwrap().to_string(),
+    ]);
     
-    let output = Command::new("cargo")
-        .args(&[
-            "run", "--bin", "minotari", "--", "create-address",
-            "--output-file", output_file.to_str().unwrap(),
-        ])
+    let output = Command::new(&cmd)
+        .args(&args)
         .output()
         .expect("Failed to execute command");
 
@@ -34,13 +37,17 @@ async fn create_address_without_password(world: &mut MinotariWorld) {
 #[when(regex = r#"^I create a new address with password "([^"]*)"$"#)]
 async fn create_address_with_password(world: &mut MinotariWorld, password: String) {
     let output_file = world.get_temp_path("wallet.json");
+    let (cmd, mut args) = world.get_minotari_command();
+    args.extend_from_slice(&[
+        "create-address".to_string(),
+        "--password".to_string(),
+        password,
+        "--output-file".to_string(),
+        output_file.to_str().unwrap().to_string(),
+    ]);
     
-    let output = Command::new("cargo")
-        .args(&[
-            "run", "--bin", "minotari", "--", "create-address",
-            "--password", &password,
-            "--output-file", output_file.to_str().unwrap(),
-        ])
+    let output = Command::new(&cmd)
+        .args(&args)
         .output()
         .expect("Failed to execute command");
 
@@ -53,12 +60,15 @@ async fn create_address_with_password(world: &mut MinotariWorld, password: Strin
 #[when(regex = r#"^I create a new address with output file "([^"]*)"$"#)]
 async fn create_address_with_output_file(world: &mut MinotariWorld, filename: String) {
     let output_file = world.get_temp_path(&filename);
+    let (cmd, mut args) = world.get_minotari_command();
+    args.extend_from_slice(&[
+        "create-address".to_string(),
+        "--output-file".to_string(),
+        output_file.to_str().unwrap().to_string(),
+    ]);
     
-    let output = Command::new("cargo")
-        .args(&[
-            "run", "--bin", "minotari", "--", "create-address",
-            "--output-file", output_file.to_str().unwrap(),
-        ])
+    let output = Command::new(&cmd)
+        .args(&args)
         .output()
         .expect("Failed to execute command");
 

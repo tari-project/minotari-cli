@@ -74,6 +74,25 @@ impl MinotariWorld {
         let temp_dir = TempDir::new().expect("Failed to create temp directory");
         self.temp_dir = Some(temp_dir);
     }
+    
+    /// Get the path to the minotari binary, using the release binary if tests are
+    /// running in release mode, otherwise use cargo run for dev mode
+    pub fn get_minotari_command(&self) -> (String, Vec<String>) {
+        // Check if we're in release mode by looking for the release binary
+        let workspace_root = std::env::var("CARGO_MANIFEST_DIR")
+            .map(|p| std::path::PathBuf::from(p).parent().unwrap().to_path_buf())
+            .unwrap_or_else(|_| std::env::current_dir().unwrap().parent().unwrap().to_path_buf());
+        
+        let release_binary = workspace_root.join("target/release/minotari");
+        
+        if release_binary.exists() {
+            // Use the release binary directly
+            (release_binary.to_string_lossy().to_string(), vec![])
+        } else {
+            // Fall back to cargo run for dev mode
+            ("cargo".to_string(), vec!["run".to_string(), "--bin".to_string(), "minotari".to_string(), "--".to_string()])
+        }
+    }
 
     pub fn get_temp_path(&self, filename: &str) -> PathBuf {
         self.temp_dir
@@ -139,15 +158,21 @@ async fn setup_database(world: &mut MinotariWorld) {
 async fn database_with_wallet(world: &mut MinotariWorld) {
     world.setup_database();
     let db_path = world.database_path.as_ref().expect("Database not set up");
+    let (cmd, mut args) = world.get_minotari_command();
+    args.extend_from_slice(&[
+        "import-view-key".to_string(),
+        "--view-private-key".to_string(),
+        world.wallet.get_view_key().to_hex(),
+        "--spend-public-key".to_string(),
+        world.wallet.get_public_spend_key().to_hex(),
+        "--password".to_string(),
+        world.test_password.clone(),
+        "--database-path".to_string(),
+        db_path.to_str().unwrap().to_string(),
+    ]);
     
-    let _ = Command::new("cargo")
-        .args(&[
-            "run", "--bin", "minotari", "--", "import-view-key",
-            "--view-private-key", &world.wallet.get_view_key().to_hex(),
-            "--spend-public-key", &world.wallet.get_public_spend_key().to_hex(),
-            "--password", &world.test_password,
-            "--database-path", db_path.to_str().unwrap(),
-        ])
+    let _ = Command::new(&cmd)
+        .args(&args)
         .output()
         .expect("Failed to set up test wallet");
 }
