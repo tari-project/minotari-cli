@@ -103,26 +103,40 @@ tests/
 │   │   ├── transactions.feature
 │   │   ├── fund_locking.feature
 │   │   └── daemon.feature
-│   ├── steps.rs            # All step definitions
-│   ├── fixtures/           # (Reserved for test data)
-│   └── README.md          # Detailed documentation
+│   ├── steps/              # Step definitions (Rust code)
+│   │   ├── mod.rs          # Module organization
+│   │   ├── common.rs       # World definition and common steps
+│   │   ├── wallet_creation.rs
+│   │   ├── wallet_import.rs
+│   │   ├── balance.rs
+│   │   ├── scanning.rs
+│   │   ├── transactions.rs
+│   │   ├── fund_locking.rs
+│   │   └── daemon.rs
+│   └── README.md           # Detailed documentation
 └── integration_tests.rs    # Test runner
 
 ```
 
 ### Key Components
 
-1. **MinotariWorld**: The shared state object that maintains context across test steps
+1. **MinotariWorld** (in `steps/common.rs`): The shared state object that maintains context across test steps
    - Temporary directories and files
    - Database paths
    - Command outputs and exit codes
    - Test credentials (keys, passwords)
    - Daemon handles
 
-2. **Step Definitions**: Rust functions that implement the Gherkin steps
-   - Given: Setup preconditions
-   - When: Execute actions  
-   - Then: Verify outcomes
+2. **Step Definition Modules**: Organized Rust modules that implement the Gherkin steps
+   - `common.rs`: Common setup steps and World definition
+   - `wallet_creation.rs`: Steps for wallet creation scenarios
+   - `wallet_import.rs`: Steps for wallet import scenarios
+   - `balance.rs`: Steps for balance checking scenarios
+   - `scanning.rs`: Steps for blockchain scanning scenarios
+   - `transactions.rs`: Steps for transaction creation scenarios
+   - `fund_locking.rs`: Steps for fund locking scenarios
+   - `daemon.rs`: Steps for daemon mode scenarios
+   - Each module contains Given/When/Then step implementations
 
 3. **Feature Files**: Human-readable test specifications in Gherkin syntax
    - Describe user stories and acceptance criteria
@@ -182,8 +196,14 @@ Potential improvements for the test suite:
 To add new tests:
 
 1. Create or update a `.feature` file in `tests/cucumber/features/`
-2. Add step definition functions in `tests/cucumber/steps.rs`
-3. Run tests to verify
-4. Update documentation as needed
+2. Add step definition functions in the appropriate module in `tests/cucumber/steps/`
+   - Or create a new module if adding a new feature area
+3. If creating a new module, add it to `tests/cucumber/steps/mod.rs`
+4. Run tests to verify: `cargo test --test integration_tests`
+5. Update documentation as needed
 
 The suite is designed to be self-contained and easy to extend as new features are added to the Minotari CLI wallet.
+
+## Recent Updates
+
+**Refactored Step Definitions** (Latest): The large `steps.rs` file (624 lines) has been refactored into smaller, more manageable modules organized by feature area in the `steps/` directory. This improves maintainability and makes it easier to locate and modify step definitions.
