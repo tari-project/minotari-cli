@@ -1,36 +1,38 @@
 use super::error::ProcessorError;
-use super::formatting::format_micro_tari;
 use super::types::{
-    BlockchainInfo, CounterpartyInfo, DisplayedTransaction, FeeInfo, TransactionDetails, TransactionDirection,
-    TransactionDisplayStatus, TransactionInput, TransactionOutput, TransactionSource,
+    BlockchainInfo, DisplayedTransaction, FeeInfo, TransactionDetails, TransactionDirection, TransactionDisplayStatus,
+    TransactionInput, TransactionOutput, TransactionSource,
 };
 use crate::models::Id;
 use chrono::NaiveDateTime;
 use tari_common_types::payment_reference::generate_payment_reference;
+use tari_common_types::tari_address::TariAddress;
+use tari_common_types::transaction::TxId;
 use tari_common_types::types::FixedHash;
+use tari_transaction_components::MicroMinotari;
+use tari_transaction_components::transaction_components::{CoinBaseExtra, OutputType};
 
 #[derive(Debug, Default)]
 pub struct DisplayedTransactionBuilder {
-    id: Option<String>,
+    id: Option<TxId>,
     account_id: Option<Id>,
     direction: Option<TransactionDirection>,
     source: Option<TransactionSource>,
     status: Option<TransactionDisplayStatus>,
-    amount: Option<u64>,
+    amount: Option<MicroMinotari>,
     message: Option<String>,
-    counterparty_address: Option<String>,
-    counterparty_emoji: Option<String>,
+    counterparty_address: Option<TariAddress>,
     block_height: Option<u64>,
     block_hash: Option<FixedHash>,
     timestamp: Option<NaiveDateTime>,
     confirmations: Option<u64>,
-    fee: Option<u64>,
-    total_credit: u64,
-    total_debit: u64,
+    fee: Option<MicroMinotari>,
+    total_credit: MicroMinotari,
+    total_debit: MicroMinotari,
     inputs: Vec<TransactionInput>,
     outputs: Vec<TransactionOutput>,
-    output_type: Option<String>,
-    coinbase_extra: Option<String>,
+    output_type: Option<OutputType>,
+    coinbase_extra: Option<CoinBaseExtra>,
     memo_hex: Option<String>,
     sent_output_hashes: Vec<FixedHash>,
 }
@@ -40,8 +42,8 @@ impl DisplayedTransactionBuilder {
         Self::default()
     }
 
-    pub fn id(mut self, id: impl Into<String>) -> Self {
-        self.id = Some(id.into());
+    pub fn id(mut self, id: TxId) -> Self {
+        self.id = Some(id);
         self
     }
 
@@ -66,7 +68,7 @@ impl DisplayedTransactionBuilder {
     }
 
     /// Set credits and debits, auto-calculating amount and direction.
-    pub fn credits_and_debits(mut self, credit: u64, debit: u64) -> Self {
+    pub fn credits_and_debits(mut self, credit: MicroMinotari, debit: MicroMinotari) -> Self {
         self.total_credit = credit;
         self.total_debit = debit;
 
@@ -86,9 +88,8 @@ impl DisplayedTransactionBuilder {
         self
     }
 
-    pub fn counterparty(mut self, address: Option<String>, emoji: Option<String>) -> Self {
+    pub fn counterparty(mut self, address: Option<TariAddress>) -> Self {
         self.counterparty_address = address;
-        self.counterparty_emoji = emoji;
         self
     }
 
@@ -106,7 +107,7 @@ impl DisplayedTransactionBuilder {
         self
     }
 
-    pub fn fee(mut self, fee: Option<u64>) -> Self {
+    pub fn fee(mut self, fee: Option<MicroMinotari>) -> Self {
         self.fee = fee;
         self
     }
@@ -121,12 +122,12 @@ impl DisplayedTransactionBuilder {
         self
     }
 
-    pub fn output_type(mut self, output_type: Option<String>) -> Self {
+    pub fn output_type(mut self, output_type: Option<OutputType>) -> Self {
         self.output_type = output_type;
         self
     }
 
-    pub fn coinbase_extra(mut self, extra: Option<String>) -> Self {
+    pub fn coinbase_extra(mut self, extra: Option<CoinBaseExtra>) -> Self {
         self.coinbase_extra = extra;
         self
     }
@@ -149,17 +150,8 @@ impl DisplayedTransactionBuilder {
             .direction
             .ok_or_else(|| ProcessorError::ParseError("direction is required".to_string()))?;
 
-        let counterparty = self.counterparty_address.map(|address| CounterpartyInfo {
-            address,
-            address_emoji: self.counterparty_emoji,
-            label: None,
-        });
-
         let fee = match direction {
-            TransactionDirection::Outgoing => self.fee.map(|f| FeeInfo {
-                amount: f,
-                amount_display: format_micro_tari(f),
-            }),
+            TransactionDirection::Outgoing => self.fee.map(|f| FeeInfo { amount: f }),
             TransactionDirection::Incoming => None,
         };
 
@@ -171,14 +163,13 @@ impl DisplayedTransactionBuilder {
             }
         }
         Ok(DisplayedTransaction {
-            id: self.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+            id: self.id.unwrap_or_else(TxId::new_random),
             direction,
             source: self.source.unwrap_or(TransactionSource::Unknown),
             status: self.status.unwrap_or(TransactionDisplayStatus::Pending),
             amount,
-            amount_display: format_micro_tari(amount),
             message: self.message,
-            counterparty,
+            counterparty: self.counterparty_address,
             blockchain: BlockchainInfo {
                 block_height: self.block_height.unwrap_or(0),
                 timestamp: self.timestamp.unwrap_or_default(),

@@ -40,9 +40,11 @@
 
 use std::time::Duration;
 
-use tari_common_types::types::FixedHash;
-
+use crate::models::Id;
 use crate::transactions::DisplayedTransaction;
+use tari_common_types::types::FixedHash;
+use tari_transaction_components::MicroMinotari;
+use tari_transaction_components::transaction_components::WalletOutput;
 
 /// Top-level event enum for all scanner notifications.
 ///
@@ -87,25 +89,22 @@ pub struct BlockProcessedEvent {
     pub block_hash: Vec<u8>,
     pub outputs_detected: Vec<DetectedOutput>,
     pub inputs_spent: Vec<SpentInput>,
-    pub outputs_confirmed: Vec<ConfirmedOutput>,
     pub balance_changes: Vec<BalanceChangeSummary>,
 }
 
 #[derive(Debug, Clone)]
 pub struct DetectedOutput {
-    pub hash: FixedHash,
     pub height: u64,
     pub mined_in_block_hash: FixedHash,
-    pub value: u64,
-    pub is_coinbase: bool,
-    pub memo: Option<String>,
+    pub output: WalletOutput,
 }
 
 #[derive(Debug, Clone)]
 pub struct SpentInput {
-    pub output_hash: FixedHash,
+    pub output_id: Id,
     pub mined_in_block: FixedHash,
-    pub value: u64,
+    pub mined_in_block_height: u64,
+    pub output: WalletOutput,
 }
 
 #[derive(Debug, Clone)]
@@ -117,8 +116,8 @@ pub struct ConfirmedOutput {
 
 #[derive(Debug, Clone)]
 pub struct BalanceChangeSummary {
-    pub credit: u64,
-    pub debit: u64,
+    pub credit: MicroMinotari,
+    pub debit: MicroMinotari,
     pub description: String,
 }
 

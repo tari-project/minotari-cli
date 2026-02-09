@@ -1,11 +1,41 @@
-use crate::db::balance_changes::insert_balance_change;
+use crate::db::balance_changes::{
+    get_balance_change_id_by_input, insert_balance_change, mark_balance_change_as_reversed,
+};
 use crate::db::error::{WalletDbError, WalletDbResult};
 use crate::models::BalanceChange;
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDateTime, Utc};
 use log::{debug, warn};
-use rusqlite::{Connection, OptionalExtension, named_params};
+use rusqlite::{Connection, named_params};
 use serde::Deserialize;
 use serde_rusqlite::from_rows;
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DbInput {
+    pub id: i64,
+    pub account_id: i64,
+    pub output_id: i64,
+    pub mined_in_block_hash: Vec<u8>,
+    pub mined_in_block_height: i64,
+    pub mined_timestamp: NaiveDateTime,
+    pub created_at: NaiveDateTime,
+    pub deleted_at: Option<NaiveDateTime>,
+    pub deleted_in_block_height: Option<i64>,
+}
+
+pub fn get_input_by_id(conn: &Connection, input_id: i64) -> WalletDbResult<Option<DbInput>> {
+    let mut stmt = conn.prepare_cached(
+        r#"
+        SELECT id, account_id, output_id, mined_in_block_hash, mined_in_block_height,
+               mined_timestamp, created_at, deleted_at, deleted_in_block_height
+        FROM inputs
+        WHERE id = :id
+        "#,
+    )?;
+
+    let rows = stmt.query(named_params! { ":id": input_id })?;
+    let input: Option<DbInput> = from_rows(rows).next().transpose()?;
+    Ok(input)
+}
 
 pub fn insert_input(
     conn: &Connection,
@@ -14,7 +44,7 @@ pub fn insert_input(
     mined_in_block_height: u64,
     mined_in_block_hash: &[u8],
     mined_timestamp: u64,
-) -> WalletDbResult<(i64, bool)> {
+) -> WalletDbResult<i64> {
     debug!(
         target: "audit",
         account_id = account_id,
@@ -28,7 +58,7 @@ pub fn insert_input(
 
     let mined_in_block_height = mined_in_block_height as i64;
 
-    let rows_affected = conn.execute(
+    conn.execute(
         r#"
        INSERT OR IGNORE INTO inputs (
             account_id,
@@ -60,24 +90,7 @@ pub fn insert_input(
         |row| row.get(0),
     )?;
 
-    Ok((input_id, rows_affected > 0))
-}
-
-// retrieve output_id
-pub fn get_input_details_for_balance_change_by_id(conn: &Connection, input_id: i64) -> WalletDbResult<Option<i64>> {
-    let mut stmt = conn.prepare_cached(
-        r#"
-        SELECT output_id
-        FROM inputs
-        WHERE id = :id AND deleted_at IS NULL
-        "#,
-    )?;
-
-    let output_id: Option<i64> = stmt
-        .query_row(named_params! { ":id": input_id }, |row| row.get("output_id"))
-        .optional()?;
-
-    Ok(output_id)
+    Ok(input_id)
 }
 
 #[derive(Deserialize)]
@@ -119,13 +132,19 @@ pub fn soft_delete_inputs_from_height(conn: &Connection, account_id: i64, height
     };
 
     for row in inputs_with_output_values {
+        // Find and mark the original balance change as reversed
+        let original_balance_change_id = get_balance_change_id_by_input(conn, row.input_id)?;
+        if let Some(original_id) = original_balance_change_id {
+            mark_balance_change_as_reversed(conn, original_id)?;
+        }
+
         let balance_change = BalanceChange {
             account_id,
             caused_by_output_id: Some(row.output_id),
             caused_by_input_id: Some(row.input_id),
             description: format!("Reversal: Input spent as input (reorg at height {})", height),
-            balance_credit: row.output_value as u64, // Reversing a debit, so credit the value back
-            balance_debit: 0,
+            balance_credit: (row.output_value as u64).into(), // Reversing a debit, so credit the value back
+            balance_debit: 0.into(),
             effective_date: now.naive_utc(),
             effective_height: height,
             claimed_recipient_address: None,
@@ -134,6 +153,9 @@ pub fn soft_delete_inputs_from_height(conn: &Connection, account_id: i64, height
             memo_hex: None,
             claimed_fee: None,
             claimed_amount: None,
+            is_reversal: true,
+            reversal_of_balance_change_id: original_balance_change_id,
+            is_reversed: false,
         };
         insert_balance_change(conn, &balance_change)?;
     }

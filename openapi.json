@@ -1034,8 +1034,12 @@
             "description": "Timestamp when the transaction was created"
           },
           "id": {
-            "type": "string",
-            "description": "Unique identifier for this completed transaction"
+            "type": "object",
+            "properties": {
+              "Tx_id": {
+                "type": "integer"
+              }
+            }
           },
           "kernel_excess_hex": {
             "type": "string",
@@ -1137,8 +1141,7 @@
         "properties": {
           "confirmation_window": {
             "type": "integer",
-            "description": "Number of confirmations required",
-            "default": 3
+            "description": "Number of confirmations required"
           },
           "idempotency_key": {
             "type": [
@@ -1217,33 +1220,28 @@
           "source",
           "status",
           "amount",
-          "amount_display",
           "blockchain",
           "details"
         ],
         "properties": {
           "amount": {
-            "type": "integer",
-            "format": "int64",
-            "description": "Net amount in microTari (always positive, use direction for sign).",
-            "minimum": 0
-          },
-          "amount_display": {
-            "type": "string",
-            "description": "User-friendly amount (e.g., \"1,234.567890 XTM\")."
+            "type": "object",
+            "properties": {
+              "amount": {
+                "type": "integer"
+              }
+            }
           },
           "blockchain": {
             "$ref": "#/components/schemas/BlockchainInfo"
           },
           "counterparty": {
-            "oneOf": [
-              {
-                "type": "null"
-              },
-              {
-                "$ref": "#/components/schemas/CounterpartyInfo"
+            "type": "object",
+            "properties": {
+              "TariAddress": {
+                "type": "string"
               }
-            ]
+            }
           },
           "details": {
             "$ref": "#/components/schemas/TransactionDetails"
@@ -1263,7 +1261,12 @@
             ]
           },
           "id": {
-            "type": "string"
+            "type": "object",
+            "properties": {
+              "Tx_id": {
+                "type": "integer"
+              }
+            }
           },
           "message": {
             "type": [
@@ -1282,17 +1285,16 @@
       "FeeInfo": {
         "type": "object",
         "required": [
-          "amount",
-          "amount_display"
+          "amount"
         ],
         "properties": {
           "amount": {
-            "type": "integer",
-            "format": "int64",
-            "minimum": 0
-          },
-          "amount_display": {
-            "type": "string"
+            "type": "object",
+            "properties": {
+              "amount": {
+                "type": "integer"
+              }
+            }
           }
         }
       },
@@ -1319,8 +1321,7 @@
           },
           "confirmation_window": {
             "type": "integer",
-            "description": "Number of confirmations required",
-            "default": 3
+            "description": "Number of confirmations required"
           },
           "estimated_output_size": {
             "type": [
@@ -1479,7 +1480,9 @@
           "total_credit",
           "total_debit",
           "inputs",
-          "outputs"
+          "outputs",
+          "sent_output_hashes",
+          "sent_payrefs"
         ],
         "properties": {
           "account_id": {
@@ -1487,11 +1490,12 @@
             "format": "int64"
           },
           "coinbase_extra": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Extra data for coinbase transactions."
+            "type": "object",
+            "properties": {
+              "Coinbase extra": {
+                "type": "string"
+              }
+            }
           },
           "inputs": {
             "type": "array",
@@ -1506,10 +1510,12 @@
             ]
           },
           "output_type": {
-            "type": [
-              "string",
-              "null"
-            ]
+            "type": "object",
+            "properties": {
+              "Output type": {
+                "type": "string"
+              }
+            }
           },
           "outputs": {
             "type": "array",
@@ -1531,14 +1537,20 @@
             }
           },
           "total_credit": {
-            "type": "integer",
-            "format": "int64",
-            "minimum": 0
+            "type": "object",
+            "properties": {
+              "amount": {
+                "type": "integer"
+              }
+            }
           },
           "total_debit": {
-            "type": "integer",
-            "format": "int64",
-            "minimum": 0
+            "type": "object",
+            "properties": {
+              "amount": {
+                "type": "integer"
+              }
+            }
           }
         }
       },
@@ -1566,23 +1578,20 @@
         "required": [
           "output_hash",
           "amount",
-          "is_matched",
+          "matched_output_id",
           "mined_in_block_hash"
         ],
         "properties": {
           "amount": {
-            "type": "integer",
-            "format": "int64",
-            "minimum": 0
-          },
-          "is_matched": {
-            "type": "boolean"
+            "type": "object",
+            "properties": {
+              "amount": {
+                "type": "integer"
+              }
+            }
           },
           "matched_output_id": {
-            "type": [
-              "integer",
-              "null"
-            ],
+            "type": "integer",
             "format": "int64",
             "description": "ID of the matched output in our database (if found)."
           },
@@ -1608,9 +1617,12 @@
         ],
         "properties": {
           "amount": {
-            "type": "integer",
-            "format": "int64",
-            "minimum": 0
+            "type": "object",
+            "properties": {
+              "amount": {
+                "type": "integer"
+              }
+            }
           },
           "hash": {
             "$ref": "#/components/schemas/FixedHash"
@@ -1627,7 +1639,12 @@
             "minimum": 0
           },
           "output_type": {
-            "type": "string"
+            "type": "object",
+            "properties": {
+              "Output type": {
+                "type": "string"
+              }
+            }
           },
           "status": {
             "$ref": "#/components/schemas/OutputStatus"

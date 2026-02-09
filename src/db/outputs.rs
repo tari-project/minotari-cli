@@ -1,4 +1,6 @@
-use crate::db::balance_changes::insert_balance_change;
+use crate::db::balance_changes::{
+    get_balance_change_id_by_output, insert_balance_change, mark_balance_change_as_reversed,
+};
 use crate::db::error::{WalletDbError, WalletDbResult};
 use crate::log::mask_amount;
 use crate::models::BalanceChange;
@@ -26,16 +28,16 @@ pub fn insert_output(
     memo_parsed: Option<String>,
     memo_hex: Option<String>,
     payment_reference: PaymentReference,
-) -> WalletDbResult<(i64, bool)> {
+) -> WalletDbResult<i64> {
     info!(
         target: "audit",
         account_id = account_id,
-        value = &*mask_amount(output.value().as_u64() as i64),
+        value = &*mask_amount(output.value()),
         height = block_height;
         "DB: Inserting output"
     );
 
-    let id = TxId::new_deterministic(account_view_key, &output.output_hash()).as_i64_wrapped();
+    let tx_id = TxId::new_deterministic(account_view_key, &output.output_hash()).as_i64_wrapped();
 
     let output_json = serde_json::to_string(&output)?;
 
@@ -46,11 +48,11 @@ pub fn insert_output(
     let value = output.value().as_u64() as i64;
     let payment_reference_hex = hex::encode(payment_reference.as_slice());
 
-    let rows_affected = conn.execute(
+    conn.execute(
         r#"
-       INSERT OR IGNORE INTO outputs (
-            id,
+       INSERT INTO outputs (
             account_id,
+            tx_id,
             output_hash,
             mined_in_block_height,
             mined_in_block_hash,
@@ -62,8 +64,8 @@ pub fn insert_output(
             payment_reference
        )
        VALUES (
-            :id,
             :account_id,
+            :tx_id,
             :output_hash,
             :block_height,
             :block_hash,
@@ -76,8 +78,8 @@ pub fn insert_output(
        )
         "#,
         named_params! {
-            ":id": id,
             ":account_id": account_id,
+            ":tx_id": tx_id,
             ":output_hash": output_hash,
             ":block_height": block_height,
             ":block_hash": block_hash.as_slice(),
@@ -90,28 +92,36 @@ pub fn insert_output(
         },
     )?;
 
-    Ok((id, rows_affected > 0))
+    Ok(conn.last_insert_rowid())
 }
 
-#[derive(Deserialize)]
-struct OutputInfoRow {
-    id: i64,
-    value: i64,
-}
-
-pub fn get_output_info_by_hash(conn: &Connection, output_hash: &FixedHash) -> WalletDbResult<Option<(i64, u64)>> {
+pub fn get_output_info_by_hash(
+    conn: &Connection,
+    output_hash: &FixedHash,
+) -> WalletDbResult<Option<(i64, TxId, WalletOutput)>> {
     let mut stmt = conn.prepare_cached(
         r#"
-        SELECT id, value
+        SELECT id, tx_id, wallet_output_json
         FROM outputs
         WHERE output_hash = :output_hash AND deleted_at IS NULL
         "#,
     )?;
 
     let rows = stmt.query(named_params! { ":output_hash": output_hash.as_slice() })?;
-    let result: Option<OutputInfoRow> = from_rows(rows).next().transpose()?;
+    let row: Option<WalletOutputRow> = from_rows(rows).next().transpose()?;
+    let data = match row {
+        Some(r) => r,
+        None => return Ok(None),
+    };
 
-    Ok(result.map(|r| (r.id, r.value as u64)))
+    let json_str = data
+        .wallet_output_json
+        .ok_or_else(|| WalletDbError::Unexpected("Output JSON is null".to_string()))?;
+    let output: WalletOutput = serde_json::from_str(&json_str)?;
+
+    let tx_id = TxId::from(data.tx_id as u64);
+
+    Ok(Some((data.id, tx_id, output)))
 }
 
 #[derive(Deserialize)]
@@ -120,6 +130,7 @@ pub struct UnconfirmedOutputRow {
     pub mined_in_block_height: i64,
     pub memo_parsed: Option<String>,
     pub memo_hex: Option<String>,
+    pub tx_id: i64,
 }
 
 pub fn get_unconfirmed_outputs(
@@ -133,7 +144,7 @@ pub fn get_unconfirmed_outputs(
 
     let mut stmt = conn.prepare_cached(
         r#"
-        SELECT output_hash, mined_in_block_height, memo_parsed, memo_hex
+        SELECT output_hash, mined_in_block_height, memo_parsed, memo_hex, tx_id
         FROM outputs o
         WHERE o.account_id = :account_id
           AND o.mined_in_block_height <= :min_height
@@ -215,13 +226,19 @@ pub fn soft_delete_outputs_from_height(conn: &Connection, account_id: i64, heigh
     };
 
     for output_row in outputs_to_delete {
+        // Find and mark the original balance change as reversed
+        let original_balance_change_id = get_balance_change_id_by_output(conn, output_row.id)?;
+        if let Some(original_id) = original_balance_change_id {
+            mark_balance_change_as_reversed(conn, original_id)?;
+        }
+
         let balance_change = BalanceChange {
             account_id,
             caused_by_output_id: Some(output_row.id),
             caused_by_input_id: None,
             description: format!("Reversal: Output found in blockchain scan (reorg at height {})", height),
-            balance_credit: 0,
-            balance_debit: output_row.value as u64,
+            balance_credit: 0.into(),
+            balance_debit: (output_row.value as u64).into(),
             effective_date: now.naive_utc(),
             effective_height: height,
             claimed_recipient_address: None,
@@ -230,6 +247,9 @@ pub fn soft_delete_outputs_from_height(conn: &Connection, account_id: i64, heigh
             memo_hex: None,
             claimed_fee: None,
             claimed_amount: None,
+            is_reversal: true,
+            reversal_of_balance_change_id: original_balance_change_id,
+            is_reversed: false,
         };
         insert_balance_change(conn, &balance_change)?;
     }
@@ -307,16 +327,69 @@ pub fn lock_output(
     Ok(())
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct DbWalletOutput {
     pub id: i64,
+    pub tx_id: TxId,
     pub output: WalletOutput,
 }
 
 #[derive(Deserialize)]
 struct WalletOutputRow {
     id: i64,
+    tx_id: i64,
     wallet_output_json: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DbOutput {
+    pub id: i64,
+    pub account_id: i64,
+    pub output_hash: Vec<u8>,
+    pub mined_in_block_hash: Vec<u8>,
+    pub mined_in_block_height: i64,
+    pub value: i64,
+    pub created_at: chrono::NaiveDateTime,
+    pub wallet_output_json: Option<String>,
+    pub mined_timestamp: chrono::NaiveDateTime,
+    pub confirmed_height: Option<i64>,
+    pub confirmed_hash: Option<Vec<u8>>,
+    pub memo_parsed: Option<String>,
+    pub memo_hex: Option<String>,
+    pub status: String,
+    pub locked_at: Option<chrono::NaiveDateTime>,
+    pub locked_by_request_id: Option<String>,
+    pub deleted_at: Option<chrono::NaiveDateTime>,
+    pub deleted_in_block_height: Option<i64>,
+    pub payment_reference: Option<String>,
+}
+
+impl DbOutput {
+    pub fn to_wallet_output(&self) -> WalletDbResult<WalletOutput> {
+        let output_str = self
+            .wallet_output_json
+            .as_ref()
+            .ok_or_else(|| WalletDbError::Unexpected("Output JSON is null".to_string()))?;
+        let output: WalletOutput = serde_json::from_str(output_str)?;
+        Ok(output)
+    }
+}
+
+pub fn get_output_by_id(conn: &Connection, output_id: i64) -> WalletDbResult<Option<DbOutput>> {
+    let mut stmt = conn.prepare_cached(
+        r#"
+        SELECT id, account_id, output_hash, mined_in_block_hash, mined_in_block_height,
+               value, created_at, wallet_output_json, mined_timestamp, confirmed_height,
+               confirmed_hash, memo_parsed, memo_hex, status, locked_at, locked_by_request_id,
+               deleted_at, deleted_in_block_height, payment_reference
+        FROM outputs
+        WHERE id = :id
+        "#,
+    )?;
+
+    let rows = stmt.query(named_params! { ":id": output_id })?;
+    let output: Option<DbOutput> = from_rows(rows).next().transpose()?;
+    Ok(output)
 }
 
 pub fn fetch_unspent_outputs(
@@ -329,7 +402,7 @@ pub fn fetch_unspent_outputs(
 
     let mut stmt = conn.prepare_cached(
         r#"
-        SELECT id, wallet_output_json
+        SELECT id, tx_id, wallet_output_json
         FROM outputs
         WHERE account_id = :account_id
           AND status = :unspent_status
@@ -349,7 +422,11 @@ pub fn fetch_unspent_outputs(
     for row in raw_rows {
         if let Some(json_str) = row.wallet_output_json {
             let output: WalletOutput = serde_json::from_str(&json_str)?;
-            outputs.push(DbWalletOutput { id: row.id, output });
+            outputs.push(DbWalletOutput {
+                id: row.id,
+                tx_id: TxId::from(row.tx_id as u64),
+                output,
+            });
         }
     }
     Ok(outputs)
@@ -385,7 +462,7 @@ pub fn fetch_outputs_by_lock_request_id(
     locked_by_request_id: &str,
 ) -> WalletDbResult<Vec<DbWalletOutput>> {
     let mut stmt = conn.prepare_cached(
-        "SELECT id, wallet_output_json FROM outputs WHERE locked_by_request_id = :req_id and wallet_output_json IS NOT NULL"
+        "SELECT id, tx_id, wallet_output_json FROM outputs WHERE locked_by_request_id = :req_id and wallet_output_json IS NOT NULL"
     )?;
 
     let rows = stmt.query(named_params! { ":req_id": locked_by_request_id })?;
@@ -395,7 +472,11 @@ pub fn fetch_outputs_by_lock_request_id(
     for row in raw_rows {
         if let Some(json_str) = row.wallet_output_json {
             let output: WalletOutput = serde_json::from_str(&json_str)?;
-            outputs.push(DbWalletOutput { id: row.id, output });
+            outputs.push(DbWalletOutput {
+                id: row.id,
+                tx_id: TxId::from(row.tx_id as u64),
+                output,
+            });
         }
     }
     Ok(outputs)
@@ -472,4 +553,29 @@ pub fn get_active_outputs_from_height(
     let results = from_rows::<ReorgOutputInfo>(rows).collect::<Result<Vec<_>, _>>()?;
 
     Ok(results)
+}
+
+pub fn get_total_unspent_balance(conn: &Connection, account_id: i64) -> WalletDbResult<u64> {
+    let unspent_status = OutputStatus::Unspent.to_string();
+
+    let mut stmt = conn.prepare_cached(
+        r#"
+        SELECT COALESCE(SUM(value), 0)
+        FROM outputs
+        WHERE account_id = :account_id
+          AND status = :unspent_status
+          AND wallet_output_json IS NOT NULL
+          AND deleted_at IS NULL
+        "#,
+    )?;
+
+    let total = stmt.query_row(
+        named_params! {
+            ":account_id": account_id,
+            ":unspent_status": unspent_status
+        },
+        |row| row.get(0),
+    )?;
+
+    Ok(total)
 }

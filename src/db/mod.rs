@@ -72,9 +72,9 @@ pub use scanned_tip_blocks::{
 
 mod outputs;
 pub use outputs::{
-    DbWalletOutput, fetch_outputs_by_lock_request_id, fetch_unspent_outputs, get_active_outputs_from_height,
-    get_output_info_by_hash, get_unconfirmed_outputs, insert_output, lock_output, mark_output_confirmed,
-    soft_delete_outputs_from_height, unlock_outputs_for_request,
+    DbOutput, DbWalletOutput, fetch_outputs_by_lock_request_id, fetch_unspent_outputs, get_active_outputs_from_height,
+    get_output_by_id, get_output_info_by_hash, get_total_unspent_balance, get_unconfirmed_outputs, insert_output,
+    lock_output, mark_output_confirmed, soft_delete_outputs_from_height, unlock_outputs_for_request,
     unlock_outputs_for_request as unlock_outputs_for_pending_transaction, update_output_status,
 };
 
@@ -100,10 +100,12 @@ mod events;
 pub use events::{DbWalletEvent, get_events_by_account_id, insert_wallet_event};
 
 mod balance_changes;
-pub use balance_changes::{get_all_balance_changes_by_account_id, insert_balance_change};
+pub use balance_changes::{
+    get_all_active_balance_changes_by_account_id, get_all_balance_changes_by_account_id, insert_balance_change,
+};
 
 mod inputs;
-pub use inputs::{get_input_details_for_balance_change_by_id, insert_input, soft_delete_inputs_from_height};
+pub use inputs::{DbInput, get_input_by_id, insert_input, soft_delete_inputs_from_height};
 
 mod displayed_transactions;
 pub use displayed_transactions::{

@@ -10,22 +10,20 @@ use log::{error, info};
 use rusqlite::Connection;
 use tari_common_types::payment_reference::generate_payment_reference;
 use tari_common_types::types::FixedHash;
+use tari_transaction_components::MicroMinotari;
 use tari_transaction_components::transaction_components::WalletOutput;
 use thiserror::Error;
 
+use crate::scan::block_event_accumulator::BlockEventAccumulator;
 use crate::{
     db::{self, WalletDbError},
     log::{mask_amount, mask_string},
     models::{BalanceChange, OutputStatus, WalletEvent, WalletEventType},
     scan::events::{
-        BalanceChangeSummary, BlockProcessedEvent, ConfirmedOutput, DetectedOutput, DisplayedTransactionsEvent,
-        EventSender, NoopEventSender, ProcessingEvent, ScanStatusEvent, SpentInput,
+        DetectedOutput, DisplayedTransactionsEvent, EventSender, NoopEventSender, ProcessingEvent, ScanStatusEvent,
+        SpentInput,
     },
-    transactions::{
-        DisplayedTransaction, TransactionDirection, TransactionDisplayStatus,
-        displayed_transaction_processor::{DisplayedTransactionProcessor, ProcessingContext},
-        monitor::REQUIRED_CONFIRMATIONS,
-    },
+    transactions::displayed_transaction_processor::DisplayedTransactionProcessor,
 };
 
 /// Errors that can occur during block processing.
@@ -92,6 +90,8 @@ pub struct BlockProcessor<E: EventSender = NoopEventSender> {
     current_tip_height: u64,
     /// Whether there are pending outbound transactions to match against.
     has_pending_outbound: bool,
+    /// Required confirmations
+    required_confirmations: u64,
 }
 
 impl BlockProcessor<NoopEventSender> {
@@ -105,7 +105,7 @@ impl BlockProcessor<NoopEventSender> {
     ///
     /// * `account_id` - Database ID of the account to process blocks for
     /// * `account_view_key` - The account's view key bytes
-    pub fn new(account_id: i64, account_view_key: Vec<u8>) -> Self {
+    pub fn new(account_id: i64, account_view_key: Vec<u8>, required_confirmations: u64) -> Self {
         Self {
             account_id,
             account_view_key,
@@ -114,6 +114,7 @@ impl BlockProcessor<NoopEventSender> {
             current_block: None,
             current_tip_height: 0,
             has_pending_outbound: false,
+            required_confirmations,
         }
     }
 }
@@ -136,6 +137,7 @@ impl<E: EventSender> BlockProcessor<E> {
         account_view_key: Vec<u8>,
         event_sender: E,
         has_pending_outbound: bool,
+        required_confirmations: u64,
     ) -> Self {
         Self {
             account_id,
@@ -145,6 +147,7 @@ impl<E: EventSender> BlockProcessor<E> {
             current_block: None,
             current_tip_height: 0,
             has_pending_outbound,
+            required_confirmations,
         }
     }
 
@@ -191,11 +194,11 @@ impl<E: EventSender> BlockProcessor<E> {
         self.process_confirmations(tx, block)?;
 
         if let Some(acc) = self.current_block.take() {
-            if !acc.outputs.is_empty() || !acc.inputs.is_empty() {
+            if !acc.is_empty() {
                 self.save_and_emit_displayed_transactions(tx, block.height, &acc)?;
             }
 
-            let block_event = acc.build();
+            let block_event = acc.into_event();
             self.event_sender.send(ProcessingEvent::BlockProcessed(block_event));
         }
 
@@ -208,101 +211,37 @@ impl<E: EventSender> BlockProcessor<E> {
         block_height: u64,
         accumulator: &BlockEventAccumulator,
     ) -> Result<(), BlockProcessorError> {
-        if accumulator.full_balance_changes.is_empty() {
+        if accumulator.is_empty() {
             return Ok(());
         }
 
-        let processor = DisplayedTransactionProcessor::new(self.current_tip_height);
-        let context = ProcessingContext::InMemory {
-            detected_outputs: &accumulator.outputs,
-            spent_inputs: &accumulator.inputs,
-        };
-
-        match processor.process_balance_changes(accumulator.full_balance_changes.clone(), context) {
-            Ok(transactions) if !transactions.is_empty() => {
-                let mut transactions_to_emit = Vec::new();
-
-                for transaction in transactions {
-                    // Check if this is a scanned version of an existing pending outbound transaction
-                    if let Some(existing_pending) = self.find_matching_pending_outbound(tx, &transaction)? {
-                        // Update the existing pending transaction with blockchain info
-                        let updated = self.merge_pending_with_scanned(existing_pending, &transaction, block_height);
-                        db::update_displayed_transaction_mined(tx, &updated)?;
-                        transactions_to_emit.push(updated);
-                    } else {
-                        db::insert_displayed_transaction(tx, &transaction)?;
-                        transactions_to_emit.push(transaction);
-                    }
-                }
-
-                self.event_sender
-                    .send(ProcessingEvent::TransactionsReady(DisplayedTransactionsEvent {
-                        account_id: self.account_id,
-                        transactions: transactions_to_emit,
-                        block_height: Some(block_height),
-                        is_initial_sync: false,
-                    }));
-            },
-            Ok(_) => {},
-            Err(e) => {
+        let processor = DisplayedTransactionProcessor::new(self.current_tip_height, self.required_confirmations);
+        let (mut updated_transactions, mut new_transactions) = processor
+            .create_new_updated_display_transactions_for_height(accumulator, tx)
+            .map_err(|e| {
                 error!(
                     block_height = block_height,
                     error:% = e;
                     "Failed to process displayed transactions"
                 );
-            },
+                BlockProcessorError::WalletEvent(anyhow::anyhow!("Failed to process displayed transactions: {}", e))
+            })?;
+        for updated in &updated_transactions {
+            db::update_displayed_transaction_mined(tx, updated)?;
         }
+        for new in &new_transactions {
+            db::insert_displayed_transaction(tx, new)?;
+        }
+        updated_transactions.append(&mut new_transactions);
+        self.event_sender
+            .send(ProcessingEvent::TransactionsReady(DisplayedTransactionsEvent {
+                account_id: self.account_id,
+                transactions: updated_transactions,
+                block_height: Some(block_height),
+                is_initial_sync: false,
+            }));
 
         Ok(())
-    }
-
-    fn find_matching_pending_outbound(
-        &self,
-        tx: &Connection,
-        scanned_transaction: &DisplayedTransaction,
-    ) -> Result<Option<DisplayedTransaction>, BlockProcessorError> {
-        // Skip DB lookup if no pending outbound transactions exist
-        if !self.has_pending_outbound {
-            return Ok(None);
-        }
-
-        // Only match for outgoing transactions (spent inputs)
-        if scanned_transaction.direction != TransactionDirection::Outgoing {
-            return Ok(None);
-        }
-
-        // Check if any of the scanned transaction's inputs match a pending outbound transaction
-        for input in &scanned_transaction.details.inputs {
-            if let Some(pending) = db::find_pending_outbound_by_output_hash(tx, self.account_id, &input.output_hash)? {
-                return Ok(Some(pending));
-            }
-        }
-
-        Ok(None)
-    }
-
-    fn merge_pending_with_scanned(
-        &self,
-        mut pending: DisplayedTransaction,
-        scanned: &DisplayedTransaction,
-        block_height: u64,
-    ) -> DisplayedTransaction {
-        // Update blockchain info from the scanned transaction
-        pending.blockchain.block_height = block_height;
-        pending.blockchain.timestamp = scanned.blockchain.timestamp;
-        pending.blockchain.confirmations = scanned.blockchain.confirmations;
-
-        // Update status based on confirmations
-        if pending.blockchain.confirmations >= REQUIRED_CONFIRMATIONS {
-            pending.status = TransactionDisplayStatus::Confirmed;
-        } else if pending.blockchain.confirmations > 0 {
-            pending.status = TransactionDisplayStatus::Unconfirmed;
-        }
-
-        // Merge any additional details from scanned transaction
-        pending.details.outputs = scanned.details.outputs.clone();
-
-        pending
     }
 
     /// Emits a scan status event through the event sender.
@@ -341,7 +280,7 @@ impl<E: EventSender> BlockProcessor<E> {
                 target: "audit",
                 account_id = self.account_id,
                 block_height = block.height,
-                value = &*mask_amount(output.value().as_u64() as i64),
+                value = &*mask_amount(output.value()),
                 is_coinbase = output.features().is_coinbase();
                 "Detected wallet output"
             );
@@ -352,7 +291,7 @@ impl<E: EventSender> BlockProcessor<E> {
             // Compute the payment reference from block hash and output hash
             let payment_reference = generate_payment_reference(&block.block_hash, hash);
 
-            let (output_id, is_new) = db::insert_output(
+            let output_id = db::insert_output(
                 tx,
                 self.account_id,
                 &self.account_view_key,
@@ -366,22 +305,19 @@ impl<E: EventSender> BlockProcessor<E> {
                 payment_reference,
             )?;
 
-            if is_new {
-                db::insert_wallet_event(tx, self.account_id, &event)?;
+            db::insert_wallet_event(tx, self.account_id, &event)?;
 
-                let balance_change = self.record_output_balance_change(tx, output_id, block, output)?;
+            let balance_change = self.record_output_balance_change(tx, output_id, block, output)?;
 
-                if let Some(ref mut acc) = self.current_block {
-                    acc.outputs.push(DetectedOutput {
-                        hash: *hash,
+            if let Some(ref mut acc) = self.current_block {
+                acc.add_credit_change(
+                    balance_change,
+                    DetectedOutput {
                         height: block.height,
                         mined_in_block_hash: block.block_hash,
-                        value: output.value().as_u64(),
-                        is_coinbase: output.features().is_coinbase(),
-                        memo: memo.parsed,
-                    });
-                    acc.add_balance_change(balance_change);
-                }
+                        output: output.clone(),
+                    },
+                );
             }
         }
 
@@ -429,19 +365,20 @@ impl<E: EventSender> BlockProcessor<E> {
     /// - Adds to the block accumulator for event emission
     fn process_inputs(&mut self, tx: &Connection, block: &BlockScanResult) -> Result<(), BlockProcessorError> {
         for input_hash in &block.inputs {
-            let Some((output_id, value)) = db::get_output_info_by_hash(tx, input_hash)? else {
+            let Some((output_id, tx_id, output)) = db::get_output_info_by_hash(tx, input_hash)? else {
                 continue;
             };
 
             info!(
                 target: "audit",
                 account_id = self.account_id,
+                tx_id:% = tx_id,
                 block_height = block.height,
-                value = &*mask_amount(value as i64);
+                value = &*mask_amount(output.value());
                 "Detected spent input"
             );
 
-            let (input_id, is_new) = db::insert_input(
+            let input_id = db::insert_input(
                 tx,
                 self.account_id,
                 output_id,
@@ -450,18 +387,19 @@ impl<E: EventSender> BlockProcessor<E> {
                 block.mined_timestamp,
             )?;
 
-            if is_new {
-                let balance_change = self.record_input_balance_change(tx, input_id, value, block)?;
-                db::update_output_status(tx, output_id, OutputStatus::Spent)?;
+            let balance_change = self.record_input_balance_change(tx, input_id, output.value(), block)?;
+            db::update_output_status(tx, output_id, OutputStatus::Spent)?;
 
-                if let Some(ref mut acc) = self.current_block {
-                    acc.inputs.push(SpentInput {
-                        output_hash: *input_hash,
+            if let Some(ref mut acc) = self.current_block {
+                acc.add_debit_change(
+                    balance_change,
+                    SpentInput {
                         mined_in_block: block.block_hash,
-                        value,
-                    });
-                    acc.add_balance_change(balance_change);
-                }
+                        mined_in_block_height: block.height,
+                        output_id,
+                        output,
+                    },
+                );
             }
         }
 
@@ -473,7 +411,7 @@ impl<E: EventSender> BlockProcessor<E> {
         &self,
         tx: &Connection,
         input_id: i64,
-        value: u64,
+        value: MicroMinotari,
         block: &BlockScanResult,
     ) -> Result<BalanceChange, BlockProcessorError> {
         let effective_date = DateTime::<Utc>::from_timestamp(block.mined_timestamp as i64, 0)
@@ -485,7 +423,7 @@ impl<E: EventSender> BlockProcessor<E> {
             caused_by_output_id: None,
             caused_by_input_id: Some(input_id),
             description: "Output spent as input".to_string(),
-            balance_credit: 0,
+            balance_credit: 0.into(),
             balance_debit: value,
             effective_date,
             effective_height: block.height,
@@ -495,6 +433,9 @@ impl<E: EventSender> BlockProcessor<E> {
             memo_parsed: None,
             claimed_fee: None,
             claimed_amount: None,
+            is_reversal: false,
+            reversal_of_balance_change_id: None,
+            is_reversed: false,
         };
 
         db::insert_balance_change(tx, &change)?;
@@ -516,7 +457,7 @@ impl<E: EventSender> BlockProcessor<E> {
     /// and updates their status to confirmed.
     fn process_confirmations(&mut self, tx: &Connection, block: &BlockScanResult) -> Result<(), BlockProcessorError> {
         let unconfirmed_outputs =
-            db::get_unconfirmed_outputs(tx, self.account_id, block.height, REQUIRED_CONFIRMATIONS)?;
+            db::get_unconfirmed_outputs(tx, self.account_id, block.height, self.required_confirmations)?;
 
         for unconfirmed_output in unconfirmed_outputs {
             info!(
@@ -545,14 +486,6 @@ impl<E: EventSender> BlockProcessor<E> {
                 block.height,
                 block.block_hash.as_slice(),
             )?;
-
-            if let Some(ref mut acc) = self.current_block {
-                acc.confirmations.push(ConfirmedOutput {
-                    hash: unconfirmed_output.output_hash,
-                    original_height: unconfirmed_output.mined_in_block_height as u64,
-                    confirmation_height: block.height,
-                });
-            }
         }
 
         Ok(())
@@ -581,71 +514,6 @@ impl<E: EventSender> BlockProcessor<E> {
                 "Output confirmed at height {} (originally at {})",
                 confirmation_height, original_height
             ),
-        }
-    }
-}
-
-/// Accumulates events and data for a single block during processing.
-///
-/// This struct collects all outputs, inputs, confirmations, and balance changes
-/// detected while processing a block, then builds them into a single
-/// [`BlockProcessedEvent`] for emission.
-struct BlockEventAccumulator {
-    /// Account ID for the block being processed.
-    account_id: i64,
-    /// Block height.
-    height: u64,
-    /// Block hash bytes.
-    block_hash: Vec<u8>,
-    /// Outputs detected in this block.
-    outputs: Vec<DetectedOutput>,
-    /// Inputs (spent outputs) detected in this block.
-    inputs: Vec<SpentInput>,
-    /// Outputs that reached confirmation depth at this block.
-    confirmations: Vec<ConfirmedOutput>,
-    /// Complete balance change records for transaction processing.
-    full_balance_changes: Vec<BalanceChange>,
-}
-
-impl BlockEventAccumulator {
-    /// Creates a new accumulator for the given block.
-    fn new(account_id: i64, height: u64, block_hash: Vec<u8>) -> Self {
-        Self {
-            account_id,
-            height,
-            block_hash,
-            outputs: Vec::new(),
-            inputs: Vec::new(),
-            confirmations: Vec::new(),
-            full_balance_changes: Vec::new(),
-        }
-    }
-
-    /// Adds a balance change to the accumulator.
-    fn add_balance_change(&mut self, change: BalanceChange) {
-        self.full_balance_changes.push(change);
-    }
-
-    /// Consumes the accumulator and builds the final [`BlockProcessedEvent`].
-    fn build(self) -> BlockProcessedEvent {
-        let balance_changes = self
-            .full_balance_changes
-            .iter()
-            .map(|c| BalanceChangeSummary {
-                credit: c.balance_credit,
-                debit: c.balance_debit,
-                description: c.description.clone(),
-            })
-            .collect();
-
-        BlockProcessedEvent {
-            account_id: self.account_id,
-            height: self.height,
-            block_hash: self.block_hash,
-            outputs_detected: self.outputs,
-            inputs_spent: self.inputs,
-            outputs_confirmed: self.confirmations,
-            balance_changes,
         }
     }
 }
@@ -703,16 +571,19 @@ fn make_balance_change_for_output(
             caused_by_output_id: Some(output_id),
             caused_by_input_id: None,
             description: "Coinbase output found in blockchain scan".to_string(),
-            balance_credit: output.value().as_u64(),
-            balance_debit: 0,
+            balance_credit: output.value(),
+            balance_debit: 0.into(),
             effective_date,
             effective_height: height,
             claimed_recipient_address: None,
             claimed_sender_address: None,
             memo_parsed: Some(String::from_utf8_lossy(&memo_bytes).to_string()),
             memo_hex: Some(hex::encode(&memo_bytes)),
-            claimed_fee: payment_info.get_fee().map(|v| v.0),
-            claimed_amount: payment_info.get_amount().map(|v| v.0),
+            claimed_fee: payment_info.get_fee(),
+            claimed_amount: payment_info.get_amount(),
+            is_reversal: false,
+            reversal_of_balance_change_id: None,
+            is_reversed: false,
         };
     }
 
@@ -721,15 +592,18 @@ fn make_balance_change_for_output(
         caused_by_output_id: Some(output_id),
         caused_by_input_id: None,
         description: "Output found in blockchain scan".to_string(),
-        balance_credit: output.value().as_u64(),
-        balance_debit: 0,
+        balance_credit: output.value(),
+        balance_debit: 0.into(),
         effective_date,
         effective_height: height,
-        claimed_recipient_address: payment_info.get_recipient_address().map(|a| a.to_base58()),
-        claimed_sender_address: payment_info.get_sender_address().map(|a| a.to_base58()),
+        claimed_recipient_address: payment_info.get_recipient_address(),
+        claimed_sender_address: payment_info.get_sender_address(),
         memo_parsed: Some(String::from_utf8_lossy(&memo_bytes).to_string()),
         memo_hex: Some(hex::encode(&memo_bytes)),
-        claimed_fee: payment_info.get_fee().map(|v| v.0),
-        claimed_amount: payment_info.get_amount().map(|v| v.0),
+        claimed_fee: payment_info.get_fee(),
+        claimed_amount: payment_info.get_amount(),
+        is_reversal: false,
+        reversal_of_balance_change_id: None,
+        is_reversed: false,
     }
 }

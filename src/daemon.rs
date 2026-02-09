@@ -73,6 +73,7 @@ pub struct Daemon {
     scan_interval: Duration,
     api_port: u16,
     network: Network,
+    required_confirmations: u64,
 }
 
 impl Daemon {
@@ -88,6 +89,7 @@ impl Daemon {
     /// * `scan_interval_secs` - Seconds to wait between scan cycles
     /// * `api_port` - Port to bind the HTTP API server to
     /// * `network` - Tari network configuration (Esmeralda, Nextnet, Mainnet, etc.)
+    /// * `required_confirmations` - Required confirmations
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         password: String,
@@ -98,6 +100,7 @@ impl Daemon {
         scan_interval_secs: u64,
         api_port: u16,
         network: Network,
+        required_confirmations: u64,
     ) -> Self {
         Self {
             password,
@@ -108,6 +111,7 @@ impl Daemon {
             scan_interval: Duration::from_secs(scan_interval_secs),
             api_port,
             network,
+            required_confirmations,
         }
     }
 
@@ -139,7 +143,12 @@ impl Daemon {
         let unlocker = TransactionUnlocker::new(db_pool.clone());
         let unlocker_task_handle = unlocker.run(shutdown_tx.subscribe());
 
-        let router = api::create_router(db_pool.clone(), self.network, self.password.clone());
+        let router = api::create_router(
+            db_pool.clone(),
+            self.network,
+            self.password.clone(),
+            self.required_confirmations,
+        );
         let addr = format!("0.0.0.0:{}", self.api_port);
         let listener = tokio::net::TcpListener::bind(&addr)
             .await
@@ -209,6 +218,7 @@ impl Daemon {
             &self.base_url,
             self.database_file.clone(),
             self.batch_size,
+            self.required_confirmations,
         )
         .mode(ScanMode::Partial {
             max_blocks: self.max_blocks,

@@ -40,7 +40,7 @@ pub fn create_pending_transaction(
         target: "audit",
         account_id = account_id,
         idempotency_key = idempotency_key,
-        total_value = &*mask_amount(total_value.as_u64() as i64);
+        total_value = &*mask_amount(total_value);
         "DB: Creating pending transaction"
     );
 
