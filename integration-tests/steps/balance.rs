@@ -22,7 +22,7 @@ async fn check_balance_for_account(world: &mut MinotariWorld, account_name: Stri
         "--account-name".to_string(),
         account_name,
     ]);
-    
+
     let output = Command::new(&cmd)
         .args(&args)
         .output()
@@ -42,7 +42,7 @@ async fn check_balance_all_accounts(world: &mut MinotariWorld) {
         "--database-path".to_string(),
         db_path.to_str().unwrap().to_string(),
     ]);
-    
+
     let output = Command::new(&cmd)
         .args(&args)
         .output()
@@ -60,8 +60,12 @@ async fn check_balance_new_wallet(world: &mut MinotariWorld) {
 
 #[then("I should see the balance information")]
 async fn see_balance_info(world: &mut MinotariWorld) {
-    assert_eq!(world.last_command_exit_code, Some(0), 
-        "Balance command failed: {}", world.last_command_error.as_deref().unwrap_or(""));
+    assert_eq!(
+        world.last_command_exit_code,
+        Some(0),
+        "Balance command failed: {}",
+        world.last_command_error.as_deref().unwrap_or("")
+    );
 }
 
 #[then("the balance should be displayed in microTari")]
@@ -72,13 +76,19 @@ async fn balance_in_microtari(world: &mut MinotariWorld) {
 
 #[then("I should see balance for all accounts")]
 async fn see_all_balances(world: &mut MinotariWorld) {
-    assert_eq!(world.last_command_exit_code, Some(0), 
-        "Balance command failed: {}", world.last_command_error.as_deref().unwrap_or(""));
+    assert_eq!(
+        world.last_command_exit_code,
+        Some(0),
+        "Balance command failed: {}",
+        world.last_command_error.as_deref().unwrap_or("")
+    );
 }
 
 #[then("the balance should be zero")]
 async fn balance_is_zero(world: &mut MinotariWorld) {
     let output = world.last_command_output.as_ref().expect("No command output");
-    assert!(output.contains("0") || output.contains("zero") || !output.is_empty(),
-        "Expected zero balance");
+    assert!(
+        output.contains("0") || output.contains("zero") || !output.is_empty(),
+        "Expected zero balance"
+    );
 }

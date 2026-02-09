@@ -3,18 +3,18 @@
 // This module contains the shared state object (MinotariWorld) and common
 // step definitions used across multiple test scenarios.
 
-use cucumber::{given, World};
+use cucumber::{World, given};
+use indexmap::IndexMap;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Command;
-use tempfile::TempDir;
-use indexmap::IndexMap;
 use tari_transaction_components::key_manager::wallet_types::WalletType;
 use tari_utilities::hex::Hex;
+use tempfile::TempDir;
 
 // Import the base node process from the test support library
 #[path = "../src/lib.rs"]
-pub mod test_support;  // Make this public so other modules can access it
+pub mod test_support; // Make this public so other modules can access it
 use test_support::BaseNodeProcess;
 
 // =============================
@@ -49,7 +49,7 @@ impl MinotariWorld {
         let base_dir = std::env::temp_dir().join(format!("minotari_cli_test_{}", std::process::id()));
         std::fs::create_dir_all(&base_dir).ok();
         let wallet = WalletType::new_random().unwrap(); // Initialize with default wallet type, can be overridden in specific tests
-        
+
         Self {
             temp_dir: None,
             database_path: None,
@@ -74,7 +74,7 @@ impl MinotariWorld {
         let temp_dir = TempDir::new().expect("Failed to create temp directory");
         self.temp_dir = Some(temp_dir);
     }
-    
+
     /// Get the path to the minotari binary, using the release binary if tests are
     /// running in release mode, otherwise use cargo run for dev mode
     pub fn get_minotari_command(&self) -> (String, Vec<String>) {
@@ -82,15 +82,23 @@ impl MinotariWorld {
         let workspace_root = std::env::var("CARGO_MANIFEST_DIR")
             .map(|p| std::path::PathBuf::from(p).parent().unwrap().to_path_buf())
             .unwrap_or_else(|_| std::env::current_dir().unwrap().parent().unwrap().to_path_buf());
-        
+
         let release_binary = workspace_root.join("target/release/minotari");
-        
+
         if release_binary.exists() {
             // Use the release binary directly
             (release_binary.to_string_lossy().to_string(), vec![])
         } else {
             // Fall back to cargo run for dev mode
-            ("cargo".to_string(), vec!["run".to_string(), "--bin".to_string(), "minotari".to_string(), "--".to_string()])
+            (
+                "cargo".to_string(),
+                vec![
+                    "run".to_string(),
+                    "--bin".to_string(),
+                    "minotari".to_string(),
+                    "--".to_string(),
+                ],
+            )
         }
     }
 
@@ -128,7 +136,7 @@ impl MinotariWorld {
             "http://127.0.0.1:18080".to_string()
         }
     }
-    
+
     pub fn all_seed_nodes(&self) -> &[String] {
         &self.seed_nodes
     }
@@ -170,7 +178,7 @@ async fn database_with_wallet(world: &mut MinotariWorld) {
         "--database-path".to_string(),
         db_path.to_str().unwrap().to_string(),
     ]);
-    
+
     let _ = Command::new(&cmd)
         .args(&args)
         .output()

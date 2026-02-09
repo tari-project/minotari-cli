@@ -22,7 +22,7 @@ async fn create_address_without_password(world: &mut MinotariWorld) {
         "--output-file".to_string(),
         output_file.to_str().unwrap().to_string(),
     ]);
-    
+
     let output = Command::new(&cmd)
         .args(&args)
         .output()
@@ -45,7 +45,7 @@ async fn create_address_with_password(world: &mut MinotariWorld, password: Strin
         "--output-file".to_string(),
         output_file.to_str().unwrap().to_string(),
     ]);
-    
+
     let output = Command::new(&cmd)
         .args(&args)
         .output()
@@ -66,7 +66,7 @@ async fn create_address_with_output_file(world: &mut MinotariWorld, filename: St
         "--output-file".to_string(),
         output_file.to_str().unwrap().to_string(),
     ]);
-    
+
     let output = Command::new(&cmd)
         .args(&args)
         .output()
@@ -82,10 +82,9 @@ async fn create_address_with_output_file(world: &mut MinotariWorld, filename: St
 async fn wallet_file_created(world: &mut MinotariWorld) {
     let output_file = world.output_file.as_ref().expect("Output file not set");
     assert!(output_file.exists(), "Wallet file was not created");
-    
+
     let content = fs::read_to_string(output_file).expect("Failed to read wallet file");
-    let wallet_data: serde_json::Value = serde_json::from_str(&content)
-        .expect("Failed to parse wallet JSON");
+    let wallet_data: serde_json::Value = serde_json::from_str(&content).expect("Failed to parse wallet JSON");
     world.wallet_data = Some(wallet_data);
 }
 
@@ -93,10 +92,9 @@ async fn wallet_file_created(world: &mut MinotariWorld) {
 async fn file_exists(world: &mut MinotariWorld, filename: String) {
     let file_path = world.get_temp_path(&filename);
     assert!(file_path.exists(), "File {} does not exist", filename);
-    
+
     let content = fs::read_to_string(&file_path).expect("Failed to read wallet file");
-    let wallet_data: serde_json::Value = serde_json::from_str(&content)
-        .expect("Failed to parse wallet JSON");
+    let wallet_data: serde_json::Value = serde_json::from_str(&content).expect("Failed to parse wallet JSON");
     world.wallet_data = Some(wallet_data);
 }
 
@@ -111,39 +109,57 @@ async fn wallet_has_address(world: &mut MinotariWorld) {
 #[then("the wallet should contain view and spend keys")]
 async fn wallet_has_keys(world: &mut MinotariWorld) {
     let wallet_data = world.wallet_data.as_ref().expect("Wallet data not loaded");
-    assert!(wallet_data.get("view_key").is_some() || wallet_data.get("encrypted_view_key").is_some(),
-        "No view key found");
-    assert!(wallet_data.get("spend_key").is_some() || wallet_data.get("encrypted_spend_key").is_some(),
-        "No spend key found");
+    assert!(
+        wallet_data.get("view_key").is_some() || wallet_data.get("encrypted_view_key").is_some(),
+        "No view key found"
+    );
+    assert!(
+        wallet_data.get("spend_key").is_some() || wallet_data.get("encrypted_spend_key").is_some(),
+        "No spend key found"
+    );
 }
 
 #[then("the wallet should contain seed words")]
 async fn wallet_has_seed_words(world: &mut MinotariWorld) {
     let wallet_data = world.wallet_data.as_ref().expect("Wallet data not loaded");
-    assert!(wallet_data.get("seed_words").is_some() || wallet_data.get("encrypted_seed_words").is_some(),
-        "No seed words found");
+    assert!(
+        wallet_data.get("seed_words").is_some() || wallet_data.get("encrypted_seed_words").is_some(),
+        "No seed words found"
+    );
 }
 
 #[then("the wallet should contain encrypted view key")]
 async fn wallet_has_encrypted_view_key(world: &mut MinotariWorld) {
     let wallet_data = world.wallet_data.as_ref().expect("Wallet data not loaded");
-    assert!(wallet_data.get("encrypted_view_key").is_some(), "Encrypted view key not found");
+    assert!(
+        wallet_data.get("encrypted_view_key").is_some(),
+        "Encrypted view key not found"
+    );
 }
 
 #[then("the wallet should contain encrypted spend key")]
 async fn wallet_has_encrypted_spend_key(world: &mut MinotariWorld) {
     let wallet_data = world.wallet_data.as_ref().expect("Wallet data not loaded");
-    assert!(wallet_data.get("encrypted_spend_key").is_some(), "Encrypted spend key not found");
+    assert!(
+        wallet_data.get("encrypted_spend_key").is_some(),
+        "Encrypted spend key not found"
+    );
 }
 
 #[then("the wallet should contain encrypted seed words")]
 async fn wallet_has_encrypted_seed_words(world: &mut MinotariWorld) {
     let wallet_data = world.wallet_data.as_ref().expect("Wallet data not loaded");
-    assert!(wallet_data.get("encrypted_seed_words").is_some(), "Encrypted seed words not found");
+    assert!(
+        wallet_data.get("encrypted_seed_words").is_some(),
+        "Encrypted seed words not found"
+    );
 }
 
 #[then("the wallet should contain a nonce")]
 async fn wallet_has_nonce(world: &mut MinotariWorld) {
     let wallet_data = world.wallet_data.as_ref().expect("Wallet data not loaded");
-    assert!(wallet_data.get("nonce").is_some(), "Nonce not found in encrypted wallet");
+    assert!(
+        wallet_data.get("nonce").is_some(),
+        "Nonce not found in encrypted wallet"
+    );
 }

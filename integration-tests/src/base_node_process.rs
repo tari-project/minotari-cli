@@ -36,19 +36,19 @@ use std::{
 };
 
 use minotari_app_utilities::identity_management::save_as_json;
-use minotari_node::{run_base_node, BaseNodeConfig, GrpcMethod, MetricsConfig};
+use minotari_node::{BaseNodeConfig, GrpcMethod, MetricsConfig, run_base_node};
 use minotari_node_grpc_client::BaseNodeGrpcClient;
-use rand::rngs::OsRng;
 use rand::Rng; // Add Rng trait for gen_range
+use rand::rngs::OsRng;
 use tari_common::{
+    MAX_GRPC_MESSAGE_SIZE,
     configuration::{CommonConfig, MultiaddrList},
     network_check::set_network_if_choice_valid,
-    MAX_GRPC_MESSAGE_SIZE,
 };
 use tari_common_sqlite::connection::DbConnectionUrl;
-use tari_comms::{multiaddr::Multiaddr, peer_manager::PeerFeatures, NodeIdentity};
+use tari_comms::{NodeIdentity, multiaddr::Multiaddr, peer_manager::PeerFeatures};
 use tari_comms_dht::DhtConfig;
-use tari_p2p::{auto_update::AutoUpdateConfig, Network, PeerSeedsConfig, TransportType};
+use tari_p2p::{Network, PeerSeedsConfig, TransportType, auto_update::AutoUpdateConfig};
 use tari_shutdown::Shutdown;
 use tokio::task;
 use tonic::transport::Channel;
@@ -102,7 +102,7 @@ impl BaseNodeProcess {
     /// Kill the base node process
     pub fn kill(&mut self) {
         self.kill_signal.trigger();
-        
+
         // Wait for ports to be released
         loop {
             if TcpListener::bind(("127.0.0.1", self.port.try_into().unwrap())).is_ok() {
@@ -174,7 +174,7 @@ pub async fn spawn_base_node_with_config(
         port = get_port(assigned_ports, 18000..18499).unwrap();
         grpc_port = get_port(assigned_ports, 18500..18999).unwrap();
         http_port = get_port(assigned_ports, 19000..19499).unwrap();
-        
+
         // Create a new temporary directory
         temp_dir_path = temp_base_dir
             .join("base_nodes")
@@ -208,15 +208,15 @@ pub async fn spawn_base_node_with_config(
     let peer_addresses: Vec<String> = seed_node_names
         .iter()
         .filter_map(|peer_name| {
-            base_nodes.get(peer_name).map(|node| {
-                node.identity.to_peer().to_short_string()
-            })
+            base_nodes
+                .get(peer_name)
+                .map(|node| node.identity.to_peer().to_short_string())
         })
         .collect();
 
     let mut common_config = CommonConfig::default();
     common_config.base_path = temp_dir_path.clone();
-    
+
     task::spawn(async move {
         let mut base_node_config = minotari_node::ApplicationConfig {
             common: common_config,
@@ -250,13 +250,9 @@ pub async fn spawn_base_node_with_config(
         base_node_config.base_node.p2p.transport.transport_type = TransportType::Tcp;
         base_node_config.base_node.p2p.transport.tcp.listener_address =
             format!("/ip4/127.0.0.1/tcp/{port}").parse().unwrap();
-        base_node_config.base_node.p2p.public_addresses = MultiaddrList::from(vec![base_node_config
-            .base_node
-            .p2p
-            .transport
-            .tcp
-            .listener_address
-            .clone()]);
+        base_node_config.base_node.p2p.public_addresses = MultiaddrList::from(vec![
+            base_node_config.base_node.p2p.transport.tcp.listener_address.clone(),
+        ]);
         base_node_config.base_node.p2p.allow_test_addresses = true;
         base_node_config.base_node.p2p.dht = DhtConfig::default_local_test();
         base_node_config.base_node.p2p.dht.database_url = DbConnectionUrl::file(format!("{port}-dht.sqlite"));
