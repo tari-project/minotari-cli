@@ -1,0 +1,43 @@
+[package]
+name = "integration-tests"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+publish = false
+
+[[test]]
+name = "cucumber"
+harness = false
+
+[dependencies]
+minotari = { path = "../minotari" }
+
+# Cucumber BDD framework
+cucumber = "0.21"
+
+# Async runtime
+tokio = { version = "1.47.1", features = ["full"] }
+
+# Utilities
+tempfile = "3.15"
+serial_test = "3.2"
+indexmap = "1.9"
+
+# Tari dependencies for base node integration
+minotari_app_utilities = { git = "https://github.com/tari-project/tari/", rev = "766f80ccc20596413ee208311750c11e02a2841d" }
+minotari_node = { git = "https://github.com/tari-project/tari/", rev = "766f80ccc20596413ee208311750c11e02a2841d", features = ["metrics"] }
+minotari_node_grpc_client = { git = "https://github.com/tari-project/tari/", rev = "766f80ccc20596413ee208311750c11e02a2841d" }
+tari_common = { git = "https://github.com/tari-project/tari/", rev = "766f80ccc20596413ee208311750c11e02a2841d" }
+tari_common_sqlite = { git = "https://github.com/tari-project/tari/", rev = "766f80ccc20596413ee208311750c11e02a2841d" }
+tari_common_types = { git = "https://github.com/tari-project/tari/", rev = "766f80ccc20596413ee208311750c11e02a2841d" }
+tari_comms = { git = "https://github.com/tari-project/tari/", rev = "766f80ccc20596413ee208311750c11e02a2841d" }
+tari_comms_dht = { git = "https://github.com/tari-project/tari/", rev = "766f80ccc20596413ee208311750c11e02a2841d" }
+tari_p2p = { git = "https://github.com/tari-project/tari/", rev = "766f80ccc20596413ee208311750c11e02a2841d" }
+tari_shutdown = { git = "https://github.com/tari-project/tari/", rev = "766f80ccc20596413ee208311750c11e02a2841d" }
+
+# Other dependencies
+rand = "0.8"
+tonic = "0.13"
+anyhow = "1.0"
+serde_json = "1.0"

@@ -3125,6 +3125,32 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8bb03732005da905c88227371639bf1ad885cc712789c011c31c5fb3ab3ccf02"
 
 [[package]]
+name = "integration-tests"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "cucumber",
+ "indexmap 1.9.3",
+ "minotari",
+ "minotari_app_utilities",
+ "minotari_node",
+ "minotari_node_grpc_client",
+ "rand 0.8.5",
+ "serde_json",
+ "serial_test",
+ "tari_common",
+ "tari_common_sqlite",
+ "tari_common_types",
+ "tari_comms",
+ "tari_comms_dht",
+ "tari_p2p",
+ "tari_shutdown",
+ "tempfile",
+ "tokio",
+ "tonic 0.13.1",
+]
+
+[[package]]
 name = "inventory"
 version = "0.3.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3723,20 +3749,14 @@ dependencies = [
  "chrono",
  "clap 4.5.49",
  "config",
- "cucumber",
  "hex",
  "include_dir",
- "indexmap 1.9.3",
  "lightweight_wallet_libs",
  "log",
  "log4rs",
- "minotari_app_utilities",
- "minotari_node",
- "minotari_node_grpc_client",
  "num-format",
  "r2d2",
  "r2d2_sqlite",
- "rand 0.8.5",
  "reqwest 0.12.24",
  "reqwest-middleware",
  "reqwest-retry",
@@ -3746,23 +3766,15 @@ dependencies = [
  "serde_json",
  "serde_rusqlite",
  "serde_yaml",
- "serial_test",
  "tari_common",
- "tari_common_sqlite",
  "tari_common_types",
- "tari_comms",
- "tari_comms_dht",
  "tari_crypto",
- "tari_p2p",
  "tari_script",
- "tari_shutdown",
  "tari_transaction_components",
  "tari_utilities",
- "tempfile",
  "thiserror 2.0.17",
  "tokio",
  "tokio-util 0.7.17",
- "tonic 0.13.1",
  "url",
  "utoipa",
  "utoipa-swagger-ui",

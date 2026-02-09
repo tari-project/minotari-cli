@@ -4,6 +4,13 @@ A command-line lightweight wallet implementation for the Tari blockchain
 network. This wallet uses view-only keys to scan the blockchain for
 transactions without requiring a full node.
 
+## Project Structure
+
+This repository is organized as a Cargo workspace:
+
+- **minotari/**: Main CLI wallet application
+- **integration-tests/**: Cucumber BDD integration tests with real base node
+
 ## Features
 
 - **View-Only Wallet**: Import and manage wallets using view keys and spend
@@ -215,16 +222,19 @@ cargo run --bin generate-openapi
 
 ## Testing
 
-The project includes a comprehensive Cucumber BDD integration testing suite that covers all major features:
+The project includes a comprehensive Cucumber BDD integration testing suite that covers all major features.
+
+The tests are located in a separate package (`integration-tests/`) within the workspace:
 
 ```bash
-# Run all integration tests
-cargo test --test integration_tests
+# Run all integration tests from workspace root
+cargo test -p integration-tests
 
-# Run specific test (requires building first)
-cargo test --test integration_tests -- --nocapture
+# Run from the integration-tests directory
+cd integration-tests
+cargo test
 ```
 
-See [tests/cucumber/README.md](tests/cucumber/README.md) for detailed testing documentation.
+See [integration-tests/README.md](integration-tests/README.md) for detailed testing documentation.
 
 ## Contributing
