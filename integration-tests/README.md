@@ -2,6 +2,23 @@
 
 This directory contains Behavior-Driven Development (BDD) integration tests for the Minotari CLI wallet using the Cucumber framework.
 
+## Prerequisites
+
+Before building or running the tests, you need to install the Protocol Buffers compiler (`protoc`):
+
+### Ubuntu/Debian
+```bash
+sudo apt-get install protobuf-compiler
+```
+
+### macOS
+```bash
+brew install protobuf
+```
+
+### Other platforms
+Download from: https://github.com/protocolbuffers/protobuf/releases
+
 ## Overview
 
 The test suite covers all major functionality of the Minotari CLI wallet:
@@ -13,11 +30,13 @@ The test suite covers all major functionality of the Minotari CLI wallet:
 - **Transaction Creation**: Creating unsigned one-sided transactions
 - **Fund Locking**: Locking UTXOs for pending transactions
 - **Daemon Mode**: Running the wallet daemon with REST API
+- **Base Node Integration**: Real base node integration for testing
 
 ## Structure
 
 ```
-tests/cucumber/
+integration-tests/
+├── Cargo.toml          # Package configuration
 ├── features/           # Gherkin feature files
 │   ├── wallet_creation.feature
 │   ├── wallet_import.feature
@@ -25,8 +44,10 @@ tests/cucumber/
 │   ├── scanning.feature
 │   ├── transactions.feature
 │   ├── fund_locking.feature
-│   └── daemon.feature
+│   ├── daemon.feature
+│   └── base_node.feature
 ├── steps/              # Step definitions (Rust code)
+│   ├── mod.rs
 │   ├── common.rs       # Shared world and utilities
 │   ├── wallet_creation.rs
 │   ├── wallet_import.rs
@@ -34,37 +55,48 @@ tests/cucumber/
 │   ├── scanning.rs
 │   ├── transactions.rs
 │   ├── fund_locking.rs
-│   └── daemon.rs
-└── fixtures/           # Test data and fixtures (if needed)
+│   ├── daemon.rs
+│   └── base_node.rs
+├── src/                # Support code
+│   ├── lib.rs
+│   └── base_node_process.rs
+└── tests/              # Test runners
+    └── cucumber.rs
 ```
 
 ## Running the Tests
 
-### Run all integration tests
+### From workspace root
 
 ```bash
-cargo test --test cucumber_integration
+# Run all integration tests
+cargo test -p integration-tests
+
+# Run with output
+cargo test -p integration-tests -- --nocapture
 ```
 
-### Run tests with output
+### From integration-tests directory
+
+```bash
+cd integration-tests
+
+# Run all tests
+cargo test
+
+# Run with output
+cargo test -- --nocapture
+```
 
 ```bash
 cargo test --test cucumber_integration -- --nocapture
-```
-
-### Run specific feature file
-
-You can filter tests by feature name:
-
-```bash
-cargo test --test cucumber_integration -- wallet_creation
 ```
 
 ## Writing New Tests
 
 ### 1. Create a Feature File
 
-Create a new `.feature` file in `tests/cucumber/features/`:
+Create a new `.feature` file in `features/`:
 
 ```gherkin
 Feature: My New Feature
@@ -80,31 +112,31 @@ Feature: My New Feature
 
 ### 2. Implement Step Definitions
 
-Create or update a step definition file in `tests/cucumber/steps/`:
+Create or update a step definition file in `steps/`:
 
 ```rust
 use cucumber::{given, when, then};
-use super::common::World;
+use super::common::MinotariWorld;
 
 #[given("some precondition")]
-async fn setup_precondition(world: &mut World) {
+async fn setup_precondition(world: &mut MinotariWorld) {
     // Setup code
 }
 
 #[when("I perform an action")]
-async fn perform_action(world: &mut World) {
+async fn perform_action(world: &mut MinotariWorld) {
     // Action code
 }
 
 #[then("I should see the expected result")]
-async fn verify_result(world: &mut World) {
+async fn verify_result(world: &mut MinotariWorld) {
     // Assertion code
 }
 ```
 
 ### 3. Register the Module
 
-Add your new module to `tests/cucumber/steps/mod.rs`:
+Add your new module to `steps/mod.rs`:
 
 ```rust
 pub mod my_new_feature;
