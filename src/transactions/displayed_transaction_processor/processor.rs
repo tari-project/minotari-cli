@@ -38,8 +38,14 @@ impl DisplayedTransactionProcessor {
         accumulator: &BlockEventAccumulator,
         tx: &Connection,
     ) -> Result<(Vec<DisplayedTransaction>, Vec<DisplayedTransaction>), ProcessorError> {
-        let current_display_transactions =
+        let mut current_display_transactions =
             db::get_displayed_transactions_from_height(tx, accumulator.account_id as Id, accumulator.height)?;
+        let mut pending_txs = db::get_displayed_transactions_by_status(
+            tx,
+            accumulator.account_id as Id,
+            TransactionDisplayStatus::Pending,
+        )?;
+        current_display_transactions.append(&mut pending_txs);
         self.create_new_updated_display_transactions(accumulator, &current_display_transactions)
     }
 
