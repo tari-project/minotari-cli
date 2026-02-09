@@ -12,7 +12,7 @@ use indexmap::IndexMap;
 
 // Import the base node process from the test support library
 #[path = "../src/lib.rs"]
-mod test_support;
+pub mod test_support;  // Make this public so other modules can access it
 use test_support::BaseNodeProcess;
 
 // =============================

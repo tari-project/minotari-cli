@@ -6,11 +6,6 @@ use cucumber::{given, when};
 
 use super::common::MinotariWorld;
 
-// Import base node spawning functions
-#[path = "../src/lib.rs"]
-mod test_support;
-use test_support::spawn_base_node;
-
 // =============================
 // Base Node Steps
 // =============================
@@ -18,9 +13,12 @@ use test_support::spawn_base_node;
 #[given(expr = "I have a seed node {word}")]
 #[when(expr = "I have a seed node {word}")]
 async fn start_seed_node(world: &mut MinotariWorld, name: String) {
+    // Dynamically load and use the spawn function
+    use super::common::test_support;
+    
     let base_dir = world.current_base_dir.as_ref().expect("Base dir not set").clone();
     
-    let node = spawn_base_node(
+    let node = test_support::spawn_base_node(
         &base_dir,
         &mut world.assigned_ports,
         &mut world.base_nodes,
@@ -36,10 +34,12 @@ async fn start_seed_node(world: &mut MinotariWorld, name: String) {
 #[given(expr = "I have a base node {word}")]
 #[when(expr = "I have a base node {word}")]
 async fn start_base_node(world: &mut MinotariWorld, name: String) {
+    use super::common::test_support;
+    
     let base_dir = world.current_base_dir.as_ref().expect("Base dir not set").clone();
     let seed_nodes = world.all_seed_nodes().to_vec();
     
-    let node = spawn_base_node(
+    let node = test_support::spawn_base_node(
         &base_dir,
         &mut world.assigned_ports,
         &mut world.base_nodes,

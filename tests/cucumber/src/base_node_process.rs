@@ -39,6 +39,7 @@ use minotari_app_utilities::identity_management::save_as_json;
 use minotari_node::{run_base_node, BaseNodeConfig, GrpcMethod, MetricsConfig};
 use minotari_node_grpc_client::BaseNodeGrpcClient;
 use rand::rngs::OsRng;
+use rand::Rng; // Add Rng trait for gen_range
 use tari_common::{
     configuration::{CommonConfig, MultiaddrList},
     network_check::set_network_if_choice_valid,
