@@ -35,6 +35,8 @@ tari_comms = { git = "https://github.com/tari-project/tari/", rev = "766f80ccc20
 tari_comms_dht = { git = "https://github.com/tari-project/tari/", rev = "766f80ccc20596413ee208311750c11e02a2841d" }
 tari_p2p = { git = "https://github.com/tari-project/tari/", rev = "766f80ccc20596413ee208311750c11e02a2841d" }
 tari_shutdown = { git = "https://github.com/tari-project/tari/", rev = "766f80ccc20596413ee208311750c11e02a2841d" }
+tari_transaction_components = { git = "https://github.com/tari-project/tari/", rev = "766f80ccc20596413ee208311750c11e02a2841d" }
+tari_utilities = { version = "0.8", features = ["std"] }
 
 # Other dependencies
 rand = "0.8"

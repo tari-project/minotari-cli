@@ -3145,6 +3145,8 @@ dependencies = [
  "tari_comms_dht",
  "tari_p2p",
  "tari_shutdown",
+ "tari_transaction_components",
+ "tari_utilities",
  "tempfile",
  "tokio",
  "tonic 0.13.1",
