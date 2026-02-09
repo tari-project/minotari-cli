@@ -114,10 +114,7 @@ pub fn get_output_info_by_hash(
         None => return Ok(None),
     };
 
-    let json_str = data
-        .wallet_output_json
-        .ok_or_else(|| WalletDbError::Unexpected("Output JSON is null".to_string()))?;
-    let output: WalletOutput = serde_json::from_str(&json_str)?;
+    let output: WalletOutput = serde_json::from_str(&data.wallet_output_json)?;
 
     let tx_id = TxId::from(data.tx_id as u64);
 
@@ -338,7 +335,7 @@ pub struct DbWalletOutput {
 struct WalletOutputRow {
     id: i64,
     tx_id: i64,
-    wallet_output_json: Option<String>,
+    wallet_output_json: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -407,7 +404,6 @@ pub fn fetch_unspent_outputs(
         WHERE account_id = :account_id
           AND status = :unspent_status
           AND confirmed_height <= :min_height
-          AND wallet_output_json IS NOT NULL
           AND deleted_at IS NULL
         ORDER BY value DESC
         "#,
@@ -420,14 +416,12 @@ pub fn fetch_unspent_outputs(
 
     let mut outputs = Vec::new();
     for row in raw_rows {
-        if let Some(json_str) = row.wallet_output_json {
-            let output: WalletOutput = serde_json::from_str(&json_str)?;
-            outputs.push(DbWalletOutput {
-                id: row.id,
-                tx_id: TxId::from(row.tx_id as u64),
-                output,
-            });
-        }
+        let output: WalletOutput = serde_json::from_str(&row.wallet_output_json)?;
+        outputs.push(DbWalletOutput {
+            id: row.id,
+            tx_id: TxId::from(row.tx_id as u64),
+            output,
+        });
     }
     Ok(outputs)
 }
@@ -461,23 +455,20 @@ pub fn fetch_outputs_by_lock_request_id(
     conn: &Connection,
     locked_by_request_id: &str,
 ) -> WalletDbResult<Vec<DbWalletOutput>> {
-    let mut stmt = conn.prepare_cached(
-        "SELECT id, tx_id, wallet_output_json FROM outputs WHERE locked_by_request_id = :req_id and wallet_output_json IS NOT NULL"
-    )?;
+    let mut stmt =
+        conn.prepare_cached("SELECT id, tx_id, wallet_output_json FROM outputs WHERE locked_by_request_id = :req_id")?;
 
     let rows = stmt.query(named_params! { ":req_id": locked_by_request_id })?;
     let raw_rows: Vec<WalletOutputRow> = from_rows(rows).collect::<Result<Vec<_>, _>>()?;
 
     let mut outputs = Vec::new();
     for row in raw_rows {
-        if let Some(json_str) = row.wallet_output_json {
-            let output: WalletOutput = serde_json::from_str(&json_str)?;
-            outputs.push(DbWalletOutput {
-                id: row.id,
-                tx_id: TxId::from(row.tx_id as u64),
-                output,
-            });
-        }
+        let output: WalletOutput = serde_json::from_str(&row.wallet_output_json)?;
+        outputs.push(DbWalletOutput {
+            id: row.id,
+            tx_id: TxId::from(row.tx_id as u64),
+            output,
+        });
     }
     Ok(outputs)
 }
@@ -564,7 +555,6 @@ pub fn get_total_unspent_balance(conn: &Connection, account_id: i64) -> WalletDb
         FROM outputs
         WHERE account_id = :account_id
           AND status = :unspent_status
-          AND wallet_output_json IS NOT NULL
           AND deleted_at IS NULL
         "#,
     )?;

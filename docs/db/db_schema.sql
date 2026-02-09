@@ -18,7 +18,7 @@ CREATE TABLE outputs (
     mined_in_block_height INTEGER NOT NULL,
     value INTEGER NOT NULL,
     created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, 
-    wallet_output_json TEXT, 
+    wallet_output_json TEXT NOT NULL, 
     mined_timestamp TIMESTAMP NOT NULL, 
     confirmed_height INTEGER, 
     confirmed_hash BLOB, 
