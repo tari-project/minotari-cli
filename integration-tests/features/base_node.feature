@@ -4,6 +4,5 @@ Feature: Base Node Integration
   So that I can verify actual blockchain interactions
 
   Scenario: Start a base node
-    Given I have a clean test environment
-    And I have a seed node Node_A
+    Given I have a seed node Node_A
     Then the base node should be running

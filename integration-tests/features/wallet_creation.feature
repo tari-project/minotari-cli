@@ -4,7 +4,6 @@ Feature: Wallet Creation
   So that I can receive and send Tari
 
   Scenario: Create a new wallet without encryption
-    Given I have a clean test environment
     When I create a new address without a password
     Then the wallet file should be created
     And the wallet should contain a valid address
@@ -12,7 +11,6 @@ Feature: Wallet Creation
     And the wallet should contain seed words
 
   Scenario: Create a new wallet with password encryption
-    Given I have a clean test environment
     When I create a new address with password "MySecurePassword123456789012345678"
     Then the wallet file should be created
     And the wallet should contain encrypted view key
@@ -21,7 +19,6 @@ Feature: Wallet Creation
     And the wallet should contain a nonce
 
   Scenario: Create wallet with custom output file
-    Given I have a clean test environment
     When I create a new address with output file "custom_wallet.json"
     Then the file "custom_wallet.json" should exist
     And the wallet should contain a valid address

@@ -50,8 +50,11 @@ impl MinotariWorld {
         std::fs::create_dir_all(&base_dir).ok();
         let wallet = WalletType::new_random().unwrap(); // Initialize with default wallet type, can be overridden in specific tests
 
+        // Automatically setup temp directory for test isolation
+        let temp_dir = TempDir::new().expect("Failed to create temp directory");
+
         Self {
-            temp_dir: None,
+            temp_dir: Some(temp_dir),
             database_path: None,
             output_file: None,
             wallet_data: None,
@@ -151,11 +154,6 @@ impl Drop for MinotariWorld {
 // =============================
 // Common Step Definitions
 // =============================
-
-#[given("I have a clean test environment")]
-async fn clean_environment(world: &mut MinotariWorld) {
-    world.setup_temp_dir();
-}
 
 #[given("I have a test database")]
 async fn setup_database(world: &mut MinotariWorld) {
