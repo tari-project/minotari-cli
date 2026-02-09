@@ -430,15 +430,11 @@ fn handle_balance(config: &WalletConfig) -> Result<(), anyhow::Error> {
     let accounts = get_accounts(&conn, config.account_name.as_deref())?;
     for account in accounts {
         let agg_result = get_balance(&conn, account.id)?;
-        let tari_balance = agg_result.total / 1_000_000;
-        let remainder = agg_result.total % 1_000_000;
         println!(
-            "Balance at height {}({}): {} microTari ({}.{} Tari)",
+            "Balance at height {}({}): {} ",
             agg_result.max_height.unwrap_or(0),
             agg_result.max_date.unwrap_or_else(|| "N/A".to_string()),
             agg_result.total,
-            tari_balance,
-            remainder,
         );
     }
     Ok(())
