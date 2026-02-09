@@ -5,4 +5,4 @@
 
 pub mod base_node_process;
 
-pub use base_node_process::{BaseNodeProcess, spawn_base_node, spawn_base_node_with_config};
+pub use base_node_process::{BaseNodeProcess, spawn_base_node};

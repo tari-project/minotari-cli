@@ -5,7 +5,7 @@
 
 use cucumber::{then, when};
 use std::process::Command;
-
+use tari_utilities::hex::Hex;
 use super::common::MinotariWorld;
 
 // =============================
@@ -19,8 +19,8 @@ async fn import_wallet_with_keys(world: &mut MinotariWorld) {
     let output = Command::new("cargo")
         .args(&[
             "run", "--bin", "minotari", "--", "import-view-key",
-            "--view-private-key", &world.test_view_key,
-            "--spend-public-key", &world.test_spend_key,
+            "--view-private-key", &world.wallet.get_view_key().to_hex(),
+            "--spend-public-key", &world.wallet.get_public_spend_key().to_hex(),
             "--password", &world.test_password,
             "--database-path", db_path.to_str().unwrap(),
         ])
@@ -39,8 +39,8 @@ async fn import_wallet_with_birthday(world: &mut MinotariWorld, birthday: String
     let output = Command::new("cargo")
         .args(&[
             "run", "--bin", "minotari", "--", "import-view-key",
-            "--view-private-key", &world.test_view_key,
-            "--spend-public-key", &world.test_spend_key,
+            "--view-private-key", &world.wallet.get_view_key().to_hex(),
+            "--spend-public-key", &world.wallet.get_public_spend_key().to_hex(),
             "--password", &world.test_password,
             "--database-path", db_path.to_str().unwrap(),
             "--birthday", &birthday,

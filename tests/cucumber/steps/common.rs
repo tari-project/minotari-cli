@@ -9,6 +9,8 @@ use std::path::PathBuf;
 use std::process::Command;
 use tempfile::TempDir;
 use indexmap::IndexMap;
+use tari_transaction_components::key_manager::wallet_types::WalletType;
+use tari_utilities::hex::Hex;
 
 // Import the base node process from the test support library
 #[path = "../src/lib.rs"]
@@ -29,8 +31,7 @@ pub struct MinotariWorld {
     pub last_command_output: Option<String>,
     pub last_command_error: Option<String>,
     pub last_command_exit_code: Option<i32>,
-    pub test_view_key: String,
-    pub test_spend_key: String,
+    pub wallet: WalletType,
     pub test_password: String,
     pub daemon_handle: Option<std::process::Child>,
     pub api_port: Option<u16>,
@@ -47,6 +48,7 @@ impl MinotariWorld {
         // Create a temp base directory for this test session
         let base_dir = std::env::temp_dir().join(format!("minotari_cli_test_{}", std::process::id()));
         std::fs::create_dir_all(&base_dir).ok();
+        let wallet = WalletType::new_random().unwrap(); // Initialize with default wallet type, can be overridden in specific tests
         
         Self {
             temp_dir: None,
@@ -56,8 +58,7 @@ impl MinotariWorld {
             last_command_output: None,
             last_command_error: None,
             last_command_exit_code: None,
-            test_view_key: "0000000000000000000000000000000000000000000000000000000000000001".to_string(),
-            test_spend_key: "0000000000000000000000000000000000000000000000000000000000000002".to_string(),
+            wallet,
             test_password: "test_password_minimum_32_chars_long_for_encryption".to_string(),
             daemon_handle: None,
             api_port: None,
@@ -99,7 +100,7 @@ impl MinotariWorld {
         self.base_nodes.clear();
         self.temp_dir = None;
     }
-    
+
     pub fn get_base_node_url(&self) -> String {
         // Get the first base node's HTTP URL if available
         if let Some((_, node)) = self.base_nodes.iter().next() {
@@ -142,8 +143,8 @@ async fn database_with_wallet(world: &mut MinotariWorld) {
     let _ = Command::new("cargo")
         .args(&[
             "run", "--bin", "minotari", "--", "import-view-key",
-            "--view-private-key", &world.test_view_key,
-            "--spend-public-key", &world.test_spend_key,
+            "--view-private-key", &world.wallet.get_view_key().to_hex(),
+            "--spend-public-key", &world.wallet.get_public_spend_key().to_hex(),
             "--password", &world.test_password,
             "--database-path", db_path.to_str().unwrap(),
         ])
