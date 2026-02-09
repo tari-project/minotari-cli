@@ -5,6 +5,7 @@ use log::debug;
 use rusqlite::{Connection, OptionalExtension, named_params};
 use serde::Deserialize;
 use serde_rusqlite::from_rows;
+use tari_transaction_components::MicroMinotari;
 
 pub fn insert_balance_change(conn: &Connection, change: &BalanceChange) -> WalletDbResult<i64> {
     debug!(
@@ -169,8 +170,8 @@ pub fn get_all_active_balance_changes_by_account_id(
 
 #[derive(Debug, Default, Deserialize)]
 pub struct BalanceAggregates {
-    pub total_credits: Option<i64>,
-    pub total_debits: Option<i64>,
+    pub total_credits: Option<MicroMinotari>,
+    pub total_debits: Option<MicroMinotari>,
     pub max_height: Option<i64>,
     pub max_date: Option<chrono::NaiveDateTime>,
 }

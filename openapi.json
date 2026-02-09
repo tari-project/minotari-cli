@@ -777,16 +777,20 @@
         ],
         "properties": {
           "available": {
-            "type": "integer",
-            "format": "int64",
-            "description": "The portion of the total balance that is currently spendable.",
-            "minimum": 0
+            "type": "object",
+            "properties": {
+              "amount": {
+                "type": "integer"
+              }
+            }
           },
           "locked": {
-            "type": "integer",
-            "format": "int64",
-            "description": "The portion of the balance that is locked.",
-            "minimum": 0
+            "type": "object",
+            "properties": {
+              "amount": {
+                "type": "integer"
+              }
+            }
           },
           "max_date": {
             "type": [
@@ -804,32 +808,36 @@
             "description": "The maximum blockchain height among all transactions for this account.\n\nWill be `None` if the account has no transactions."
           },
           "total": {
-            "type": "integer",
-            "format": "int64",
-            "description": "The total balance of the account (Total Credits - Total Debits).",
-            "minimum": 0
+            "type": "object",
+            "properties": {
+              "amount": {
+                "type": "integer"
+              }
+            }
           },
           "total_credits": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
-            "description": "The total sum of all incoming (credit) transactions."
+            "type": "object",
+            "properties": {
+              "amount": {
+                "type": "integer"
+              }
+            }
           },
           "total_debits": {
-            "type": [
-              "integer",
-              "null"
-            ],
-            "format": "int64",
-            "description": "The total sum of all outgoing (debit) transactions."
+            "type": "object",
+            "properties": {
+              "amount": {
+                "type": "integer"
+              }
+            }
           },
           "unconfirmed": {
-            "type": "integer",
-            "format": "int64",
-            "description": "The amount from incoming transactions that have not yet been confirmed.",
-            "minimum": 0
+            "type": "object",
+            "properties": {
+              "amount": {
+                "type": "integer"
+              }
+            }
           }
         }
       },

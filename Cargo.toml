@@ -25,7 +25,6 @@ lightweight_wallet_libs = { git = "https://github.com/tari-project/tari-wallet",
 ] }
 log = { version = "0.4.29", features = ["kv"] }
 log4rs = { version = "1.4.0", features = ["yaml_format", "console_appender", "file_appender", "log_kv"] }
-num-format = "0.4.4"
 r2d2 = "0.8.10"
 r2d2_sqlite = "0.31.0"
 reqwest = { version = "0.12", features = ["json"] }
