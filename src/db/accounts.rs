@@ -307,8 +307,8 @@ pub fn get_balance(conn: &Connection, account_id: i64) -> WalletDbResult<Account
     let (locked_amount, unconfirmed_amount, locked_and_unconfirmed_amount) =
         get_output_totals_for_account(conn, account_id)?;
 
-    let total_credits = history_agg.total_credits.unwrap_or_default();
-    let total_debits = history_agg.total_debits.unwrap_or_default();
+    let total_credits: MicroMinotari = (history_agg.total_credits.unwrap_or_default() as u64).into();
+    let total_debits: MicroMinotari = (history_agg.total_debits.unwrap_or_default() as u64).into();
     let total_balance = total_credits.saturating_sub(total_debits);
 
     let unavailable_balance = locked_amount
@@ -323,8 +323,8 @@ pub fn get_balance(conn: &Connection, account_id: i64) -> WalletDbResult<Account
         available: available_balance,
         locked: locked_amount,
         unconfirmed: unconfirmed_amount,
-        total_credits: history_agg.total_credits,
-        total_debits: history_agg.total_debits,
+        total_credits: Some(total_credits),
+        total_debits: Some(total_debits),
         max_height: history_agg.max_height,
         max_date: max_date_str,
     })

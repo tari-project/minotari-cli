@@ -65,12 +65,11 @@ impl DisplayedTransactionBuilder {
     pub fn credits_and_debits(mut self, credit: MicroMinotari, debit: MicroMinotari) -> Self {
         self.total_credit = credit;
         self.total_debit = debit;
-
-        if debit > credit {
+        if debit > 0.into() {
             self.amount = Some(debit.saturating_sub(credit));
             self.direction = Some(TransactionDirection::Outgoing);
         } else {
-            self.amount = Some(credit.saturating_sub(debit));
+            self.amount = Some(credit);
             self.direction = Some(TransactionDirection::Incoming);
         }
 
