@@ -19,6 +19,8 @@ async fn check_balance_for_account(world: &mut MinotariWorld, account_name: Stri
         "balance".to_string(),
         "--database-path".to_string(),
         db_path.to_str().unwrap().to_string(),
+        "--password".to_string(),
+        world.test_password.clone(),
         "--account-name".to_string(),
         account_name,
     ]);
@@ -41,6 +43,8 @@ async fn check_balance_all_accounts(world: &mut MinotariWorld) {
         "balance".to_string(),
         "--database-path".to_string(),
         db_path.to_str().unwrap().to_string(),
+        "--password".to_string(),
+        world.test_password.clone(),
     ]);
 
     let output = Command::new(&cmd)
