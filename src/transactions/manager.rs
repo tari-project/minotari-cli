@@ -62,7 +62,9 @@ use r2d2_sqlite::SqliteConnectionManager;
 use tari_common::configuration::Network;
 use tari_common_types::types::FixedHash;
 use tari_common_types::{tari_address::TariAddressFeatures, transaction::TxId};
+use tari_transaction_components::offline_signing::models::SignedTransaction;
 use tari_transaction_components::rpc::models::TxSubmissionRejectionReason;
+use tari_transaction_components::transaction_components::OutputType;
 use tari_transaction_components::{
     MicroMinotari, TransactionBuilder,
     consensus::ConsensusConstantsBuilder,
@@ -77,6 +79,8 @@ use tari_transaction_components::{
 use tari_utilities::ByteArray;
 
 use crate::db::DbWalletOutput;
+use crate::models::OutputStatus;
+use crate::transactions::TransactionOutput;
 use crate::{
     db::{self, AccountRow, SqlitePool},
     http::WalletHttpClient,
@@ -559,7 +563,7 @@ impl TransactionSender {
     /// ```
     pub async fn finalize_transaction_and_broadcast(
         &self,
-        signed_transaction: SignedOneSidedTransactionResult,
+        signed_transaction_result: SignedOneSidedTransactionResult,
         grpc_address: String,
     ) -> Result<DisplayedTransaction, anyhow::Error> {
         let connection = self.get_connection()?;
@@ -579,11 +583,9 @@ impl TransactionSender {
             })?;
 
         // Extract transaction info from the signed result for building DisplayedTransaction
-        let tx_info = &signed_transaction.request.info;
+        let tx_info = &signed_transaction_result.request.info;
         let actual_fee = tx_info.fee;
-        // Get the first recipient's amount (for one-sided transactions there's typically one recipient)
-        let recipient_amount = tx_info.recipients.first().map(|r| r.amount).unwrap_or_default();
-        let kernel_excess = signed_transaction
+        let kernel_excess = signed_transaction_result
             .signed_transaction
             .transaction
             .body()
@@ -592,21 +594,18 @@ impl TransactionSender {
             .map(|k| k.excess.as_bytes().to_vec())
             .unwrap_or_default();
 
-        let serialized_transaction = serde_json::to_vec(&signed_transaction.signed_transaction.transaction)
+        let serialized_transaction = serde_json::to_vec(&signed_transaction_result.signed_transaction.transaction)
             .inspect_err(|e| {
                 warn!(target: "audit", error:% = e; "Transaction finalization preparation failed");
                 self.fail_and_unlock_pending_transaction(&connection, processed_transaction.id());
             })
             .map_err(|e| anyhow!("Failed to serialize transaction: {}", e))?;
 
-        let sent_output_hash = signed_transaction
+        let sent_output_hash = signed_transaction_result
             .signed_transaction
             .sent_hashes
             .first()
             .map(hex::encode);
-
-        // Collect sent_output_hashes before moving signed_transaction
-        let sent_output_hashes: Vec<FixedHash> = signed_transaction.signed_transaction.sent_hashes.clone();
 
         db::update_pending_transaction_status(
             &connection,
@@ -617,7 +616,8 @@ impl TransactionSender {
             warn!(target: "audit", error:% = e; "Transaction finalization preparation failed");
             self.fail_and_unlock_pending_transaction(&connection, processed_transaction.id());
         })?;
-        let completed_tx_id = signed_transaction.signed_transaction.tx_id;
+        let completed_tx_id = signed_transaction_result.signed_transaction.tx_id;
+        let signed_transaction = signed_transaction_result.signed_transaction.clone();
         db::create_completed_transaction(
             &connection,
             account_id,
@@ -634,7 +634,7 @@ impl TransactionSender {
 
         let wallet_http_client = WalletHttpClient::new(grpc_address.parse()?)?;
         let response = wallet_http_client
-            .submit_transaction(signed_transaction.signed_transaction.transaction)
+            .submit_transaction(signed_transaction_result.signed_transaction.transaction)
             .await;
 
         if let Err(e) = response {
@@ -683,13 +683,8 @@ impl TransactionSender {
         }
 
         // Build and save DisplayedTransaction for immediate UI display
-        let displayed_transaction = self.build_pending_displayed_transaction(
-            processed_transaction,
-            sent_output_hashes,
-            completed_tx_id,
-            recipient_amount,
-            actual_fee,
-        )?;
+        let displayed_transaction =
+            self.build_pending_displayed_transaction(processed_transaction, signed_transaction, actual_fee)?;
 
         db::insert_displayed_transaction(&connection, &displayed_transaction)?;
 
@@ -703,39 +698,66 @@ impl TransactionSender {
     fn build_pending_displayed_transaction(
         &self,
         processed_tx: &ProcessedTransaction,
-        sent_output_hashes: Vec<FixedHash>,
-        completed_tx_id: TxId,
-        amount: MicroMinotari,
+        signed_transaction: SignedTransaction,
         fee: MicroMinotari,
     ) -> Result<DisplayedTransaction, anyhow::Error> {
         let recipient = &processed_tx.recipient;
         let now = Utc::now().naive_utc();
 
         // Build inputs from selected UTXOs
-        let inputs: Vec<TransactionInput> = processed_tx
-            .selected_utxos
-            .iter()
-            .map(|utxo| TransactionInput {
-                output_hash: utxo.output.output_hash(),
-                amount: utxo.output.value(),
+        let mut credit: MicroMinotari = 0.into();
+        let mut debit: MicroMinotari = 0.into();
+        let mut inputs = Vec::new();
+        let mut outputs = Vec::new();
+
+        for input in &processed_tx.selected_utxos {
+            inputs.push(TransactionInput {
+                output_hash: input.output.output_hash(),
+                amount: input.output.value(),
                 mined_in_block_hash: FixedHash::default(),
-                matched_output_id: utxo.id,
-            })
-            .collect();
+                matched_output_id: input.id,
+            });
+            debit += input.output.value();
+        }
+
+        for output in &signed_transaction.outputs {
+            outputs.push(TransactionOutput {
+                hash: output.output_hash(),
+                amount: output.value(),
+                status: OutputStatus::Unspent,
+                mined_in_block_height: 0,
+                mined_in_block_hash: FixedHash::default(),
+                output_type: OutputType::Standard,
+                is_change: false,
+            });
+        }
+        if let Some(change) = signed_transaction.change_output {
+            outputs.push(TransactionOutput {
+                hash: change.output_hash(),
+                amount: change.value(),
+                status: OutputStatus::Unspent,
+                mined_in_block_height: 0,
+                mined_in_block_hash: FixedHash::default(),
+                output_type: OutputType::Standard,
+                is_change: true,
+            });
+            credit += change.value();
+        }
 
         let tx = DisplayedTransactionBuilder::new()
             .account_id(self.account.id)
             .direction(TransactionDirection::Outgoing)
             .status(TransactionDisplayStatus::Pending)
             .source(TransactionSource::OneSided)
-            .credits_and_debits(0.into(), amount + fee)
+            .credits_and_debits(credit, debit)
             .message(recipient.payment_id.clone())
             .counterparty(Some(recipient.address.clone()))
             .blockchain_info(0, FixedHash::default(), now, 0) // No block height yet
             .fee(Some(fee))
             .inputs(inputs)
-            .sent_output_hashes(sent_output_hashes)
-            .build(completed_tx_id)
+            .outputs(outputs)
+            .sent_output_hashes(signed_transaction.sent_hashes.clone())
+            .build(signed_transaction.tx_id)
             .map_err(|e| anyhow!("Failed to build displayed transaction: {}", e))?;
 
         Ok(tx)
