@@ -99,6 +99,68 @@ impl BaseNodeProcess {
         )
     }
 
+    /// Get the current chain tip height
+    pub async fn get_tip_height(&self) -> anyhow::Result<u64> {
+        let mut client = self.get_grpc_client().await?;
+        let tip_info = client.get_tip_info(minotari_node_grpc_client::grpc::Empty {}).await?;
+        Ok(tip_info.into_inner().metadata.unwrap().best_block_height)
+    }
+
+    /// Mine blocks on this node using SHA3 mining
+    pub async fn mine_blocks(&self, num_blocks: u64, wallet_payment_address: &str) -> anyhow::Result<()> {
+        use minotari_node_grpc_client::grpc::{MinerInput, NewBlockTemplate, PowAlgo};
+        
+        let mut client = self.get_grpc_client().await?;
+        
+        for _ in 0..num_blocks {
+            // Get new block template
+            let template_request = NewBlockTemplate {
+                algo: Some(PowAlgo {
+                    pow_algo: minotari_node_grpc_client::grpc::pow_algo::PowAlgos::Sha3x.into(),
+                }),
+                max_weight: 0,
+            };
+            
+            let template_response = client.get_new_block_template(template_request).await?;
+            let template = template_response.into_inner();
+            
+            // Submit the block with minimal proof of work (SHA3 is fast)
+            let miner_input = MinerInput {
+                block_template_data: template.block_template_data,
+                coinbase_extra: wallet_payment_address.as_bytes().to_vec(),
+                nonce: 0,
+            };
+            
+            let submit_response = client.submit_block(miner_input).await?;
+            let block_result = submit_response.into_inner();
+            
+            if block_result.block_hash.is_empty() {
+                anyhow::bail!("Failed to mine block");
+            }
+        }
+        
+        Ok(())
+    }
+
+    /// Wait for this node to reach a specific height
+    pub async fn wait_for_height(&self, height: u64, timeout_secs: u64) -> anyhow::Result<()> {
+        let start = std::time::Instant::now();
+        let timeout = Duration::from_secs(timeout_secs);
+        
+        loop {
+            let current_height = self.get_tip_height().await?;
+            if current_height >= height {
+                return Ok(());
+            }
+            
+            if start.elapsed() > timeout {
+                anyhow::bail!("Timeout waiting for height {}, current height: {}", height, current_height);
+            }
+            
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+
     /// Kill the base node process
     pub fn kill(&mut self) {
         self.kill_signal.trigger();

@@ -75,3 +75,57 @@ async fn base_node_is_running(world: &mut MinotariWorld) {
         );
     }
 }
+
+#[when(expr = "I mine {int} blocks on {word}")]
+async fn mine_blocks_on_node(world: &mut MinotariWorld, num_blocks: u64, node_name: String) {
+    let node = world
+        .base_nodes
+        .get(&node_name)
+        .expect(&format!("Node {} not found", node_name));
+
+    // Use the wallet's address for mining rewards
+    let wallet_address = world.wallet.get_comms_public_key().to_hex();
+
+    node.mine_blocks(num_blocks, &wallet_address)
+        .await
+        .expect("Failed to mine blocks");
+
+    // Store the current height for later verification
+    let height = node.get_tip_height().await.expect("Failed to get tip height");
+    world.last_command_output = Some(format!("Mined {} blocks, current height: {}", num_blocks, height));
+    println!("Mined {} blocks on {}, current height: {}", num_blocks, node_name, height);
+}
+
+#[then(expr = "the chain height should be {int}")]
+async fn chain_height_should_be(world: &mut MinotariWorld, expected_height: u64) {
+    // Check the first base node
+    if let Some((_, node)) = world.base_nodes.iter().next() {
+        let actual_height = node.get_tip_height().await.expect("Failed to get tip height");
+        assert_eq!(
+            actual_height, expected_height,
+            "Expected height {} but got {}",
+            expected_height, actual_height
+        );
+        println!("Chain height verified: {}", actual_height);
+    } else {
+        panic!("No base nodes available");
+    }
+}
+
+#[then(expr = "{word} should be at height {int}")]
+async fn node_at_height(world: &mut MinotariWorld, node_name: String, expected_height: u64) {
+    let node = world
+        .base_nodes
+        .get(&node_name)
+        .expect(&format!("Node {} not found", node_name));
+
+    node.wait_for_height(expected_height, 30)
+        .await
+        .expect(&format!(
+            "Node {} failed to reach height {}",
+            node_name, expected_height
+        ));
+
+    let actual_height = node.get_tip_height().await.expect("Failed to get tip height");
+    println!("Node {} is at height {}", node_name, actual_height);
+}
