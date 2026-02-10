@@ -29,6 +29,7 @@ use crate::{
         scan_db_handler::ScanDbHandler,
     },
     transactions::{MonitoringState, TransactionMonitor},
+    webhooks::WebhookTriggerConfig,
 };
 
 /// Unix timestamp for the genesis epoch used in birthday calculations.
@@ -107,6 +108,8 @@ struct ScanContext {
     wallet_client: WalletHttpClient,
     /// Monitor for tracking pending transaction confirmations.
     transaction_monitor: TransactionMonitor,
+    /// Webhook Configuration
+    webhook_config: Option<WebhookTriggerConfig>,
 }
 
 impl ScanContext {
@@ -354,9 +357,14 @@ async fn wait_for_next_poll_cycle<E: EventSender>(
 
     let mut conn = db_handler.get_connection().await?;
 
-    let reorg_result = reorg::handle_reorgs(&mut scanner_context.scanner, &mut conn, scanner_context.account_id)
-        .await
-        .map_err(ScanError::Fatal)?;
+    let reorg_result = reorg::handle_reorgs(
+        &mut scanner_context.scanner,
+        &mut conn,
+        scanner_context.account_id,
+        scanner_context.webhook_config.clone(),
+    )
+    .await
+    .map_err(ScanError::Fatal)?;
 
     let mut resume_height = last_scanned_height;
 
@@ -416,6 +424,7 @@ async fn prepare_account_scan(
     monitoring_state: MonitoringState,
     conn: &mut Connection,
     required_confirmations: u64,
+    webhook_config: Option<WebhookTriggerConfig>,
 ) -> Result<ScanContext, ScanError> {
     let key_manager = account.get_key_manager(password)?;
     let account_view_key = key_manager.get_private_view_key();
@@ -424,7 +433,7 @@ async fn prepare_account_scan(
         .await
         .map_err(|e| ScanError::Intermittent(e.to_string()))?;
 
-    let reorg_result = reorg::handle_reorgs(&mut scanner, conn, account.id)
+    let reorg_result = reorg::handle_reorgs(&mut scanner, conn, account.id, webhook_config.clone())
         .await
         .map_err(ScanError::Fatal)?;
 
@@ -454,7 +463,7 @@ async fn prepare_account_scan(
         .initialize(conn, account.id)
         .map_err(ScanError::Fatal)?;
 
-    let transaction_monitor = TransactionMonitor::new(monitoring_state, required_confirmations);
+    let transaction_monitor = TransactionMonitor::new(monitoring_state, required_confirmations, webhook_config.clone());
 
     Ok(ScanContext {
         scanner,
@@ -464,6 +473,7 @@ async fn prepare_account_scan(
         reorg_check_interval,
         wallet_client,
         transaction_monitor,
+        webhook_config,
     })
 }
 
@@ -587,6 +597,7 @@ async fn run_scan_loop<E: EventSender + Clone + Send + 'static>(
                 scanner_context.account_view_key.clone(),
                 event_sender.clone(),
                 has_pending_outbound,
+                scanner_context.webhook_config.clone(),
             )
             .await?;
 
@@ -619,10 +630,14 @@ async fn run_scan_loop<E: EventSender + Clone + Send + 'static>(
 
         if more_blocks && blocks_since_reorg_check >= scanner_context.reorg_check_interval {
             let mut conn = db_handler.get_connection().await?;
-            let reorg_result =
-                reorg::handle_reorgs(&mut scanner_context.scanner, &mut conn, scanner_context.account_id)
-                    .await
-                    .map_err(ScanError::Fatal)?;
+            let reorg_result = reorg::handle_reorgs(
+                &mut scanner_context.scanner,
+                &mut conn,
+                scanner_context.account_id,
+                scanner_context.webhook_config.clone(),
+            )
+            .await
+            .map_err(ScanError::Fatal)?;
 
             if let Some(reorg_info) = reorg_result.reorg_information {
                 warn!(
@@ -772,6 +787,8 @@ pub struct Scanner {
     cancel_token: Option<CancellationToken>,
     /// Required confirmations
     required_confirmations: u64,
+    /// Webhook Configuration
+    webhook_config: Option<WebhookTriggerConfig>,
 }
 
 impl Scanner {
@@ -816,6 +833,7 @@ impl Scanner {
             retry_config: ScanRetryConfig::default(),
             cancel_token: None,
             required_confirmations,
+            webhook_config: None,
         }
     }
 
@@ -946,6 +964,12 @@ impl Scanner {
         self
     }
 
+    /// Sets webhook configuration
+    pub fn webhook_config(mut self, config: WebhookTriggerConfig) -> Self {
+        self.webhook_config = Some(config);
+        self
+    }
+
     /// Runs the scanner without real-time event streaming.
     ///
     /// # Returns
@@ -1032,6 +1056,7 @@ impl Scanner {
                 monitoring_state,
                 &mut conn,
                 self.required_confirmations,
+                self.webhook_config.clone(),
             )
             .await?;
 

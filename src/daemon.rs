@@ -57,6 +57,10 @@ use crate::{
     api, db,
     scan::{self, ScanMode, scan::ScanError},
     tasks::unlocker::TransactionUnlocker,
+    webhooks::{
+        WebhookTriggerConfig,
+        worker::{WebhookWorker, WebhookWorkerConfig},
+    },
 };
 
 /// Daemon for running the wallet in continuous background mode.
@@ -74,6 +78,8 @@ pub struct Daemon {
     api_port: u16,
     network: Network,
     required_confirmations: u64,
+    webhook_config: WebhookWorkerConfig,
+    webhook_trigger_config: Option<WebhookTriggerConfig>,
 }
 
 impl Daemon {
@@ -90,6 +96,8 @@ impl Daemon {
     /// * `api_port` - Port to bind the HTTP API server to
     /// * `network` - Tari network configuration (Esmeralda, Nextnet, Mainnet, etc.)
     /// * `required_confirmations` - Required confirmations
+    /// * `webhook_url` - Webhook URL
+    /// * `webhook_secret` - Webhook signing secret
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         password: String,
@@ -101,7 +109,20 @@ impl Daemon {
         api_port: u16,
         network: Network,
         required_confirmations: u64,
+        webhook_url: Option<String>,
+        webhook_secret: Option<String>,
+        send_only_event_types: Option<Vec<String>>,
     ) -> Self {
+        let webhook_worker_config = WebhookWorkerConfig {
+            enabled: webhook_url.is_some() && webhook_secret.is_some(),
+            secret: webhook_secret,
+            send_only_event_types: send_only_event_types.clone(),
+        };
+        let webhook_trigger_config = webhook_url.map(|url| WebhookTriggerConfig {
+            url,
+            send_only_event_types,
+        });
+
         Self {
             password,
             base_url,
@@ -112,6 +133,8 @@ impl Daemon {
             api_port,
             network,
             required_confirmations,
+            webhook_config: webhook_worker_config,
+            webhook_trigger_config,
         }
     }
 
@@ -142,6 +165,12 @@ impl Daemon {
 
         let unlocker = TransactionUnlocker::new(db_pool.clone());
         let unlocker_task_handle = unlocker.run(shutdown_tx.subscribe());
+
+        let webhook_worker = std::sync::Arc::new(WebhookWorker::new(db_pool.clone(), self.webhook_config.clone()));
+        let worker_rx = shutdown_tx.subscribe();
+        let webhook_handle = tokio::spawn(async move {
+            webhook_worker.run(worker_rx).await;
+        });
 
         let router = api::create_router(
             db_pool.clone(),
@@ -192,10 +221,10 @@ impl Daemon {
             error!("Failed to send shutdown signal. All tasks may not have received it.");
         }
 
-        let join_res = tokio::try_join!(api_server_handle, unlocker_task_handle, ctrlc_handle)
+        let join_res = tokio::try_join!(api_server_handle, unlocker_task_handle, webhook_handle, ctrlc_handle)
             .map_err(|e| ScanError::Fatal(anyhow!("A task panicked during shutdown: {}", e)))?;
 
-        let (_api_res, _unlocker_res, _ctrlc_res) = join_res;
+        let (_api_res, _unlocker_res, _webhook_res, _ctrlc_res) = join_res;
 
         info!("Daemon stopped gracefully.");
         Ok(())
@@ -213,7 +242,7 @@ impl Daemon {
     /// - `Err(ScanError)` - Scan failed with a fatal or intermittent error
     async fn scan_and_sleep(&self) -> Result<(), ScanError> {
         info!("Starting wallet scan...");
-        let result = scan::Scanner::new(
+        let mut scanner = scan::Scanner::new(
             &self.password,
             &self.base_url,
             self.database_file.clone(),
@@ -222,10 +251,12 @@ impl Daemon {
         )
         .mode(ScanMode::Partial {
             max_blocks: self.max_blocks,
-        })
-        .run()
-        .await;
+        });
+        if let Some(cfg) = &self.webhook_trigger_config {
+            scanner = scanner.webhook_config(cfg.clone());
+        }
 
+        let result = scanner.run().await;
         match result {
             Ok((events, _are_there_more_blocks_to_scan)) => {
                 info!(event_count = events.len(); "Scan completed successfully");

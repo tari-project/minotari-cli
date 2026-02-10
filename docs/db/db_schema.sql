@@ -78,10 +78,7 @@ CREATE TABLE balance_changes (
     memo_hex TEXT,
     claimed_fee INTEGER,
     claimed_amount INTEGER,
-    is_reversal BOOLEAN NOT NULL DEFAULT FALSE,
-    reversal_of_balance_change_id INTEGER REFERENCES balance_changes(id),
-    is_reversed BOOLEAN NOT NULL DEFAULT FALSE,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, is_reversal BOOLEAN NOT NULL DEFAULT FALSE, reversal_of_balance_change_id INTEGER REFERENCES balance_changes(id), is_reversed BOOLEAN NOT NULL DEFAULT FALSE,
     FOREIGN KEY (account_id) REFERENCES accounts(id),
     FOREIGN KEY (caused_by_output_id) REFERENCES outputs(id),
     FOREIGN KEY (caused_by_input_id) REFERENCES inputs(id)
@@ -136,8 +133,6 @@ CREATE TABLE displayed_transactions (
 CREATE INDEX idx_scanned_tip_blocks_account_height ON scanned_tip_blocks(account_id, height DESC);
 CREATE UNIQUE INDEX idx_scanned_tip_blocks_account_height_hash ON scanned_tip_blocks(account_id, height, hash);
 CREATE INDEX idx_balance_changes_account_height ON balance_changes(account_id, effective_height);
-CREATE INDEX idx_balance_changes_reversal_of ON balance_changes(reversal_of_balance_change_id) WHERE reversal_of_balance_change_id IS NOT NULL;
-CREATE INDEX idx_balance_changes_is_reversed ON balance_changes(is_reversed) WHERE is_reversed = TRUE;
 CREATE UNIQUE INDEX idx_outputs_output_hash_active ON outputs(output_hash) WHERE deleted_at IS NULL;
 CREATE INDEX idx_outputs_account_mined_height_active ON outputs(account_id, mined_in_block_height) WHERE deleted_at IS NULL;
 CREATE INDEX idx_outputs_status_active ON outputs(status) WHERE deleted_at IS NULL;
@@ -158,3 +153,19 @@ CREATE INDEX idx_displayed_transactions_block_height ON displayed_transactions(b
 CREATE INDEX idx_displayed_transactions_account_status ON displayed_transactions(account_id, status);
 CREATE INDEX idx_displayed_transactions_account_height ON displayed_transactions(account_id, block_height DESC);
 CREATE INDEX idx_displayed_transactions_payref ON displayed_transactions(payref);
+CREATE INDEX idx_balance_changes_reversal_of ON balance_changes(reversal_of_balance_change_id) WHERE reversal_of_balance_change_id IS NOT NULL;
+CREATE INDEX idx_balance_changes_is_reversed ON balance_changes(is_reversed) WHERE is_reversed = TRUE;
+CREATE TABLE webhook_queue (
+    id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
+    event_id INTEGER, -- Optional reference to the main events table for traceability
+    event_type TEXT NOT NULL,
+    payload TEXT NOT NULL, -- The JSON body of the webhook
+    target_url TEXT NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending', -- pending, success, failed, permanent_failure
+    attempt_count INTEGER NOT NULL DEFAULT 0,
+    next_retry_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    last_error TEXT,
+    FOREIGN KEY (event_id) REFERENCES events(id) ON DELETE SET NULL
+);
+CREATE INDEX idx_webhook_queue_pending ON webhook_queue(status, next_retry_at);

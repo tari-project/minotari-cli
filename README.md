@@ -16,6 +16,7 @@ transactions without requiring a full node.
 - **SQLite Database**: All wallet data stored in a local SQLite database with migrations
 - **Memo Support**: Parse and display payment memos attached to transactions
 - **Multi-Account**: Support for multiple wallet accounts in a single database
+- **Webhooks**: Real-time HTTP notifications for wallet events (outputs, confirmations, etc.)
 
 ## Build
 

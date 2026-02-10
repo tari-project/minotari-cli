@@ -76,6 +76,7 @@ use crate::db::{
 use crate::http::WalletHttpClient;
 use crate::models::{WalletEvent, WalletEventType};
 use crate::transactions::{DisplayedTransaction, TransactionDisplayStatus};
+use crate::webhooks::{WebhookTriggerConfig, utils::trigger_webhook_with_balance};
 use tari_transaction_components::transaction_components::Transaction;
 use tari_utilities::ByteArray;
 
@@ -286,6 +287,7 @@ impl PendingTransactionsByStatus {
 pub struct TransactionMonitor {
     state: MonitoringState,
     required_confirmations: u64,
+    webhook_config: Option<WebhookTriggerConfig>,
 }
 
 impl TransactionMonitor {
@@ -294,15 +296,28 @@ impl TransactionMonitor {
     /// # Arguments
     ///
     /// * `state` - Shared monitoring state for tracking pending transactions
-    pub fn new(state: MonitoringState, required_confirmations: u64) -> Self {
+    pub fn new(
+        state: MonitoringState,
+        required_confirmations: u64,
+        webhook_config: Option<WebhookTriggerConfig>,
+    ) -> Self {
         Self {
             state,
             required_confirmations,
+            webhook_config,
         }
     }
 
     fn get_connection(pool: &SqlitePool) -> Result<PooledConnection<SqliteConnectionManager>, anyhow::Error> {
         pool.get().map_err(|e| anyhow!("Failed to get DB connection: {}", e))
+    }
+
+    fn persist_event(&self, conn: &Connection, account_id: i64, event: &WalletEvent) -> Result<()> {
+        let event_id = db::insert_wallet_event(conn, account_id, event)?;
+        if let Some(config) = &self.webhook_config {
+            trigger_webhook_with_balance(conn, account_id, event_id, event, config)?;
+        }
+        Ok(())
     }
 
     /// Returns whether there are pending outbound transactions to monitor.
@@ -490,11 +505,13 @@ impl TransactionMonitor {
         let mut result = MonitoringResult::default();
 
         result.extend(
-            Self::rebroadcast_completed_transactions(wallet_client, db_pool, account_id, by_status.completed).await?,
+            self.rebroadcast_completed_transactions(wallet_client, db_pool, account_id, by_status.completed)
+                .await?,
         );
 
-        let broadcast_events =
-            Self::check_broadcast_for_mining(wallet_client, db_pool, account_id, by_status.broadcast).await?;
+        let broadcast_events = self
+            .check_broadcast_for_mining(wallet_client, db_pool, account_id, by_status.broadcast)
+            .await?;
         result.wallet_events.extend(broadcast_events);
 
         let confirmation_events =
@@ -505,6 +522,7 @@ impl TransactionMonitor {
     }
 
     async fn rebroadcast_completed_transactions(
+        &self,
         wallet_client: &WalletHttpClient,
         db_pool: &SqlitePool,
         account_id: i64,
@@ -528,12 +546,14 @@ impl TransactionMonitor {
                     result.updated_displayed_transactions.push(rejected_displayed_tx);
                 }
 
-                result.wallet_events.push(WalletEvent {
+                let event = WalletEvent {
                     id: 0,
                     account_id,
                     event_type: WalletEventType::TransactionRejected { tx_id: tx.id, reason },
                     description: format!("Transaction {} exceeded broadcast attempts", tx.id),
-                });
+                };
+                self.persist_event(&conn, account_id, &event)?;
+                result.wallet_events.push(event);
                 continue;
             }
 
@@ -546,7 +566,7 @@ impl TransactionMonitor {
                     );
                     mark_completed_transaction_as_broadcasted(&conn, tx.id, tx.broadcast_attempts + 1)?;
 
-                    result.wallet_events.push(WalletEvent {
+                    let event = WalletEvent {
                         id: 0,
                         account_id,
                         event_type: WalletEventType::TransactionBroadcast {
@@ -554,7 +574,9 @@ impl TransactionMonitor {
                             kernel_excess: tx.kernel_excess.clone(),
                         },
                         description: format!("Transaction {} broadcast", tx.id),
-                    });
+                    };
+                    self.persist_event(&conn, account_id, &event)?;
+                    result.wallet_events.push(event);
                 },
                 Err(reason) => {
                     warn!(
@@ -570,12 +592,14 @@ impl TransactionMonitor {
                         result.updated_displayed_transactions.push(rejected_displayed_tx);
                     }
 
-                    result.wallet_events.push(WalletEvent {
+                    let event = WalletEvent {
                         id: 0,
                         account_id,
                         event_type: WalletEventType::TransactionRejected { tx_id: tx.id, reason },
                         description: format!("Transaction {} rejected", tx.id),
-                    });
+                    };
+                    self.persist_event(&conn, account_id, &event)?;
+                    result.wallet_events.push(event);
                 },
             }
         }
@@ -584,6 +608,7 @@ impl TransactionMonitor {
     }
 
     async fn check_broadcast_for_mining(
+        &self,
         wallet_client: &WalletHttpClient,
         db_pool: &SqlitePool,
         account_id: i64,
@@ -602,7 +627,7 @@ impl TransactionMonitor {
                 let conn = Self::get_connection(db_pool)?;
                 mark_completed_transaction_as_mined_unconfirmed(&conn, tx.id, block_height as i64, &block_hash)?;
 
-                events.push(WalletEvent {
+                let event = WalletEvent {
                     id: 0,
                     account_id,
                     event_type: WalletEventType::TransactionUnconfirmed {
@@ -611,7 +636,9 @@ impl TransactionMonitor {
                         confirmations: 0,
                     },
                     description: format!("Transaction {} mined at height {}", tx.id, block_height),
-                });
+                };
+                self.persist_event(&conn, account_id, &event)?;
+                events.push(event);
             }
         }
 
@@ -658,7 +685,7 @@ impl TransactionMonitor {
                 let conn = Self::get_connection(db_pool)?;
                 mark_completed_transaction_as_confirmed(&conn, tx.id, current_height as i64, payref)?;
 
-                events.push(WalletEvent {
+                let event = WalletEvent {
                     id: 0,
                     account_id,
                     event_type: WalletEventType::TransactionConfirmed {
@@ -667,7 +694,9 @@ impl TransactionMonitor {
                         confirmation_height: current_height,
                     },
                     description: format!("Transaction {} confirmed", tx.id),
-                });
+                };
+                self.persist_event(&conn, account_id, &event)?;
+                events.push(event);
             }
         }
 
