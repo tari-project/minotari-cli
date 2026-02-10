@@ -66,7 +66,7 @@ impl DisplayedTransactionBuilder {
         self.total_credit = credit;
         self.total_debit = debit;
         if debit > 0.into() {
-            self.amount = Some(debit);
+            self.amount = Some(debit.saturating_sub(credit));
             self.direction = Some(TransactionDirection::Outgoing);
         } else {
             self.amount = Some(credit);
