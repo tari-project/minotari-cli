@@ -78,7 +78,7 @@ CREATE TABLE balance_changes (
     memo_hex TEXT,
     claimed_fee INTEGER,
     claimed_amount INTEGER,
-    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP, is_reversal BOOLEAN NOT NULL DEFAULT FALSE, reversal_of_balance_change_id INTEGER REFERENCES balance_changes(id), is_reversed BOOLEAN NOT NULL DEFAULT FALSE,
     FOREIGN KEY (account_id) REFERENCES accounts(id),
     FOREIGN KEY (caused_by_output_id) REFERENCES outputs(id),
     FOREIGN KEY (caused_by_input_id) REFERENCES inputs(id)
@@ -153,6 +153,8 @@ CREATE INDEX idx_displayed_transactions_block_height ON displayed_transactions(b
 CREATE INDEX idx_displayed_transactions_account_status ON displayed_transactions(account_id, status);
 CREATE INDEX idx_displayed_transactions_account_height ON displayed_transactions(account_id, block_height DESC);
 CREATE INDEX idx_displayed_transactions_payref ON displayed_transactions(payref);
+CREATE INDEX idx_balance_changes_reversal_of ON balance_changes(reversal_of_balance_change_id) WHERE reversal_of_balance_change_id IS NOT NULL;
+CREATE INDEX idx_balance_changes_is_reversed ON balance_changes(is_reversed) WHERE is_reversed = TRUE;
 CREATE TABLE webhook_queue (
     id INTEGER NOT NULL PRIMARY KEY AUTOINCREMENT,
     event_id INTEGER, -- Optional reference to the main events table for traceability
