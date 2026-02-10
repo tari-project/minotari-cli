@@ -43,7 +43,6 @@ use crate::http::JsonRpcResponse;
 use crate::http::utils::check_transaction_size;
 
 use super::http_client::HttpClient;
-// use super::types::JsonRpcResponse;
 
 /// HTTP client for wallet operations against a Tari base node.
 ///
