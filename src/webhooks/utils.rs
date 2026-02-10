@@ -28,9 +28,9 @@ pub fn trigger_webhook_with_balance(
     let balance = db::get_balance(conn, account_id)?;
 
     let snapshot = WebhookBalanceSnapshot {
-        available: balance.available,
-        pending_incoming: balance.unconfirmed,
-        pending_outgoing: balance.locked,
+        available: balance.available.0,
+        pending_incoming: balance.unconfirmed.0,
+        pending_outgoing: balance.locked.0,
     };
 
     let payload = WebhookPayload {
