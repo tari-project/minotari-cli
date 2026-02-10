@@ -684,7 +684,7 @@ impl TransactionSender {
 
         // Build and save DisplayedTransaction for immediate UI display
         let displayed_transaction =
-            self.build_pending_displayed_transaction(processed_transaction, signed_transaction, actual_fee)?;
+            self.build_pending_displayed_transaction(processed_transaction, &signed_transaction, actual_fee)?;
 
         db::insert_displayed_transaction(&connection, &displayed_transaction)?;
 
@@ -698,7 +698,7 @@ impl TransactionSender {
     fn build_pending_displayed_transaction(
         &self,
         processed_tx: &ProcessedTransaction,
-        signed_transaction: SignedTransaction,
+        signed_transaction: &SignedTransaction,
         fee: MicroMinotari,
     ) -> Result<DisplayedTransaction, anyhow::Error> {
         let recipient = &processed_tx.recipient;
@@ -731,7 +731,7 @@ impl TransactionSender {
                 is_change: false,
             });
         }
-        if let Some(change) = signed_transaction.change_output {
+        if let Some(change) = &signed_transaction.change_output {
             outputs.push(TransactionOutput {
                 hash: change.output_hash(),
                 amount: change.value(),
