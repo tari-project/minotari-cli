@@ -66,13 +66,14 @@ use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::Connection;
 use tari_common_types::payment_reference::generate_payment_reference;
 use tari_common_types::types::FixedHash;
+use tari_transaction_components::rpc::models::{TxLocation, TxSubmissionRejectionReason};
 
 use crate::db::{
     self, CompletedTransaction, CompletedTransactionStatus, SqlitePool, get_pending_completed_transactions,
     mark_completed_transaction_as_broadcasted, mark_completed_transaction_as_confirmed,
     mark_completed_transaction_as_mined_unconfirmed, mark_completed_transaction_as_rejected,
 };
-use crate::http::{TxLocation, TxSubmissionRejectionReason, WalletHttpClient};
+use crate::http::WalletHttpClient;
 use crate::models::{WalletEvent, WalletEventType};
 use crate::transactions::{DisplayedTransaction, TransactionDisplayStatus};
 use tari_transaction_components::transaction_components::Transaction;

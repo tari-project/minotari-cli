@@ -62,6 +62,7 @@ use r2d2_sqlite::SqliteConnectionManager;
 use tari_common::configuration::Network;
 use tari_common_types::types::FixedHash;
 use tari_common_types::{tari_address::TariAddressFeatures, transaction::TxId};
+use tari_transaction_components::rpc::models::TxSubmissionRejectionReason;
 use tari_transaction_components::{
     MicroMinotari, TransactionBuilder,
     consensus::ConsensusConstantsBuilder,
@@ -78,7 +79,7 @@ use tari_utilities::ByteArray;
 use crate::db::DbWalletOutput;
 use crate::{
     db::{self, AccountRow, SqlitePool},
-    http::{TxSubmissionRejectionReason, WalletHttpClient},
+    http::WalletHttpClient,
     log::mask_amount,
     models::PendingTransactionStatus,
     transactions::{

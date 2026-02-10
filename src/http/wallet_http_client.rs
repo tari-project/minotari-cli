@@ -34,14 +34,16 @@ use std::time::Duration;
 
 use log::{debug, info, warn};
 use reqwest::Method;
+use tari_transaction_components::rpc::models::{TipInfoResponse, TxQueryResponse, TxSubmissionResponse};
 use tari_transaction_components::transaction_components::Transaction;
 use tari_utilities::hex::to_hex;
 use url::Url;
 
+use crate::http::JsonRpcResponse;
 use crate::http::utils::check_transaction_size;
 
 use super::http_client::HttpClient;
-use super::types::{JsonRpcResponse, TipInfoResponse, TxQueryResponse, TxSubmissionResponse};
+// use super::types::JsonRpcResponse;
 
 /// HTTP client for wallet operations against a Tari base node.
 ///
