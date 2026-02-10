@@ -131,6 +131,21 @@ impl MinotariWorld {
         self.temp_dir = None;
     }
 
+    /// Parse the balance amount from the last command output
+    pub fn parse_balance_from_output(&self) -> Option<u64> {
+        let output = self.last_command_output.as_ref()?;
+        
+        // Look for pattern like "1,000,000 microTari" or "0 microTari"
+        // Balance format: "Balance at height X(date): Y microTari (A.B Tari)"
+        let re = regex::Regex::new(r":\s*([\d,]+)\s+microTari").ok()?;
+        let captures = re.captures(output)?;
+        let balance_str = captures.get(1)?.as_str();
+        
+        // Remove commas and parse
+        let balance_str = balance_str.replace(',', "");
+        balance_str.parse::<u64>().ok()
+    }
+
     pub fn get_base_node_url(&self) -> String {
         // Get the first base node's HTTP URL if available
         if let Some((_, node)) = self.base_nodes.iter().next() {

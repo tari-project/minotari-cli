@@ -13,6 +13,7 @@ Feature: End-to-End Wallet Testing
     And the scanned tip should be updated
     When I check the balance for account "default"
     Then I should see the balance information
+    And the balance should be at least 10000000 microTari
 
   Scenario: Multi-block mining with incremental scanning
     Given I have a seed node MinerNode

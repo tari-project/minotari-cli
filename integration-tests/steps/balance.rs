@@ -86,9 +86,36 @@ async fn see_all_balances(world: &mut MinotariWorld) {
 
 #[then("the balance should be zero")]
 async fn balance_is_zero(world: &mut MinotariWorld) {
-    let output = world.last_command_output.as_ref().expect("No command output");
+    let balance = world.parse_balance_from_output().expect("Could not parse balance");
+    assert_eq!(balance, 0, "Expected zero balance, got {}", balance);
+}
+
+#[then(regex = r"^the balance should be (\d+) microTari$")]
+async fn balance_should_be_exact(world: &mut MinotariWorld, expected: u64) {
+    let balance = world.parse_balance_from_output().expect("Could not parse balance");
+    assert_eq!(
+        balance, expected,
+        "Expected balance {} microTari, got {}",
+        expected, balance
+    );
+}
+
+#[then(regex = r"^the balance should be at least (\d+) microTari$")]
+async fn balance_should_be_at_least(world: &mut MinotariWorld, minimum: u64) {
+    let balance = world.parse_balance_from_output().expect("Could not parse balance");
     assert!(
-        output.contains("0") || output.contains("zero") || !output.is_empty(),
-        "Expected zero balance"
+        balance >= minimum,
+        "Expected balance at least {} microTari, got {}",
+        minimum, balance
+    );
+}
+
+#[then(regex = r"^the balance should contain (\d+) microTari$")]
+async fn balance_should_contain(world: &mut MinotariWorld, expected: u64) {
+    let balance = world.parse_balance_from_output().expect("Could not parse balance");
+    assert!(
+        balance >= expected,
+        "Expected balance to contain at least {} microTari, got {}",
+        expected, balance
     );
 }
