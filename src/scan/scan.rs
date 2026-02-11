@@ -834,7 +834,7 @@ impl Scanner {
             database_file,
             account_name: None,
             batch_size,
-            processing_threads: 8,
+            processing_threads: 0, // This will pick optimal thread count based on CPU count on the machine
             scanning_offset: DEFAULT_SCANNING_OFFSET_DAYS,
             reorg_check_interval: 1000,
             mode: ScanMode::Full,

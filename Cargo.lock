@@ -1710,7 +1710,7 @@ dependencies = [
 [[package]]
 name = "lightweight_wallet_libs"
 version = "0.2.0"
-source = "git+https://github.com/tari-project/tari-wallet?rev=60ece73ca9ba08dfa747eb3d968fb4a95c55f126#60ece73ca9ba08dfa747eb3d968fb4a95c55f126"
+source = "git+https://github.com/tari-project/tari-wallet?rev=a43164233665486d604f51996db6f892dc7a6e2e#a43164233665486d604f51996db6f892dc7a6e2e"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1718,6 +1718,7 @@ dependencies = [
  "getrandom 0.2.16",
  "js-sys",
  "minotari_app_grpc",
+ "num_cpus",
  "primitive-types",
  "rayon",
  "reqwest",
@@ -1732,6 +1733,7 @@ dependencies = [
  "tari_transaction_components",
  "tari_utilities",
  "thiserror 1.0.69",
+ "tokio",
  "tonic",
  "tracing",
  "tracing-subscriber",
@@ -1910,8 +1912,8 @@ dependencies = [
 
 [[package]]
 name = "minotari_app_grpc"
-version = "5.2.1-pre.2"
-source = "git+https://github.com/tari-project/tari/?rev=766f80ccc20596413ee208311750c11e02a2841d#766f80ccc20596413ee208311750c11e02a2841d"
+version = "5.3.0-pre.0"
+source = "git+https://github.com/tari-project/tari/?rev=32df87fab620ae2ccd34d37aac9a7670351932d0#32df87fab620ae2ccd34d37aac9a7670351932d0"
 dependencies = [
  "argon2 0.4.1",
  "base64 0.22.1",
@@ -1939,8 +1941,8 @@ dependencies = [
 
 [[package]]
 name = "minotari_ledger_wallet_common"
-version = "5.2.1-pre.2"
-source = "git+https://github.com/tari-project/tari/?rev=766f80ccc20596413ee208311750c11e02a2841d#766f80ccc20596413ee208311750c11e02a2841d"
+version = "5.3.0-pre.0"
+source = "git+https://github.com/tari-project/tari/?rev=32df87fab620ae2ccd34d37aac9a7670351932d0#32df87fab620ae2ccd34d37aac9a7670351932d0"
 dependencies = [
  "bs58 0.5.1",
  "serde",
@@ -3498,8 +3500,8 @@ dependencies = [
 
 [[package]]
 name = "tari_common"
-version = "5.2.1-pre.2"
-source = "git+https://github.com/tari-project/tari/?rev=766f80ccc20596413ee208311750c11e02a2841d#766f80ccc20596413ee208311750c11e02a2841d"
+version = "5.3.0-pre.0"
+source = "git+https://github.com/tari-project/tari/?rev=32df87fab620ae2ccd34d37aac9a7670351932d0#32df87fab620ae2ccd34d37aac9a7670351932d0"
 dependencies = [
  "anyhow",
  "cargo_toml",
@@ -3521,8 +3523,8 @@ dependencies = [
 
 [[package]]
 name = "tari_common_types"
-version = "5.2.1-pre.2"
-source = "git+https://github.com/tari-project/tari/?rev=766f80ccc20596413ee208311750c11e02a2841d#766f80ccc20596413ee208311750c11e02a2841d"
+version = "5.3.0-pre.0"
+source = "git+https://github.com/tari-project/tari/?rev=32df87fab620ae2ccd34d37aac9a7670351932d0#32df87fab620ae2ccd34d37aac9a7670351932d0"
 dependencies = [
  "argon2 0.4.1",
  "base64 0.22.1",
@@ -3580,13 +3582,13 @@ dependencies = [
 
 [[package]]
 name = "tari_features"
-version = "5.2.1-pre.2"
-source = "git+https://github.com/tari-project/tari/?rev=766f80ccc20596413ee208311750c11e02a2841d#766f80ccc20596413ee208311750c11e02a2841d"
+version = "5.3.0-pre.0"
+source = "git+https://github.com/tari-project/tari/?rev=32df87fab620ae2ccd34d37aac9a7670351932d0#32df87fab620ae2ccd34d37aac9a7670351932d0"
 
 [[package]]
 name = "tari_hashing"
-version = "5.2.1-pre.2"
-source = "git+https://github.com/tari-project/tari/?rev=766f80ccc20596413ee208311750c11e02a2841d#766f80ccc20596413ee208311750c11e02a2841d"
+version = "5.3.0-pre.0"
+source = "git+https://github.com/tari-project/tari/?rev=32df87fab620ae2ccd34d37aac9a7670351932d0#32df87fab620ae2ccd34d37aac9a7670351932d0"
 dependencies = [
  "blake2",
  "borsh",
@@ -3596,8 +3598,8 @@ dependencies = [
 
 [[package]]
 name = "tari_jellyfish"
-version = "5.2.1-pre.2"
-source = "git+https://github.com/tari-project/tari/?rev=766f80ccc20596413ee208311750c11e02a2841d#766f80ccc20596413ee208311750c11e02a2841d"
+version = "5.3.0-pre.0"
+source = "git+https://github.com/tari-project/tari/?rev=32df87fab620ae2ccd34d37aac9a7670351932d0#32df87fab620ae2ccd34d37aac9a7670351932d0"
 dependencies = [
  "borsh",
  "digest",
@@ -3610,8 +3612,8 @@ dependencies = [
 
 [[package]]
 name = "tari_max_size"
-version = "5.2.1-pre.2"
-source = "git+https://github.com/tari-project/tari/?rev=766f80ccc20596413ee208311750c11e02a2841d#766f80ccc20596413ee208311750c11e02a2841d"
+version = "5.3.0-pre.0"
+source = "git+https://github.com/tari-project/tari/?rev=32df87fab620ae2ccd34d37aac9a7670351932d0#32df87fab620ae2ccd34d37aac9a7670351932d0"
 dependencies = [
  "borsh",
  "serde",
@@ -3621,8 +3623,8 @@ dependencies = [
 
 [[package]]
 name = "tari_node_components"
-version = "5.2.1-pre.2"
-source = "git+https://github.com/tari-project/tari/?rev=766f80ccc20596413ee208311750c11e02a2841d#766f80ccc20596413ee208311750c11e02a2841d"
+version = "5.3.0-pre.0"
+source = "git+https://github.com/tari-project/tari/?rev=32df87fab620ae2ccd34d37aac9a7670351932d0#32df87fab620ae2ccd34d37aac9a7670351932d0"
 dependencies = [
  "blake2",
  "borsh",
@@ -3640,8 +3642,8 @@ dependencies = [
 
 [[package]]
 name = "tari_script"
-version = "5.2.1-pre.2"
-source = "git+https://github.com/tari-project/tari/?rev=766f80ccc20596413ee208311750c11e02a2841d#766f80ccc20596413ee208311750c11e02a2841d"
+version = "5.3.0-pre.0"
+source = "git+https://github.com/tari-project/tari/?rev=32df87fab620ae2ccd34d37aac9a7670351932d0#32df87fab620ae2ccd34d37aac9a7670351932d0"
 dependencies = [
  "blake2",
  "borsh",
@@ -3658,8 +3660,8 @@ dependencies = [
 
 [[package]]
 name = "tari_sidechain"
-version = "5.2.1-pre.2"
-source = "git+https://github.com/tari-project/tari/?rev=766f80ccc20596413ee208311750c11e02a2841d#766f80ccc20596413ee208311750c11e02a2841d"
+version = "5.3.0-pre.0"
+source = "git+https://github.com/tari-project/tari/?rev=32df87fab620ae2ccd34d37aac9a7670351932d0#32df87fab620ae2ccd34d37aac9a7670351932d0"
 dependencies = [
  "borsh",
  "hex",
@@ -3675,8 +3677,8 @@ dependencies = [
 
 [[package]]
 name = "tari_transaction_components"
-version = "5.2.1-pre.2"
-source = "git+https://github.com/tari-project/tari/?rev=766f80ccc20596413ee208311750c11e02a2841d#766f80ccc20596413ee208311750c11e02a2841d"
+version = "5.3.0-pre.0"
+source = "git+https://github.com/tari-project/tari/?rev=32df87fab620ae2ccd34d37aac9a7670351932d0#32df87fab620ae2ccd34d37aac9a7670351932d0"
 dependencies = [
  "anyhow",
  "base64 0.22.1",
