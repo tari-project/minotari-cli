@@ -115,6 +115,7 @@ impl DisplayedTransactionProcessor {
         //Now we have a list of inputs and outputs that don't have matching transactions
         let mut new_transactions = Vec::new();
         while let Some((balance_change, output)) = new_credit.pop() {
+            let (initial_status, initial_confirmations) = self.calculate_status_and_confirmations(output.height);
             //lets do coinbases first, they are easy to identify as they have no matching inputs.
             if output.output.is_coinbase() {
                 //create new display transaction for this coinbase output
@@ -126,14 +127,14 @@ impl DisplayedTransactionProcessor {
                 let display_tx = DisplayedTransactionBuilder::new()
                     .account_id(accumulator.account_id as Id)
                     .source(TransactionSource::Coinbase)
-                    .status(TransactionDisplayStatus::Pending)
+                    .status(initial_status)
                     .credits_and_debits(balance_change.balance_credit, 0.into())
                     .counterparty(None)
                     .blockchain_info(
                         accumulator.height,
                         output.mined_in_block_hash,
                         balance_change.effective_date,
-                        0,
+                        initial_confirmations,
                     )
                     .fee(None)
                     .inputs(vec![])
@@ -197,7 +198,7 @@ impl DisplayedTransactionProcessor {
             let display_tx = DisplayedTransactionBuilder::new()
                 .account_id(accumulator.account_id as Id)
                 .source(TransactionSource::Transfer)
-                .status(TransactionDisplayStatus::Pending)
+                .status(initial_status)
                 .credits_and_debits(balance_change.balance_credit, debit_value)
                 .counterparty(other_party)
                 .blockchain_info(
@@ -224,17 +225,19 @@ impl DisplayedTransactionProcessor {
             new_transactions.push(display_tx);
         }
         while let Some((balance_change, input)) = new_debit.pop() {
+            let (initial_status, initial_confirmations) =
+                self.calculate_status_and_confirmations(input.mined_in_block_height);
             // these are unpaired inputs, so they must be outgoing transactions that don't have a change output
             let display_tx = DisplayedTransactionBuilder::new()
                 .account_id(accumulator.account_id as Id)
                 .source(TransactionSource::Transfer)
-                .status(TransactionDisplayStatus::Pending)
+                .status(initial_status)
                 .credits_and_debits(0.into(), balance_change.balance_debit)
                 .blockchain_info(
                     accumulator.height,
                     input.mined_in_block,
                     balance_change.effective_date,
-                    0,
+                    initial_confirmations,
                 )
                 .inputs(vec![TransactionInput {
                     output_hash: input.output.output_hash(),
@@ -368,6 +371,16 @@ impl DisplayedTransactionProcessor {
             new_transactions.append(&mut new_tx);
         }
         Ok((updated_transactions, new_transactions))
+    }
+
+    fn calculate_status_and_confirmations(&self, mined_height: u64) -> (TransactionDisplayStatus, u64) {
+        let confirmations = self.current_tip_height.saturating_sub(mined_height);
+        let status = if confirmations >= self.req_confirmations {
+            TransactionDisplayStatus::Confirmed
+        } else {
+            TransactionDisplayStatus::Unconfirmed
+        };
+        (status, confirmations)
     }
 }
 

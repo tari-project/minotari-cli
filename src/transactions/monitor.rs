@@ -435,12 +435,7 @@ impl TransactionMonitor {
         account_id: i64,
         current_chain_height: u64,
     ) -> Result<Vec<DisplayedTransaction>> {
-        let transactions_needing_update = db::get_displayed_transactions_needing_confirmation_update(
-            conn,
-            account_id,
-            current_chain_height,
-            self.required_confirmations,
-        )?;
+        let transactions_needing_update = db::get_displayed_transactions_needing_confirmation_update(conn, account_id)?;
 
         if transactions_needing_update.is_empty() {
             return Ok(Vec::new());
