@@ -20,6 +20,7 @@ use crate::{
     http::WalletHttpClient,
     models::WalletEvent,
     scan::{
+        DisplayedTransactionsEvent,
         block_processor::BlockProcessorError,
         events::{
             ChannelEventSender, EventSender, NoopEventSender, PauseReason, ProcessingEvent, ReorgDetectedEvent,
@@ -623,7 +624,14 @@ async fn run_scan_loop<E: EventSender + Clone + Send + 'static>(
             if !monitor_result.updated_displayed_transactions.is_empty() {
                 event_sender.send(ProcessingEvent::TransactionsUpdated(TransactionsUpdatedEvent {
                     account_id: scanner_context.account_id,
-                    updated_transactions: monitor_result.updated_displayed_transactions,
+                    updated_transactions: monitor_result.updated_displayed_transactions.clone(),
+                }));
+
+                event_sender.send(ProcessingEvent::TransactionsReady(DisplayedTransactionsEvent {
+                    account_id: scanner_context.account_id,
+                    transactions: monitor_result.updated_displayed_transactions,
+                    block_height: Some(last_scanned_height),
+                    is_initial_sync: false,
                 }));
             }
         }
