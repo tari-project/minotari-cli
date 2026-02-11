@@ -115,7 +115,7 @@ impl DisplayedTransactionProcessor {
         //Now we have a list of inputs and outputs that don't have matching transactions
         let mut new_transactions = Vec::new();
         while let Some((balance_change, output)) = new_credit.pop() {
-            let initial_status = self.calculate_status(output.height);
+            let (initial_status, initial_confirmations) = self.calculate_status_and_confirmations(output.height);
             //lets do coinbases first, they are easy to identify as they have no matching inputs.
             if output.output.is_coinbase() {
                 //create new display transaction for this coinbase output
@@ -134,7 +134,7 @@ impl DisplayedTransactionProcessor {
                         accumulator.height,
                         output.mined_in_block_hash,
                         balance_change.effective_date,
-                        0,
+                        initial_confirmations,
                     )
                     .fee(None)
                     .inputs(vec![])
@@ -225,7 +225,8 @@ impl DisplayedTransactionProcessor {
             new_transactions.push(display_tx);
         }
         while let Some((balance_change, input)) = new_debit.pop() {
-            let initial_status = self.calculate_status(input.mined_in_block_height);
+            let (initial_status, initial_confirmations) =
+                self.calculate_status_and_confirmations(input.mined_in_block_height);
             // these are unpaired inputs, so they must be outgoing transactions that don't have a change output
             let display_tx = DisplayedTransactionBuilder::new()
                 .account_id(accumulator.account_id as Id)
@@ -236,7 +237,7 @@ impl DisplayedTransactionProcessor {
                     accumulator.height,
                     input.mined_in_block,
                     balance_change.effective_date,
-                    0,
+                    initial_confirmations,
                 )
                 .inputs(vec![TransactionInput {
                     output_hash: input.output.output_hash(),
@@ -372,13 +373,14 @@ impl DisplayedTransactionProcessor {
         Ok((updated_transactions, new_transactions))
     }
 
-    fn calculate_status(&self, mined_height: u64) -> TransactionDisplayStatus {
+    fn calculate_status_and_confirmations(&self, mined_height: u64) -> (TransactionDisplayStatus, u64) {
         let confirmations = self.current_tip_height.saturating_sub(mined_height);
-        if confirmations >= self.req_confirmations {
+        let status = if confirmations >= self.req_confirmations {
             TransactionDisplayStatus::Confirmed
         } else {
             TransactionDisplayStatus::Unconfirmed
-        }
+        };
+        (status, confirmations)
     }
 }
 
