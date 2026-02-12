@@ -1,12 +1,13 @@
 use crate::{
     ScanError, WalletEvent,
     db::{SqlitePool, WalletDbError, prune_scanned_tip_blocks},
-    scan::{BlockProcessor, EventSender},
+    scan::{EventSender, block_processor::BlockProcessor},
     webhooks::WebhookTriggerConfig,
 };
 use log::{debug, error};
 use r2d2::PooledConnection;
 use r2d2_sqlite::SqliteConnectionManager;
+use rusqlite::TransactionBehavior;
 use tari_common_types::types::PrivateKey;
 
 #[derive(Clone)]
@@ -61,9 +62,10 @@ impl ScanDbHandler {
             let mut conn = pool.get().map_err(WalletDbError::from)?;
             let mut events = Vec::new();
 
+            let tx = conn
+                .transaction_with_behavior(TransactionBehavior::Immediate)
+                .map_err(WalletDbError::from)?;
             for block in blocks {
-                let tx = conn.transaction().map_err(WalletDbError::from)?;
-
                 let mut processor = BlockProcessor::with_event_sender(
                     account_id,
                     view_key.clone(),
@@ -78,9 +80,9 @@ impl ScanDbHandler {
                     .map_err(|e| WalletDbError::Unexpected(e.to_string()))?;
 
                 events.extend(processor.into_wallet_events());
-
-                tx.commit().map_err(WalletDbError::from)?;
             }
+            tx.commit().map_err(WalletDbError::from)?;
+
             Ok::<Vec<WalletEvent>, WalletDbError>(events)
         })
         .await
