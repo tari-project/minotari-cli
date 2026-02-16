@@ -61,6 +61,7 @@ pub use error::{WalletDbError, WalletDbResult};
 mod accounts;
 pub use accounts::{
     AccountBalance, AccountRow, create_account, delete_account, get_account_by_name, get_accounts, get_balance,
+    update_account_name,
 };
 
 mod scanned_tip_blocks;

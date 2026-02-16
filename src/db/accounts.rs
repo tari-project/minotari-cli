@@ -370,3 +370,37 @@ pub fn delete_account(conn: &Connection, friendly_name: &str) -> WalletDbResult<
 
     Ok(())
 }
+
+pub fn update_account_name(conn: &Connection, current_name: &str, new_name: &str) -> WalletDbResult<()> {
+    info!(
+        target: "audit",
+        current_name = current_name,
+        new_name = new_name;
+        "DB: Renaming account"
+    );
+
+    // Check if the new name is already taken
+    if get_account_by_name(conn, new_name)?.is_some() {
+        return Err(WalletDbError::InvalidInput(format!(
+            "An account with the name '{}' already exists",
+            new_name
+        )));
+    }
+
+    let affected_rows = conn.execute(
+        "UPDATE accounts SET friendly_name = :new_name WHERE friendly_name = :current_name",
+        named_params! {
+            ":new_name": new_name,
+            ":current_name": current_name,
+        },
+    )?;
+
+    if affected_rows == 0 {
+        return Err(WalletDbError::InvalidInput(format!(
+            "Account '{}' not found",
+            current_name
+        )));
+    }
+
+    Ok(())
+}
