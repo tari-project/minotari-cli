@@ -387,13 +387,22 @@ pub fn update_account_name(conn: &Connection, current_name: &str, new_name: &str
         )));
     }
 
-    let affected_rows = conn.execute(
+    let affected_rows = match conn.execute(
         "UPDATE accounts SET friendly_name = :new_name WHERE friendly_name = :current_name",
         named_params! {
             ":new_name": new_name,
             ":current_name": current_name,
         },
-    )?;
+    ) {
+        Ok(rows) => rows,
+        Err(rusqlite::Error::SqliteFailure(err, _)) if err.code == rusqlite::ErrorCode::ConstraintViolation => {
+            return Err(WalletDbError::InvalidInput(format!(
+                "An account with the name '{}' already exists",
+                new_name
+            )));
+        },
+        Err(e) => return Err(e.into()),
+    };
 
     if affected_rows == 0 {
         return Err(WalletDbError::InvalidInput(format!(
