@@ -1,7 +1,3 @@
-Here is the markdown documentation explaining the multi-wallet scanning architecture.
-
-***
-
 # Multi-Wallet Scanning Architecture
 
 ## Overview
