@@ -8,6 +8,7 @@ use log::{debug, error};
 use r2d2::PooledConnection;
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::TransactionBehavior;
+use std::sync::Arc;
 use tari_common_types::types::PrivateKey;
 
 #[derive(Clone)]
@@ -36,14 +37,17 @@ impl ScanDbHandler {
             .map_err(ScanError::DbError)
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub async fn process_blocks<E: EventSender + Clone + Send + 'static>(
         &self,
-        blocks: Vec<lightweight_wallet_libs::BlockScanResult>,
+        blocks: Arc<Vec<lightweight_wallet_libs::BlockScanResult>>,
         account_id: i64,
         view_key: PrivateKey,
         event_sender: E,
         has_pending_outbound: bool,
         webhook_config: Option<WebhookTriggerConfig>,
+        key_manager_idx: usize,
+        resume_height: u64,
     ) -> Result<Vec<WalletEvent>, ScanError> {
         if blocks.is_empty() {
             return Ok(Vec::new());
@@ -65,7 +69,12 @@ impl ScanDbHandler {
             let tx = conn
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(WalletDbError::from)?;
-            for block in blocks {
+
+            for block in blocks.iter() {
+                if block.height <= resume_height {
+                    continue;
+                }
+
                 let mut processor = BlockProcessor::with_event_sender(
                     account_id,
                     view_key.clone(),
@@ -76,7 +85,7 @@ impl ScanDbHandler {
                 processor.set_webhook_config(webhook_config.clone());
 
                 processor
-                    .process_block(&tx, &block)
+                    .process_block(&tx, block, Some(key_manager_idx))
                     .map_err(|e| WalletDbError::Unexpected(e.to_string()))?;
 
                 events.extend(processor.into_wallet_events());

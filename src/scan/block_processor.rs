@@ -185,11 +185,17 @@ impl<E: EventSender> BlockProcessor<E> {
     ///
     /// * `tx` - Database transaction for atomic operations
     /// * `block` - The scanned block result from the blockchain scanner
+    /// * `key_manager_idx` - Optional index to filter wallet outputs by (used when sharing block data)
     ///
     /// # Errors
     ///
     /// Returns [`BlockProcessorError`] if any database operation fails.
-    pub fn process_block(&mut self, tx: &Connection, block: &BlockScanResult) -> Result<(), BlockProcessorError> {
+    pub fn process_block(
+        &mut self,
+        tx: &Connection,
+        block: &BlockScanResult,
+        key_manager_idx: Option<usize>,
+    ) -> Result<(), BlockProcessorError> {
         self.current_tip_height = block.height;
 
         self.current_block = Some(BlockEventAccumulator::new(
@@ -198,7 +204,7 @@ impl<E: EventSender> BlockProcessor<E> {
             block.block_hash.to_vec(),
         ));
 
-        self.process_outputs(tx, block)?;
+        self.process_outputs(tx, block, key_manager_idx)?;
         self.process_inputs(tx, block)?;
         self.record_scanned_block(tx, block)?;
         self.process_confirmations(tx, block)?;
@@ -286,10 +292,21 @@ impl<E: EventSender> BlockProcessor<E> {
     /// - Creates a wallet event for detection
     /// - Records the balance change (credit)
     /// - Adds to the block accumulator for event emission
-    fn process_outputs(&mut self, tx: &Connection, block: &BlockScanResult) -> Result<(), BlockProcessorError> {
+    fn process_outputs(
+        &mut self,
+        tx: &Connection,
+        block: &BlockScanResult,
+        key_manager_idx: Option<usize>,
+    ) -> Result<(), BlockProcessorError> {
         let mut generated_events: Vec<(i64, WalletEvent)> = Vec::new();
 
-        for (hash, output, _wallet_id) in &block.wallet_outputs {
+        for (hash, output, wallet_idx) in &block.wallet_outputs {
+            if let Some(idx) = key_manager_idx
+                && *wallet_idx != idx
+            {
+                continue;
+            }
+
             let memo = MemoInfo::from_output(output);
 
             info!(

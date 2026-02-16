@@ -1,4 +1,6 @@
-use lightweight_wallet_libs::{BlockScanResult, HttpBlockchainScanner, ScanConfig, scanning::BlockchainScanner};
+use std::sync::Arc;
+
+use lightweight_wallet_libs::{HttpBlockchainScanner, ScanConfig, scanning::BlockchainScanner};
 use log::{info, warn};
 use tari_common_types::{seeds::cipher_seed::BIRTHDAY_GENESIS_FROM_UNIX_EPOCH, types::PrivateKey};
 use tari_transaction_components::key_manager::KeyManager;
@@ -87,19 +89,29 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
         scanning_offset: u64,
         cancel_token: Option<CancellationToken>,
     ) -> Result<(Vec<WalletEvent>, bool), ScanError> {
-        let mut conn = self.pool.get().map_err(|e| ScanError::DbError(e.into()))?;
-
-        // Check reorgs for every account and find resume heights
-        let mut sync_targets = Vec::new();
-        for account in accounts {
-            let target = self
-                .prepare_target(account, password, &self.client, scanning_offset, &mut conn)
-                .await?;
-            sync_targets.push(target);
+        if accounts.is_empty() {
+            return Ok((Vec::new(), false));
         }
 
-        if sync_targets.is_empty() {
-            return Ok((Vec::new(), false));
+        let mut conn = self.pool.get().map_err(|e| ScanError::DbError(e.into()))?;
+
+        let first_km = accounts[0].get_key_manager(password)?;
+        let mut shared_reorg_scanner = self.create_reorg_scanner(first_km).await?;
+
+        let mut sync_targets = Vec::with_capacity(accounts.len());
+
+        for account in accounts {
+            let target = self
+                .prepare_target(
+                    account,
+                    password,
+                    &self.client,
+                    scanning_offset,
+                    &mut conn,
+                    &mut shared_reorg_scanner,
+                )
+                .await?;
+            sync_targets.push(target);
         }
 
         self.unified_scan_loop(sync_targets, mode, cancel_token).await
@@ -113,20 +125,12 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
         wallet_client: &WalletHttpClient,
         scanning_offset: u64,
         conn: &mut rusqlite::Connection,
+        scanner: &mut HttpBlockchainScanner<KeyManager>,
     ) -> Result<AccountSyncTarget, ScanError> {
         let key_manager = account.get_key_manager(password)?;
         let view_key = key_manager.get_private_view_key();
 
-        // Check reorgs for this specific account before starting
-        let mut scanner = HttpBlockchainScanner::new(
-            self.base_url.clone(),
-            vec![key_manager.clone()],
-            OPTIMAL_SCANNING_TREADS,
-        )
-        .await
-        .map_err(|e| ScanError::Intermittent(e.to_string()))?;
-
-        let reorg_result = reorg::handle_reorgs(&mut scanner, conn, account.id, self.webhook_config.clone())
+        let reorg_result = reorg::handle_reorgs(scanner, conn, account.id, self.webhook_config.clone())
             .await
             .map_err(ScanError::Fatal)?;
 
@@ -220,60 +224,53 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
             }
 
             let mut max_new_height_in_batch = global_current_height;
+            let is_batch_empty = scanned_blocks.is_empty();
 
-            if !scanned_blocks.is_empty() {
-                for &idx in &active_indices {
+            if !is_batch_empty {
+                let shared_blocks = Arc::new(scanned_blocks);
+
+                for (relative_idx, &idx) in active_indices.iter().enumerate() {
                     let target = &mut targets[idx];
 
-                    // Get blocks that this account hasn't scanned yet
-                    let blocks_for_account: Vec<BlockScanResult> = scanned_blocks
-                        .iter()
-                        .filter(|b| b.height > target.resume_height)
-                        .cloned()
-                        .map(|mut b| {
-                            let relative_idx = active_indices.iter().position(|&i| i == idx).unwrap();
-                            b.wallet_outputs.retain(|(_, _, scan_idx)| *scan_idx == relative_idx);
-                            b
-                        })
-                        .collect();
+                    let events = db_handler
+                        .process_blocks(
+                            shared_blocks.clone(),
+                            target.account.id,
+                            target.view_key.clone(),
+                            self.event_sender.clone(),
+                            target.transaction_monitor.has_pending_outbound(),
+                            self.webhook_config.clone(),
+                            relative_idx,
+                            target.resume_height,
+                        )
+                        .await?;
+                    all_events.extend(events);
 
-                    if !blocks_for_account.is_empty() {
-                        let events = db_handler
-                            .process_blocks(
-                                blocks_for_account.clone(),
-                                target.account.id,
-                                target.view_key.clone(),
-                                self.event_sender.clone(),
-                                target.transaction_monitor.has_pending_outbound(),
-                                self.webhook_config.clone(),
-                            )
-                            .await?;
-                        all_events.extend(events);
-
-                        if let Some(last) = blocks_for_account.last() {
-                            target.resume_height = last.height;
-                            if last.height > max_new_height_in_batch {
-                                max_new_height_in_batch = last.height;
-                            }
-
-                            let monitor_res = target
-                                .transaction_monitor
-                                .monitor_if_needed(&self.client, &self.pool, target.account.id, last.height)
-                                .await
-                                .map_err(ScanError::Fatal)?;
-
-                            all_events.extend(monitor_res.wallet_events.clone());
-                            self.emit_monitor_events(target.account.id, last.height, monitor_res);
-
-                            db_handler.prune_tips(target.account.id, last.height).await?;
-
-                            self.event_sender
-                                .send(ProcessingEvent::ScanStatus(ScanStatusEvent::Progress {
-                                    account_id: target.account.id,
-                                    current_height: last.height,
-                                    blocks_scanned: total_scanned_globally,
-                                }));
+                    if let Some(last) = shared_blocks.last()
+                        && last.height > target.resume_height
+                    {
+                        target.resume_height = last.height;
+                        if last.height > max_new_height_in_batch {
+                            max_new_height_in_batch = last.height;
                         }
+
+                        let monitor_res = target
+                            .transaction_monitor
+                            .monitor_if_needed(&self.client, &self.pool, target.account.id, last.height)
+                            .await
+                            .map_err(ScanError::Fatal)?;
+
+                        all_events.extend(monitor_res.wallet_events.clone());
+                        self.emit_monitor_events(target.account.id, last.height, monitor_res);
+
+                        db_handler.prune_tips(target.account.id, last.height).await?;
+
+                        self.event_sender
+                            .send(ProcessingEvent::ScanStatus(ScanStatusEvent::Progress {
+                                account_id: target.account.id,
+                                current_height: last.height,
+                                blocks_scanned: total_scanned_globally,
+                            }));
                     }
                 }
             }
@@ -298,7 +295,7 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
                 );
             }
 
-            if scanned_blocks.is_empty() || !more_blocks {
+            if is_batch_empty || !more_blocks {
                 for &idx in &active_indices {
                     let target = &targets[idx];
                     self.event_sender
@@ -325,16 +322,15 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
         targets: &mut [AccountSyncTarget],
         db_handler: &ScanDbHandler,
     ) -> Result<(), ScanError> {
-        let mut conn = db_handler.get_connection().await?;
-        for target in targets {
-            let mut scanner = HttpBlockchainScanner::new(
-                self.base_url.clone(),
-                vec![target.key_manager.clone()],
-                OPTIMAL_SCANNING_TREADS,
-            )
-            .await
-            .map_err(|e| ScanError::Intermittent(e.to_string()))?;
+        if targets.is_empty() {
+            return Ok(());
+        }
 
+        let mut conn = db_handler.get_connection().await?;
+
+        let mut scanner = self.create_reorg_scanner(targets[0].key_manager.clone()).await?;
+
+        for target in targets {
             let res = reorg::handle_reorgs(&mut scanner, &mut conn, target.account.id, self.webhook_config.clone())
                 .await
                 .map_err(ScanError::Fatal)?;
@@ -470,5 +466,14 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
                 cancelled_transaction_ids: reorg_info.cancelled_transaction_ids,
                 reorganized_displayed_transactions: reorg_info.reorganized_displayed_transactions,
             }));
+    }
+
+    async fn create_reorg_scanner(
+        &self,
+        key_manager: KeyManager,
+    ) -> Result<HttpBlockchainScanner<KeyManager>, ScanError> {
+        HttpBlockchainScanner::new(self.base_url.clone(), vec![key_manager], OPTIMAL_SCANNING_TREADS)
+            .await
+            .map_err(|e| ScanError::Intermittent(e.to_string()))
     }
 }
