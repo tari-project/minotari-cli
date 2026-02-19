@@ -18,7 +18,7 @@ pub const DEFAULT_SCANNING_OFFSET_DAYS: u64 = 2;
 pub const MAX_BACKOFF_EXPONENT: u32 = 5;
 pub const MAX_BACKOFF_SECONDS: u64 = 60;
 
-pub const OPTIMAL_SCANNING_TREADS: usize = 0; // Based on num_cpus
+pub const OPTIMAL_SCANNING_THREADS: usize = 0; // Based on num_cpus
 
 /// Configuration for scan operation timeouts.
 ///

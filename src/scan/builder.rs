@@ -7,7 +7,7 @@ use crate::{
     ProcessingEvent, ScanMode, WalletEvent, db,
     scan::{
         ChannelEventSender, EventSender, NoopEventSender,
-        config::{DEFAULT_SCANNING_OFFSET_DAYS, OPTIMAL_SCANNING_TREADS, ScanRetryConfig, ScanTimeoutConfig},
+        config::{DEFAULT_SCANNING_OFFSET_DAYS, OPTIMAL_SCANNING_THREADS, ScanRetryConfig, ScanTimeoutConfig},
         coordinator::ScanCoordinator,
         types::ScanError,
     },
@@ -114,7 +114,7 @@ impl Scanner {
             database_file,
             account_name: None,
             batch_size,
-            processing_threads: OPTIMAL_SCANNING_TREADS,
+            processing_threads: OPTIMAL_SCANNING_THREADS,
             scanning_offset: DEFAULT_SCANNING_OFFSET_DAYS,
             reorg_check_interval: 1000,
             mode: ScanMode::Full,

@@ -1,4 +1,4 @@
-use std::sync::Arc;
+use std::{collections::VecDeque, sync::Arc};
 
 use lightweight_wallet_libs::{HttpBlockchainScanner, ScanConfig, scanning::BlockchainScanner};
 use log::{info, warn};
@@ -14,7 +14,8 @@ use crate::{
     models::WalletEvent,
     scan::{
         DisplayedTransactionsEvent, ReorgDetectedEvent, ScanError, ScanMode, ScanRetryConfig, TransactionsUpdatedEvent,
-        config::{MAX_BACKOFF_EXPONENT, MAX_BACKOFF_SECONDS, OPTIMAL_SCANNING_TREADS},
+        block_processor::BlockProcessor,
+        config::{MAX_BACKOFF_EXPONENT, MAX_BACKOFF_SECONDS, OPTIMAL_SCANNING_THREADS},
         events::{EventSender, ProcessingEvent},
         reorg,
         scan_db_handler::ScanDbHandler,
@@ -25,13 +26,16 @@ use crate::{
 };
 use tari_transaction_components::key_manager::TransactionKeyManagerInterface;
 
+const MAX_CONTINUOUS_BUFFERED_EVENTS: usize = 10_000;
+
 /// Represents an account that is part of the current global scan session.
-pub struct AccountSyncTarget {
-    pub account: AccountRow,
-    pub key_manager: KeyManager,
-    pub view_key: PrivateKey,
-    pub resume_height: u64,
-    pub transaction_monitor: TransactionMonitor,
+/// This is an internal state object and should not be exposed publicly.
+pub(crate) struct AccountSyncTarget {
+    pub(crate) account: AccountRow,
+    pub(crate) key_manager: KeyManager,
+    pub(crate) view_key: PrivateKey,
+    pub(crate) resume_height: u64,
+    pub(crate) transaction_monitor: TransactionMonitor,
 }
 
 pub struct ScanCoordinator<E: EventSender> {
@@ -168,8 +172,22 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
         mode: ScanMode,
         cancel_token: Option<CancellationToken>,
     ) -> Result<(Vec<WalletEvent>, bool), ScanError> {
-        let mut all_events = Vec::new();
-        let db_handler = ScanDbHandler::new(self.pool.clone(), self.required_confirmations);
+        let mut all_events = VecDeque::new();
+        let max_buffered_events = match mode {
+            ScanMode::Continuous { .. } => Some(MAX_CONTINUOUS_BUFFERED_EVENTS),
+            _ => None,
+        };
+        let all_accounts: Vec<(i64, PrivateKey)> = targets
+            .iter()
+            .map(|target| (target.account.id, target.view_key.clone()))
+            .collect();
+        let block_processor = BlockProcessor::with_event_sender(
+            all_accounts,
+            self.event_sender.clone(),
+            false,
+            self.required_confirmations,
+        );
+        let mut db_handler = ScanDbHandler::new(self.pool.clone(), block_processor);
         let mut total_scanned_globally: u64 = 0;
         let mut blocks_since_reorg_check: u64 = 0;
 
@@ -185,11 +203,10 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
             let global_current_height = targets.iter().map(|t| t.resume_height).min().unwrap_or(0);
 
             // Determine which accounts are active at this height
-            let active_indices: Vec<usize> = targets
+            let active_account_ids: Vec<i64> = targets
                 .iter()
-                .enumerate()
-                .filter(|(_, target)| target.resume_height <= global_current_height + self.batch_size)
-                .map(|(idx, _)| idx)
+                .filter(|target| target.resume_height <= global_current_height + self.batch_size)
+                .map(|target| target.account.id)
                 .collect();
 
             let next_horizon_height = targets
@@ -201,7 +218,7 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
 
             let (scanner, scanner_config) = state_manager
                 .get_scanner_and_config(
-                    &active_indices,
+                    &active_account_ids,
                     global_current_height,
                     end_height,
                     self.batch_size,
@@ -213,11 +230,10 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
             let (scanned_blocks, more_blocks) = self.scan_blocks_with_timeout(scanner, &scanner_config).await?;
 
             if more_blocks {
-                for &idx in &active_indices {
-                    let target = &targets[idx];
+                for account_id in &active_account_ids {
                     self.event_sender
                         .send(ProcessingEvent::ScanStatus(ScanStatusEvent::MoreBlocksAvailable {
-                            account_id: target.account.id,
+                            account_id: *account_id,
                             last_scanned_height: global_current_height,
                         }));
                 }
@@ -229,22 +245,24 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
             if !is_batch_empty {
                 let shared_blocks = Arc::new(scanned_blocks);
 
-                for (relative_idx, &idx) in active_indices.iter().enumerate() {
-                    let target = &mut targets[idx];
+                for account_id in &active_account_ids {
+                    let Some(target) = targets.iter_mut().find(|target| target.account.id == *account_id) else {
+                        return Err(ScanError::Fatal(anyhow::anyhow!(
+                            "Unknown active account id: {}",
+                            account_id
+                        )));
+                    };
 
                     let events = db_handler
                         .process_blocks(
                             shared_blocks.clone(),
-                            target.account.id,
-                            target.view_key.clone(),
-                            self.event_sender.clone(),
+                            *account_id,
                             target.transaction_monitor.has_pending_outbound(),
                             self.webhook_config.clone(),
-                            relative_idx,
                             target.resume_height,
                         )
                         .await?;
-                    all_events.extend(events);
+                    Self::push_events_with_limit(&mut all_events, events, max_buffered_events);
 
                     if let Some(last) = shared_blocks.last()
                         && last.height > target.resume_height
@@ -260,7 +278,11 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
                             .await
                             .map_err(ScanError::Fatal)?;
 
-                        all_events.extend(monitor_res.wallet_events.clone());
+                        Self::push_events_with_limit(
+                            &mut all_events,
+                            monitor_res.wallet_events.clone(),
+                            max_buffered_events,
+                        );
                         self.emit_monitor_events(target.account.id, last.height, monitor_res);
 
                         db_handler.prune_tips(target.account.id, last.height).await?;
@@ -296,8 +318,13 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
             }
 
             if is_batch_empty || !more_blocks {
-                for &idx in &active_indices {
-                    let target = &targets[idx];
+                for account_id in &active_account_ids {
+                    let Some(target) = targets.iter().find(|target| target.account.id == *account_id) else {
+                        return Err(ScanError::Fatal(anyhow::anyhow!(
+                            "Unknown active account id: {}",
+                            account_id
+                        )));
+                    };
                     self.event_sender
                         .send(ProcessingEvent::ScanStatus(ScanStatusEvent::Completed {
                             account_id: target.account.id,
@@ -312,7 +339,20 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
                     continue;
                 }
 
-                return Ok((all_events, false));
+                return Ok((all_events.into_iter().collect(), false));
+            }
+        }
+    }
+
+    fn push_events_with_limit(
+        all_events: &mut VecDeque<WalletEvent>,
+        events: Vec<WalletEvent>,
+        max_buffered_events: Option<usize>,
+    ) {
+        all_events.extend(events);
+        if let Some(limit) = max_buffered_events {
+            while all_events.len() > limit {
+                all_events.pop_front();
             }
         }
     }
@@ -320,7 +360,7 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
     async fn check_global_reorgs(
         &self,
         targets: &mut [AccountSyncTarget],
-        db_handler: &ScanDbHandler,
+        db_handler: &ScanDbHandler<E>,
     ) -> Result<(), ScanError> {
         if targets.is_empty() {
             return Ok(());
@@ -346,7 +386,7 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
     async fn wait_for_next_poll_cycle(
         &self,
         targets: &mut [AccountSyncTarget],
-        db_handler: &ScanDbHandler,
+        db_handler: &ScanDbHandler<E>,
         interval: std::time::Duration,
         cancel: &Option<CancellationToken>,
     ) -> Result<(), ScanError> {
@@ -374,7 +414,7 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
         &self,
         targets: &[AccountSyncTarget],
         reason: PauseReason,
-        events: Vec<WalletEvent>,
+        events: VecDeque<WalletEvent>,
     ) -> Result<(Vec<WalletEvent>, bool), ScanError> {
         for t in targets {
             self.event_sender
@@ -384,7 +424,7 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
                     reason: reason.clone(),
                 }));
         }
-        Ok((events, true))
+        Ok((events.into_iter().collect(), true))
     }
 
     fn emit_monitor_events(&self, account_id: i64, height: u64, res: MonitoringResult) {
@@ -472,7 +512,7 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
         &self,
         key_manager: KeyManager,
     ) -> Result<HttpBlockchainScanner<KeyManager>, ScanError> {
-        HttpBlockchainScanner::new(self.base_url.clone(), vec![key_manager], OPTIMAL_SCANNING_TREADS)
+        HttpBlockchainScanner::new(self.base_url.clone(), vec![key_manager], OPTIMAL_SCANNING_THREADS)
             .await
             .map_err(|e| ScanError::Intermittent(e.to_string()))
     }

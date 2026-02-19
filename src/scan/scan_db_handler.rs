@@ -9,19 +9,17 @@ use r2d2::PooledConnection;
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::TransactionBehavior;
 use std::sync::Arc;
-use tari_common_types::types::PrivateKey;
 
-#[derive(Clone)]
-pub struct ScanDbHandler {
+pub struct ScanDbHandler<E: EventSender + Clone + Send + 'static> {
     pool: SqlitePool,
-    required_confirmations: u64,
+    block_processor: Option<BlockProcessor<E>>,
 }
 
-impl ScanDbHandler {
-    pub fn new(pool: SqlitePool, required_confirmations: u64) -> Self {
+impl<E: EventSender + Clone + Send + 'static> ScanDbHandler<E> {
+    pub fn new(pool: SqlitePool, block_processor: BlockProcessor<E>) -> Self {
         Self {
             pool,
-            required_confirmations,
+            block_processor: Some(block_processor),
         }
     }
 
@@ -38,15 +36,12 @@ impl ScanDbHandler {
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub async fn process_blocks<E: EventSender + Clone + Send + 'static>(
-        &self,
+    pub async fn process_blocks(
+        &mut self,
         blocks: Arc<Vec<lightweight_wallet_libs::BlockScanResult>>,
-        account_id: i64,
-        view_key: PrivateKey,
-        event_sender: E,
+        target_account_id: i64,
         has_pending_outbound: bool,
         webhook_config: Option<WebhookTriggerConfig>,
-        key_manager_idx: usize,
         resume_height: u64,
     ) -> Result<Vec<WalletEvent>, ScanError> {
         if blocks.is_empty() {
@@ -55,44 +50,41 @@ impl ScanDbHandler {
 
         debug!(
             count = blocks.len(),
-            account_id = account_id;
+            account_id = target_account_id;
             "Processing scanned blocks in DB task"
         );
 
         let pool = self.pool.clone();
-        let required_confirmations = self.required_confirmations;
+        let mut block_processor = self
+            .block_processor
+            .take()
+            .ok_or_else(|| ScanError::Fatal(anyhow::anyhow!("BlockProcessor not initialized")))?;
+
+        block_processor.set_has_pending_outbound(has_pending_outbound);
+        block_processor.set_webhook_config(webhook_config);
 
         tokio::task::spawn_blocking(move || {
             let mut conn = pool.get().map_err(WalletDbError::from)?;
-            let mut events = Vec::new();
 
             let tx = conn
                 .transaction_with_behavior(TransactionBehavior::Immediate)
                 .map_err(WalletDbError::from)?;
+            let mut processor = block_processor;
 
             for block in blocks.iter() {
                 if block.height <= resume_height {
                     continue;
                 }
 
-                let mut processor = BlockProcessor::with_event_sender(
-                    account_id,
-                    view_key.clone(),
-                    event_sender.clone(),
-                    has_pending_outbound,
-                    required_confirmations,
-                );
-                processor.set_webhook_config(webhook_config.clone());
-
                 processor
-                    .process_block(&tx, block, Some(key_manager_idx))
+                    .process_block(&tx, block, target_account_id)
                     .map_err(|e| WalletDbError::Unexpected(e.to_string()))?;
-
-                events.extend(processor.into_wallet_events());
             }
+
+            let events = processor.take_wallet_events();
             tx.commit().map_err(WalletDbError::from)?;
 
-            Ok::<Vec<WalletEvent>, WalletDbError>(events)
+            Ok::<(Vec<WalletEvent>, BlockProcessor<E>), WalletDbError>((events, processor))
         })
         .await
         .map_err(|e| {
@@ -101,6 +93,10 @@ impl ScanDbHandler {
             ScanError::Fatal(err)
         })?
         .map_err(ScanError::from)
+        .map(|(events, processor)| {
+            self.block_processor = Some(processor);
+            events
+        })
     }
 
     pub async fn prune_tips(&self, account_id: i64, height: u64) -> Result<(), ScanError> {

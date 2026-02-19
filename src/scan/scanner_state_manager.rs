@@ -4,7 +4,7 @@ use tari_transaction_components::key_manager::KeyManager;
 
 pub struct ScannerStateManager {
     scanner: Option<HttpBlockchainScanner<KeyManager>>,
-    active_indices: Vec<usize>,
+    active_account_ids: Vec<i64>,
     scan_config: ScanConfig,
 }
 
@@ -12,7 +12,7 @@ impl ScannerStateManager {
     pub fn new() -> Self {
         Self {
             scanner: None,
-            active_indices: Vec::new(),
+            active_account_ids: Vec::new(),
             scan_config: ScanConfig::default(),
         }
     }
@@ -20,7 +20,7 @@ impl ScannerStateManager {
     #[allow(clippy::too_many_arguments)]
     pub async fn get_scanner_and_config(
         &mut self,
-        new_active_indices: &[usize],
+        new_active_account_ids: &[i64],
         new_start_height: u64,
         new_end_height: Option<u64>,
         batch_size: u64,
@@ -29,18 +29,24 @@ impl ScannerStateManager {
         processing_threads: usize,
     ) -> Result<(&mut HttpBlockchainScanner<KeyManager>, ScanConfig), ScanError> {
         // Only recreate scanner if accounts change
-        if self.scanner.is_none() || self.active_indices != new_active_indices {
-            let active_key_managers: Vec<KeyManager> = new_active_indices
+        if self.scanner.is_none() || self.active_account_ids != new_active_account_ids {
+            let active_key_managers: Vec<KeyManager> = new_active_account_ids
                 .iter()
-                .map(|&idx| all_targets[idx].key_manager.clone())
-                .collect();
+                .map(|account_id| {
+                    all_targets
+                        .iter()
+                        .find(|target| target.account.id == *account_id)
+                        .map(|target| target.key_manager.clone())
+                        .ok_or_else(|| ScanError::Fatal(anyhow::anyhow!("Unknown active account id: {}", account_id)))
+                })
+                .collect::<Result<Vec<_>, _>>()?;
 
             let new_scanner = HttpBlockchainScanner::new(base_url.to_string(), active_key_managers, processing_threads)
                 .await
                 .map_err(|e| ScanError::Intermittent(e.to_string()))?;
 
             self.scanner = Some(new_scanner);
-            self.active_indices = new_active_indices.to_vec();
+            self.active_account_ids = new_active_account_ids.to_vec();
         }
 
         // Always update the config to the last known height.
@@ -50,6 +56,11 @@ impl ScannerStateManager {
             .with_batch_size(batch_size);
         self.scan_config.end_height = new_end_height;
 
-        Ok((self.scanner.as_mut().unwrap(), self.scan_config.clone()))
+        let scanner = self
+            .scanner
+            .as_mut()
+            .ok_or_else(|| ScanError::Fatal(anyhow::anyhow!("Scanner was not initialized")))?;
+
+        Ok((scanner, self.scan_config.clone()))
     }
 }
