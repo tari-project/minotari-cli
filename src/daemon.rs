@@ -55,7 +55,7 @@ use tari_common::configuration::Network;
 
 use crate::{
     api, db,
-    scan::{self, ScanMode, scan::ScanError},
+    scan::{self, ScanError, ScanMode},
     tasks::unlocker::TransactionUnlocker,
     webhooks::{
         WebhookTriggerConfig,

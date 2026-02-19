@@ -58,6 +58,7 @@ use chacha20poly1305::{
 use clap::Parser;
 use log::info;
 use minotari::{
+    ScanError,
     api::accounts::LockFundsRequest,
     cli::{ApplyArgs, Cli, Commands},
     config::{defaults::WalletConfig, loader::load_configuration},
@@ -65,7 +66,7 @@ use minotari::{
     db::{self, WalletDbError, get_accounts, get_balance, init_db},
     log::{init_logging, mask_string},
     models::WalletEvent,
-    scan::{self, rollback_from_height, scan::ScanError},
+    scan::{self, reorg::rollback_from_height},
     transactions::{
         fund_locker::FundLocker,
         one_sided_transaction::{OneSidedTransaction, Recipient},

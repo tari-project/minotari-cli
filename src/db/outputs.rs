@@ -127,6 +127,39 @@ pub fn get_output_info_by_hash(
     Ok(Some((data.id, tx_id, output)))
 }
 
+pub fn get_output_info_by_hash_for_account(
+    conn: &Connection,
+    account_id: i64,
+    output_hash: &FixedHash,
+) -> WalletDbResult<Option<(i64, TxId, WalletOutput)>> {
+    let mut stmt = conn.prepare_cached(
+        r#"
+        SELECT id, tx_id, wallet_output_json
+        FROM outputs
+        WHERE account_id = :account_id AND output_hash = :output_hash AND deleted_at IS NULL
+        "#,
+    )?;
+
+    let rows = stmt.query(named_params! {
+        ":account_id": account_id,
+        ":output_hash": output_hash.as_slice(),
+    })?;
+    let row: Option<WalletOutputRow> = from_rows(rows).next().transpose()?;
+    let data = match row {
+        Some(r) => r,
+        None => return Ok(None),
+    };
+
+    let json_str = data
+        .wallet_output_json
+        .ok_or_else(|| WalletDbError::Unexpected("Output JSON is null".to_string()))?;
+    let output: WalletOutput = serde_json::from_str(&json_str)?;
+
+    let tx_id = TxId::from(data.tx_id as u64);
+
+    Ok(Some((data.id, tx_id, output)))
+}
+
 #[derive(Deserialize)]
 pub struct UnconfirmedOutputRow {
     pub output_hash: FixedHash,

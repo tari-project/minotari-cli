@@ -8,6 +8,7 @@ use chrono::{DateTime, Utc};
 use lightweight_wallet_libs::BlockScanResult;
 use log::{error, info};
 use rusqlite::Connection;
+use std::collections::HashMap;
 use tari_common_types::payment_reference::generate_payment_reference;
 use tari_common_types::types::{FixedHash, PrivateKey};
 use tari_transaction_components::MicroMinotari;
@@ -64,23 +65,23 @@ pub enum BlockProcessorError {
 /// let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
 /// let event_sender = ChannelEventSender::new(tx);
 /// let mut processor = BlockProcessor::with_event_sender(
-///     account_id,
-///     view_key.to_vec(),
+///     vec![(account_id, view_key)],
 ///     event_sender,
 ///     false,
+///     6,
 /// );
 ///
 /// // Process a block
-/// processor.process_block(&mut tx, &scanned_block).await?;
+/// processor.process_block(&tx, &scanned_block, account_id)?;
 ///
 /// // Retrieve generated wallet events
 /// let events = processor.into_wallet_events();
 /// ```
 pub struct BlockProcessor<E: EventSender = NoopEventSender> {
-    /// Database ID of the account being processed.
-    account_id: i64,
-    /// The account's view key for output ownership verification.
-    account_view_key: PrivateKey,
+    /// Mapping of wallet index to account ID for active scanning set.
+    wallet_index_to_account_id: Vec<i64>,
+    /// Account view keys indexed by account ID.
+    account_view_keys: HashMap<i64, PrivateKey>,
     /// Accumulated wallet events for the current processing session.
     wallet_events: Vec<WalletEvent>,
     /// Event sender for real-time notifications.
@@ -106,12 +107,12 @@ impl BlockProcessor<NoopEventSender> {
     ///
     /// # Arguments
     ///
-    /// * `account_id` - Database ID of the account to process blocks for
-    /// * `account_view_key` - The account's view key bytes
-    pub fn new(account_id: i64, account_view_key: PrivateKey, required_confirmations: u64) -> Self {
+    /// * `accounts` - Ordered list mapping scanner wallet index to (account_id, account_view_key)
+    pub fn new(accounts: Vec<(i64, PrivateKey)>, required_confirmations: u64) -> Self {
+        let (wallet_index_to_account_id, account_view_keys) = Self::build_account_mappings(accounts);
         Self {
-            account_id,
-            account_view_key,
+            wallet_index_to_account_id,
+            account_view_keys,
             wallet_events: Vec::new(),
             event_sender: NoopEventSender,
             current_block: None,
@@ -131,21 +132,20 @@ impl<E: EventSender> BlockProcessor<E> {
     ///
     /// # Arguments
     ///
-    /// * `account_id` - Database ID of the account to process blocks for
-    /// * `account_view_key` - The account's view key bytes
+    /// * `accounts` - Ordered list mapping scanner wallet index to (account_id, account_view_key)
     /// * `event_sender` - Implementation of [`EventSender`] for event notifications
     /// * `has_pending_outbound` - Whether there are pending outbound transactions
     ///   that should be matched against scanned inputs
     pub fn with_event_sender(
-        account_id: i64,
-        account_view_key: PrivateKey,
+        accounts: Vec<(i64, PrivateKey)>,
         event_sender: E,
         has_pending_outbound: bool,
         required_confirmations: u64,
     ) -> Self {
+        let (wallet_index_to_account_id, account_view_keys) = Self::build_account_mappings(accounts);
         Self {
-            account_id,
-            account_view_key,
+            wallet_index_to_account_id,
+            account_view_keys,
             wallet_events: Vec::new(),
             event_sender,
             current_block: None,
@@ -154,6 +154,18 @@ impl<E: EventSender> BlockProcessor<E> {
             required_confirmations,
             webhook_config: None,
         }
+    }
+
+    fn build_account_mappings(accounts: Vec<(i64, PrivateKey)>) -> (Vec<i64>, HashMap<i64, PrivateKey>) {
+        let wallet_index_to_account_id = accounts.iter().map(|(account_id, _)| *account_id).collect();
+        let account_view_keys = accounts.into_iter().collect();
+        (wallet_index_to_account_id, account_view_keys)
+    }
+
+    fn account_view_key(&self, account_id: i64) -> Result<&PrivateKey, BlockProcessorError> {
+        self.account_view_keys
+            .get(&account_id)
+            .ok_or_else(|| BlockProcessorError::WalletEvent(anyhow::anyhow!("Unknown account id: {}", account_id)))
     }
 
     /// Updates the pending outbound transaction flag.
@@ -185,27 +197,34 @@ impl<E: EventSender> BlockProcessor<E> {
     ///
     /// * `tx` - Database transaction for atomic operations
     /// * `block` - The scanned block result from the blockchain scanner
+    /// * `account_id` - Account ID to process this block for
     ///
     /// # Errors
     ///
     /// Returns [`BlockProcessorError`] if any database operation fails.
-    pub fn process_block(&mut self, tx: &Connection, block: &BlockScanResult) -> Result<(), BlockProcessorError> {
+    pub fn process_block(
+        &mut self,
+        tx: &Connection,
+        block: &BlockScanResult,
+        account_id: i64,
+    ) -> Result<(), BlockProcessorError> {
+        let account_view_key = self.account_view_key(account_id)?.clone();
         self.current_tip_height = block.height;
 
         self.current_block = Some(BlockEventAccumulator::new(
-            self.account_id,
+            account_id,
             block.height,
             block.block_hash.to_vec(),
         ));
 
-        self.process_outputs(tx, block)?;
-        self.process_inputs(tx, block)?;
-        self.record_scanned_block(tx, block)?;
-        self.process_confirmations(tx, block)?;
+        self.process_outputs(tx, block, account_id, &account_view_key)?;
+        self.process_inputs(tx, block, account_id)?;
+        self.record_scanned_block(tx, block, account_id)?;
+        self.process_confirmations(tx, block, account_id)?;
 
         if let Some(acc) = self.current_block.take() {
             if !acc.is_empty() {
-                self.save_and_emit_displayed_transactions(tx, block.height, &acc)?;
+                self.save_and_emit_displayed_transactions(tx, block.height, account_id, &account_view_key, &acc)?;
             }
 
             let block_event = acc.into_event();
@@ -219,6 +238,8 @@ impl<E: EventSender> BlockProcessor<E> {
         &self,
         tx: &Connection,
         block_height: u64,
+        account_id: i64,
+        account_view_key: &PrivateKey,
         accumulator: &BlockEventAccumulator,
     ) -> Result<(), BlockProcessorError> {
         if accumulator.is_empty() {
@@ -228,7 +249,7 @@ impl<E: EventSender> BlockProcessor<E> {
         let processor = DisplayedTransactionProcessor::new(
             self.current_tip_height,
             self.required_confirmations,
-            self.account_view_key.clone(),
+            account_view_key.clone(),
         );
         let (mut updated_transactions, mut new_transactions) = processor
             .create_new_updated_display_transactions_for_height(accumulator, tx)
@@ -249,7 +270,7 @@ impl<E: EventSender> BlockProcessor<E> {
         updated_transactions.append(&mut new_transactions);
         self.event_sender
             .send(ProcessingEvent::TransactionsReady(DisplayedTransactionsEvent {
-                account_id: self.account_id,
+                account_id,
                 transactions: updated_transactions,
                 block_height: Some(block_height),
                 is_initial_sync: false,
@@ -274,9 +295,9 @@ impl<E: EventSender> BlockProcessor<E> {
         self.wallet_events
     }
 
-    /// Returns the account ID this processor is handling.
-    pub fn account_id(&self) -> i64 {
-        self.account_id
+    /// Drains and returns accumulated wallet events while keeping the processor alive.
+    pub fn take_wallet_events(&mut self) -> Vec<WalletEvent> {
+        std::mem::take(&mut self.wallet_events)
     }
 
     /// Processes all detected outputs in the block.
@@ -286,22 +307,36 @@ impl<E: EventSender> BlockProcessor<E> {
     /// - Creates a wallet event for detection
     /// - Records the balance change (credit)
     /// - Adds to the block accumulator for event emission
-    fn process_outputs(&mut self, tx: &Connection, block: &BlockScanResult) -> Result<(), BlockProcessorError> {
+    fn process_outputs(
+        &mut self,
+        tx: &Connection,
+        block: &BlockScanResult,
+        account_id: i64,
+        account_view_key: &PrivateKey,
+    ) -> Result<(), BlockProcessorError> {
         let mut generated_events: Vec<(i64, WalletEvent)> = Vec::new();
 
-        for (hash, output, _wallet_id) in &block.wallet_outputs {
+        for (hash, output, wallet_idx) in &block.wallet_outputs {
+            let Some(mapped_account_id) = self.wallet_index_to_account_id.get(*wallet_idx).copied() else {
+                continue;
+            };
+
+            if mapped_account_id != account_id {
+                continue;
+            }
+
             let memo = MemoInfo::from_output(output);
 
             info!(
                 target: "audit",
-                account_id = self.account_id,
+                account_id = account_id,
                 block_height = block.height,
                 value = &*mask_amount(output.value()),
                 is_coinbase = output.features().is_coinbase();
                 "Detected wallet output"
             );
 
-            let event = self.make_output_detected_event(*hash, block, &memo);
+            let event = self.make_output_detected_event(account_id, *hash, block, &memo);
             self.wallet_events.push(event.clone());
 
             // Compute the payment reference from block hash and output hash
@@ -309,8 +344,8 @@ impl<E: EventSender> BlockProcessor<E> {
 
             let output_id = db::insert_output(
                 tx,
-                self.account_id,
-                &self.account_view_key,
+                account_id,
+                account_view_key,
                 hash.to_vec(),
                 output,
                 block.height,
@@ -321,10 +356,10 @@ impl<E: EventSender> BlockProcessor<E> {
                 payment_reference,
             )?;
 
-            let event_id = db::insert_wallet_event(tx, self.account_id, &event)?;
+            let event_id = db::insert_wallet_event(tx, account_id, &event)?;
             generated_events.push((event_id, event));
 
-            let balance_change = self.record_output_balance_change(tx, output_id, block, output)?;
+            let balance_change = self.record_output_balance_change(tx, account_id, output_id, block, output)?;
 
             if let Some(ref mut acc) = self.current_block {
                 acc.add_credit_change(
@@ -340,7 +375,7 @@ impl<E: EventSender> BlockProcessor<E> {
 
         if let Some(config) = &self.webhook_config {
             for (event_id, event) in generated_events {
-                trigger_webhook_with_balance(tx, self.account_id, event_id, &event, config)?;
+                trigger_webhook_with_balance(tx, account_id, event_id, &event, config)?;
             }
         }
 
@@ -348,10 +383,16 @@ impl<E: EventSender> BlockProcessor<E> {
     }
 
     /// Creates a wallet event for a newly detected output.
-    fn make_output_detected_event(&self, hash: FixedHash, block: &BlockScanResult, memo: &MemoInfo) -> WalletEvent {
+    fn make_output_detected_event(
+        &self,
+        account_id: i64,
+        hash: FixedHash,
+        block: &BlockScanResult,
+        memo: &MemoInfo,
+    ) -> WalletEvent {
         WalletEvent {
             id: 0,
-            account_id: self.account_id,
+            account_id,
             event_type: WalletEventType::OutputDetected {
                 hash,
                 block_height: block.height,
@@ -367,12 +408,12 @@ impl<E: EventSender> BlockProcessor<E> {
     fn record_output_balance_change(
         &self,
         tx: &Connection,
+        account_id: i64,
         output_id: i64,
         block: &BlockScanResult,
         output: &WalletOutput,
     ) -> Result<BalanceChange, BlockProcessorError> {
-        let change =
-            make_balance_change_for_output(self.account_id, output_id, block.mined_timestamp, block.height, output);
+        let change = make_balance_change_for_output(account_id, output_id, block.mined_timestamp, block.height, output);
 
         db::insert_balance_change(tx, &change)?;
 
@@ -386,15 +427,21 @@ impl<E: EventSender> BlockProcessor<E> {
     /// - Records the balance change (debit)
     /// - Updates the output status to Spent
     /// - Adds to the block accumulator for event emission
-    fn process_inputs(&mut self, tx: &Connection, block: &BlockScanResult) -> Result<(), BlockProcessorError> {
+    fn process_inputs(
+        &mut self,
+        tx: &Connection,
+        block: &BlockScanResult,
+        account_id: i64,
+    ) -> Result<(), BlockProcessorError> {
         for input_hash in &block.inputs {
-            let Some((output_id, tx_id, output)) = db::get_output_info_by_hash(tx, input_hash)? else {
+            let Some((output_id, tx_id, output)) = db::get_output_info_by_hash_for_account(tx, account_id, input_hash)?
+            else {
                 continue;
             };
 
             info!(
                 target: "audit",
-                account_id = self.account_id,
+                account_id = account_id,
                 tx_id:% = tx_id,
                 block_height = block.height,
                 value = &*mask_amount(output.value());
@@ -403,14 +450,14 @@ impl<E: EventSender> BlockProcessor<E> {
 
             let input_id = db::insert_input(
                 tx,
-                self.account_id,
+                account_id,
                 output_id,
                 block.height,
                 block.block_hash.as_slice(),
                 block.mined_timestamp,
             )?;
 
-            let balance_change = self.record_input_balance_change(tx, input_id, output.value(), block)?;
+            let balance_change = self.record_input_balance_change(tx, account_id, input_id, output.value(), block)?;
             db::update_output_status(tx, output_id, OutputStatus::Spent)?;
 
             if let Some(ref mut acc) = self.current_block {
@@ -433,6 +480,7 @@ impl<E: EventSender> BlockProcessor<E> {
     fn record_input_balance_change(
         &self,
         tx: &Connection,
+        account_id: i64,
         input_id: i64,
         value: MicroMinotari,
         block: &BlockScanResult,
@@ -442,7 +490,7 @@ impl<E: EventSender> BlockProcessor<E> {
             .naive_utc();
 
         let change = BalanceChange {
-            account_id: self.account_id,
+            account_id,
             caused_by_output_id: None,
             caused_by_input_id: Some(input_id),
             description: "Output spent as input".to_string(),
@@ -469,8 +517,13 @@ impl<E: EventSender> BlockProcessor<E> {
     ///
     /// Stores the block height and hash in the scanned_tip_blocks table,
     /// which is used to detect chain reorganizations.
-    fn record_scanned_block(&self, tx: &Connection, block: &BlockScanResult) -> Result<(), BlockProcessorError> {
-        db::insert_scanned_tip_block(tx, self.account_id, block.height as i64, block.block_hash.as_slice())?;
+    fn record_scanned_block(
+        &self,
+        tx: &Connection,
+        block: &BlockScanResult,
+        account_id: i64,
+    ) -> Result<(), BlockProcessorError> {
+        db::insert_scanned_tip_block(tx, account_id, block.height as i64, block.block_hash.as_slice())?;
         Ok(())
     }
 
@@ -478,16 +531,21 @@ impl<E: EventSender> BlockProcessor<E> {
     ///
     /// Finds outputs that have reached the required confirmation depth
     /// and updates their status to confirmed.
-    fn process_confirmations(&mut self, tx: &Connection, block: &BlockScanResult) -> Result<(), BlockProcessorError> {
+    fn process_confirmations(
+        &mut self,
+        tx: &Connection,
+        block: &BlockScanResult,
+        account_id: i64,
+    ) -> Result<(), BlockProcessorError> {
         let mut generated_events: Vec<(i64, WalletEvent)> = Vec::new();
 
         let unconfirmed_outputs =
-            db::get_unconfirmed_outputs(tx, self.account_id, block.height, self.required_confirmations)?;
+            db::get_unconfirmed_outputs(tx, account_id, block.height, self.required_confirmations)?;
 
         for unconfirmed_output in unconfirmed_outputs {
             info!(
                 target: "audit",
-                account_id = self.account_id,
+                account_id = account_id,
                 output_hash = &*mask_string(&hex::encode(unconfirmed_output.output_hash)),
                 original_height = unconfirmed_output.mined_in_block_height,
                 confirmed_at = block.height;
@@ -495,6 +553,7 @@ impl<E: EventSender> BlockProcessor<E> {
             );
 
             let event = self.make_confirmation_event(
+                account_id,
                 &unconfirmed_output.output_hash,
                 unconfirmed_output.mined_in_block_height as u64,
                 block.height,
@@ -503,7 +562,7 @@ impl<E: EventSender> BlockProcessor<E> {
             );
 
             self.wallet_events.push(event.clone());
-            let event_id = db::insert_wallet_event(tx, self.account_id, &event)?;
+            let event_id = db::insert_wallet_event(tx, account_id, &event)?;
             generated_events.push((event_id, event));
 
             db::mark_output_confirmed(
@@ -516,7 +575,7 @@ impl<E: EventSender> BlockProcessor<E> {
 
         if let Some(config) = &self.webhook_config {
             for (event_id, event) in generated_events {
-                trigger_webhook_with_balance(tx, self.account_id, event_id, &event, config)?;
+                trigger_webhook_with_balance(tx, account_id, event_id, &event, config)?;
             }
         }
 
@@ -526,6 +585,7 @@ impl<E: EventSender> BlockProcessor<E> {
     /// Creates a wallet event for an output reaching confirmation depth.
     fn make_confirmation_event(
         &self,
+        account_id: i64,
         output_hash: &FixedHash,
         original_height: u64,
         confirmation_height: u64,
@@ -534,7 +594,7 @@ impl<E: EventSender> BlockProcessor<E> {
     ) -> WalletEvent {
         WalletEvent {
             id: 0,
-            account_id: self.account_id,
+            account_id,
             event_type: WalletEventType::OutputConfirmed {
                 hash: *output_hash,
                 block_height: original_height,

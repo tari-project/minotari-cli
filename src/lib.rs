@@ -135,6 +135,6 @@ pub mod webhooks;
 pub use crate::api::ApiDoc;
 pub use crate::db::{get_accounts, get_balance, init_db};
 pub use crate::models::WalletEvent;
-pub use crate::scan::scan::ScanError;
+pub use crate::scan::types::ScanError;
 pub use crate::scan::{BlockProcessedEvent, PauseReason, ProcessingEvent, ScanMode, ScanStatusEvent, Scanner};
 pub use crate::transactions::{DisplayedTransaction, TransactionHistoryService};
