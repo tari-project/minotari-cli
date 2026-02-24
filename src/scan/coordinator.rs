@@ -34,7 +34,7 @@ pub(crate) struct AccountSyncTarget {
     pub(crate) account: AccountRow,
     pub(crate) key_manager: KeyManager,
     pub(crate) view_key: PrivateKey,
-    pub(crate) resume_height: u64,
+    pub(crate) next_block_to_scan: u64,
     pub(crate) transaction_monitor: TransactionMonitor,
 }
 
@@ -138,18 +138,17 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
             .await
             .map_err(ScanError::Fatal)?;
 
-        let mut resume_height = reorg_result.resume_height;
+        let mut next_block = reorg_result.resume_height.saturating_sub(1);
 
-        if resume_height == 0 {
+        if next_block == 0 {
             // Use birthday logic
             let timestamp = (account.birthday as u64).saturating_sub(scanning_offset) * 24 * 60 * 60
                 + BIRTHDAY_GENESIS_FROM_UNIX_EPOCH;
-            resume_height = wallet_client
+            next_block = wallet_client
                 .get_height_at_time(timestamp)
                 .await
                 .map_err(ScanError::Fatal)?;
         }
-        resume_height = resume_height.saturating_sub(1);
 
         let monitor_state = MonitoringState::new();
         monitor_state.initialize(conn, account.id).map_err(ScanError::Fatal)?;
@@ -161,7 +160,7 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
             account,
             key_manager,
             view_key,
-            resume_height,
+            next_block_to_scan: next_block,
             transaction_monitor,
         })
     }
@@ -200,26 +199,27 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
                 return self.handle_pause(&targets, PauseReason::Cancelled, all_events);
             }
 
-            let global_current_height = targets.iter().map(|t| t.resume_height).min().unwrap_or(0);
+            let global_next_block = targets.iter().map(|t| t.next_block_to_scan).min().unwrap_or(0);
 
             // Determine which accounts are active at this height
             let active_account_ids: Vec<i64> = targets
                 .iter()
-                .filter(|target| target.resume_height <= global_current_height + self.batch_size)
+                .filter(|target| target.next_block_to_scan <= global_next_block + self.batch_size)
                 .map(|target| target.account.id)
                 .collect();
 
             let next_horizon_height = targets
                 .iter()
-                .map(|t| t.resume_height)
-                .filter(|&h| h > global_current_height + self.batch_size)
+                .map(|t| t.next_block_to_scan)
+                .filter(|&h| h > global_next_block + self.batch_size)
                 .min();
+
             let end_height = next_horizon_height.map(|h| h.saturating_sub(1));
 
             let (scanner, scanner_config) = state_manager
                 .get_scanner_and_config(
                     &active_account_ids,
-                    global_current_height,
+                    global_next_block,
                     end_height,
                     self.batch_size,
                     &targets,
@@ -227,6 +227,7 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
                     self.processing_threads,
                 )
                 .await?;
+
             let (scanned_blocks, more_blocks) = self.scan_blocks_with_timeout(scanner, &scanner_config).await?;
 
             if more_blocks {
@@ -234,12 +235,12 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
                     self.event_sender
                         .send(ProcessingEvent::ScanStatus(ScanStatusEvent::MoreBlocksAvailable {
                             account_id: *account_id,
-                            last_scanned_height: global_current_height,
+                            last_scanned_height: global_next_block.saturating_sub(1),
                         }));
                 }
             }
 
-            let mut max_new_height_in_batch = global_current_height;
+            let mut max_new_height_in_batch = global_next_block;
             let is_batch_empty = scanned_blocks.is_empty();
 
             if !is_batch_empty {
@@ -259,15 +260,16 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
                             *account_id,
                             target.transaction_monitor.has_pending_outbound(),
                             self.webhook_config.clone(),
-                            target.resume_height,
+                            target.next_block_to_scan,
                         )
                         .await?;
                     Self::push_events_with_limit(&mut all_events, events, max_buffered_events);
 
                     if let Some(last) = shared_blocks.last()
-                        && last.height > target.resume_height
+                        && last.height >= target.next_block_to_scan
                     {
-                        target.resume_height = last.height;
+                        target.next_block_to_scan = last.height + 1;
+
                         if last.height > max_new_height_in_batch {
                             max_new_height_in_batch = last.height;
                         }
@@ -297,12 +299,17 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
                 }
             }
 
-            let new_blocks_count = max_new_height_in_batch.saturating_sub(global_current_height);
+            let new_blocks_count = if is_batch_empty {
+                0
+            } else {
+                (max_new_height_in_batch.saturating_sub(global_next_block)) + 1
+            };
+
             blocks_since_reorg_check += new_blocks_count;
             total_scanned_globally += new_blocks_count;
 
             if blocks_since_reorg_check >= self.reorg_check_interval {
-                self.check_global_reorgs(&mut targets, &db_handler).await?;
+                self.check_global_reorgs(&mut targets, &db_handler, scanner).await?;
                 blocks_since_reorg_check = 0;
             }
 
@@ -328,13 +335,13 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
                     self.event_sender
                         .send(ProcessingEvent::ScanStatus(ScanStatusEvent::Completed {
                             account_id: target.account.id,
-                            final_height: target.resume_height,
+                            final_height: target.next_block_to_scan.saturating_sub(1),
                             total_blocks_scanned: total_scanned_globally,
                         }));
                 }
 
                 if let ScanMode::Continuous { poll_interval } = mode {
-                    self.wait_for_next_poll_cycle(&mut targets, &db_handler, poll_interval, &cancel_token)
+                    self.wait_for_next_poll_cycle(&mut targets, &db_handler, poll_interval, &cancel_token, scanner)
                         .await?;
                     continue;
                 }
@@ -361,6 +368,7 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
         &self,
         targets: &mut [AccountSyncTarget],
         db_handler: &ScanDbHandler<E>,
+        scanner: &mut HttpBlockchainScanner<KeyManager>,
     ) -> Result<(), ScanError> {
         if targets.is_empty() {
             return Ok(());
@@ -368,16 +376,14 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
 
         let mut conn = db_handler.get_connection().await?;
 
-        let mut scanner = self.create_reorg_scanner(targets[0].key_manager.clone()).await?;
-
         for target in targets {
-            let res = reorg::handle_reorgs(&mut scanner, &mut conn, target.account.id, self.webhook_config.clone())
+            let res = reorg::handle_reorgs(scanner, &mut conn, target.account.id, self.webhook_config.clone())
                 .await
                 .map_err(ScanError::Fatal)?;
 
             if let Some(info) = res.reorg_information {
                 self.emit_reorg_event(target.account.id, info, res.resume_height);
-                target.resume_height = res.resume_height.saturating_sub(1);
+                target.next_block_to_scan = res.resume_height;
             }
         }
         Ok(())
@@ -389,8 +395,11 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
         db_handler: &ScanDbHandler<E>,
         interval: std::time::Duration,
         cancel: &Option<CancellationToken>,
+        scanner: &mut HttpBlockchainScanner<KeyManager>,
     ) -> Result<(), ScanError> {
-        for target in targets.iter() {
+        for target in targets.iter_mut() {
+            target.next_block_to_scan = target.next_block_to_scan.saturating_sub(1);
+
             self.event_sender
                 .send(ProcessingEvent::ScanStatus(ScanStatusEvent::Waiting {
                     account_id: target.account.id,
@@ -407,7 +416,7 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
             tokio::time::sleep(interval).await;
         }
 
-        self.check_global_reorgs(targets, db_handler).await
+        self.check_global_reorgs(targets, db_handler, scanner).await
     }
 
     fn handle_pause(
@@ -420,7 +429,7 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
             self.event_sender
                 .send(ProcessingEvent::ScanStatus(ScanStatusEvent::Paused {
                     account_id: t.account.id,
-                    last_scanned_height: t.resume_height,
+                    last_scanned_height: t.next_block_to_scan.saturating_sub(1),
                     reason: reason.clone(),
                 }));
         }
