@@ -308,6 +308,10 @@ pub struct CreateTransactionRequest {
     pub confirmation_window: Option<u64>,
 }
 
+fn default_one_usize() -> usize {
+    1
+}
+
 // Request body for fee estimation.
 ///
 /// Calculates estimated fees for a transaction based on current mempool conditions
@@ -329,9 +333,9 @@ pub struct EstimateFeeRequest {
     pub amount: MicroMinotari,
 
     /// Number of outputs in the transaction (default: 1).
-    #[serde(default = "default_num_outputs")]
+    #[serde(default = "default_one_usize")]
     #[schema(default = "1")]
-    pub num_outputs: Option<usize>,
+    pub num_outputs: usize,
 
     /// Number of confirmations required for inputs.
     #[schema(schema_with = confirmation_window_schema)]
@@ -1511,7 +1515,7 @@ pub async fn api_estimate_fees(
         .estimate_fees(
             &name,
             body.amount,
-            body.num_outputs.unwrap_or(1),
+            body.num_outputs,
             confirmation_window,
             body.estimated_output_size,
         )
