@@ -67,3 +67,16 @@ pub struct JsonRpcResponse<T> {
     /// This should match the `id` field from the corresponding request.
     pub id: String,
 }
+
+#[derive(serde::Deserialize)]
+pub struct FeePerGramStatResponse {
+    pub order: u64,
+    pub min_fee_per_gram: u64,
+    pub avg_fee_per_gram: u64,
+    pub max_fee_per_gram: u64,
+}
+
+#[derive(serde::Deserialize)]
+pub struct GetMempoolFeePerGramStatsResponse {
+    pub stats: Vec<FeePerGramStatResponse>,
+}

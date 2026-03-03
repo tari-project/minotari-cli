@@ -52,8 +52,8 @@ use crate::{
     api::{
         AppState,
         types::{
-            AddressResponse, AddressWithPaymentIdResponse, CompletedTransactionResponse, LockFundsResult,
-            ScanStatusResponse, TariAddressBase58, VersionResponse,
+            AddressResponse, AddressWithPaymentIdResponse, CompletedTransactionResponse, FeeEstimateResponse,
+            FeePriorityResponse, LockFundsResult, ScanStatusResponse, TariAddressBase58, VersionResponse,
         },
     },
     db::{
@@ -64,6 +64,7 @@ use crate::{
     log::mask_amount,
     transactions::{
         DisplayedTransaction,
+        fee_estimator::{FeeEstimator, FeePriority},
         fund_locker::FundLocker,
         one_sided_transaction::{OneSidedTransaction, Recipient},
     },
@@ -305,6 +306,39 @@ pub struct CreateTransactionRequest {
 
     #[schema(schema_with = confirmation_window_schema)]
     pub confirmation_window: Option<u64>,
+}
+
+// Request body for fee estimation.
+///
+/// Calculates estimated fees for a transaction based on current mempool conditions
+/// and available UTXOs.
+///
+/// # JSON Example
+///
+/// ```json
+/// {
+///   "amount": 1000000,
+///   "num_outputs": 2,
+///   "estimated_output_size": 500
+/// }
+/// ```
+#[derive(Debug, Deserialize, utoipa::ToSchema)]
+pub struct EstimateFeeRequest {
+    /// The amount to send in MicroMinotari.
+    #[schema(value_type = u64)]
+    pub amount: MicroMinotari,
+
+    /// Number of outputs in the transaction (default: 1).
+    #[serde(default = "default_num_outputs")]
+    #[schema(default = "1")]
+    pub num_outputs: Option<usize>,
+
+    /// Number of confirmations required for inputs.
+    #[schema(schema_with = confirmation_window_schema)]
+    pub confirmation_window: Option<u64>,
+
+    /// Estimated size of each output in bytes.
+    pub estimated_output_size: Option<usize>,
 }
 
 /// Retrieves the wallet version information.
@@ -1408,4 +1442,102 @@ pub async fn api_get_displayed_transactions_by_payref(
     .map_err(|e| ApiError::InternalServerError(format!("Task join error: {}", e)))??;
 
     Ok(Json(transactions))
+}
+
+/// Estimates transaction fees based on current network conditions.
+///
+/// Calculates fee estimates for Slow, Medium, and Fast priority levels by analyzing
+/// the mempool state and selecting appropriate UTXOs for the requested amount.
+///
+/// # Path Parameters
+///
+/// - `name`: The account name to estimate fees for
+///
+/// # Request Body
+///
+/// See [`EstimateFeeRequest`] for the complete request schema.
+///
+/// # Response
+///
+/// Returns a list of [`FeeEstimateResponse`] objects for different priorities.
+///
+/// # Errors
+///
+/// - [`ApiError::AccountNotFound`]: The specified account does not exist
+/// - [`ApiError::InternalServerError`]: Failed to query base node or calculate fees
+/// - [`ApiError::DbError`]: Database connection or query failure
+///
+/// # Example Request
+///
+/// ```bash
+/// curl -X POST http://localhost:8080/accounts/default/estimate_fees \
+///   -H "Content-Type: application/json" \
+///   -d '{"amount": 1000000}'
+/// ```
+#[utoipa::path(
+    post,
+    path = "/accounts/{name}/estimate_fees",
+    request_body = EstimateFeeRequest,
+    responses(
+        (status = 200, description = "Fees estimated successfully", body = Vec<FeeEstimateResponse>),
+        (status = 400, description = "Bad request", body = ApiError),
+        (status = 404, description = "Account not found", body = ApiError),
+        (status = 500, description = "Internal server error", body = ApiError),
+    ),
+    params(
+        ("name" = String, Path, description = "Name of the account to estimate fees for"),
+    )
+)]
+pub async fn api_estimate_fees(
+    State(app_state): State<AppState>,
+    Path(WalletParams { name }): Path<WalletParams>,
+    Json(body): Json<EstimateFeeRequest>,
+) -> Result<Json<Vec<FeeEstimateResponse>>, ApiError> {
+    debug!(
+        account = &*name,
+        amount = &*mask_amount(body.amount.0.into());
+        "API: Estimate fees request"
+    );
+
+    let pool = app_state.db_pool.clone();
+    let base_url = app_state.base_node_url.clone();
+    let default_confirmations = app_state.required_confirmations;
+    let name = name.clone();
+
+    let estimator = FeeEstimator::new(pool, base_url);
+    let confirmation_window = body.confirmation_window.unwrap_or(default_confirmations);
+
+    let estimates = estimator
+        .estimate_fees(
+            &name,
+            body.amount,
+            body.num_outputs.unwrap_or(1),
+            confirmation_window,
+            body.estimated_output_size,
+        )
+        .await
+        .map_err(|e| {
+            if e.to_string().contains("not found") {
+                ApiError::AccountNotFound(name.clone())
+            } else {
+                ApiError::InternalServerError(e.to_string())
+            }
+        })?;
+
+    let response: Vec<FeeEstimateResponse> = estimates
+        .into_iter()
+        .map(|est| FeeEstimateResponse {
+            priority: match est.priority {
+                FeePriority::Slow => FeePriorityResponse::Slow,
+                FeePriority::Medium => FeePriorityResponse::Medium,
+                FeePriority::Fast => FeePriorityResponse::Fast,
+            },
+            fee_per_gram: est.fee_per_gram,
+            estimated_fee: est.estimated_fee,
+            total_amount_required: est.total_amount_required,
+            input_count: est.input_count,
+        })
+        .collect();
+
+    Ok(Json(response))
 }
