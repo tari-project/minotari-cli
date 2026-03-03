@@ -1392,10 +1392,7 @@
             "minimum": 0
           },
           "num_outputs": {
-            "type": [
-              "integer",
-              "null"
-            ],
+            "type": "integer",
             "description": "Number of outputs in the transaction (default: 1).",
             "default": "1",
             "minimum": 0
