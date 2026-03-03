@@ -1520,13 +1520,7 @@ pub async fn api_estimate_fees(
             body.estimated_output_size,
         )
         .await
-        .map_err(|e| {
-            if e.to_string().contains("not found") {
-                ApiError::AccountNotFound(name.clone())
-            } else {
-                ApiError::InternalServerError(e.to_string())
-            }
-        })?;
+        .map_err(|e| ApiError::InternalServerError(e.to_string()))?;
 
     let response: Vec<FeeEstimateResponse> = estimates
         .into_iter()
