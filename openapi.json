@@ -540,6 +540,82 @@
         }
       }
     },
+    "/accounts/{name}/estimate_fees": {
+      "post": {
+        "tags": [
+          "accounts"
+        ],
+        "summary": "Estimates transaction fees based on current network conditions.",
+        "description": "Calculates fee estimates for Slow, Medium, and Fast priority levels by analyzing\nthe mempool state and selecting appropriate UTXOs for the requested amount.\n\n# Path Parameters\n\n- `name`: The account name to estimate fees for\n\n# Request Body\n\nSee [`EstimateFeeRequest`] for the complete request schema.\n\n# Response\n\nReturns a list of [`FeeEstimateResponse`] objects for different priorities.\n\n# Errors\n\n- [`ApiError::AccountNotFound`]: The specified account does not exist\n- [`ApiError::InternalServerError`]: Failed to query base node or calculate fees\n- [`ApiError::DbError`]: Database connection or query failure\n\n# Example Request\n\n```bash\ncurl -X POST http://localhost:8080/accounts/default/estimate_fees \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\"amount\": 1000000}'\n```",
+        "operationId": "api_estimate_fees",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Name of the account to estimate fees for",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/EstimateFeeRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Fees estimated successfully",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/FeeEstimateResponse"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Bad request",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Account not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/accounts/{name}/events": {
       "get": {
         "tags": [
@@ -1290,6 +1366,82 @@
           }
         }
       },
+      "EstimateFeeRequest": {
+        "type": "object",
+        "description": "\nCalculates estimated fees for a transaction based on current mempool conditions\nand available UTXOs.\n\n# JSON Example\n\n```json\n{\n  \"amount\": 1000000,\n  \"num_outputs\": 2,\n  \"estimated_output_size\": 500\n}\n```",
+        "required": [
+          "amount"
+        ],
+        "properties": {
+          "amount": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The amount to send in MicroMinotari.",
+            "minimum": 0
+          },
+          "confirmation_window": {
+            "type": "integer",
+            "description": "Number of confirmations required"
+          },
+          "estimated_output_size": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Estimated size of each output in bytes.",
+            "minimum": 0
+          },
+          "num_outputs": {
+            "type": [
+              "integer",
+              "null"
+            ],
+            "description": "Number of outputs in the transaction (default: 1).",
+            "default": "1",
+            "minimum": 0
+          }
+        }
+      },
+      "FeeEstimateResponse": {
+        "type": "object",
+        "description": "API response type for fee estimation.\n\nContains the estimated fee details for a specific priority level.\n\n# JSON Example\n\n```json\n{\n  \"priority\": \"Medium\",\n  \"fee_per_gram\": 5,\n  \"estimated_fee\": 500,\n  \"total_amount_required\": 1000500,\n  \"input_count\": 2\n}\n```",
+        "required": [
+          "priority",
+          "fee_per_gram",
+          "estimated_fee",
+          "total_amount_required",
+          "input_count"
+        ],
+        "properties": {
+          "estimated_fee": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The total estimated fee in MicroMinotari",
+            "minimum": 0
+          },
+          "fee_per_gram": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The fee per gram used for calculation",
+            "minimum": 0
+          },
+          "input_count": {
+            "type": "integer",
+            "description": "The number of input UTXOs selected",
+            "minimum": 0
+          },
+          "priority": {
+            "$ref": "#/components/schemas/FeePriorityResponse",
+            "description": "The priority level for this estimate"
+          },
+          "total_amount_required": {
+            "type": "integer",
+            "format": "int64",
+            "description": "The total amount required (sent amount + fee) in MicroMinotari",
+            "minimum": 0
+          }
+        }
+      },
       "FeeInfo": {
         "type": "object",
         "required": [
@@ -1305,6 +1457,15 @@
             }
           }
         }
+      },
+      "FeePriorityResponse": {
+        "type": "string",
+        "description": "Priority level for fee estimation.",
+        "enum": [
+          "Slow",
+          "Medium",
+          "Fast"
+        ]
       },
       "FixedHash": {
         "type": "array",
