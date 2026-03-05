@@ -16,6 +16,7 @@ use tari_common_types::types::FixedHash;
 use tari_common_types::types::PrivateKey;
 use tari_transaction_components::MicroMinotari;
 use tari_transaction_components::transaction_components::WalletOutput;
+use tari_transaction_components::utxo_selection::UtxoValue;
 use tari_utilities::ByteArray;
 
 #[allow(clippy::too_many_arguments)]
@@ -147,10 +148,7 @@ pub fn get_output_info_by_hash_for_account(
         None => return Ok(None),
     };
 
-    let json_str = data
-        .wallet_output_json
-        .ok_or_else(|| WalletDbError::Unexpected("Output JSON is null".to_string()))?;
-    let output: WalletOutput = serde_json::from_str(&json_str)?;
+    let output: WalletOutput = serde_json::from_str(&data.wallet_output_json)?;
 
     let tx_id = TxId::from(data.tx_id as u64);
 
@@ -360,11 +358,17 @@ pub fn lock_output(
     Ok(())
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DbWalletOutput {
     pub id: i64,
     pub tx_id: TxId,
     pub output: WalletOutput,
+}
+
+impl UtxoValue for DbWalletOutput {
+    fn value(&self) -> MicroMinotari {
+        self.output.value()
+    }
 }
 
 #[derive(Deserialize)]

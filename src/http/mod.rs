@@ -36,7 +36,7 @@
 //!     let tip_info = client.get_tip_info().await?;
 //!     if tip_info.is_synced {
 //!         println!("Node is synced at height {:?}",
-//!             tip_info.metadata.map(|m| m.best_block_height));
+//!             tip_info.metadata.map(|m| m.best_block_height()));
 //!     }
 //! }
 //! # Ok(())

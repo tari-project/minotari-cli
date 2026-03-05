@@ -24,7 +24,7 @@
 //! // Check connectivity
 //! if client.is_online().await {
 //!     let tip = client.get_tip_info().await?;
-//!     println!("Chain height: {:?}", tip.metadata.map(|m| m.best_block_height));
+//!     println!("Chain height: {:?}", tip.metadata.map(|m| m.best_block_height()));
 //! }
 //! # Ok(())
 //! # }
@@ -203,8 +203,8 @@ impl WalletHttpClient {
     ///
     /// let tip = client.get_tip_info().await?;
     /// if let Some(metadata) = tip.metadata {
-    ///     println!("Current height: {}", metadata.best_block_height);
-    ///     println!("Accumulated difficulty: {}", metadata.accumulated_difficulty);
+    ///     println!("Current height: {}", metadata.best_block_height());
+    ///     println!("Accumulated difficulty: {}", metadata.accumulated_difficulty());
     /// }
     /// # Ok(())
     /// # }
@@ -401,8 +401,8 @@ impl WalletHttpClient {
     ///
     /// ```rust,no_run
     /// use url::Url;
-    /// use minotari::http::{WalletHttpClient, TxLocation};
-    ///
+    /// use minotari::http::{WalletHttpClient};
+    /// use tari_transaction_components::rpc::models::TxLocation;
     /// # async fn example() -> Result<(), anyhow::Error> {
     /// let client = WalletHttpClient::new(Url::parse("http://localhost:18142")?)?;
     ///
