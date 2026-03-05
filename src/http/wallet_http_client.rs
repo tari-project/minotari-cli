@@ -34,13 +34,16 @@ use std::time::Duration;
 
 use log::{debug, info, warn};
 use reqwest::Method;
-use tari_transaction_components::rpc::models::{TipInfoResponse, TxQueryResponse, TxSubmissionResponse};
+use tari_transaction_components::MicroMinotari;
+use tari_transaction_components::rpc::models::{
+    FeePerGramStat, TipInfoResponse, TxQueryResponse, TxSubmissionResponse,
+};
 use tari_transaction_components::transaction_components::Transaction;
 use tari_utilities::hex::to_hex;
 use url::Url;
 
-use crate::http::JsonRpcResponse;
 use crate::http::utils::check_transaction_size;
+use crate::http::{GetMempoolFeePerGramStatsResponse, JsonRpcResponse};
 
 use super::http_client::HttpClient;
 
@@ -462,5 +465,32 @@ impl WalletHttpClient {
 
         debug!("HTTP: Requesting block height successful");
         Ok(response)
+    }
+
+    pub async fn get_mempool_fee_per_gram_stats(&self, count: u64) -> Result<Vec<FeePerGramStat>, anyhow::Error> {
+        debug!(
+            count = count;
+            "Requesting mempool fee per gram stats"
+        );
+
+        let path = format!("/get_mempool_fee_per_gram_stats?count={count}");
+
+        let response = self
+            .http_client
+            .send_request::<GetMempoolFeePerGramStatsResponse>(Method::GET, &path, None)
+            .await?;
+
+        let stats: Vec<FeePerGramStat> = response
+            .stats
+            .into_iter()
+            .map(|s| FeePerGramStat {
+                order: s.order,
+                min_fee_per_gram: MicroMinotari::from(s.min_fee_per_gram),
+                avg_fee_per_gram: MicroMinotari::from(s.avg_fee_per_gram),
+                max_fee_per_gram: MicroMinotari::from(s.max_fee_per_gram),
+            })
+            .collect();
+
+        Ok(stats)
     }
 }

@@ -177,6 +177,7 @@ impl Daemon {
             self.network,
             self.password.clone(),
             self.required_confirmations,
+            self.base_url.clone(),
         );
         let addr = format!("0.0.0.0:{}", self.api_port);
         let listener = tokio::net::TcpListener::bind(&addr)
