@@ -67,7 +67,8 @@ async fn see_balance_info(world: &mut MinotariWorld) {
     assert_eq!(
         world.last_command_exit_code,
         Some(0),
-        "Balance command failed: {}",
+        "Balance command should succeed but got exit code {:?}. Error: {}",
+        world.last_command_exit_code,
         world.last_command_error.as_deref().unwrap_or("")
     );
     
@@ -113,7 +114,8 @@ async fn see_all_balances(world: &mut MinotariWorld) {
     assert_eq!(
         world.last_command_exit_code,
         Some(0),
-        "Balance command failed: {}",
+        "Balance command should succeed but got exit code {:?}. Error: {}",
+        world.last_command_exit_code,
         world.last_command_error.as_deref().unwrap_or("")
     );
     
