@@ -11,10 +11,6 @@ use super::common::MinotariWorld;
 // Scanning Steps
 // =============================
 
-#[given(regex = r#"^the wallet has birthday height "([^"]*)"$"#)]
-async fn wallet_has_birthday(_world: &mut MinotariWorld, _height: String) {
-    // Birthday is set during import, this step is for documentation
-}
 
 #[given("the wallet has been previously scanned")]
 async fn wallet_previously_scanned(world: &mut MinotariWorld) {
