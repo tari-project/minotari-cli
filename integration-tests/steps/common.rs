@@ -36,6 +36,7 @@ pub struct MinotariWorld {
     pub daemon_handle: Option<std::process::Child>,
     pub api_port: Option<u16>,
     pub locked_funds: HashMap<String, serde_json::Value>,
+    pub transaction_data: HashMap<String, serde_json::Value>,
     // Base node infrastructure
     pub base_nodes: IndexMap<String, BaseNodeProcess>,
     pub assigned_ports: IndexMap<u64, u64>,
@@ -66,6 +67,7 @@ impl MinotariWorld {
             daemon_handle: None,
             api_port: None,
             locked_funds: HashMap::new(),
+            transaction_data: HashMap::new(),
             base_nodes: IndexMap::new(),
             assigned_ports: IndexMap::new(),
             current_base_dir: Some(base_dir),
