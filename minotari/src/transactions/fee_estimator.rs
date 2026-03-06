@@ -2,7 +2,6 @@ use anyhow::{Result, anyhow};
 use log::debug;
 use tari_script::TariScript;
 use tari_transaction_components::helpers::borsh::SerializedSize;
-use tari_transaction_components::rpc::models::FeePerGramStat;
 use tari_transaction_components::{
     fee::Fee,
     tari_amount::MicroMinotari,
@@ -10,6 +9,7 @@ use tari_transaction_components::{
     weight::TransactionWeight,
 };
 
+use crate::http::WalletHttpClient;
 use crate::{
     db::{self, AccountRow, SqlitePool},
     transactions::input_selector::InputSelector,
@@ -33,11 +33,7 @@ pub struct FeeEstimateResult {
 
 pub struct FeeEstimator {
     db_pool: SqlitePool,
-
-    // base_url will be required for `get_mempool_fee_per_gram_stats()` call
-    #[allow(dead_code)]
     base_url: String,
-
     fee_calc: Fee,
 }
 
@@ -48,16 +44,6 @@ impl FeeEstimator {
             base_url,
             fee_calc: Fee::new(TransactionWeight::latest()),
         }
-    }
-
-    async fn get_mempool_fee_per_gram_stats(&self) -> Result<FeePerGramStat, anyhow::Error> {
-        // Placeholder implementation
-        Ok(FeePerGramStat {
-            order: 1,
-            min_fee_per_gram: MicroMinotari::from(1),  // Slow
-            avg_fee_per_gram: MicroMinotari::from(5),  // Medium
-            max_fee_per_gram: MicroMinotari::from(10), // Fast
-        })
     }
 
     pub async fn estimate_fees(
@@ -73,17 +59,25 @@ impl FeeEstimator {
         let account: AccountRow = db::get_account_by_name(&conn, account_name)?
             .ok_or_else(|| anyhow!("Account with name '{}' not found", account_name))?;
 
-        let stats = self.get_mempool_fee_per_gram_stats().await?;
+        let client = WalletHttpClient::new(self.base_url.parse()?)?;
+        let (fast_fee, medium_fee, slow_fee) = match client.get_mempool_fee_per_gram_stats(3).await {
+            Ok(stats) if !stats.is_empty() => {
+                // Fast: Average of the 1st block (next block)
+                let fast = stats.first().unwrap().avg_fee_per_gram;
+                // Medium: Average of the 2nd block (if exists)
+                let medium = stats.get(1).unwrap_or(&stats[0]).avg_fee_per_gram;
+                // Slow: Minimum of the deepest block we got
+                let slow = stats.last().unwrap().min_fee_per_gram;
+
+                (fast, medium, slow)
+            },
+            _ => (MicroMinotari::from(10), MicroMinotari::from(5), MicroMinotari::from(1)),
+        };
 
         let input_selector = InputSelector::new(account.id, confirmation_window);
 
-        let selection = input_selector.fetch_unspent_outputs(
-            &conn,
-            amount,
-            num_outputs,
-            stats.max_fee_per_gram,
-            estimated_output_size,
-        )?;
+        let selection =
+            input_selector.fetch_unspent_outputs(&conn, amount, num_outputs, fast_fee, estimated_output_size)?;
 
         let input_count = selection.utxos.len();
         let total_outputs = if selection.requires_change_output {
@@ -98,9 +92,9 @@ impl FeeEstimator {
         };
 
         let results = [
-            (FeePriority::Slow, stats.min_fee_per_gram),
-            (FeePriority::Medium, stats.avg_fee_per_gram),
-            (FeePriority::Fast, stats.max_fee_per_gram),
+            (FeePriority::Slow, slow_fee),
+            (FeePriority::Medium, medium_fee),
+            (FeePriority::Fast, fast_fee),
         ]
         .into_iter()
         .map(|(priority, fee_per_gram)| {

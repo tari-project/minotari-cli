@@ -361,10 +361,7 @@ pub fn get_displayed_transactions_paginated(
 pub fn get_displayed_transactions_needing_confirmation_update(
     conn: &Connection,
     account_id: Id,
-    current_tip_height: u64,
-    required_confirmations: u64,
 ) -> WalletDbResult<Vec<DisplayedTransaction>> {
-    let min_height = current_tip_height.saturating_sub(required_confirmations) as i64;
     let pending_status = format!("{:?}", TransactionDisplayStatus::Pending).to_lowercase();
     let unconfirmed_status = format!("{:?}", TransactionDisplayStatus::Unconfirmed).to_lowercase();
 
@@ -373,15 +370,12 @@ pub fn get_displayed_transactions_needing_confirmation_update(
         SELECT transaction_json
         FROM displayed_transactions
         WHERE account_id = :account_id
-          AND block_height > :min_height
           AND status IN (:s1, :s2)
-        ORDER BY block_height DESC
         "#,
     )?;
 
     let rows = stmt.query(named_params! {
         ":account_id": account_id,
-        ":min_height": min_height,
         ":s1": pending_status,
         ":s2": unconfirmed_status
     })?;

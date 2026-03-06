@@ -13,13 +13,17 @@ use serde_rusqlite::from_rows;
 use tari_common_types::payment_reference::PaymentReference;
 use tari_common_types::transaction::TxId;
 use tari_common_types::types::FixedHash;
+use tari_common_types::types::PrivateKey;
+use tari_transaction_components::MicroMinotari;
 use tari_transaction_components::transaction_components::WalletOutput;
+use tari_transaction_components::utxo_selection::UtxoValue;
+use tari_utilities::ByteArray;
 
 #[allow(clippy::too_many_arguments)]
 pub fn insert_output(
     conn: &Connection,
     account_id: i64,
-    account_view_key: &[u8],
+    account_view_key: &PrivateKey,
     output_hash: Vec<u8>,
     output: &WalletOutput,
     block_height: u64,
@@ -37,7 +41,7 @@ pub fn insert_output(
         "DB: Inserting output"
     );
 
-    let tx_id = TxId::new_deterministic(account_view_key, &output.output_hash()).as_i64_wrapped();
+    let tx_id = TxId::new_deterministic(account_view_key.as_bytes(), &output.output_hash()).as_i64_wrapped();
 
     let output_json = serde_json::to_string(&output)?;
 
@@ -114,10 +118,37 @@ pub fn get_output_info_by_hash(
         None => return Ok(None),
     };
 
-    let json_str = data
-        .wallet_output_json
-        .ok_or_else(|| WalletDbError::Unexpected("Output JSON is null".to_string()))?;
-    let output: WalletOutput = serde_json::from_str(&json_str)?;
+    let output: WalletOutput = serde_json::from_str(&data.wallet_output_json)?;
+
+    let tx_id = TxId::from(data.tx_id as u64);
+
+    Ok(Some((data.id, tx_id, output)))
+}
+
+pub fn get_output_info_by_hash_for_account(
+    conn: &Connection,
+    account_id: i64,
+    output_hash: &FixedHash,
+) -> WalletDbResult<Option<(i64, TxId, WalletOutput)>> {
+    let mut stmt = conn.prepare_cached(
+        r#"
+        SELECT id, tx_id, wallet_output_json
+        FROM outputs
+        WHERE account_id = :account_id AND output_hash = :output_hash AND deleted_at IS NULL
+        "#,
+    )?;
+
+    let rows = stmt.query(named_params! {
+        ":account_id": account_id,
+        ":output_hash": output_hash.as_slice(),
+    })?;
+    let row: Option<WalletOutputRow> = from_rows(rows).next().transpose()?;
+    let data = match row {
+        Some(r) => r,
+        None => return Ok(None),
+    };
+
+    let output: WalletOutput = serde_json::from_str(&data.wallet_output_json)?;
 
     let tx_id = TxId::from(data.tx_id as u64);
 
@@ -327,18 +358,24 @@ pub fn lock_output(
     Ok(())
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DbWalletOutput {
     pub id: i64,
     pub tx_id: TxId,
     pub output: WalletOutput,
 }
 
+impl UtxoValue for DbWalletOutput {
+    fn value(&self) -> MicroMinotari {
+        self.output.value()
+    }
+}
+
 #[derive(Deserialize)]
 struct WalletOutputRow {
     id: i64,
     tx_id: i64,
-    wallet_output_json: Option<String>,
+    wallet_output_json: String,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -407,7 +444,6 @@ pub fn fetch_unspent_outputs(
         WHERE account_id = :account_id
           AND status = :unspent_status
           AND confirmed_height <= :min_height
-          AND wallet_output_json IS NOT NULL
           AND deleted_at IS NULL
         ORDER BY value DESC
         "#,
@@ -420,14 +456,12 @@ pub fn fetch_unspent_outputs(
 
     let mut outputs = Vec::new();
     for row in raw_rows {
-        if let Some(json_str) = row.wallet_output_json {
-            let output: WalletOutput = serde_json::from_str(&json_str)?;
-            outputs.push(DbWalletOutput {
-                id: row.id,
-                tx_id: TxId::from(row.tx_id as u64),
-                output,
-            });
-        }
+        let output: WalletOutput = serde_json::from_str(&row.wallet_output_json)?;
+        outputs.push(DbWalletOutput {
+            id: row.id,
+            tx_id: TxId::from(row.tx_id as u64),
+            output,
+        });
     }
     Ok(outputs)
 }
@@ -461,23 +495,20 @@ pub fn fetch_outputs_by_lock_request_id(
     conn: &Connection,
     locked_by_request_id: &str,
 ) -> WalletDbResult<Vec<DbWalletOutput>> {
-    let mut stmt = conn.prepare_cached(
-        "SELECT id, tx_id, wallet_output_json FROM outputs WHERE locked_by_request_id = :req_id and wallet_output_json IS NOT NULL"
-    )?;
+    let mut stmt =
+        conn.prepare_cached("SELECT id, tx_id, wallet_output_json FROM outputs WHERE locked_by_request_id = :req_id")?;
 
     let rows = stmt.query(named_params! { ":req_id": locked_by_request_id })?;
     let raw_rows: Vec<WalletOutputRow> = from_rows(rows).collect::<Result<Vec<_>, _>>()?;
 
     let mut outputs = Vec::new();
     for row in raw_rows {
-        if let Some(json_str) = row.wallet_output_json {
-            let output: WalletOutput = serde_json::from_str(&json_str)?;
-            outputs.push(DbWalletOutput {
-                id: row.id,
-                tx_id: TxId::from(row.tx_id as u64),
-                output,
-            });
-        }
+        let output: WalletOutput = serde_json::from_str(&row.wallet_output_json)?;
+        outputs.push(DbWalletOutput {
+            id: row.id,
+            tx_id: TxId::from(row.tx_id as u64),
+            output,
+        });
     }
     Ok(outputs)
 }
@@ -491,7 +522,10 @@ struct OutputTotals {
 
 /// Retrieves the sum of LOCKED values, the sum of UNCONFIRMED values, and the sum of values that are both LOCKED and UNCONFIRMED for an account.
 /// Returns (locked_balance, unconfirmed_balance, locked_and_unconfirmed_balance)
-pub fn get_output_totals_for_account(conn: &Connection, account_id: i64) -> WalletDbResult<(u64, u64, u64)> {
+pub fn get_output_totals_for_account(
+    conn: &Connection,
+    account_id: i64,
+) -> WalletDbResult<(MicroMinotari, MicroMinotari, MicroMinotari)> {
     let locked_status = OutputStatus::Locked.to_string();
 
     let mut stmt = conn.prepare_cached(
@@ -515,9 +549,9 @@ pub fn get_output_totals_for_account(conn: &Connection, account_id: i64) -> Wall
         .ok_or_else(|| WalletDbError::Unexpected("Aggregate query returned no rows".to_string()))??;
 
     Ok((
-        result.locked_val as u64,
-        result.unconfirmed_val as u64,
-        result.locked_and_unconfirmed_val as u64,
+        (result.locked_val as u64).into(),
+        (result.unconfirmed_val as u64).into(),
+        (result.locked_and_unconfirmed_val as u64).into(),
     ))
 }
 
@@ -564,7 +598,6 @@ pub fn get_total_unspent_balance(conn: &Connection, account_id: i64) -> WalletDb
         FROM outputs
         WHERE account_id = :account_id
           AND status = :unspent_status
-          AND wallet_output_json IS NOT NULL
           AND deleted_at IS NULL
         "#,
     )?;

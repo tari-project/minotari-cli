@@ -352,3 +352,46 @@ impl<'de> Deserialize<'de> for TariAddressBase58 {
             .map_err(de::Error::custom)
     }
 }
+
+/// Priority level for fee estimation.
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
+pub enum FeePriorityResponse {
+    /// Low fee, slower confirmation time
+    Slow,
+    /// Medium fee, average confirmation time
+    Medium,
+    /// High fee, faster confirmation time
+    Fast,
+}
+
+/// API response type for fee estimation.
+///
+/// Contains the estimated fee details for a specific priority level.
+///
+/// # JSON Example
+///
+/// ```json
+/// {
+///   "priority": "Medium",
+///   "fee_per_gram": 5,
+///   "estimated_fee": 500,
+///   "total_amount_required": 1000500,
+///   "input_count": 2
+/// }
+/// ```
+#[derive(Debug, serde::Serialize, utoipa::ToSchema)]
+pub struct FeeEstimateResponse {
+    /// The priority level for this estimate
+    pub priority: FeePriorityResponse,
+    /// The fee per gram used for calculation
+    #[schema(value_type = u64)]
+    pub fee_per_gram: MicroMinotari,
+    /// The total estimated fee in MicroMinotari
+    #[schema(value_type = u64)]
+    pub estimated_fee: MicroMinotari,
+    /// The total amount required (sent amount + fee) in MicroMinotari
+    #[schema(value_type = u64)]
+    pub total_amount_required: MicroMinotari,
+    /// The number of input UTXOs selected
+    pub input_count: usize,
+}

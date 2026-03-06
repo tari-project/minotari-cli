@@ -168,14 +168,14 @@ pub fn get_all_active_balance_changes_by_account_id(
 }
 
 #[derive(Debug, Default, Deserialize)]
-pub struct BalanceAggregates {
+pub struct DbBalanceAggregates {
     pub total_credits: Option<i64>,
     pub total_debits: Option<i64>,
     pub max_height: Option<i64>,
     pub max_date: Option<chrono::NaiveDateTime>,
 }
 
-pub fn get_balance_aggregates_for_account(conn: &Connection, account_id: i64) -> WalletDbResult<BalanceAggregates> {
+pub fn get_balance_aggregates_for_account(conn: &Connection, account_id: i64) -> WalletDbResult<DbBalanceAggregates> {
     let mut stmt = conn.prepare_cached(
         r#"
             SELECT
@@ -189,7 +189,7 @@ pub fn get_balance_aggregates_for_account(conn: &Connection, account_id: i64) ->
     )?;
 
     let rows = stmt.query(named_params! { ":account_id": account_id })?;
-    let result = from_rows::<BalanceAggregates>(rows)
+    let result = from_rows::<DbBalanceAggregates>(rows)
         .next()
         .ok_or_else(|| WalletDbError::Unexpected("Aggregate query returned no rows".to_string()))??;
     Ok(result)

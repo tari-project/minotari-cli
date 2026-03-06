@@ -84,20 +84,22 @@
 //!
 //! Retry behavior is configurable via [`ScanRetryConfig`].
 
-mod block_processor;
-mod events;
-mod reorg;
-#[allow(clippy::module_inception)]
-pub mod scan;
-pub mod scan_db_handler;
-
 pub mod block_event_accumulator;
+pub mod block_processor;
+pub mod events;
+pub mod reorg;
+pub mod scan_db_handler;
+pub mod types;
 
-pub use block_processor::BlockProcessor;
-pub use events::{
-    BalanceChangeSummary, BlockProcessedEvent, ChannelEventSender, ConfirmedOutput, DetectedOutput,
-    DisplayedTransactionsEvent, EventSender, NoopEventSender, PauseReason, ProcessingEvent, ReorgDetectedEvent,
-    ScanStatusEvent, SpentInput, TransactionsUpdatedEvent,
-};
-pub use reorg::{ReorgInformation, ReorgResult, rollback_from_height};
-pub use scan::{ScanMode, ScanRetryConfig, ScanTimeoutConfig, Scanner};
+mod builder;
+mod config;
+mod coordinator;
+mod scanner_state_manager;
+
+pub use builder::Scanner;
+pub use config::ScanMode;
+pub use config::ScanRetryConfig;
+pub use config::ScanTimeoutConfig;
+pub use types::ScanError;
+
+pub use events::*;

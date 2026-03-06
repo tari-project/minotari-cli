@@ -4,6 +4,16 @@ use tari_common::{SubConfigPath, configuration::Network};
 
 use crate::cli::{AccountArgs, ApplyArgs, DatabaseArgs, NodeArgs, TransactionArgs};
 
+#[derive(Debug, Clone, Deserialize, Serialize, Default)]
+pub struct WebhookConfig {
+    /// The HTTP endpoint to post events to
+    pub url: Option<String>,
+    /// The secret key used for HMAC signing
+    pub secret: Option<String>,
+    /// Optional list of event types to send. If None, all events are sent.
+    pub send_only_event_types: Option<Vec<String>>,
+}
+
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct WalletConfig {
     pub network: Network,
@@ -14,6 +24,7 @@ pub struct WalletConfig {
     pub api_port: u16,
     pub confirmation_window: u64,
     pub account_name: Option<String>,
+    pub webhook: WebhookConfig,
 }
 
 impl Default for WalletConfig {
@@ -27,6 +38,7 @@ impl Default for WalletConfig {
             api_port: 9000,
             confirmation_window: 3,
             account_name: None,
+            webhook: WebhookConfig::default(),
         }
     }
 }

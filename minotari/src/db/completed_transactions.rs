@@ -69,11 +69,9 @@ fn map_row(row: &Row) -> Result<CompletedTransaction, rusqlite::Error> {
     let status_str: String = row.get("status")?;
     let status =
         CompletedTransactionStatus::from_str(&status_str).map_err(|_| rusqlite::Error::ExecuteReturnedResults)?;
-    let string_id: String = row.get("id")?;
+    let id: i64 = row.get("id")?;
     Ok(CompletedTransaction {
-        id: TxId::from(string_id.parse::<u64>().map_err(|e| {
-            rusqlite::Error::FromSqlConversionFailure(string_id.len(), rusqlite::types::Type::Text, Box::new(e))
-        })?),
+        id: TxId::from(id as u64),
         account_id: row.get("account_id")?,
         pending_tx_id: row.get("pending_tx_id")?,
         status,
@@ -106,7 +104,7 @@ pub fn create_completed_transaction(
         "DB: Creating completed transaction"
     );
 
-    let id = tx_id.to_string();
+    let id = tx_id.as_i64_wrapped();
     let status_str = CompletedTransactionStatus::Completed.to_string();
 
     conn.execute(
@@ -143,7 +141,7 @@ pub fn create_completed_transaction(
 
     info!(
         target: "audit",
-        id = id.as_str(),
+        id = id.to_string().as_str(),
         account_id = account_id,
         pending_id = pending_tx_id;
         "DB: Transaction Completed"

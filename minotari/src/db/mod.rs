@@ -61,6 +61,7 @@ pub use error::{WalletDbError, WalletDbResult};
 mod accounts;
 pub use accounts::{
     AccountBalance, AccountRow, create_account, delete_account, get_account_by_name, get_accounts, get_balance,
+    update_account_name,
 };
 
 mod scanned_tip_blocks;
@@ -73,8 +74,9 @@ pub use scanned_tip_blocks::{
 mod outputs;
 pub use outputs::{
     DbOutput, DbWalletOutput, fetch_outputs_by_lock_request_id, fetch_unspent_outputs, get_active_outputs_from_height,
-    get_output_by_id, get_output_info_by_hash, get_total_unspent_balance, get_unconfirmed_outputs, insert_output,
-    lock_output, mark_output_confirmed, soft_delete_outputs_from_height, unlock_outputs_for_request,
+    get_output_by_id, get_output_info_by_hash, get_output_info_by_hash_for_account, get_output_totals_for_account,
+    get_total_unspent_balance, get_unconfirmed_outputs, insert_output, lock_output, mark_output_confirmed,
+    soft_delete_outputs_from_height, unlock_outputs_for_request,
     unlock_outputs_for_request as unlock_outputs_for_pending_transaction, update_output_status,
 };
 
@@ -98,6 +100,9 @@ pub use completed_transactions::{
 
 mod events;
 pub use events::{DbWalletEvent, get_events_by_account_id, insert_wallet_event};
+
+mod webhooks;
+pub use webhooks::{delete_webhooks_older_than, enqueue_webhook, fetch_due_webhooks, update_webhook_status};
 
 mod balance_changes;
 pub use balance_changes::{

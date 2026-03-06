@@ -86,6 +86,7 @@ pub struct AppState {
     pub network: Network,
     pub password: String,
     pub required_confirmations: u64,
+    pub base_node_url: String,
 }
 
 impl FromRef<AppState> for SqlitePool {
@@ -132,6 +133,9 @@ impl FromRef<AppState> for SqlitePool {
 /// - `RecipientRequest` - Transaction recipient details
 /// - `LockFundsResult` - Response from fund locking operation
 /// - `TariAddressBase58` - Base58-encoded Tari address
+/// - `FeeEstimateResponse` - Fee estimation result
+/// - `FeePriorityResponse` - Fee priority enumeration
+/// - `EstimateFeeRequest` - Request body for fee estimation
 #[derive(OpenApi)]
 #[openapi(
     paths(
@@ -147,6 +151,7 @@ impl FromRef<AppState> for SqlitePool {
         accounts::api_get_displayed_transactions_by_payref,
         accounts::api_lock_funds,
         accounts::api_create_unsigned_transaction,
+        accounts::api_estimate_fees,
     ),
     components(
         schemas(
@@ -158,6 +163,7 @@ impl FromRef<AppState> for SqlitePool {
             accounts::CreateTransactionRequest,
             accounts::CreatePaymentIdAddressRequest,
             accounts::RecipientRequest,
+            accounts::EstimateFeeRequest,
             crate::api::types::LockFundsResult,
             crate::api::types::TariAddressBase58,
             crate::api::types::CompletedTransactionResponse,
@@ -165,6 +171,8 @@ impl FromRef<AppState> for SqlitePool {
             crate::api::types::AddressResponse,
             crate::api::types::AddressWithPaymentIdResponse,
             crate::api::types::VersionResponse,
+            crate::api::types::FeeEstimateResponse,
+            crate::api::types::FeePriorityResponse,
             crate::transactions::DisplayedTransaction,
             crate::transactions::TransactionDirection,
             crate::transactions::TransactionSource,
@@ -219,7 +227,13 @@ pub struct ApiDoc;
 /// # Ok(())
 /// # }
 /// ```
-pub fn create_router(db_pool: SqlitePool, network: Network, password: String, required_confirmations: u64) -> Router {
+pub fn create_router(
+    db_pool: SqlitePool,
+    network: Network,
+    password: String,
+    required_confirmations: u64,
+    base_node_url: String,
+) -> Router {
     info!(
         network:% = network;
         "Creating API router"
@@ -230,6 +244,7 @@ pub fn create_router(db_pool: SqlitePool, network: Network, password: String, re
         network,
         password,
         required_confirmations,
+        base_node_url,
     };
 
     Router::new()
@@ -264,5 +279,6 @@ pub fn create_router(db_pool: SqlitePool, network: Network, password: String, re
             "/accounts/{name}/create_unsigned_transaction",
             post(accounts::api_create_unsigned_transaction),
         )
+        .route("/accounts/{name}/estimate_fees", post(accounts::api_estimate_fees))
         .with_state(app_state)
 }

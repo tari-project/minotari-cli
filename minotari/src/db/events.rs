@@ -28,7 +28,7 @@ pub struct DbWalletEvent {
     pub created_at: NaiveDateTime,
 }
 
-pub fn insert_wallet_event(conn: &Connection, account_id: i64, event: &WalletEvent) -> WalletDbResult<()> {
+pub fn insert_wallet_event(conn: &Connection, account_id: i64, event: &WalletEvent) -> WalletDbResult<i64> {
     info!(
         target: "audit",
         account_id = account_id,
@@ -53,7 +53,9 @@ pub fn insert_wallet_event(conn: &Connection, account_id: i64, event: &WalletEve
         },
     )?;
 
-    Ok(())
+    let event_id = conn.last_insert_rowid();
+
+    Ok(event_id)
 }
 
 pub fn get_events_by_account_id(

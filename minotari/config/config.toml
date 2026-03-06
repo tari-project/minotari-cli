@@ -9,6 +9,23 @@ api_port = 9000
 confirmation_window = 3
 account_name = "default"
 
+# [wallet.webhook]
+# url = "https://your-api.com/webhook"
+# secret = "your_super_secret_hmac_key"
+# Optional: List of event types to receive. If commented out, all events are sent.
+# Available event types:
+# - BlockRolledBack: A block was removed from the local database due to a reorg.
+# - OutputDetected: A new UTXO belonging to the wallet was found.
+# - OutputConfirmed: A received UTXO has reached the required confirmation depth.
+# - OutputRolledBack: A detected UTXO was removed due to a chain reorg.
+# - PendingTransactionCancelled: A pending outbound transaction was cancelled.
+# - TransactionBroadcast: An outbound transaction was successfully broadcast to the network.
+# - TransactionUnconfirmed: An outbound transaction was mined but is awaiting confirmations.
+# - TransactionConfirmed: An outbound transaction has reached sufficient confirmations.
+# - TransactionRejected: An outbound transaction was rejected by the base node.
+# - TransactionReorged: A previously mined outbound transaction was removed via reorg.
+# send_only_event_types = ["OutputDetected", "TransactionConfirmed", "TransactionRejected"]
+
 [mainnet.wallet]
 base_url = "https://rpc.tari.com"
 

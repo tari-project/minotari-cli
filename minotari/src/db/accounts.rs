@@ -12,6 +12,7 @@ use tari_common_types::{
     types::CompressedPublicKey,
 };
 use tari_crypto::{keys::PublicKey, ristretto::RistrettoPublicKey};
+use tari_transaction_components::MicroMinotari;
 use tari_transaction_components::key_manager::{KeyManager, wallet_types::WalletType};
 use utoipa::ToSchema;
 
@@ -24,6 +25,15 @@ use crate::utils::{
 };
 use crate::{db::balance_changes::get_balance_aggregates_for_account, utils::crypto::FullEncryptedData};
 use tari_utilities::hex::Hex;
+use utoipa::openapi::{Object, Schema, Type};
+
+pub fn micro_minotari_schema() -> Schema {
+    Schema::Object(
+        Object::builder()
+            .property("amount", Schema::Object(Object::with_type(Type::Integer)))
+            .build(),
+    )
+}
 
 pub fn create_account(
     conn: &Connection,
@@ -260,17 +270,23 @@ impl AccountRow {
 #[derive(Debug, Clone, ToSchema, Serialize)]
 pub struct AccountBalance {
     /// The total balance of the account (Total Credits - Total Debits).
-    pub total: u64,
+    #[schema(schema_with = micro_minotari_schema)]
+    pub total: MicroMinotari,
     /// The portion of the total balance that is currently spendable.
-    pub available: u64,
+    #[schema(schema_with = micro_minotari_schema)]
+    pub available: MicroMinotari,
     /// The portion of the balance that is locked.
-    pub locked: u64,
+    #[schema(schema_with = micro_minotari_schema)]
+    pub locked: MicroMinotari,
     /// The amount from incoming transactions that have not yet been confirmed.
-    pub unconfirmed: u64,
+    #[schema(schema_with = micro_minotari_schema)]
+    pub unconfirmed: MicroMinotari,
     /// The total sum of all incoming (credit) transactions.
-    pub total_credits: Option<i64>,
+    #[schema(schema_with = micro_minotari_schema)]
+    pub total_credits: Option<MicroMinotari>,
     /// The total sum of all outgoing (debit) transactions.
-    pub total_debits: Option<i64>,
+    #[schema(schema_with = micro_minotari_schema)]
+    pub total_debits: Option<MicroMinotari>,
     /// The maximum blockchain height among all transactions for this account.
     ///
     /// Will be `None` if the account has no transactions.
@@ -291,8 +307,8 @@ pub fn get_balance(conn: &Connection, account_id: i64) -> WalletDbResult<Account
     let (locked_amount, unconfirmed_amount, locked_and_unconfirmed_amount) =
         get_output_totals_for_account(conn, account_id)?;
 
-    let total_credits = history_agg.total_credits.unwrap_or(0) as u64;
-    let total_debits = history_agg.total_debits.unwrap_or(0) as u64;
+    let total_credits: MicroMinotari = (history_agg.total_credits.unwrap_or_default() as u64).into();
+    let total_debits: MicroMinotari = (history_agg.total_debits.unwrap_or_default() as u64).into();
     let total_balance = total_credits.saturating_sub(total_debits);
 
     let unavailable_balance = locked_amount
@@ -307,8 +323,8 @@ pub fn get_balance(conn: &Connection, account_id: i64) -> WalletDbResult<Account
         available: available_balance,
         locked: locked_amount,
         unconfirmed: unconfirmed_amount,
-        total_credits: history_agg.total_credits,
-        total_debits: history_agg.total_debits,
+        total_credits: Some(total_credits),
+        total_debits: Some(total_debits),
         max_height: history_agg.max_height,
         max_date: max_date_str,
     })
@@ -351,6 +367,49 @@ pub fn delete_account(conn: &Connection, friendly_name: &str) -> WalletDbResult<
     )?;
 
     info!(target: "audit", account = friendly_name; "Account successfully deleted");
+
+    Ok(())
+}
+
+pub fn update_account_name(conn: &Connection, current_name: &str, new_name: &str) -> WalletDbResult<()> {
+    info!(
+        target: "audit",
+        current_name = current_name,
+        new_name = new_name;
+        "DB: Renaming account"
+    );
+
+    // Check if the new name is already taken
+    if get_account_by_name(conn, new_name)?.is_some() {
+        return Err(WalletDbError::InvalidInput(format!(
+            "An account with the name '{}' already exists",
+            new_name
+        )));
+    }
+
+    let affected_rows = match conn.execute(
+        "UPDATE accounts SET friendly_name = :new_name WHERE friendly_name = :current_name",
+        named_params! {
+            ":new_name": new_name,
+            ":current_name": current_name,
+        },
+    ) {
+        Ok(rows) => rows,
+        Err(rusqlite::Error::SqliteFailure(err, _)) if err.code == rusqlite::ErrorCode::ConstraintViolation => {
+            return Err(WalletDbError::InvalidInput(format!(
+                "An account with the name '{}' already exists",
+                new_name
+            )));
+        },
+        Err(e) => return Err(e.into()),
+    };
+
+    if affected_rows == 0 {
+        return Err(WalletDbError::InvalidInput(format!(
+            "Account '{}' not found",
+            current_name
+        )));
+    }
 
     Ok(())
 }

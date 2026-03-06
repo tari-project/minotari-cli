@@ -58,6 +58,7 @@ use chacha20poly1305::{
 use clap::Parser;
 use log::info;
 use minotari::{
+    ScanError,
     api::accounts::LockFundsRequest,
     cli::{ApplyArgs, Cli, Commands},
     config::{defaults::WalletConfig, loader::load_configuration},
@@ -65,14 +66,14 @@ use minotari::{
     db::{self, WalletDbError, get_accounts, get_balance, init_db},
     log::{init_logging, mask_string},
     models::WalletEvent,
-    scan::{self, rollback_from_height, scan::ScanError},
+    scan::{self, reorg::rollback_from_height},
     transactions::{
         fund_locker::FundLocker,
         one_sided_transaction::{OneSidedTransaction, Recipient},
     },
     utils,
+    webhooks::WebhookTriggerConfig,
 };
-use num_format::{Locale, ToFormattedString};
 use std::str::FromStr;
 use tari_common::{DefaultConfigLoader, configuration::Network};
 use tari_common_types::{
@@ -316,8 +317,21 @@ async fn main() -> Result<(), anyhow::Error> {
             wallet_config.apply_node(&node);
             wallet_config.apply_database(&db);
 
-            let (events, _more_blocks_to_scan) =
-                rescan(&security.password, &wallet_config, &account_name, rescan_from_height).await?;
+            let webhook_url = wallet_config.webhook.url.clone();
+            let send_only_event_types = wallet_config.webhook.send_only_event_types.clone();
+            let webhook_trigger_config = webhook_url.map(|url| WebhookTriggerConfig {
+                url,
+                send_only_event_types: send_only_event_types.clone(),
+            });
+
+            let (events, _more_blocks_to_scan) = rescan(
+                &security.password,
+                &wallet_config,
+                &account_name,
+                rescan_from_height,
+                webhook_trigger_config,
+            )
+            .await?;
             info!(event_count = events.len(); "Re-scan complete");
             Ok(())
         },
@@ -333,6 +347,10 @@ async fn main() -> Result<(), anyhow::Error> {
             wallet_config.apply_node(&node);
             wallet_config.apply_database(&db);
 
+            let webhook_url = wallet_config.webhook.url.clone();
+            let webhook_secret = wallet_config.webhook.secret.clone();
+            let send_only_event_types = wallet_config.webhook.send_only_event_types.clone();
+
             let max_blocks_to_scan = u64::MAX;
             let daemon = daemon::Daemon::new(
                 security.password,
@@ -344,6 +362,9 @@ async fn main() -> Result<(), anyhow::Error> {
                 api_port,
                 wallet_config.network,
                 wallet_config.confirmation_window,
+                webhook_url,
+                webhook_secret,
+                send_only_event_types,
             );
             daemon.run().await?;
             Ok(())
@@ -431,15 +452,11 @@ fn handle_balance(config: &WalletConfig) -> Result<(), anyhow::Error> {
     let accounts = get_accounts(&conn, config.account_name.as_deref())?;
     for account in accounts {
         let agg_result = get_balance(&conn, account.id)?;
-        let tari_balance = agg_result.total / 1_000_000;
-        let remainder = agg_result.total % 1_000_000;
         println!(
-            "Balance at height {}({}): {} microTari ({}.{} Tari)",
+            "Balance at height {}({}): {} ",
             agg_result.max_height.unwrap_or(0),
             agg_result.max_date.unwrap_or_else(|| "N/A".to_string()),
-            agg_result.total.to_formatted_string(&Locale::en),
-            tari_balance.to_formatted_string(&Locale::en),
-            remainder.to_formatted_string(&Locale::en),
+            agg_result.total,
         );
     }
     Ok(())
@@ -569,6 +586,14 @@ async fn scan(
         scanner = scanner.account(name);
     }
 
+    if let Some(url) = &config.webhook.url {
+        let trigger_config = WebhookTriggerConfig {
+            url: url.clone(),
+            send_only_event_types: config.webhook.send_only_event_types.clone(),
+        };
+        scanner = scanner.webhook_config(trigger_config);
+    }
+
     scanner.run().await
 }
 
@@ -577,10 +602,12 @@ async fn rescan(
     config: &WalletConfig,
     account_name: &str,
     rescan_from_height: u64,
+    webhook_config: Option<WebhookTriggerConfig>,
 ) -> Result<(Vec<WalletEvent>, bool), ScanError> {
     let db_file_clone = config.database_path.clone();
     let account_name_clone = account_name.to_string();
 
+    let webhook_config_cloned = webhook_config.clone();
     tokio::task::spawn_blocking(move || {
         let pool = init_db(db_file_clone).map_err(|e| format!("Failed to init db: {}", e))?;
 
@@ -590,7 +617,8 @@ async fn rescan(
             .map_err(|e| format!("DB error querying account: {}", e))?
             .ok_or_else(|| format!("Account not found: {}", account_name_clone))?;
 
-        rollback_from_height(&conn, account.id, rescan_from_height).map_err(|e| format!("Rollback failed: {}", e))?;
+        rollback_from_height(&conn, account.id, rescan_from_height, webhook_config_cloned)
+            .map_err(|e| format!("Rollback failed: {}", e))?;
 
         Ok::<(), String>(())
     })
@@ -609,6 +637,9 @@ async fn rescan(
     .mode(scan::ScanMode::Partial {
         max_blocks: max_blocks_to_scan,
     });
+    if let Some(cfg) = webhook_config {
+        scanner = scanner.webhook_config(cfg);
+    }
     scanner = scanner.account(account_name);
     scanner.run().await
 }

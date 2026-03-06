@@ -24,7 +24,7 @@
 //! // Check connectivity
 //! if client.is_online().await {
 //!     let tip = client.get_tip_info().await?;
-//!     println!("Chain height: {:?}", tip.metadata.map(|m| m.best_block_height));
+//!     println!("Chain height: {:?}", tip.metadata.map(|m| m.best_block_height()));
 //! }
 //! # Ok(())
 //! # }
@@ -34,14 +34,18 @@ use std::time::Duration;
 
 use log::{debug, info, warn};
 use reqwest::Method;
+use tari_transaction_components::MicroMinotari;
+use tari_transaction_components::rpc::models::{
+    FeePerGramStat, TipInfoResponse, TxQueryResponse, TxSubmissionResponse,
+};
 use tari_transaction_components::transaction_components::Transaction;
 use tari_utilities::hex::to_hex;
 use url::Url;
 
 use crate::http::utils::check_transaction_size;
+use crate::http::{GetMempoolFeePerGramStatsResponse, JsonRpcResponse};
 
 use super::http_client::HttpClient;
-use super::types::{JsonRpcResponse, TipInfoResponse, TxQueryResponse, TxSubmissionResponse};
 
 /// HTTP client for wallet operations against a Tari base node.
 ///
@@ -199,8 +203,8 @@ impl WalletHttpClient {
     ///
     /// let tip = client.get_tip_info().await?;
     /// if let Some(metadata) = tip.metadata {
-    ///     println!("Current height: {}", metadata.best_block_height);
-    ///     println!("Accumulated difficulty: {}", metadata.accumulated_difficulty);
+    ///     println!("Current height: {}", metadata.best_block_height());
+    ///     println!("Accumulated difficulty: {}", metadata.accumulated_difficulty());
     /// }
     /// # Ok(())
     /// # }
@@ -397,8 +401,8 @@ impl WalletHttpClient {
     ///
     /// ```rust,no_run
     /// use url::Url;
-    /// use minotari::http::{WalletHttpClient, TxLocation};
-    ///
+    /// use minotari::http::{WalletHttpClient};
+    /// use tari_transaction_components::rpc::models::TxLocation;
     /// # async fn example() -> Result<(), anyhow::Error> {
     /// let client = WalletHttpClient::new(Url::parse("http://localhost:18142")?)?;
     ///
@@ -461,5 +465,32 @@ impl WalletHttpClient {
 
         debug!("HTTP: Requesting block height successful");
         Ok(response)
+    }
+
+    pub async fn get_mempool_fee_per_gram_stats(&self, count: u64) -> Result<Vec<FeePerGramStat>, anyhow::Error> {
+        debug!(
+            count = count;
+            "Requesting mempool fee per gram stats"
+        );
+
+        let path = format!("/get_mempool_fee_per_gram_stats?count={count}");
+
+        let response = self
+            .http_client
+            .send_request::<GetMempoolFeePerGramStatsResponse>(Method::GET, &path, None)
+            .await?;
+
+        let stats: Vec<FeePerGramStat> = response
+            .stats
+            .into_iter()
+            .map(|s| FeePerGramStat {
+                order: s.order,
+                min_fee_per_gram: MicroMinotari::from(s.min_fee_per_gram),
+                avg_fee_per_gram: MicroMinotari::from(s.avg_fee_per_gram),
+                max_fee_per_gram: MicroMinotari::from(s.max_fee_per_gram),
+            })
+            .collect();
+
+        Ok(stats)
     }
 }
