@@ -22,7 +22,7 @@ fn execute_lock_funds(
 ) {
     let db_path = world.database_path.as_ref().expect("Database not set up");
     let output_file = world.get_temp_path("locked_funds.json");
-    
+
     let (cmd, mut args) = world.get_minotari_command();
     args.extend_from_slice(&[
         "lock-funds".to_string(),
@@ -37,33 +37,24 @@ fn execute_lock_funds(
         "--output-file".to_string(),
         output_file.to_str().unwrap().to_string(),
     ]);
-    
+
     if let Some(num) = num_outputs {
-        args.extend_from_slice(&[
-            "--num-outputs".to_string(),
-            num.to_string(),
-        ]);
+        args.extend_from_slice(&["--num-outputs".to_string(), num.to_string()]);
     }
-    
+
     if let Some(secs) = duration_secs {
-        args.extend_from_slice(&[
-            "--seconds-to-lock-utxos".to_string(),
-            secs.to_string(),
-        ]);
+        args.extend_from_slice(&["--seconds-to-lock-utxos".to_string(), secs.to_string()]);
     }
-    
+
     if let Some(fee) = fee_per_gram {
-        args.extend_from_slice(&[
-            "--fee-per-gram".to_string(),
-            fee.to_string(),
-        ]);
+        args.extend_from_slice(&["--fee-per-gram".to_string(), fee.to_string()]);
     }
-    
+
     let output = Command::new(&cmd)
         .args(&args)
         .output()
         .expect("Failed to execute lock-funds command");
-    
+
     world.last_command_exit_code = Some(output.status.code().unwrap_or(-1));
     world.last_command_output = Some(String::from_utf8_lossy(&output.stdout).to_string());
     world.last_command_error = Some(String::from_utf8_lossy(&output.stderr).to_string());
@@ -118,12 +109,12 @@ async fn locked_funds_file_created(world: &mut MinotariWorld) {
         "Locked funds file was not created at {:?}",
         output_file
     );
-    
+
     // Parse the JSON file and store it for later verification
     let content = fs::read_to_string(output_file).expect("Failed to read locked funds file");
-    let locked_funds_data: serde_json::Value = 
+    let locked_funds_data: serde_json::Value =
         serde_json::from_str(&content).expect("Failed to parse locked funds JSON");
-    
+
     // Store in world for later assertions
     world.locked_funds.insert("latest".to_string(), locked_funds_data);
 }
@@ -132,31 +123,30 @@ async fn locked_funds_file_created(world: &mut MinotariWorld) {
 async fn utxos_marked_locked(world: &mut MinotariWorld) {
     // Verify the locked funds JSON contains UTXO information
     let locked_funds = world.locked_funds.get("latest").expect("No locked funds data");
-    
+
     assert!(
         locked_funds.get("utxos").is_some(),
         "Locked funds JSON should contain 'utxos' field"
     );
-    
-    let utxos = locked_funds.get("utxos")
+
+    let utxos = locked_funds
+        .get("utxos")
         .and_then(|v| v.as_array())
         .expect("'utxos' should be an array");
-    
-    assert!(
-        !utxos.is_empty(),
-        "At least one UTXO should be locked"
-    );
+
+    assert!(!utxos.is_empty(), "At least one UTXO should be locked");
 }
 
 #[then(regex = r#"^"([^"]*)" UTXOs should be locked$"#)]
 async fn n_utxos_locked(world: &mut MinotariWorld, num: String) {
     let expected_count: usize = num.parse().expect("Invalid number of UTXOs");
     let locked_funds = world.locked_funds.get("latest").expect("No locked funds data");
-    
-    let utxos = locked_funds.get("utxos")
+
+    let utxos = locked_funds
+        .get("utxos")
         .and_then(|v| v.as_array())
         .expect("'utxos' should be an array");
-    
+
     assert_eq!(
         utxos.len(),
         expected_count,
@@ -169,11 +159,11 @@ async fn n_utxos_locked(world: &mut MinotariWorld, num: String) {
 #[then(regex = r#"^the UTXOs should be locked for "([^"]*)" seconds$"#)]
 async fn utxos_locked_duration(world: &mut MinotariWorld, seconds: String) {
     let _expected_duration: u64 = seconds.parse().expect("Invalid duration");
-    
+
     // The locked funds JSON should contain expiration information
     // This could be verified by checking timestamps in the JSON
     let locked_funds = world.locked_funds.get("latest").expect("No locked funds data");
-    
+
     // Just verify that we have some lock information
     // The actual duration check would require parsing timestamps and comparing
     assert!(
@@ -195,13 +185,13 @@ async fn fund_locking_fails(world: &mut MinotariWorld) {
 async fn fee_calculation_uses(world: &mut MinotariWorld, fee: String) {
     let expected_fee: u64 = fee.parse().expect("Invalid fee value");
     let locked_funds = world.locked_funds.get("latest").expect("No locked funds data");
-    
+
     // Check if fee information is in the output
     // This could be in fee_without_change or fee_with_change fields
-    let has_fee_info = locked_funds.get("fee_without_change").is_some() 
+    let has_fee_info = locked_funds.get("fee_without_change").is_some()
         || locked_funds.get("fee_with_change").is_some()
         || locked_funds.get("fee_per_gram").is_some();
-    
+
     assert!(
         has_fee_info,
         "Locked funds should contain fee calculation information (expected {} microTari per gram)",

@@ -14,13 +14,9 @@ use super::common::MinotariWorld;
 // =============================
 
 /// Start a daemon process with the given configuration
-async fn start_daemon_process(
-    world: &mut MinotariWorld,
-    port: u16,
-    scan_interval: Option<u64>,
-) {
+async fn start_daemon_process(world: &mut MinotariWorld, port: u16, scan_interval: Option<u64>) {
     let (command, mut args) = world.get_minotari_command();
-    
+
     let db_path = world
         .database_path
         .as_ref()
@@ -95,11 +91,7 @@ async fn query_balance_api(world: &mut MinotariWorld, account_name: String) {
     let url = format!("http://127.0.0.1:{}/accounts/{}/balance", port, account_name);
 
     let client = reqwest::Client::new();
-    let response = client
-        .get(&url)
-        .send()
-        .await
-        .expect("Failed to query balance API");
+    let response = client.get(&url).send().await.expect("Failed to query balance API");
 
     let status = response.status();
     let body = response.text().await.expect("Failed to read response body");
@@ -171,7 +163,7 @@ async fn send_shutdown_signal(world: &mut MinotariWorld) {
         // Send SIGINT signal (Ctrl+C equivalent)
         #[cfg(unix)]
         {
-            use nix::sys::signal::{kill, Signal};
+            use nix::sys::signal::{Signal, kill};
             use nix::unistd::Pid;
             let pid = Pid::from_raw(child.id() as i32);
             kill(pid, Signal::SIGINT).expect("Failed to send SIGINT");
@@ -224,11 +216,7 @@ async fn swagger_available(world: &mut MinotariWorld) {
     let url = format!("http://127.0.0.1:{}/swagger-ui/", port);
 
     let client = reqwest::Client::new();
-    let response = client
-        .get(&url)
-        .send()
-        .await
-        .expect("Failed to access Swagger UI");
+    let response = client.get(&url).send().await.expect("Failed to access Swagger UI");
 
     assert!(
         response.status().is_success(),
@@ -245,12 +233,8 @@ async fn daemon_scans_periodically(world: &mut MinotariWorld) {
     let client = reqwest::Client::new();
 
     // Get initial scan status
-    let response1 = client
-        .get(&url)
-        .send()
-        .await
-        .expect("Failed to get scan status");
-    
+    let response1 = client.get(&url).send().await.expect("Failed to get scan status");
+
     assert!(
         response1.status().is_success(),
         "Scan status endpoint should be accessible"
@@ -306,13 +290,9 @@ async fn receive_balance_response(world: &mut MinotariWorld) {
 
 #[then("the response should include balance information")]
 async fn response_has_balance_info(world: &mut MinotariWorld) {
-    let output = world
-        .last_command_output
-        .as_ref()
-        .expect("Should have response output");
+    let output = world.last_command_output.as_ref().expect("Should have response output");
 
-    let json: serde_json::Value = serde_json::from_str(output)
-        .expect("Response should be valid JSON");
+    let json: serde_json::Value = serde_json::from_str(output).expect("Response should be valid JSON");
 
     assert!(
         json.get("balance_microtari").is_some() || json.get("available_balance_microtari").is_some(),
@@ -331,13 +311,9 @@ async fn api_returns_success(world: &mut MinotariWorld) {
 
 #[then("the API should return the unsigned transaction")]
 async fn api_returns_transaction(world: &mut MinotariWorld) {
-    let output = world
-        .last_command_output
-        .as_ref()
-        .expect("Should have response output");
+    let output = world.last_command_output.as_ref().expect("Should have response output");
 
-    let json: serde_json::Value = serde_json::from_str(output)
-        .expect("Response should be valid JSON");
+    let json: serde_json::Value = serde_json::from_str(output).expect("Response should be valid JSON");
 
     assert!(
         json.get("transaction").is_some() || json.get("unsigned_transaction").is_some(),
@@ -364,16 +340,11 @@ async fn database_connections_closed(world: &mut MinotariWorld) {
     if let Some(db_path) = &world.database_path {
         // Wait a moment to ensure connections are fully closed
         sleep(Duration::from_millis(500)).await;
-        
+
         // Try to open the database with exclusive access
         // If the daemon closed connections properly, this should succeed
-        let result = std::fs::OpenOptions::new()
-            .write(true)
-            .open(db_path);
+        let result = std::fs::OpenOptions::new().write(true).open(db_path);
 
-        assert!(
-            result.is_ok(),
-            "Database file should be unlocked after daemon shutdown"
-        );
+        assert!(result.is_ok(), "Database file should be unlocked after daemon shutdown");
     }
 }

@@ -11,7 +11,6 @@ use super::common::MinotariWorld;
 // Scanning Steps
 // =============================
 
-
 #[given("the wallet has been previously scanned")]
 async fn wallet_previously_scanned(world: &mut MinotariWorld) {
     // Perform a quick scan to establish previous state
@@ -29,7 +28,7 @@ async fn wallet_scanned_to_height(world: &mut MinotariWorld, height: String) {
 #[when(regex = r#"^I perform a scan with max blocks "([^"]*)"$"#)]
 async fn scan_with_max_blocks(world: &mut MinotariWorld, max_blocks: String) {
     let db_path = world.database_path.as_ref().expect("Database not set up");
-    
+
     // Get base node URL from the first available base node
     let base_url = if let Some((_, node)) = world.base_nodes.iter().next() {
         format!("http://127.0.0.1:{}", node.http_port)
@@ -74,7 +73,7 @@ async fn incremental_scan(world: &mut MinotariWorld) {
 #[when(regex = r#"^I re-scan from height "([^"]*)"$"#)]
 async fn rescan_from_height(world: &mut MinotariWorld, height: String) {
     let db_path = world.database_path.as_ref().expect("Database not set up");
-    
+
     // Get base node URL from the first available base node
     let base_url = if let Some((_, node)) = world.base_nodes.iter().next() {
         format!("http://127.0.0.1:{}", node.http_port)
@@ -110,7 +109,7 @@ async fn rescan_from_height(world: &mut MinotariWorld, height: String) {
 #[when(regex = r#"^I perform a scan with batch size "([^"]*)"$"#)]
 async fn scan_with_batch_size(world: &mut MinotariWorld, batch_size: String) {
     let db_path = world.database_path.as_ref().expect("Database not set up");
-    
+
     // Get base node URL from the first available base node
     let base_url = if let Some((_, node)) = world.base_nodes.iter().next() {
         format!("http://127.0.0.1:{}", node.http_port)
@@ -155,7 +154,7 @@ async fn scan_succeeds(world: &mut MinotariWorld) {
 async fn scanned_tip_updated(world: &mut MinotariWorld) {
     // Verify scan completed successfully first
     scan_succeeds(world).await;
-    
+
     // The scanned tip is updated in the database during scanning
     // We can verify this by checking the output mentions scanning progress
     let output = world.last_command_output.as_ref().expect("No scan output");

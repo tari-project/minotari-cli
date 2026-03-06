@@ -71,7 +71,7 @@ async fn see_balance_info(world: &mut MinotariWorld) {
         world.last_command_exit_code,
         world.last_command_error.as_deref().unwrap_or("")
     );
-    
+
     // Verify the output contains actual balance information
     let output = world.last_command_output.as_ref().expect("No command output");
     assert!(
@@ -84,29 +84,29 @@ async fn see_balance_info(world: &mut MinotariWorld) {
         "Balance output should contain balance information, got: {}",
         output
     );
-    
+
     // Try to parse the balance to ensure it's in the correct format
-    world.parse_balance_from_output().expect(
-        "Could not parse balance from output - output format may be incorrect"
-    );
+    world
+        .parse_balance_from_output()
+        .expect("Could not parse balance from output - output format may be incorrect");
 }
 
 #[then("the balance should be displayed in microTari")]
 async fn balance_in_microtari(world: &mut MinotariWorld) {
     let output = world.last_command_output.as_ref().expect("No command output");
     assert!(!output.is_empty(), "No balance output");
-    
+
     // Verify the output specifically mentions microTari
     assert!(
         output.contains("microTari"),
         "Balance output should display amounts in microTari, got: {}",
         output
     );
-    
+
     // Verify we can parse a numeric balance value
-    world.parse_balance_from_output().expect(
-        "Could not parse numeric balance value - output may not be in correct microTari format"
-    );
+    world
+        .parse_balance_from_output()
+        .expect("Could not parse numeric balance value - output may not be in correct microTari format");
 }
 
 #[then("I should see balance for all accounts")]
@@ -118,7 +118,7 @@ async fn see_all_balances(world: &mut MinotariWorld) {
         world.last_command_exit_code,
         world.last_command_error.as_deref().unwrap_or("")
     );
-    
+
     // Verify the output contains actual balance information
     let output = world.last_command_output.as_ref().expect("No command output");
     assert!(
@@ -126,11 +126,11 @@ async fn see_all_balances(world: &mut MinotariWorld) {
         "Balance output should contain 'microTari' for accounts, got: {}",
         output
     );
-    
+
     // Try to parse at least one balance to ensure format is correct
-    world.parse_balance_from_output().expect(
-        "Could not parse balance from output - output format may be incorrect"
-    );
+    world
+        .parse_balance_from_output()
+        .expect("Could not parse balance from output - output format may be incorrect");
 }
 
 #[then("the balance should be zero")]
@@ -155,7 +155,8 @@ async fn balance_should_be_at_least(world: &mut MinotariWorld, minimum: u64) {
     assert!(
         balance >= minimum,
         "Expected balance at least {} microTari, got {}",
-        minimum, balance
+        minimum,
+        balance
     );
 }
 
@@ -165,6 +166,7 @@ async fn balance_should_contain(world: &mut MinotariWorld, expected: u64) {
     assert!(
         balance >= expected,
         "Expected balance to contain at least {} microTari, got {}",
-        expected, balance
+        expected,
+        balance
     );
 }

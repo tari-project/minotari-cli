@@ -13,15 +13,8 @@ use super::common::MinotariWorld;
 // =============================
 
 /// Helper function to execute create-unsigned-transaction command with flexible parameters
-fn execute_create_transaction(
-    world: &mut MinotariWorld,
-    recipients: Vec<String>,
-    lock_duration: Option<u64>,
-) {
-    let db_path = world
-        .database_path
-        .as_ref()
-        .expect("Database path not set");
+fn execute_create_transaction(world: &mut MinotariWorld, recipients: Vec<String>, lock_duration: Option<u64>) {
+    let db_path = world.database_path.as_ref().expect("Database path not set");
 
     // Generate output file path
     let output_path = world
@@ -68,13 +61,7 @@ fn execute_create_transaction(
 /// Generate a test Tari address (simplified for testing)
 fn generate_test_address(world: &MinotariWorld) -> String {
     // Use the wallet's view key to generate a valid address
-    format!(
-        "{}",
-        world
-            .wallet
-            .view_key_public()
-            .to_base58()
-    )
+    format!("{}", world.wallet.view_key_public().to_base58())
 }
 
 // =============================
@@ -113,9 +100,9 @@ async fn create_transaction_multiple_recipients(world: &mut MinotariWorld) {
     let address3 = generate_test_address(world);
 
     let recipients = vec![
-        format!("{}::50000", address1),  // 50000 microTari
-        format!("{}::30000", address2),  // 30000 microTari
-        format!("{}::20000", address3),  // 20000 microTari
+        format!("{}::50000", address1), // 50000 microTari
+        format!("{}::30000", address2), // 30000 microTari
+        format!("{}::20000", address3), // 20000 microTari
     ];
 
     execute_create_transaction(world, recipients, None);
@@ -153,10 +140,7 @@ async fn create_transaction_with_lock_duration(world: &mut MinotariWorld, second
 
 #[then("the transaction file should be created")]
 async fn transaction_file_created(world: &mut MinotariWorld) {
-    let output_file = world
-        .output_file
-        .as_ref()
-        .expect("Output file path not set");
+    let output_file = world.output_file.as_ref().expect("Output file path not set");
 
     assert!(
         output_file.exists(),
@@ -165,16 +149,12 @@ async fn transaction_file_created(world: &mut MinotariWorld) {
     );
 
     // Parse the JSON file
-    let content = std::fs::read_to_string(output_file)
-        .expect("Failed to read transaction file");
-    
-    let transaction_json: serde_json::Value = serde_json::from_str(&content)
-        .expect("Failed to parse transaction JSON");
+    let content = std::fs::read_to_string(output_file).expect("Failed to read transaction file");
+
+    let transaction_json: serde_json::Value = serde_json::from_str(&content).expect("Failed to parse transaction JSON");
 
     // Store for later verification
-    world
-        .transaction_data
-        .insert("current".to_string(), transaction_json);
+    world.transaction_data.insert("current".to_string(), transaction_json);
 }
 
 #[then("the transaction should include the recipient")]
@@ -218,15 +198,9 @@ async fn transaction_has_all_recipients(world: &mut MinotariWorld) {
         .or_else(|| transaction.get("outputs"))
         .expect("Transaction should have recipients or outputs");
 
-    let recipients_array = recipients
-        .as_array()
-        .expect("Recipients should be an array");
+    let recipients_array = recipients.as_array().expect("Recipients should be an array");
 
-    assert_eq!(
-        recipients_array.len(),
-        3,
-        "Transaction should have 3 recipients"
-    );
+    assert_eq!(recipients_array.len(), 3, "Transaction should have 3 recipients");
 }
 
 #[then("the total amount should be correct")]
@@ -238,9 +212,9 @@ async fn total_amount_correct(world: &mut MinotariWorld) {
 
     // Check that total amount or value field exists
     assert!(
-        transaction.get("total_amount").is_some() || 
-        transaction.get("total_value").is_some() ||
-        transaction.get("amount").is_some(),
+        transaction.get("total_amount").is_some()
+            || transaction.get("total_value").is_some()
+            || transaction.get("amount").is_some(),
         "Transaction should have a total amount field"
     );
 
@@ -256,14 +230,11 @@ async fn transaction_has_payment_id(world: &mut MinotariWorld) {
         .expect("Transaction data not found");
 
     // Check for payment ID in various possible locations
-    let has_payment_id = transaction.get("payment_id").is_some() ||
-        transaction.get("memo").is_some() ||
-        transaction.get("message").is_some();
+    let has_payment_id = transaction.get("payment_id").is_some()
+        || transaction.get("memo").is_some()
+        || transaction.get("message").is_some();
 
-    assert!(
-        has_payment_id,
-        "Transaction should include payment ID/memo field"
-    );
+    assert!(has_payment_id, "Transaction should include payment ID/memo field");
 }
 
 #[then("the transaction creation should fail")]
@@ -285,9 +256,9 @@ async fn see_insufficient_balance_error(world: &mut MinotariWorld) {
         .expect("No error output");
 
     assert!(
-        error.to_lowercase().contains("insufficient") ||
-        error.to_lowercase().contains("balance") ||
-        error.to_lowercase().contains("not enough"),
+        error.to_lowercase().contains("insufficient")
+            || error.to_lowercase().contains("balance")
+            || error.to_lowercase().contains("not enough"),
         "Error message should indicate insufficient balance. Got: {}",
         error
     );
@@ -301,14 +272,11 @@ async fn inputs_locked_for_duration(world: &mut MinotariWorld, seconds: String) 
         .expect("Transaction data not found");
 
     // Check that lock duration or expiry information is present
-    let has_lock_info = transaction.get("lock_duration").is_some() ||
-        transaction.get("expires_at").is_some() ||
-        transaction.get("utxo_lock_duration").is_some();
+    let has_lock_info = transaction.get("lock_duration").is_some()
+        || transaction.get("expires_at").is_some()
+        || transaction.get("utxo_lock_duration").is_some();
 
-    assert!(
-        has_lock_info,
-        "Transaction should include lock duration information"
-    );
+    assert!(has_lock_info, "Transaction should include lock duration information");
 
     // Note: The exact duration check would require parsing the timestamp
     // For now, we just verify the field exists

@@ -93,7 +93,10 @@ async fn mine_blocks_on_node(world: &mut MinotariWorld, num_blocks: u64, node_na
     // Store the current height for later verification
     let height = node.get_tip_height().await.expect("Failed to get tip height");
     world.last_command_output = Some(format!("Mined {} blocks, current height: {}", num_blocks, height));
-    println!("Mined {} blocks on {}, current height: {}", num_blocks, node_name, height);
+    println!(
+        "Mined {} blocks on {}, current height: {}",
+        num_blocks, node_name, height
+    );
 }
 
 #[then(expr = "the chain height should be {int}")]
@@ -119,12 +122,10 @@ async fn node_at_height(world: &mut MinotariWorld, node_name: String, expected_h
         .get(&node_name)
         .expect(&format!("Node {} not found", node_name));
 
-    node.wait_for_height(expected_height, 30)
-        .await
-        .expect(&format!(
-            "Node {} failed to reach height {}",
-            node_name, expected_height
-        ));
+    node.wait_for_height(expected_height, 30).await.expect(&format!(
+        "Node {} failed to reach height {}",
+        node_name, expected_height
+    ));
 
     let actual_height = node.get_tip_height().await.expect("Failed to get tip height");
     println!("Node {} is at height {}", node_name, actual_height);
