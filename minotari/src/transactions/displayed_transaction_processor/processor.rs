@@ -6,7 +6,7 @@ use super::types::{
 use crate::db::{self};
 use crate::models::{BalanceChange, Id, OutputStatus};
 use crate::scan::block_event_accumulator::BlockEventAccumulator;
-use crate::scan::{DetectedOutput, SpentInput};
+use crate::scan::{DetectedOutput, MemoInfo, SpentInput};
 use log::debug;
 use rusqlite::Connection;
 use std::collections::HashMap;
@@ -120,10 +120,7 @@ impl DisplayedTransactionProcessor {
             if output.output.is_coinbase() {
                 //create new display transaction for this coinbase output
                 let id = TxId::new_deterministic(self.view_key.as_bytes(), &output.output.output_hash());
-                let payment_id_string = match output.output.payment_id().get_payment_id().is_empty() {
-                    true => None,
-                    false => Some(String::from_utf8_lossy(&output.output.payment_id().get_payment_id()).to_string()),
-                };
+                let memo = MemoInfo::from_output(&output.output);
                 let display_tx = DisplayedTransactionBuilder::new()
                     .account_id(accumulator.account_id as Id)
                     .source(TransactionSource::Coinbase)
@@ -147,7 +144,8 @@ impl DisplayedTransactionProcessor {
                         output_type: OutputType::Coinbase,
                         is_change: false,
                     }])
-                    .message(payment_id_string)
+                    .message(memo.parsed)
+                    .memo_hex(memo.hex)
                     .output_type(Some(OutputType::Coinbase))
                     .coinbase_extra(Some(output.output.features().coinbase_extra.clone()))
                     .build(id)?;
@@ -158,15 +156,7 @@ impl DisplayedTransactionProcessor {
             let mut inputs = Vec::new();
             let mut other_party = output.output.payment_id().get_sender_address();
             let id = TxId::new_deterministic(self.view_key.as_bytes(), &output.output.output_hash());
-            let payment_id = output.output.payment_id().get_payment_id();
-            let (payment_id_string, memo_hex_value) = if payment_id.is_empty() {
-                (None, None)
-            } else {
-                (
-                    Some(String::from_utf8_lossy(&payment_id).to_string()),
-                    Some(hex::encode(payment_id)),
-                )
-            };
+            let memo = MemoInfo::from_output(&output.output);
             //create new display transaction for each
             if let Some((sender, amount, _tx_type, _one_sided)) =
                 output.output.payment_id().get_transaction_info_details()
@@ -213,8 +203,8 @@ impl DisplayedTransactionProcessor {
                 )
                 .fee(output.output.payment_id().get_fee())
                 .inputs(inputs)
-                .message(payment_id_string)
-                .memo_hex(memo_hex_value)
+                .message(memo.parsed)
+                .memo_hex(memo.hex)
                 .outputs(vec![TransactionOutput {
                     hash: output.output.output_hash(),
                     amount: output.output.value(),
