@@ -158,16 +158,19 @@ impl DisplayedTransactionProcessor {
             let mut inputs = Vec::new();
             let mut other_party = output.output.payment_id().get_sender_address();
             let id = TxId::new_deterministic(self.view_key.as_bytes(), &output.output.output_hash());
-            let mut payment_id_string = None;
+            let payment_id_string = match output.output.payment_id().get_payment_id().is_empty() {
+                true => None,
+                false => Some(String::from_utf8_lossy(&output.output.payment_id().get_payment_id()).to_string()),
+            };
+            let memo_hex_value = match output.output.payment_id().get_payment_id().is_empty() {
+                true => None,
+                false => Some(hex::encode(output.output.payment_id().get_payment_id())),
+            };
             //create new display transaction for each
             if let Some((sender, amount, _tx_type, _one_sided)) =
                 output.output.payment_id().get_transaction_info_details()
             {
                 // So this is change from our wallet.
-                payment_id_string = match output.output.payment_id().get_payment_id().is_empty() {
-                    true => None,
-                    false => Some(String::from_utf8_lossy(&output.output.payment_id().get_payment_id()).to_string()),
-                };
                 let total_send =
                     amount + output.output.value() + output.output.payment_id().get_fee().unwrap_or_default();
                 let mut selected_inputs = Vec::new();
@@ -210,6 +213,7 @@ impl DisplayedTransactionProcessor {
                 .fee(output.output.payment_id().get_fee())
                 .inputs(inputs)
                 .message(payment_id_string)
+                .memo_hex(memo_hex_value)
                 .outputs(vec![TransactionOutput {
                     hash: output.output.output_hash(),
                     amount: output.output.value(),
