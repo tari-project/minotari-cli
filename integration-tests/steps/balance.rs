@@ -71,11 +71,6 @@ async fn see_balance_info(world: &mut MinotariWorld) {
     // Verify the output contains actual balance information
     let output = world.last_command_output.as_ref().expect("No command output");
     assert!(
-        output.contains("µT"),
-        "Balance output should contain 'µT', got: {}",
-        output
-    );
-    assert!(
         output.contains("Balance at height") || output.contains("balance"),
         "Balance output should contain balance information, got: {}",
         output

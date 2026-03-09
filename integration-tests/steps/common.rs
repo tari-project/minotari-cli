@@ -79,11 +79,12 @@ impl MinotariWorld {
         self.temp_dir = Some(temp_dir);
     }
 
-    /// Get the path to the minotari binary, using the release binary if tests are
-    /// running in release mode, otherwise use cargo run for dev mode.
-    /// Returns (command, args, workspace_root) so callers can set current_dir.
+    /// Get the path to the minotari binary.
+    ///
+    /// The binary is expected to have been built by `ensure_minotari_binary_built()`
+    /// in the cucumber test runner before any scenarios execute. This method simply
+    /// locates the built binary (release or debug) and returns the command to invoke it.
     pub fn get_minotari_command(&self) -> (String, Vec<String>) {
-        // Check if we're in release mode by looking for the release binary
         let workspace_root = std::env::var("CARGO_MANIFEST_DIR")
             .map(|p| std::path::PathBuf::from(p).parent().unwrap().to_path_buf())
             .unwrap_or_else(|_| std::env::current_dir().unwrap().parent().unwrap().to_path_buf());
@@ -92,30 +93,16 @@ impl MinotariWorld {
         let debug_binary = workspace_root.join("target/debug/minotari");
 
         if release_binary.exists() {
-            // Use the release binary directly
             (release_binary.to_string_lossy().to_string(), vec![])
         } else if debug_binary.exists() {
-            // Use the debug binary directly
             (debug_binary.to_string_lossy().to_string(), vec![])
         } else {
-            // Fall back to cargo run for dev mode
-            // Use --manifest-path and --package to ensure cargo finds the
-            // correct binary regardless of the current working directory.
-            let manifest_path = workspace_root.join("Cargo.toml");
-            (
-                "cargo".to_string(),
-                vec![
-                    "run".to_string(),
-                    "--manifest-path".to_string(),
-                    manifest_path.to_string_lossy().to_string(),
-                    "--package".to_string(),
-                    "minotari".to_string(),
-                    "--bin".to_string(),
-                    "minotari".to_string(),
-                    "--release".to_string(),
-                    "--".to_string(),
-                ],
-            )
+            panic!(
+                "minotari binary not found at {:?} or {:?}. \
+                 The binary should have been built by ensure_minotari_binary_built() \
+                 in the cucumber test runner.",
+                release_binary, debug_binary
+            );
         }
     }
 

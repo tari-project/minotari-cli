@@ -138,7 +138,7 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
             .await
             .map_err(ScanError::Fatal)?;
 
-        let mut next_block = reorg_result.resume_height.saturating_sub(1);
+        let mut next_block = reorg_result.resume_height;
 
         if next_block == 0 {
             // Use birthday logic
@@ -276,11 +276,12 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
                         )
                         .await?;
                     Self::push_events_with_limit(&mut all_events, events, max_buffered_events);
-
+                    if let Some(last) = shared_blocks.last() {
+                        target.next_block_to_scan = last.height + 1;
+                    }
                     if let Some(last) = shared_blocks.last()
                         && last.height >= target.next_block_to_scan
                     {
-                        target.next_block_to_scan = last.height + 1;
 
                         if last.height > max_new_height_in_batch {
                             max_new_height_in_batch = last.height;

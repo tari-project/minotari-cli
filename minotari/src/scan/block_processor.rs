@@ -314,6 +314,7 @@ impl<E: EventSender> BlockProcessor<E> {
         account_id: i64,
         account_view_key: &PrivateKey,
     ) -> Result<(), BlockProcessorError> {
+
         let mut generated_events: Vec<(i64, WalletEvent)> = Vec::new();
 
         for (hash, output, wallet_idx) in &block.wallet_outputs {

@@ -510,7 +510,6 @@ async fn run_scan_loop<E: EventSender + Clone + Send + 'static>(
         start_height = scanner_context.scan_config.start_height;
         "Starting scan for account"
     );
-
     let db_handler = ScanDbHandler::new(pool.clone(), required_confirmations);
     let mut all_events = Vec::new();
     let mut total_scanned: u64 = 0;
@@ -1017,7 +1016,6 @@ impl Scanner {
         let mut any_more_blocks = false;
 
         let accounts = db::get_accounts(&conn, self.account_name.as_deref())?;
-
         for account in accounts {
             let monitoring_state = MonitoringState::new();
 

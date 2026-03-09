@@ -15,6 +15,7 @@ Feature: End-to-End Wallet Testing
     Then I should see the balance information
     And the balance should be at least 10000000 microTari
 
+    @pie
   Scenario: Multi-block mining with incremental scanning
     Given I have a seed node MinerNode
     And I have a test database with an existing wallet
