@@ -7,6 +7,10 @@ license.workspace = true
 default-run = "minotari"
 
 [[bin]]
+name = "minotari"
+path = "src/main.rs"
+
+[[bin]]
 name = "generate-openapi"
 path = "src/bin/generate_openapi.rs"
 

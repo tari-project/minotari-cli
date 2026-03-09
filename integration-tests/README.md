@@ -89,7 +89,7 @@ cargo test -- --nocapture
 ```
 
 ```bash
-cargo test --test cucumber_integration -- --nocapture
+cargo test --test cucumber -- --nocapture
 ```
 
 ## Writing New Tests

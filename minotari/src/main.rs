@@ -453,7 +453,7 @@ fn handle_balance(config: &WalletConfig) -> Result<(), anyhow::Error> {
     for account in accounts {
         let agg_result = get_balance(&conn, account.id)?;
         println!(
-            "Balance at height {}({}): {} ",
+            "Balance at height {}({}): {}",
             agg_result.max_height.unwrap_or(0),
             agg_result.max_date.unwrap_or_else(|| "N/A".to_string()),
             agg_result.total,

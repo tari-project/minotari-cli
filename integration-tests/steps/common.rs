@@ -80,7 +80,8 @@ impl MinotariWorld {
     }
 
     /// Get the path to the minotari binary, using the release binary if tests are
-    /// running in release mode, otherwise use cargo run for dev mode
+    /// running in release mode, otherwise use cargo run for dev mode.
+    /// Returns (command, args, workspace_root) so callers can set current_dir.
     pub fn get_minotari_command(&self) -> (String, Vec<String>) {
         // Check if we're in release mode by looking for the release binary
         let workspace_root = std::env::var("CARGO_MANIFEST_DIR")
@@ -88,18 +89,30 @@ impl MinotariWorld {
             .unwrap_or_else(|_| std::env::current_dir().unwrap().parent().unwrap().to_path_buf());
 
         let release_binary = workspace_root.join("target/release/minotari");
+        let debug_binary = workspace_root.join("target/debug/minotari");
 
         if release_binary.exists() {
             // Use the release binary directly
             (release_binary.to_string_lossy().to_string(), vec![])
+        } else if debug_binary.exists() {
+            // Use the debug binary directly
+            (debug_binary.to_string_lossy().to_string(), vec![])
         } else {
             // Fall back to cargo run for dev mode
+            // Use --manifest-path and --package to ensure cargo finds the
+            // correct binary regardless of the current working directory.
+            let manifest_path = workspace_root.join("Cargo.toml");
             (
                 "cargo".to_string(),
                 vec![
                     "run".to_string(),
+                    "--manifest-path".to_string(),
+                    manifest_path.to_string_lossy().to_string(),
+                    "--package".to_string(),
+                    "minotari".to_string(),
                     "--bin".to_string(),
                     "minotari".to_string(),
+                    "--release".to_string(),
                     "--".to_string(),
                 ],
             )
@@ -136,15 +149,31 @@ impl MinotariWorld {
     pub fn parse_balance_from_output(&self) -> Option<u64> {
         let output = self.last_command_output.as_ref()?;
 
-        // Look for pattern like "1,000,000 microTari" or "0 microTari"
-        // Balance format: "Balance at height X(date): Y microTari (A.B Tari)"
-        let re = cucumber::codegen::Regex::new(r":\s*([\d,]+)\s+microTari").ok()?;
-        let captures = re.captures(output)?;
+        // Look for pattern like "1,000,000 µT" or "18462.816327 T"
+        // Balance format: "Balance at height X(date): Y µT" or "Balance at height X(date): Y T"
+        let micro_tari_re = cucumber::codegen::Regex::new(r":\s*([\d,.]+)\s+µT").ok()?;
+        let tari_re = cucumber::codegen::Regex::new(r":\s*([\d,.]+)\s+T\b").ok()?;
+        let mut tari_value = false;
+        let captures = match micro_tari_re.captures(output) {
+            Some(caps) => caps,
+            None => {
+                // Try the Tari pattern if microTari pattern didn't match
+                tari_value = true;
+                tari_re.captures(output)?
+            }
+        };
         let balance_str = captures.get(1)?.as_str();
 
-        // Remove commas and parse
+        // Remove commas and parse as f64 to handle decimal values
         let balance_str = balance_str.replace(',', "");
-        balance_str.parse::<u64>().ok()
+        let balance_f64: f64 = balance_str.parse().ok()?;
+        let balance_micro_tari = if tari_value {
+            // Convert from Tari to microTari (1 T = 1,000,000 µT)
+            (balance_f64 * 1_000_000.0).round() as u64
+        } else {
+            balance_f64.round() as u64
+        };
+        Some(balance_micro_tari)
     }
 
     pub fn all_seed_nodes(&self) -> &[String] {

@@ -19,8 +19,6 @@ async fn check_balance_for_account(world: &mut MinotariWorld, account_name: Stri
         "balance".to_string(),
         "--database-path".to_string(),
         db_path.to_str().unwrap().to_string(),
-        "--password".to_string(),
-        world.test_password.clone(),
         "--account-name".to_string(),
         account_name,
     ]);
@@ -43,8 +41,6 @@ async fn check_balance_all_accounts(world: &mut MinotariWorld) {
         "balance".to_string(),
         "--database-path".to_string(),
         db_path.to_str().unwrap().to_string(),
-        "--password".to_string(),
-        world.test_password.clone(),
     ]);
 
     let output = Command::new(&cmd)
@@ -75,8 +71,8 @@ async fn see_balance_info(world: &mut MinotariWorld) {
     // Verify the output contains actual balance information
     let output = world.last_command_output.as_ref().expect("No command output");
     assert!(
-        output.contains("microTari"),
-        "Balance output should contain 'microTari', got: {}",
+        output.contains("µT"),
+        "Balance output should contain 'µT', got: {}",
         output
     );
     assert!(
@@ -98,7 +94,7 @@ async fn balance_in_microtari(world: &mut MinotariWorld) {
 
     // Verify the output specifically mentions microTari
     assert!(
-        output.contains("microTari"),
+        output.contains("µT"),
         "Balance output should display amounts in microTari, got: {}",
         output
     );
@@ -122,8 +118,8 @@ async fn see_all_balances(world: &mut MinotariWorld) {
     // Verify the output contains actual balance information
     let output = world.last_command_output.as_ref().expect("No command output");
     assert!(
-        output.contains("microTari"),
-        "Balance output should contain 'microTari' for accounts, got: {}",
+        output.contains("µT"),
+        "Balance output should contain 'µT' for accounts, got: {}",
         output
     );
 
