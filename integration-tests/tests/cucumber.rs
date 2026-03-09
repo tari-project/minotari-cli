@@ -64,21 +64,11 @@ fn needs_rebuild(binary: &Path, watched: &[PathBuf]) -> bool {
 /// exercise the latest code.
 fn ensure_minotari_binary_built() {
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-    let workspace_root = manifest_dir
-        .parent()
-        .expect("Failed to find workspace root");
+    let workspace_root = manifest_dir.parent().expect("Failed to find workspace root");
 
-    let profile = if cfg!(debug_assertions) {
-        "dev"
-    } else {
-        "release"
-    };
+    let profile = if cfg!(debug_assertions) { "dev" } else { "release" };
 
-    let target_dir = if profile == "release" {
-        "release"
-    } else {
-        "debug"
-    };
+    let target_dir = if profile == "release" { "release" } else { "debug" };
 
     let binary = workspace_root.join(format!("target/{target_dir}/minotari"));
 

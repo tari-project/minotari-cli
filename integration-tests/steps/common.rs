@@ -147,7 +147,7 @@ impl MinotariWorld {
                 // Try the Tari pattern if microTari pattern didn't match
                 tari_value = true;
                 tari_re.captures(output)?
-            }
+            },
         };
         let balance_str = captures.get(1)?.as_str();
 

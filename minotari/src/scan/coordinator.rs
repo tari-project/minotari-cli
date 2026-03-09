@@ -282,7 +282,6 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
                     if let Some(last) = shared_blocks.last()
                         && last.height >= target.next_block_to_scan
                     {
-
                         if last.height > max_new_height_in_batch {
                             max_new_height_in_batch = last.height;
                         }
