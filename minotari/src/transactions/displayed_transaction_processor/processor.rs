@@ -158,13 +158,14 @@ impl DisplayedTransactionProcessor {
             let mut inputs = Vec::new();
             let mut other_party = output.output.payment_id().get_sender_address();
             let id = TxId::new_deterministic(self.view_key.as_bytes(), &output.output.output_hash());
-            let payment_id_string = match output.output.payment_id().get_payment_id().is_empty() {
-                true => None,
-                false => Some(String::from_utf8_lossy(&output.output.payment_id().get_payment_id()).to_string()),
-            };
-            let memo_hex_value = match output.output.payment_id().get_payment_id().is_empty() {
-                true => None,
-                false => Some(hex::encode(output.output.payment_id().get_payment_id())),
+            let payment_id = output.output.payment_id().get_payment_id();
+            let (payment_id_string, memo_hex_value) = if payment_id.is_empty() {
+                (None, None)
+            } else {
+                (
+                    Some(String::from_utf8_lossy(&payment_id).to_string()),
+                    Some(hex::encode(payment_id)),
+                )
             };
             //create new display transaction for each
             if let Some((sender, amount, _tx_type, _one_sided)) =
