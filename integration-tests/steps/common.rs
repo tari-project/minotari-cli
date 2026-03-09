@@ -11,7 +11,6 @@ use std::process::Command;
 use tari_transaction_components::key_manager::wallet_types::WalletType;
 use tari_utilities::hex::Hex;
 use tempfile::TempDir;
-
 // Import the base node process from the test support library
 #[path = "../src/lib.rs"]
 pub mod test_support; // Make this public so other modules can access it
@@ -139,22 +138,13 @@ impl MinotariWorld {
 
         // Look for pattern like "1,000,000 microTari" or "0 microTari"
         // Balance format: "Balance at height X(date): Y microTari (A.B Tari)"
-        let re = regex::Regex::new(r":\s*([\d,]+)\s+microTari").ok()?;
+        let re = cucumber::codegen::Regex::new(r":\s*([\d,]+)\s+microTari").ok()?;
         let captures = re.captures(output)?;
         let balance_str = captures.get(1)?.as_str();
 
         // Remove commas and parse
         let balance_str = balance_str.replace(',', "");
         balance_str.parse::<u64>().ok()
-    }
-
-    pub fn get_base_node_url(&self) -> String {
-        // Get the first base node's HTTP URL if available
-        if let Some((_, node)) = self.base_nodes.iter().next() {
-            format!("http://127.0.0.1:{}", node.http_port)
-        } else {
-            "http://127.0.0.1:18080".to_string()
-        }
     }
 
     pub fn all_seed_nodes(&self) -> &[String] {

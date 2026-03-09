@@ -5,7 +5,9 @@
 use cucumber::{given, then, when};
 
 use super::common::MinotariWorld;
-
+use tari_common::configuration::Network::LocalNet;
+use tari_common_types::tari_address::TariAddress;
+use tari_common_types::tari_address::TariAddressFeatures;
 // =============================
 // Base Node Steps
 // =============================
@@ -81,10 +83,19 @@ async fn mine_blocks_on_node(world: &mut MinotariWorld, num_blocks: u64, node_na
     let node = world
         .base_nodes
         .get(&node_name)
-        .expect(&format!("Node {} not found", node_name));
+        .unwrap_or_else(|| panic!("Node {} not found", node_name));
 
     // Use the wallet's address for mining rewards
-    let wallet_address = world.wallet.get_comms_public_key().to_hex();
+    let spend_key = world.wallet.get_public_spend_key();
+    let view_key = world.wallet.get_public_view_key();
+    let wallet_address = TariAddress::new_dual_address(
+        view_key,
+        spend_key,
+        LocalNet,
+        TariAddressFeatures::create_one_sided_only(),
+        None,
+    )
+    .unwrap();
 
     node.mine_blocks(num_blocks, &wallet_address)
         .await
@@ -120,12 +131,11 @@ async fn node_at_height(world: &mut MinotariWorld, node_name: String, expected_h
     let node = world
         .base_nodes
         .get(&node_name)
-        .expect(&format!("Node {} not found", node_name));
+        .unwrap_or_else(|| panic!("Node {} not found", node_name));
 
-    node.wait_for_height(expected_height, 30).await.expect(&format!(
-        "Node {} failed to reach height {}",
-        node_name, expected_height
-    ));
+    node.wait_for_height(expected_height, 30)
+        .await
+        .unwrap_or_else(|_| panic!("Node {} failed to reach height {}", node_name, expected_height));
 
     let actual_height = node.get_tip_height().await.expect("Failed to get tip height");
     println!("Node {} is at height {}", node_name, actual_height);

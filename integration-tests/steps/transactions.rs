@@ -2,12 +2,13 @@
 //
 // Step definitions for testing transaction creation functionality.
 
-use cucumber::{given, then, when};
-use std::path::PathBuf;
-use std::process::Command;
-
 use super::common::MinotariWorld;
-
+use super::common::test_support;
+use cucumber::{given, then, when};
+use std::process::Command;
+use tari_common::configuration::Network::LocalNet;
+use tari_common_types::tari_address::TariAddress;
+use tari_common_types::tari_address::TariAddressFeatures;
 // =============================
 // Helper Functions
 // =============================
@@ -17,12 +18,10 @@ fn execute_create_transaction(world: &mut MinotariWorld, recipients: Vec<String>
     let db_path = world.database_path.as_ref().expect("Database path not set");
 
     // Generate output file path
-    let output_path = world
-        .get_temp_path("unsigned_transaction.json")
-        .expect("Failed to get temp path");
+    let output_path = world.get_temp_path("unsigned_transaction.json");
     world.output_file = Some(output_path.clone());
 
-    let (program, mut base_args) = world.get_minotari_command();
+    let (program, base_args) = world.get_minotari_command();
     let mut args = base_args;
 
     args.push("create-unsigned-transaction".to_string());
@@ -61,7 +60,17 @@ fn execute_create_transaction(world: &mut MinotariWorld, recipients: Vec<String>
 /// Generate a test Tari address (simplified for testing)
 fn generate_test_address(world: &MinotariWorld) -> String {
     // Use the wallet's view key to generate a valid address
-    format!("{}", world.wallet.view_key_public().to_base58())
+    let spend_key = world.wallet.get_public_spend_key();
+    let view_key = world.wallet.get_public_view_key();
+    let wallet_address = TariAddress::new_dual_address(
+        view_key,
+        spend_key,
+        LocalNet,
+        TariAddressFeatures::create_one_sided_only(),
+        None,
+    )
+    .unwrap();
+    wallet_address.to_base58().to_string()
 }
 
 // =============================
@@ -70,15 +79,113 @@ fn generate_test_address(world: &MinotariWorld) -> String {
 
 #[given("the wallet has sufficient balance")]
 async fn wallet_has_balance(world: &mut MinotariWorld) {
-    // This would typically mine blocks to create balance
-    // For now, we assume the wallet has been set up with balance in previous steps
-    // The actual balance checking happens when creating the transaction
+    // 1. Spin up a seed base node if one isn't already running
+    if world.base_nodes.is_empty() {
+        let base_dir = world.current_base_dir.as_ref().expect("Base dir not set").clone();
+
+        let node = test_support::spawn_base_node(
+            &base_dir,
+            &mut world.assigned_ports,
+            &mut world.base_nodes,
+            true,
+            "BalanceMiner".to_string(),
+            vec![],
+        )
+        .await;
+
+        world.base_nodes.insert("BalanceMiner".to_string(), node);
+        world.seed_nodes.push("BalanceMiner".to_string());
+    }
+
+    // 2. Mine blocks so the wallet receives coinbase rewards
+    let spend_key = world.wallet.get_public_spend_key();
+    let view_key = world.wallet.get_public_view_key();
+    let wallet_address = TariAddress::new_dual_address(
+        view_key,
+        spend_key,
+        LocalNet,
+        TariAddressFeatures::create_one_sided_only(),
+        None,
+    )
+    .unwrap();
+
+    let node_name = world.base_nodes.keys().next().unwrap().clone();
+    let node = world.base_nodes.get(&node_name).unwrap();
+    node.mine_blocks(5, &wallet_address)
+        .await
+        .expect("Failed to mine blocks for balance");
+
+    // 3. Scan the blockchain so the wallet database picks up the mined outputs
+    let db_path = world.database_path.as_ref().expect("Database not set up");
+    let base_url = {
+        let node = world.base_nodes.get(&node_name).unwrap();
+        format!("http://127.0.0.1:{}", node.http_port)
+    };
+
+    let (cmd, mut args) = world.get_minotari_command();
+    args.extend_from_slice(&[
+        "scan".to_string(),
+        "--database-path".to_string(),
+        db_path.to_str().unwrap().to_string(),
+        "--password".to_string(),
+        world.test_password.clone(),
+        "--base-url".to_string(),
+        base_url,
+        "--max-blocks-to-scan".to_string(),
+        "20".to_string(),
+    ]);
+
+    let output = Command::new(&cmd)
+        .args(&args)
+        .output()
+        .expect("Failed to execute scan command");
+
+    assert!(
+        output.status.success(),
+        "Scan failed during balance setup: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+
+    println!(
+        "Wallet funded via mining + scan. Scan output: {}",
+        String::from_utf8_lossy(&output.stdout)
+    );
 }
 
 #[given("the wallet has zero balance")]
 async fn wallet_zero_balance(world: &mut MinotariWorld) {
-    // The wallet starts with zero balance by default
-    // No need to do anything - just document the state
+    // Run the balance command and verify the wallet reports zero balance
+    let db_path = world.database_path.as_ref().expect("Database not set up");
+    let (cmd, mut args) = world.get_minotari_command();
+    args.extend_from_slice(&[
+        "balance".to_string(),
+        "--database-path".to_string(),
+        db_path.to_str().unwrap().to_string(),
+        "--password".to_string(),
+        world.test_password.clone(),
+        "--account-name".to_string(),
+        "default".to_string(),
+    ]);
+
+    let output = Command::new(&cmd)
+        .args(&args)
+        .output()
+        .expect("Failed to execute balance command");
+
+    world.last_command_exit_code = Some(output.status.code().unwrap_or(-1));
+    world.last_command_output = Some(String::from_utf8_lossy(&output.stdout).to_string());
+    world.last_command_error = Some(String::from_utf8_lossy(&output.stderr).to_string());
+
+    // Verify the balance is zero
+    if let Some(balance) = world.parse_balance_from_output() {
+        assert_eq!(
+            balance, 0,
+            "Expected zero balance for a fresh wallet, got {} microTari",
+            balance
+        );
+    }
+
+    println!("Confirmed wallet has zero balance");
 }
 
 // =============================

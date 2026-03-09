@@ -43,7 +43,7 @@ async fn start_daemon_process(world: &mut MinotariWorld, port: u16, scan_interva
         args.push(base_url);
     }
 
-    let mut child = std::process::Command::new(&command)
+    let child = std::process::Command::new(&command)
         .args(&args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -179,14 +179,15 @@ async fn send_shutdown_signal(world: &mut MinotariWorld) {
         sleep(Duration::from_secs(2)).await;
 
         // Try to collect exit status
-        if let Ok(status) = child.try_wait() {
-            if let Some(exit_status) = status {
-                world.last_command_exit_code = exit_status.code();
-            }
+        if let Ok(status) = child.try_wait()
+            && let Some(exit_status) = status
+        {
+            world.last_command_exit_code = exit_status.code();
         }
     }
 }
 
+#[allow(unused_variables)]
 #[then(regex = r#"^the API should be accessible on port "([^"]*)"$"#)]
 async fn api_accessible(world: &mut MinotariWorld, port: String) {
     let port_num = port.parse::<u16>().expect("Invalid port number");

@@ -26,6 +26,7 @@ indexmap = "1.9"
 
 # Tari dependencies for base node integration
 minotari_app_utilities = { git = "https://github.com/tari-project/tari/", rev = "766f80ccc20596413ee208311750c11e02a2841d" }
+minotari_app_grpc = { git = "https://github.com/tari-project/tari/", rev = "766f80ccc20596413ee208311750c11e02a2841d"}
 minotari_node = { git = "https://github.com/tari-project/tari/", rev = "766f80ccc20596413ee208311750c11e02a2841d", features = ["metrics"] }
 minotari_node_grpc_client = { git = "https://github.com/tari-project/tari/", rev = "766f80ccc20596413ee208311750c11e02a2841d" }
 tari_common = { git = "https://github.com/tari-project/tari/", rev = "766f80ccc20596413ee208311750c11e02a2841d" }

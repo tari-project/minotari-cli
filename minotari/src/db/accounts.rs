@@ -9,9 +9,7 @@ use tari_common_types::{
         seed_words::SeedWords,
     },
     tari_address::{TariAddress, TariAddressFeatures},
-    types::CompressedPublicKey,
 };
-use tari_crypto::{keys::PublicKey, ristretto::RistrettoPublicKey};
 use tari_transaction_components::MicroMinotari;
 use tari_transaction_components::key_manager::{KeyManager, wallet_types::WalletType};
 use utoipa::ToSchema;
@@ -189,14 +187,11 @@ impl AccountRow {
     pub fn get_address(&self, network: Network, password: &str) -> WalletDbResult<TariAddress> {
         let wallet = self.decrypt_wallet_type(password)?;
 
-        let view_private_key = wallet.get_view_key();
+        let view_public_key = wallet.get_public_view_key();
         let spend_public_key = wallet.get_public_spend_key();
 
-        let view_public_key = RistrettoPublicKey::from_secret_key(view_private_key);
-        let view_public_compressed = CompressedPublicKey::new_from_pk(view_public_key);
-
         let address = TariAddress::new_dual_address(
-            view_public_compressed,
+            view_public_key,
             spend_public_key,
             network,
             TariAddressFeatures::create_one_sided_only(),
@@ -215,14 +210,11 @@ impl AccountRow {
     ) -> WalletDbResult<TariAddress> {
         let wallet = self.decrypt_wallet_type(password)?;
 
-        let view_private_key = wallet.get_view_key();
+        let view_public_key = wallet.get_public_view_key();
         let spend_public_key = wallet.get_public_spend_key();
 
-        let view_public_key = RistrettoPublicKey::from_secret_key(view_private_key);
-        let view_public_compressed = CompressedPublicKey::new_from_pk(view_public_key);
-
         let address = TariAddress::new_dual_address(
-            view_public_compressed,
+            view_public_key,
             spend_public_key,
             network,
             TariAddressFeatures::create_one_sided_only(),

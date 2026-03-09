@@ -24,7 +24,7 @@
 //!
 //! This module spawns and manages actual Tari base node processes for integration testing.
 //! Based on the tari/integration_tests implementation.
-
+use std::path::Path;
 use std::{
     convert::TryInto,
     fmt::{Debug, Formatter},
@@ -46,6 +46,7 @@ use tari_common::{
     network_check::set_network_if_choice_valid,
 };
 use tari_common_sqlite::connection::DbConnectionUrl;
+use tari_common_types::tari_address::TariAddress;
 use tari_comms::{NodeIdentity, multiaddr::Multiaddr, peer_manager::PeerFeatures};
 use tari_comms_dht::DhtConfig;
 use tari_p2p::{Network, PeerSeedsConfig, TransportType, auto_update::AutoUpdateConfig};
@@ -63,7 +64,6 @@ pub struct BaseNodeProcess {
     pub identity: NodeIdentity,
     pub temp_dir_path: PathBuf,
     pub is_seed_node: bool,
-    pub seed_nodes: Vec<String>,
     pub config: BaseNodeConfig,
     pub kill_signal: Shutdown,
 }
@@ -107,35 +107,42 @@ impl BaseNodeProcess {
     }
 
     /// Mine blocks on this node using SHA3 mining
-    pub async fn mine_blocks(&self, num_blocks: u64, wallet_payment_address: &str) -> anyhow::Result<()> {
-        use minotari_node_grpc_client::grpc::{MinerInput, NewBlockTemplate, PowAlgo};
+    pub async fn mine_blocks(&self, num_blocks: u64, wallet_payment_address: &TariAddress) -> anyhow::Result<()> {
+        use minotari_app_grpc::tari_rpc::{
+            GetNewBlockWithCoinbasesRequest, NewBlockCoinbase, NewBlockTemplateRequest, PowAlgo, pow_algo::PowAlgos,
+        };
 
         let mut client = self.get_grpc_client().await?;
 
         for _ in 0..num_blocks {
             // Get new block template
-            let template_request = NewBlockTemplate {
+            let template_req = NewBlockTemplateRequest {
                 algo: Some(PowAlgo {
-                    pow_algo: minotari_node_grpc_client::grpc::pow_algo::PowAlgos::Sha3x.into(),
+                    pow_algo: PowAlgos::Sha3x.into(),
                 }),
                 max_weight: 0,
             };
-
-            let template_response = client.get_new_block_template(template_request).await?;
-            let template = template_response.into_inner();
-
-            // Submit the block with minimal proof of work (SHA3 is fast)
-            let miner_input = MinerInput {
-                block_template_data: template.block_template_data,
-                coinbase_extra: wallet_payment_address.as_bytes().to_vec(),
-                nonce: 0,
+            let template_response = client.get_new_block_template(template_req).await.unwrap().into_inner();
+            let block_template = template_response.new_block_template.clone().unwrap();
+            let miner_data = template_response.miner_data.unwrap();
+            let amount = miner_data.reward + miner_data.total_fees;
+            let request = GetNewBlockWithCoinbasesRequest {
+                new_template: Some(block_template),
+                coinbases: vec![NewBlockCoinbase {
+                    address: wallet_payment_address.to_base58(),
+                    value: amount,
+                    stealth_payment: false,
+                    revealed_value_proof: true,
+                    coinbase_extra: Vec::new(),
+                }],
             };
+            let new_block = client.get_new_block_with_coinbases(request).await.unwrap().into_inner();
 
-            let submit_response = client.submit_block(miner_input).await?;
-            let block_result = submit_response.into_inner();
+            let new_block = new_block.block.unwrap();
 
-            if block_result.block_hash.is_empty() {
-                anyhow::bail!("Failed to mine block");
+            match client.submit_block(new_block).await {
+                Ok(_) => (),
+                Err(e) => panic!("The block should have been valid, {e}"),
             }
         }
 
@@ -187,7 +194,7 @@ impl BaseNodeProcess {
 
 /// Spawn a base node with default configuration
 pub async fn spawn_base_node(
-    temp_base_dir: &PathBuf,
+    temp_base_dir: &Path,
     assigned_ports: &mut indexmap::IndexMap<u64, u64>,
     base_nodes: &mut indexmap::IndexMap<String, BaseNodeProcess>,
     is_seed_node: bool,
@@ -209,7 +216,7 @@ pub async fn spawn_base_node(
 /// Spawn a base node with custom configuration
 #[allow(clippy::too_many_lines)]
 pub async fn spawn_base_node_with_config(
-    temp_base_dir: &PathBuf,
+    temp_base_dir: &Path,
     assigned_ports: &mut indexmap::IndexMap<u64, u64>,
     base_nodes: &mut indexmap::IndexMap<String, BaseNodeProcess>,
     is_seed_node: bool,
@@ -263,7 +270,6 @@ pub async fn spawn_base_node_with_config(
         identity,
         temp_dir_path: temp_dir_path.clone(),
         is_seed_node,
-        seed_nodes: seed_node_names.clone(),
         config: base_node_config.clone(),
         kill_signal: shutdown.clone(),
     };
