@@ -1,0 +1,12 @@
+{
+  "sqltools.connections": [
+    {
+      "previewLimit": 50,
+      "driver": "SQLite",
+      "name": "minotari-cli",
+      "database": "${workspaceFolder:minotari-cli.martins}/data/wallet.db",
+      "group": "aaa"
+    }
+  ],
+  "sqltools.useNodeRuntime": true
+}

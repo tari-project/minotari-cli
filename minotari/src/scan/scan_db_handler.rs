@@ -42,7 +42,7 @@ impl<E: EventSender + Clone + Send + 'static> ScanDbHandler<E> {
         target_account_id: i64,
         has_pending_outbound: bool,
         webhook_config: Option<WebhookTriggerConfig>,
-        resume_height: u64,
+        next_block_to_scan: u64,
     ) -> Result<Vec<WalletEvent>, ScanError> {
         if blocks.is_empty() {
             return Ok(Vec::new());
@@ -72,7 +72,7 @@ impl<E: EventSender + Clone + Send + 'static> ScanDbHandler<E> {
             let mut processor = block_processor;
 
             for block in blocks.iter() {
-                if block.height <= resume_height {
+                if block.height < next_block_to_scan {
                     continue;
                 }
 
