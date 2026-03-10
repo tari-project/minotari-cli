@@ -47,10 +47,10 @@ fn needs_rebuild(binary: &Path, watched: &[PathBuf]) -> bool {
         } else {
             path.metadata().ok().and_then(|m| m.modified().ok())
         };
-        if let Some(t) = newest {
-            if t > bin_mtime {
-                return true;
-            }
+        if let Some(t) = newest
+            && t > bin_mtime
+        {
+            return true;
         }
     }
     false
