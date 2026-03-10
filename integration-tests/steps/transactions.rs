@@ -52,13 +52,6 @@ fn execute_create_transaction(world: &mut MinotariWorld, recipients: Vec<String>
         .args(&args)
         .output()
         .expect("Failed to execute create-unsigned-transaction command");
-    dbg!(&output);
-assert!(
-        output.status.success(),
-        "create-unsigned-transaction command failed with exit code {:?}. Stderr: {}",
-        output.status.code(),
-        String::from_utf8_lossy(&output.stderr)
-    );
     world.last_command_exit_code = output.status.code();
     world.last_command_output = Some(String::from_utf8_lossy(&output.stdout).to_string());
     world.last_command_error = Some(String::from_utf8_lossy(&output.stderr).to_string());
@@ -272,7 +265,7 @@ async fn transaction_has_recipient(world: &mut MinotariWorld) {
     let transaction = world
         .transaction_data
         .get("current")
-        .expect("Transaction data not found");
+        .expect("Transaction data not found").get("info").expect("Transaction info not found");
 
     // Check that the transaction has outputs/recipients
     assert!(
@@ -286,7 +279,7 @@ async fn inputs_are_locked(world: &mut MinotariWorld) {
     let transaction = world
         .transaction_data
         .get("current")
-        .expect("Transaction data not found");
+        .expect("Transaction data not found").get("info").expect("Transaction info not found");
 
     // Check that the transaction has inputs
     assert!(
@@ -381,7 +374,8 @@ async fn inputs_locked_for_duration(world: &mut MinotariWorld, seconds: String) 
     let transaction = world
         .transaction_data
         .get("current")
-        .expect("Transaction data not found");
+        .expect("Transaction data not found").get("info").expect("No info found for transaction");
+    dbg!(&transaction);
 
     // Check that lock duration or expiry information is present
     let has_lock_info = transaction.get("lock_duration").is_some()

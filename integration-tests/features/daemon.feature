@@ -8,7 +8,7 @@ Feature: Daemon Mode
     When I start the daemon on port "9001"
     Then the API should be accessible on port "9001"
     And the Swagger UI should be available
-
+    
   Scenario: Daemon performs automatic scanning
     Given I have a test database with an existing wallet
     When I start the daemon with scan interval "10" seconds

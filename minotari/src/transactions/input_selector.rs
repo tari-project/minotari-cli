@@ -277,7 +277,6 @@ impl InputSelector {
             amount = &*mask_amount(amount);
             "Selecting UTXOs"
         );
-
         let tip = get_latest_scanned_tip_block_by_account(conn, self.account_id)?;
         let min_height = tip
             .map(|b| b.height)
@@ -301,7 +300,6 @@ impl InputSelector {
                 required: amount,
             });
         }
-
         let uo = crate::db::fetch_unspent_outputs(conn, self.account_id, min_height)?;
 
         let features_and_scripts_byte_size = match estimated_output_size {

@@ -15,6 +15,7 @@ use super::common::MinotariWorld;
 
 /// Start a daemon process with the given configuration
 async fn start_daemon_process(world: &mut MinotariWorld, port: u16, scan_interval: Option<u64>) {
+    world.setup_database();
     let (command, mut args) = world.get_minotari_command();
 
     let db_path = world

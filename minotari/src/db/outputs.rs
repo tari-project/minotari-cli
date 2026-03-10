@@ -371,7 +371,7 @@ impl UtxoValue for DbWalletOutput {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 struct WalletOutputRow {
     id: i64,
     tx_id: i64,
@@ -437,13 +437,14 @@ pub fn fetch_unspent_outputs(
     let unspent_status = OutputStatus::Unspent.to_string();
     let min_height_i64 = min_height as i64;
 
+
     let mut stmt = conn.prepare_cached(
         r#"
         SELECT id, tx_id, wallet_output_json
         FROM outputs
         WHERE account_id = :account_id
           AND status = :unspent_status
-          AND confirmed_height <= :min_height
+          AND mined_in_block_height <= :min_height
           AND deleted_at IS NULL
         ORDER BY value DESC
         "#,
