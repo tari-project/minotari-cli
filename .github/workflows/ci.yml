@@ -42,7 +42,7 @@ jobs:
         run: cargo install sqlx-cli --no-default-features --features sqlite
         
       - name: Create database and run migrations
-        run: sqlx database create && sqlx migrate run
+        run: cd minotari && sqlx database create && sqlx migrate run
 
       - name: Run clippy
         run: cargo clippy --all-targets --all-features -- -D warnings
