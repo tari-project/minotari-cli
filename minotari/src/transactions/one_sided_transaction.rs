@@ -213,15 +213,10 @@ impl OneSidedTransaction {
         if recipients.is_empty() {
             return Err(anyhow!("No recipients provided"));
         }
-        if recipients.len() > 1 {
-            return Err(anyhow!("Only one recipient is supported for now"));
-        }
 
-        let recipient = &recipients[0];
         info!(
             target: "audit",
-            recipient = &*mask_string(&recipient.address.to_string()),
-            amount = &*mask_amount(recipient.amount);
+            count = recipients.len();
             "Creating unsigned one-sided transaction"
         );
 
@@ -238,19 +233,34 @@ impl OneSidedTransaction {
         }
 
         let tx_id = TxId::new_random();
-        let payment_id = match &recipient.payment_id {
-            Some(s) => MemoField::new_open_from_string(s, TxType::PaymentToOther).map_err(|e| anyhow!(e))?,
-            None => MemoField::new_empty(),
-        };
         let output_features = OutputFeatures::default();
-        let recipients = [PaymentRecipient {
-            amount: recipient.amount,
-            output_features: output_features.clone(),
-            address: recipient.address.clone(),
-            payment_id: payment_id.clone(),
-        }];
-        let result =
-            prepare_one_sided_transaction_for_signing(tx_id, tx_builder, &recipients, payment_id, sender_address)?;
+        let payment_recipients: Vec<PaymentRecipient> = recipients
+            .iter()
+            .map(|r| {
+                let payment_id = match &r.payment_id {
+                    Some(s) => MemoField::new_open_from_string(s, TxType::PaymentToOther)
+                        .unwrap_or_else(|_| MemoField::new_empty()),
+                    None => MemoField::new_empty(),
+                };
+                PaymentRecipient {
+                    amount: r.amount,
+                    output_features: output_features.clone(),
+                    address: r.address.clone(),
+                    payment_id,
+                }
+            })
+            .collect();
+
+        // Use first recipient's payment_id as the overall transaction memo
+        let main_payment_id = payment_recipients[0].payment_id.clone();
+
+        let result = prepare_one_sided_transaction_for_signing(
+            tx_id,
+            tx_builder,
+            &payment_recipients,
+            main_payment_id,
+            sender_address,
+        )?;
 
         Ok(result)
     }

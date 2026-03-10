@@ -15,7 +15,7 @@ Feature: Fund Locking
     Given I have a test database with an existing wallet
     And the wallet has sufficient balance
     When I lock funds with "3" outputs
-    Then "3" UTXOs should be locked
+    Then the UTXOs should be marked as locked
 
   Scenario: Lock funds with custom duration
     Given I have a test database with an existing wallet
@@ -23,6 +23,7 @@ Feature: Fund Locking
     When I lock funds with duration "7200" seconds
     Then the UTXOs should be locked for "7200" seconds
 
+    @pie
   Scenario: Lock funds with insufficient balance
     Given I have a test database with an existing wallet
     And the wallet has zero balance

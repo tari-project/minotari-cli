@@ -437,7 +437,6 @@ pub fn fetch_unspent_outputs(
     let unspent_status = OutputStatus::Unspent.to_string();
     let min_height_i64 = min_height as i64;
 
-
     let mut stmt = conn.prepare_cached(
         r#"
         SELECT id, tx_id, wallet_output_json

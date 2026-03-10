@@ -5,9 +5,26 @@
 use cucumber::{given, then, when};
 use std::process::Stdio;
 use std::time::Duration;
+use tari_common::configuration::Network::LocalNet;
+use tari_common_types::tari_address::{TariAddress, TariAddressFeatures};
 use tokio::time::sleep;
 
-use super::common::MinotariWorld;
+use super::common::{MinotariWorld, database_with_wallet};
+
+/// Generate a valid test Tari address from the wallet in world
+fn generate_test_address(world: &MinotariWorld) -> String {
+    let spend_key = world.wallet.get_public_spend_key();
+    let view_key = world.wallet.get_public_view_key();
+    let wallet_address = TariAddress::new_dual_address(
+        view_key,
+        spend_key,
+        LocalNet,
+        TariAddressFeatures::create_one_sided_only(),
+        None,
+    )
+    .unwrap();
+    wallet_address.to_base58().to_string()
+}
 
 // =============================
 // Helper Functions
@@ -64,6 +81,8 @@ async fn start_daemon_process(world: &mut MinotariWorld, port: u16, scan_interva
 
 #[given("I have a running daemon with an existing wallet")]
 async fn running_daemon_with_wallet(world: &mut MinotariWorld) {
+    // Import a wallet so the daemon has an account to query
+    database_with_wallet(world).await;
     // Start daemon on default port 9000
     start_daemon_process(world, 9000, None).await;
 }
@@ -108,7 +127,7 @@ async fn lock_funds_api(world: &mut MinotariWorld, amount: String) {
 
     let amount_num = amount.parse::<u64>().expect("Invalid amount");
     let request_body = serde_json::json!({
-        "amount_microtari": amount_num,
+        "amount": amount_num,
         "idempotency_key": format!("test_lock_{}", chrono::Utc::now().timestamp())
     });
 
@@ -132,14 +151,13 @@ async fn create_transaction_api(world: &mut MinotariWorld) {
     let port = world.api_port.expect("Daemon must be running");
     let url = format!("http://127.0.0.1:{}/accounts/default/create_unsigned_transaction", port);
 
-    // Create a dummy transaction request
+    let address = generate_test_address(world);
     let request_body = serde_json::json!({
         "recipients": [{
-            "address": "5CKLWUeJH9dZhH8WJnPJc7fV6XHnYNYpFT8YgMHunvFBXj3bZvW8M1TGVvdvP8n4wJV8LF9HxYv7fV8H",
-            "amount_microtari": 1000000,
-            "message": "Test transaction"
+            "address": address,
+            "amount": 100000,
+            "payment_id": "test-payment"
         }],
-        "fee_per_gram": 5,
         "idempotency_key": format!("test_tx_{}", chrono::Utc::now().timestamp())
     });
 
@@ -153,6 +171,13 @@ async fn create_transaction_api(world: &mut MinotariWorld) {
 
     let status = response.status();
     let body = response.text().await.expect("Failed to read response body");
+
+    // Store response in transaction_data for subsequent step assertions
+    if status.is_success() {
+        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
+            world.transaction_data.insert("current".to_string(), json);
+        }
+    }
 
     world.last_command_output = Some(body);
     world.last_command_exit_code = Some(if status.is_success() { 0 } else { 1 });
@@ -297,8 +322,8 @@ async fn response_has_balance_info(world: &mut MinotariWorld) {
     let json: serde_json::Value = serde_json::from_str(output).expect("Response should be valid JSON");
 
     assert!(
-        json.get("balance_microtari").is_some() || json.get("available_balance_microtari").is_some(),
-        "Response should include balance information"
+        json.get("available").is_some() || json.get("total").is_some(),
+        "Response should include balance information (available or total field)"
     );
 }
 
@@ -313,13 +338,20 @@ async fn api_returns_success(world: &mut MinotariWorld) {
 
 #[then("the API should return the unsigned transaction")]
 async fn api_returns_transaction(world: &mut MinotariWorld) {
+    assert_eq!(
+        world.last_command_exit_code,
+        Some(0),
+        "API should return success for unsigned transaction"
+    );
+
     let output = world.last_command_output.as_ref().expect("Should have response output");
 
     let json: serde_json::Value = serde_json::from_str(output).expect("Response should be valid JSON");
 
+    // PrepareOneSidedTransactionForSigningResult has fields: version, tx_id, info
     assert!(
-        json.get("transaction").is_some() || json.get("unsigned_transaction").is_some(),
-        "Response should include transaction data"
+        json.get("tx_id").is_some() || json.get("info").is_some(),
+        "Response should include transaction data (tx_id or info field)"
     );
 }
 

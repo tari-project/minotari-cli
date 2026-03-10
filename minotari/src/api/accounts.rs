@@ -711,8 +711,7 @@ pub async fn api_get_scan_status(
             .map_err(|e| ApiError::DbError(e.to_string()))?
             .ok_or_else(|| ApiError::AccountNotFound(name.clone()))?;
 
-        get_latest_scanned_block_with_timestamp(&conn, account.id)
-            .map_err(|e| ApiError::DbError(e.to_string()))
+        get_latest_scanned_block_with_timestamp(&conn, account.id).map_err(|e| ApiError::DbError(e.to_string()))
     })
     .await
     .map_err(|e| ApiError::InternalServerError(format!("Task join error: {}", e)))??;
@@ -1243,7 +1242,6 @@ pub async fn api_create_unsigned_transaction(
     Path(WalletParams { name }): Path<WalletParams>,
     Json(body): Json<CreateTransactionRequest>,
 ) -> Result<Json<JsonValue>, ApiError> {
-
     info!(
         target: "audit",
         account = &*name,

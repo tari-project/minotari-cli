@@ -184,7 +184,7 @@ async fn setup_database(world: &mut MinotariWorld) {
 }
 
 #[given("I have a test database with an existing wallet")]
-async fn database_with_wallet(world: &mut MinotariWorld) {
+pub async fn database_with_wallet(world: &mut MinotariWorld) {
     world.setup_database();
     let db_path = world.database_path.as_ref().expect("Database not set up");
     let (cmd, mut args) = world.get_minotari_command();

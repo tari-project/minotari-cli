@@ -48,10 +48,13 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
 
       - name: Build
-        run: cargo build --all-targets --all-features
+        run: cargo build --release --all-targets --all-features
 
       - name: Run tests
-        run: cargo test --all-targets --all-features
+        run: cargo test --release --all-targets --all-features --workspace --exclude integration-tests
+
+      - name: Run integration tests
+        run: cargo test --release --test cucumber
 
       - name: Check unused dependencies
         run: cargo machete

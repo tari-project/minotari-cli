@@ -285,7 +285,8 @@ impl InputSelector {
         let (locked_amount, _unconfirmed_amount, _locked_and_unconfirmed_amount) =
             crate::db::get_output_totals_for_account(conn, self.account_id)?;
         let total_unspent_balance: MicroMinotari = get_total_unspent_balance(conn, self.account_id)?.into();
-        if total_unspent_balance.saturating_sub(locked_amount) <= amount {
+        let available_balance = total_unspent_balance.saturating_sub(locked_amount);
+        if available_balance <= amount && total_unspent_balance >= amount {
             let pending = total_unspent_balance.saturating_sub(locked_amount);
             warn!(
                 target: "audit",
