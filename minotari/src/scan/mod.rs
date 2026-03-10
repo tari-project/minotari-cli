@@ -102,4 +102,5 @@ pub use config::ScanRetryConfig;
 pub use config::ScanTimeoutConfig;
 pub use types::ScanError;
 
+pub use block_processor::MemoInfo;
 pub use events::*;

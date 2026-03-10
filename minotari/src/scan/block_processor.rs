@@ -611,16 +611,16 @@ impl<E: EventSender> BlockProcessor<E> {
 }
 
 /// Extracted memo information from an output's payment ID.
-struct MemoInfo {
+pub struct MemoInfo {
     /// Human-readable interpretation of the memo (UTF-8 lossy).
-    parsed: Option<String>,
+    pub parsed: Option<String>,
     /// Hexadecimal encoding of the raw memo bytes.
-    hex: Option<String>,
+    pub hex: Option<String>,
 }
 
 impl MemoInfo {
     /// Extracts memo information from a wallet output's payment ID.
-    fn from_output(output: &WalletOutput) -> Self {
+    pub fn from_output(output: &WalletOutput) -> Self {
         let payment_info = output.payment_id();
         let memo_bytes = payment_info.get_payment_id();
 
