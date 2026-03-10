@@ -40,6 +40,7 @@ fn execute_create_transaction(world: &mut MinotariWorld, recipients: Vec<String>
 
     args.push("--output-file".to_string());
     args.push(output_path.to_str().unwrap().to_string());
+    world.output_file = Some(output_path);
 
     // Add custom lock duration if provided
     if let Some(seconds) = lock_duration {
@@ -51,10 +52,32 @@ fn execute_create_transaction(world: &mut MinotariWorld, recipients: Vec<String>
         .args(&args)
         .output()
         .expect("Failed to execute create-unsigned-transaction command");
-
+    dbg!(&output);
+assert!(
+        output.status.success(),
+        "create-unsigned-transaction command failed with exit code {:?}. Stderr: {}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stderr)
+    );
     world.last_command_exit_code = output.status.code();
     world.last_command_output = Some(String::from_utf8_lossy(&output.stdout).to_string());
     world.last_command_error = Some(String::from_utf8_lossy(&output.stderr).to_string());
+
+    let output_file = world.output_file.as_ref().expect("Output file path not set");
+
+    assert!(
+        output_file.exists(),
+        "Transaction file should exist at {:?}",
+        output_file
+    );
+
+    // Parse the JSON file
+    let content = std::fs::read_to_string(output_file).expect("Failed to read transaction file");
+
+    let transaction_json: serde_json::Value = serde_json::from_str(&content).expect("Failed to parse transaction JSON");
+
+    // Store for later verification
+    world.transaction_data.insert("current".to_string(), transaction_json);
 }
 
 /// Generate a test Tari address (simplified for testing)
@@ -96,7 +119,6 @@ async fn wallet_has_balance(world: &mut MinotariWorld) {
         world.base_nodes.insert("BalanceMiner".to_string(), node);
         world.seed_nodes.push("BalanceMiner".to_string());
     }
-
     // 2. Mine blocks so the wallet receives coinbase rewards
     let spend_key = world.wallet.get_public_spend_key();
     let view_key = world.wallet.get_public_view_key();
@@ -139,7 +161,6 @@ async fn wallet_has_balance(world: &mut MinotariWorld) {
         .args(&args)
         .output()
         .expect("Failed to execute scan command");
-
     assert!(
         output.status.success(),
         "Scan failed during balance setup: {}",
@@ -245,24 +266,6 @@ async fn create_transaction_with_lock_duration(world: &mut MinotariWorld, second
 // Verification Steps
 // =============================
 
-#[then("the transaction file should be created")]
-async fn transaction_file_created(world: &mut MinotariWorld) {
-    let output_file = world.output_file.as_ref().expect("Output file path not set");
-
-    assert!(
-        output_file.exists(),
-        "Transaction file should exist at {:?}",
-        output_file
-    );
-
-    // Parse the JSON file
-    let content = std::fs::read_to_string(output_file).expect("Failed to read transaction file");
-
-    let transaction_json: serde_json::Value = serde_json::from_str(&content).expect("Failed to parse transaction JSON");
-
-    // Store for later verification
-    world.transaction_data.insert("current".to_string(), transaction_json);
-}
 
 #[then("the transaction should include the recipient")]
 async fn transaction_has_recipient(world: &mut MinotariWorld) {
@@ -336,8 +339,10 @@ async fn transaction_has_payment_id(world: &mut MinotariWorld) {
         .get("current")
         .expect("Transaction data not found");
 
-    // Check for payment ID in various possible locations
-    let has_payment_id = transaction.get("payment_id").is_some()
+    // Check for payment ID in the transaction info object and at the root level
+    let info = transaction.get("info");
+    let has_payment_id = info.and_then(|i| i.get("payment_id")).is_some()
+        || transaction.get("payment_id").is_some()
         || transaction.get("memo").is_some()
         || transaction.get("message").is_some();
 
