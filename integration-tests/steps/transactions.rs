@@ -40,7 +40,6 @@ fn execute_create_transaction(world: &mut MinotariWorld, recipients: Vec<String>
 
     args.push("--output-file".to_string());
     args.push(output_path.to_str().unwrap().to_string());
-    world.output_file = Some(output_path);
 
     // Add custom lock duration if provided
     if let Some(seconds) = lock_duration {

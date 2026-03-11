@@ -55,8 +55,6 @@ use tari_transaction_components::{
     transaction_components::{MemoField, OutputFeatures, memo_field::TxType},
 };
 
-use crate::log::{mask_amount, mask_string};
-
 /// Represents a recipient of a one-sided transaction.
 ///
 /// Contains all the information needed to send funds to a recipient,

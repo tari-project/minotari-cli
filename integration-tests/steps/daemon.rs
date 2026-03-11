@@ -173,10 +173,10 @@ async fn create_transaction_api(world: &mut MinotariWorld) {
     let body = response.text().await.expect("Failed to read response body");
 
     // Store response in transaction_data for subsequent step assertions
-    if status.is_success() {
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
+    if status.is_success() &&
+         let Ok(json) = serde_json::from_str::<serde_json::Value>(&body) {
             world.transaction_data.insert("current".to_string(), json);
-        }
+
     }
 
     world.last_command_output = Some(body);
