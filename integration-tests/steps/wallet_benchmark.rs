@@ -20,7 +20,7 @@ use super::common::MinotariWorld;
 // =============================
 // Benchmark Steps
 // =============================
-#[when(regex = r#"^I measure the time to scan "([^"]*)" blocks" blocks$"#)]
+#[then(regex = r#"^I measure the time to scan (\d+) blocks$"#)]
 async fn measure_scan_time(world: &mut MinotariWorld, blocks: String) {
     let db_path = world.database_path.as_ref().expect("Database not set up");
 
@@ -62,7 +62,7 @@ async fn measure_scan_time(world: &mut MinotariWorld, blocks: String) {
     }
 }
 
-#[when(regex = r#"^I send "([^"]*)" transactions" transactions"#)]
+#[when(regex = r#"^I send (\d+) transactions$"#)]
 async fn send_transactions(world: &mut MinotariWorld, transactions: String) {
     let db_path = world.database_path.as_ref().expect("Database not set up");
 
@@ -212,8 +212,8 @@ async fn send_transactions(world: &mut MinotariWorld, transactions: String) {
     world.last_command_output = Some(format!("Sent {} transactions", successful_txs));
 }
 
-#[when(regex = r#"^I measure the time to confirm"([^"]*)" transactions" transactions"#)]
-async fn measure_confirmation_time(world: &mut MinotariWorld, transactions: String) {
+#[when(regex = r#"^I measure the time to confirm (\d+) transactions$"#)]
+async fn measure_confirmation_time(world: &mut MinotariWorld, _transactions: String) {
     let db_path = world.database_path.as_ref().expect("Database not set up");
 
     // Get base node URL
