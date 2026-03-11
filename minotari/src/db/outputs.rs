@@ -371,7 +371,7 @@ impl UtxoValue for DbWalletOutput {
     }
 }
 
-#[derive(Deserialize)]
+#[derive(Deserialize, Debug)]
 struct WalletOutputRow {
     id: i64,
     tx_id: i64,
@@ -443,7 +443,7 @@ pub fn fetch_unspent_outputs(
         FROM outputs
         WHERE account_id = :account_id
           AND status = :unspent_status
-          AND confirmed_height <= :min_height
+          AND mined_in_block_height <= :min_height
           AND deleted_at IS NULL
         ORDER BY value DESC
         "#,

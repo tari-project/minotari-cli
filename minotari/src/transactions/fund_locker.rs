@@ -152,7 +152,6 @@ impl FundLocker {
             amount = &*mask_amount(amount);
             "Locking funds"
         );
-
         let mut conn = self.db_pool.get()?;
         if let Some(idempotency_key_str) = &idempotency_key
             && let Some(response) =

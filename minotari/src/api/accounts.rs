@@ -668,7 +668,7 @@ pub async fn api_create_address_with_payment_id(
 /// # Errors
 ///
 /// - [`ApiError::AccountNotFound`]: The specified account does not exist
-/// - [`ApiError::NotFound`]: No blocks have been scanned yet for this account
+/// If no blocks have been scanned yet, returns a response with default values (height 0, empty hash and timestamp).
 /// - [`ApiError::DbError`]: Database connection or query failure
 ///
 /// # Example Response
@@ -685,7 +685,7 @@ pub async fn api_create_address_with_payment_id(
     path = "/accounts/{name}/scan_status",
     responses(
         (status = 200, description = "Scan status retrieved successfully", body = ScanStatusResponse),
-        (status = 404, description = "Account not found or no blocks scanned", body = ApiError),
+        (status = 404, description = "Account not found", body = ApiError),
         (status = 500, description = "Internal server error", body = ApiError),
     ),
     params(
@@ -711,14 +711,21 @@ pub async fn api_get_scan_status(
             .map_err(|e| ApiError::DbError(e.to_string()))?
             .ok_or_else(|| ApiError::AccountNotFound(name.clone()))?;
 
-        get_latest_scanned_block_with_timestamp(&conn, account.id)
-            .map_err(|e| ApiError::DbError(e.to_string()))?
-            .ok_or_else(|| ApiError::NotFound("No blocks have been scanned yet".to_string()))
+        get_latest_scanned_block_with_timestamp(&conn, account.id).map_err(|e| ApiError::DbError(e.to_string()))
     })
     .await
     .map_err(|e| ApiError::InternalServerError(format!("Task join error: {}", e)))??;
 
-    Ok(Json(ScanStatusResponse::from(scan_status)))
+    let response = match scan_status {
+        Some(block) => ScanStatusResponse::from(block),
+        None => ScanStatusResponse {
+            last_scanned_height: 0,
+            last_scanned_block_hash: String::new(),
+            scanned_at: String::new(),
+        },
+    };
+
+    Ok(Json(response))
 }
 
 /// Retrieves wallet events for a specified account with pagination.
@@ -1142,7 +1149,6 @@ pub async fn api_lock_funds(
 
         let lock_amount = FundLocker::new(pool);
         let confirmation_window = body.confirmation_window.unwrap_or(default_confirmations);
-
         lock_amount
             .lock(
                 account.id,
@@ -1287,7 +1293,6 @@ pub async fn api_create_unsigned_transaction(
                 confirmation_window,
             )
             .map_err(|e| ApiError::FailedToLockFunds(e.to_string()))?;
-
         let one_sided_tx = OneSidedTransaction::new(pool, network, password);
         one_sided_tx
             .create_unsigned_transaction(&account, locked_funds, recipients, fee_per_gram)

@@ -77,8 +77,9 @@ pub fn mask_string(s: &str) -> String {
     if s.len() <= 12 {
         return "***".to_string();
     }
-
-    format!("{}...{}", &s[0..6], &s[s.len() - 6..])
+    let start: String = s.chars().take(6).collect();
+    let end: String = s.chars().rev().take(6).collect::<Vec<_>>().into_iter().rev().collect();
+    format!("{start}...{end}")
 }
 
 /// Returns a redacted placeholder for amounts.

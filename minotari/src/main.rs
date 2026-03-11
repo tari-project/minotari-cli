@@ -498,7 +498,6 @@ fn handle_create_unsigned_transaction(
         })
         .collect();
     let recipients = recipients?;
-
     let pool = init_db(database_file)?;
     let conn = pool.get()?;
     let account =

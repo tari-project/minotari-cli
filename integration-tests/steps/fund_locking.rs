@@ -22,14 +22,13 @@ fn execute_lock_funds(
 ) {
     let db_path = world.database_path.as_ref().expect("Database not set up");
     let output_file = world.get_temp_path("locked_funds.json");
+    world.output_file = Some(output_file.clone());
 
     let (cmd, mut args) = world.get_minotari_command();
     args.extend_from_slice(&[
         "lock-funds".to_string(),
         "--database-path".to_string(),
         db_path.to_str().unwrap().to_string(),
-        "--password".to_string(),
-        world.test_password.clone(),
         "--account-name".to_string(),
         "default".to_string(),
         "--amount".to_string(),
@@ -58,7 +57,13 @@ fn execute_lock_funds(
     world.last_command_exit_code = Some(output.status.code().unwrap_or(-1));
     world.last_command_output = Some(String::from_utf8_lossy(&output.stdout).to_string());
     world.last_command_error = Some(String::from_utf8_lossy(&output.stderr).to_string());
-    world.output_file = Some(output_file);
+
+    // Only parse the JSON file if the command succeeded
+    if output.status.success() && output_file.exists() {
+        let content = std::fs::read_to_string(&output_file).expect("Failed to read transaction file");
+        let json: serde_json::Value = serde_json::from_str(&content).expect("Failed to parse transaction JSON");
+        world.locked_funds.insert("latest".to_string(), json);
+    }
 }
 
 #[when(regex = r#"^I lock funds for amount "([^"]*)" microTari$"#)]

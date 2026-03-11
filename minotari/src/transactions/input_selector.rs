@@ -277,7 +277,6 @@ impl InputSelector {
             amount = &*mask_amount(amount);
             "Selecting UTXOs"
         );
-
         let tip = get_latest_scanned_tip_block_by_account(conn, self.account_id)?;
         let min_height = tip
             .map(|b| b.height)
@@ -286,7 +285,8 @@ impl InputSelector {
         let (locked_amount, _unconfirmed_amount, _locked_and_unconfirmed_amount) =
             crate::db::get_output_totals_for_account(conn, self.account_id)?;
         let total_unspent_balance: MicroMinotari = get_total_unspent_balance(conn, self.account_id)?.into();
-        if total_unspent_balance.saturating_sub(locked_amount) <= amount {
+        let available_balance = total_unspent_balance.saturating_sub(locked_amount);
+        if available_balance <= amount && total_unspent_balance >= amount {
             let pending = total_unspent_balance.saturating_sub(locked_amount);
             warn!(
                 target: "audit",
@@ -301,7 +301,6 @@ impl InputSelector {
                 required: amount,
             });
         }
-
         let uo = crate::db::fetch_unspent_outputs(conn, self.account_id, min_height)?;
 
         let features_and_scripts_byte_size = match estimated_output_size {
