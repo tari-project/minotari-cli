@@ -56,6 +56,7 @@ async fn measure_scan_time(world: &mut MinotariWorld, blocks: String) {
     world.last_command_error = Some(String::from_utf8_lossy(&output.stderr).to_string());
 
     println!("Scan completed in {:?}", duration);
+    world.benchmark_timings.insert("scan".to_string(), duration);
     println!("Scan output: {}", world.last_command_output.as_ref().unwrap());
     if !world.last_command_error.as_ref().unwrap().is_empty() {
         println!("Scan stderr: {}", world.last_command_error.as_ref().unwrap());
@@ -249,6 +250,7 @@ async fn measure_confirmation_time(world: &mut MinotariWorld, _transactions: Str
     world.last_command_error = Some(String::from_utf8_lossy(&output.stderr).to_string());
 
     println!("Transaction confirmation scan completed in {:?}", duration);
+    world.benchmark_timings.insert("confirmation".to_string(), duration);
     println!("Scan output: {}", world.last_command_output.as_ref().unwrap());
 }
 
@@ -262,4 +264,20 @@ async fn transactions_confirmed(world: &mut MinotariWorld) {
     );
 
     println!("All transactions confirmed successfully");
+}
+
+#[then("I print the benchmark results")]
+async fn print_benchmark_results(world: &mut MinotariWorld) {
+    println!("\n========================================");
+    println!("         BENCHMARK RESULTS");
+    println!("========================================");
+    if let Some(scan_duration) = world.benchmark_timings.get("scan") {
+        println!("  Scan time:         {:.2?}", scan_duration);
+    }
+    if let Some(confirm_duration) = world.benchmark_timings.get("confirmation") {
+        println!("  Confirmation time: {:.2?}", confirm_duration);
+    }
+    let total: std::time::Duration = world.benchmark_timings.values().sum();
+    println!("  Total time:        {:.2?}", total);
+    println!("========================================\n");
 }

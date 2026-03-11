@@ -16,3 +16,4 @@ Feature: Wallet Performance Benchmarking
     And I mine 5 blocks on BenchmarkNode
     And I measure the time to confirm 10 transactions
     Then all transactions should be confirmed
+    Then I print the benchmark results

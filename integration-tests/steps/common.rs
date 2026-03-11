@@ -41,6 +41,7 @@ pub struct MinotariWorld {
     pub assigned_ports: IndexMap<u64, u64>,
     pub current_base_dir: Option<PathBuf>,
     pub seed_nodes: Vec<String>,
+    pub benchmark_timings: HashMap<String, std::time::Duration>,
 }
 
 impl MinotariWorld {
@@ -71,6 +72,7 @@ impl MinotariWorld {
             assigned_ports: IndexMap::new(),
             current_base_dir: Some(base_dir),
             seed_nodes: Vec::new(),
+            benchmark_timings: HashMap::new(),
         }
     }
 
