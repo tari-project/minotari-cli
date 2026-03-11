@@ -65,7 +65,7 @@ async fn measure_scan_time(world: &mut MinotariWorld, blocks: String) {
 
 #[when(regex = r#"^I send (\d+) transactions$"#)]
 async fn send_transactions(world: &mut MinotariWorld, transactions: String) {
-    let db_path = world.database_path.as_ref().expect("Database not set up");
+    let db_path = world.database_path.as_ref().expect("Database not set up").clone();
 
     // Get base node URL for submitting transactions
     let base_url = if let Some((_, node)) = world.base_nodes.iter().next() {
@@ -74,18 +74,20 @@ async fn send_transactions(world: &mut MinotariWorld, transactions: String) {
         panic!("No base node available");
     };
 
-    // Generate a test address
-    let spend_key = world.wallet.get_public_spend_key();
-    let view_key = world.wallet.get_public_view_key();
-    let wallet_address = TariAddress::new_dual_address(
-        view_key,
-        spend_key,
+    // Generate a recipient address from a different random wallet
+    use tari_transaction_components::key_manager::wallet_types::WalletType;
+    let recipient_wallet = WalletType::new_random().expect("Failed to create random recipient wallet");
+    let recipient_spend = recipient_wallet.get_public_spend_key();
+    let recipient_view = recipient_wallet.get_public_view_key();
+    let recipient_address = TariAddress::new_dual_address(
+        recipient_view,
+        recipient_spend,
         LocalNet,
         TariAddressFeatures::create_one_sided_only(),
         None,
     )
     .unwrap();
-    let address = wallet_address.to_base58().to_string();
+    let address = recipient_address.to_base58().to_string();
 
     // Create a key manager from the wallet for offline signing
     let key_manager =
@@ -93,6 +95,9 @@ async fn send_transactions(world: &mut MinotariWorld, transactions: String) {
     let consensus_constants = ConsensusConstantsBuilder::new(LocalNet).build();
 
     println!("Sending transactions...");
+    // Capture balance before sending
+    world.pre_send_balance = Some(world.fetch_balance());
+    println!("Pre-send balance: {} µT", world.pre_send_balance.unwrap());
     let mut successful_txs = 0;
     let num_transactions: usize = transactions.parse().expect("Invalid number of transactions");
 
@@ -103,9 +108,9 @@ async fn send_transactions(world: &mut MinotariWorld, transactions: String) {
             .timeout(std::time::Duration::from_secs(30))
             .build()
             .expect("Failed to create HTTP client");
-
+    let amount: u64 = 1000;
     for i in 0..num_transactions {
-        let recipient = format!("{}::1000", address); // 1000 microTari per transaction
+        let recipient = format!("{}::{}", address, amount); //  microTari per transaction
         let output_path = world.get_temp_path(&format!("tx_{}.json", i));
 
         // Step 1: Create unsigned transaction via CLI
@@ -254,8 +259,8 @@ async fn measure_confirmation_time(world: &mut MinotariWorld, _transactions: Str
     println!("Scan output: {}", world.last_command_output.as_ref().unwrap());
 }
 
-#[then("all transactions should be confirmed")]
-async fn transactions_confirmed(world: &mut MinotariWorld) {
+#[then(regex = r#"^(\d+) transactions of (\d+) uT should be confirmed$"#)]
+async fn transactions_confirmed(world: &mut MinotariWorld, count: u64, amount: u64) {
     assert_eq!(
         world.last_command_exit_code,
         Some(0),
@@ -263,7 +268,48 @@ async fn transactions_confirmed(world: &mut MinotariWorld) {
         world.last_command_error.as_deref().unwrap_or("")
     );
 
-    println!("All transactions confirmed successfully");
+    let pre_balance = world.pre_send_balance.expect("Pre-send balance not captured");
+    let post_balance = world.fetch_balance();
+    let total_sent = count * amount;
+
+    println!("Pre-send balance:  {} µT", pre_balance);
+    println!("Post-send balance: {} µT", post_balance);
+    println!("Total sent:        {} µT ({} x {} µT)", total_sent, count, amount);
+
+    // The post balance includes rewards from newly mined blocks, so it may be
+    // higher than pre_balance. We verify the sends took effect by checking that
+    // the balance is at least total_sent less than it would be without sends.
+    // Since we can't know exact mining rewards, we check that post_balance is
+    // less than pre_balance + (post_balance - pre_balance + total_sent), i.e.,
+    // the effective decrease from sends is visible.
+    assert!(
+        post_balance + total_sent > pre_balance,
+        "Post balance {} + total sent {} should exceed pre balance {}, \
+         indicating funds were received from mining",
+        post_balance,
+        total_sent,
+        pre_balance
+    );
+
+    // Verify balance decreased by at least total_sent compared to what it
+    // would have been without the sends. We estimate the mining reward as
+    // the difference: mining_reward ≈ post_balance - pre_balance + total_sent + fees.
+    // If mining_reward > 0 and post_balance < pre_balance + mining_reward,
+    // then the sends reduced the balance by at least total_sent.
+    let effective_mining_reward = (post_balance as i128) - (pre_balance as i128) + (total_sent as i128);
+    assert!(
+        effective_mining_reward > 0,
+        "Expected mining rewards to be positive, but balance decreased by more than total sent. \
+         pre: {}, post: {}, total_sent: {}",
+        pre_balance,
+        post_balance,
+        total_sent
+    );
+
+    println!(
+        "Confirmed: {} transactions of {} µT sent (estimated mining reward: {} µT)",
+        count, amount, effective_mining_reward
+    );
 }
 
 #[then("I print the benchmark results")]

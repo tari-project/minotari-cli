@@ -15,5 +15,5 @@ Feature: Wallet Performance Benchmarking
     When I send 10 transactions
     And I mine 5 blocks on BenchmarkNode
     And I measure the time to confirm 10 transactions
-    Then all transactions should be confirmed
+    Then 10 transactions of 1000 uT should be confirmed
     Then I print the benchmark results
