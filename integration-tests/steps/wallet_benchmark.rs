@@ -2,6 +2,7 @@
 //
 // Step definitions for benchmarking wallet performance.
 
+use super::common::MinotariWorld;
 use cucumber::{then, when};
 use std::process::Command;
 use std::time::Instant;
@@ -10,10 +11,9 @@ use tari_common_types::tari_address::TariAddress;
 use tari_common_types::tari_address::TariAddressFeatures;
 use tari_transaction_components::consensus::ConsensusConstantsBuilder;
 use tari_transaction_components::key_manager::KeyManager;
+use tari_transaction_components::offline_signing::models::PrepareOneSidedTransactionForSigningResult;
 use tari_transaction_components::offline_signing::models::TransactionResult;
 use tari_transaction_components::offline_signing::sign_locked_transaction;
-
-use super::common::MinotariWorld;
 
 // =============================
 // Benchmark Steps
