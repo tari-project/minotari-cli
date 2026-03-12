@@ -10,9 +10,7 @@ use tari_common_types::tari_address::TariAddress;
 use tari_common_types::tari_address::TariAddressFeatures;
 use tari_transaction_components::consensus::ConsensusConstantsBuilder;
 use tari_transaction_components::key_manager::KeyManager;
-use tari_transaction_components::offline_signing::models::{
-    PrepareOneSidedTransactionForSigningResult, TransactionResult,
-};
+use tari_transaction_components::offline_signing::models::TransactionResult;
 use tari_transaction_components::offline_signing::sign_locked_transaction;
 
 use super::common::MinotariWorld;
@@ -90,8 +88,7 @@ async fn send_transactions(world: &mut MinotariWorld, transactions: String) {
     let address = recipient_address.to_base58().to_string();
 
     // Create a key manager from the wallet for offline signing
-    let key_manager =
-        KeyManager::new(world.wallet.clone()).expect("Failed to create key manager from wallet");
+    let key_manager = KeyManager::new(world.wallet.clone()).expect("Failed to create key manager from wallet");
     let consensus_constants = ConsensusConstantsBuilder::new(LocalNet).build();
 
     println!("Sending transactions...");
@@ -103,11 +100,10 @@ async fn send_transactions(world: &mut MinotariWorld, transactions: String) {
 
     // Create an HTTP client for submitting transactions to the base node
     let submit_url = format!("{}/json_rpc", base_url);
-    let http_client =
-        reqwest::Client::builder()
-            .timeout(std::time::Duration::from_secs(30))
-            .build()
-            .expect("Failed to create HTTP client");
+    let http_client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(30))
+        .build()
+        .expect("Failed to create HTTP client");
     let amount: u64 = 1000;
     for i in 0..num_transactions {
         let recipient = format!("{}::{}", address, amount); //  microTari per transaction
@@ -144,27 +140,22 @@ async fn send_transactions(world: &mut MinotariWorld, transactions: String) {
                 },
             };
 
-            let unsigned_tx =
-                match PrepareOneSidedTransactionForSigningResult::from_json(&unsigned_json) {
-                    Ok(tx) => tx,
-                    Err(e) => {
-                        println!("Transaction {} failed to parse unsigned tx: {}", i, e);
-                        continue;
-                    },
-                };
-
-            let signed_result = match sign_locked_transaction(
-                &key_manager,
-                consensus_constants.clone(),
-                LocalNet,
-                unsigned_tx,
-            ) {
-                Ok(result) => result,
+            let unsigned_tx = match PrepareOneSidedTransactionForSigningResult::from_json(&unsigned_json) {
+                Ok(tx) => tx,
                 Err(e) => {
-                    println!("Transaction {} signing failed: {}", i, e);
+                    println!("Transaction {} failed to parse unsigned tx: {}", i, e);
                     continue;
                 },
             };
+
+            let signed_result =
+                match sign_locked_transaction(&key_manager, consensus_constants.clone(), LocalNet, unsigned_tx) {
+                    Ok(result) => result,
+                    Err(e) => {
+                        println!("Transaction {} signing failed: {}", i, e);
+                        continue;
+                    },
+                };
 
             // Step 3: Submit the signed transaction to the base node
             let transaction = signed_result.signed_transaction.transaction;
@@ -175,22 +166,14 @@ async fn send_transactions(world: &mut MinotariWorld, transactions: String) {
                 "params": { "transaction": transaction }
             });
 
-            let submit_result = http_client
-                .post(&submit_url)
-                .json(&request)
-                .send()
-                .await;
+            let submit_result = http_client.post(&submit_url).json(&request).send().await;
 
             match submit_result {
                 Ok(response) if response.status().is_success() => {
                     successful_txs += 1;
                 },
                 Ok(response) => {
-                    println!(
-                        "Transaction {} submit failed with status: {}",
-                        i,
-                        response.status()
-                    );
+                    println!("Transaction {} submit failed with status: {}", i, response.status());
                 },
                 Err(e) => {
                     println!("Transaction {} submit failed: {}", i, e);
