@@ -10,6 +10,7 @@ pub mod daemon;
 pub mod fund_locking;
 pub mod scanning;
 pub mod transactions;
+pub mod wallet_benchmark;
 pub mod wallet_creation;
 pub mod wallet_import;
 

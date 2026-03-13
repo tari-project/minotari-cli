@@ -41,6 +41,8 @@ pub struct MinotariWorld {
     pub assigned_ports: IndexMap<u64, u64>,
     pub current_base_dir: Option<PathBuf>,
     pub seed_nodes: Vec<String>,
+    pub benchmark_timings: HashMap<String, std::time::Duration>,
+    pub pre_send_balance: Option<u64>,
 }
 
 impl MinotariWorld {
@@ -71,6 +73,8 @@ impl MinotariWorld {
             assigned_ports: IndexMap::new(),
             current_base_dir: Some(base_dir),
             seed_nodes: Vec::new(),
+            benchmark_timings: HashMap::new(),
+            pre_send_balance: None,
         }
     }
 
@@ -165,6 +169,27 @@ impl MinotariWorld {
 
     pub fn all_seed_nodes(&self) -> &[String] {
         &self.seed_nodes
+    }
+
+    /// Run the balance command and return the balance in microTari
+    pub fn fetch_balance(&mut self) -> u64 {
+        let db_path = self.database_path.as_ref().expect("Database not set up").clone();
+        let (cmd, mut args) = self.get_minotari_command();
+        args.extend_from_slice(&[
+            "balance".to_string(),
+            "--database-path".to_string(),
+            db_path.to_str().unwrap().to_string(),
+            "--account-name".to_string(),
+            "default".to_string(),
+        ]);
+
+        let output = std::process::Command::new(&cmd)
+            .args(&args)
+            .output()
+            .expect("Failed to execute balance command");
+
+        self.last_command_output = Some(String::from_utf8_lossy(&output.stdout).to_string());
+        self.parse_balance_from_output().expect("Could not parse balance")
     }
 }
 
