@@ -19,7 +19,6 @@ serde_json = "1.0"
 thiserror = "1.0"
 
 # === Tari Ecosystem Dependencies ===
-tari_common = { workspace = true }
 tari_common_types = { workspace = true }
 tari_crypto = { workspace = true , features = ["borsh"] }
 tari_utilities = { workspace = true, features = ["std"] }
@@ -42,14 +41,12 @@ async-trait = "0.1"
 
 # === Logging & Tracing ===
 tracing = { version = "0.1", optional = true }
-tracing-subscriber = { version = "0.3", optional = true }
 # === GRPC Dependencies (blockchain scanning) ===
 tonic = { version = "0.13", features = ["tls-ring", "prost"], optional = true }
 
 # === CLI Tools ===
 
 anyhow = "1.0.99"
-futures = "0.3.31"
 
 # === Platform-Specific Dependencies ===
 # Native targets (non-WASM) - Full reqwest with all features
@@ -86,7 +83,6 @@ default = ["http"]
 grpc = [
     "tonic",
     "tracing",
-    "tracing-subscriber",
     "minotari_app_grpc",
 ]
 http = [
