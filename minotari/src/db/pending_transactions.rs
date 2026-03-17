@@ -46,8 +46,11 @@ pub fn create_pending_transaction(
 
     let id: String = Uuid::new_v4().to_string();
     let status_pending = PendingTransactionStatus::Pending.to_string();
+    #[allow(clippy::cast_possible_wrap)]
     let total_value = total_value.as_u64() as i64;
+    #[allow(clippy::cast_possible_wrap)]
     let fee_without_change = fee_without_change.as_u64() as i64;
+    #[allow(clippy::cast_possible_wrap)]
     let fee_with_change = fee_with_change.as_u64() as i64;
 
     let res = conn.execute(

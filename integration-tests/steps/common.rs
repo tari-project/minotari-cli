@@ -128,8 +128,8 @@ impl MinotariWorld {
 
     pub fn cleanup(&mut self) {
         if let Some(mut child) = self.daemon_handle.take() {
-            let _ = child.kill();
-            let _ = child.wait();
+            let _unused = child.kill();
+            let _unused = child.wait();
         }
         // Base nodes are dropped automatically via their Drop impl
         self.base_nodes.clear();
@@ -137,6 +137,7 @@ impl MinotariWorld {
     }
 
     /// Parse the balance amount from the last command output
+    #[allow(clippy::cast_possible_truncation)]
     pub fn parse_balance_from_output(&self) -> Option<u64> {
         let output = self.last_command_output.as_ref()?;
 
@@ -225,7 +226,7 @@ pub async fn database_with_wallet(world: &mut MinotariWorld) {
         db_path.to_str().unwrap().to_string(),
     ]);
 
-    let _ = Command::new(&cmd)
+    let _unused = Command::new(&cmd)
         .args(&args)
         .output()
         .expect("Failed to set up test wallet");

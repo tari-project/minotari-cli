@@ -3,7 +3,7 @@
 //! This module contains the [`Scanner`] builder and the main scanning loop logic
 //! for synchronizing wallet state with the blockchain.
 
-use lightweight_wallet_libs::{HttpBlockchainScanner, ScanConfig, scanning::BlockchainScanner};
+use minotari_scanning::{HttpBlockchainScanner, ScanConfig, scanning::BlockchainScanner};
 use log::{info, warn};
 use rusqlite::Connection;
 use std::{path::PathBuf, time::Duration};

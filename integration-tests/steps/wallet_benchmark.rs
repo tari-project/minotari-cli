@@ -61,6 +61,7 @@ async fn measure_scan_time(world: &mut MinotariWorld, blocks: String) {
     }
 }
 
+#[allow(clippy::too_many_lines)]
 #[when(regex = r#"^I send (\d+) transactions$"#)]
 async fn send_transactions(world: &mut MinotariWorld, transactions: String) {
     let db_path = world.database_path.as_ref().expect("Database not set up").clone();
@@ -279,7 +280,7 @@ async fn transactions_confirmed(world: &mut MinotariWorld, count: u64, amount: u
     // the difference: mining_reward ≈ post_balance - pre_balance + total_sent + fees.
     // If mining_reward > 0 and post_balance < pre_balance + mining_reward,
     // then the sends reduced the balance by at least total_sent.
-    let effective_mining_reward = (post_balance as i128) - (pre_balance as i128) + (total_sent as i128);
+    let effective_mining_reward = post_balance + total_sent - pre_balance;
     assert!(
         effective_mining_reward > 0,
         "Expected mining rewards to be positive, but balance decreased by more than total sent. \

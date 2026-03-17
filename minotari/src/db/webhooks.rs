@@ -158,6 +158,7 @@ pub fn delete_webhooks_older_than(conn: &Connection, timestamp: NaiveDateTime) -
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::indexing_slicing)]
     use super::*;
     use crate::db::{create_account, get_account_by_name, init_db, insert_wallet_event};
     use crate::models::{WalletEvent, WalletEventType};

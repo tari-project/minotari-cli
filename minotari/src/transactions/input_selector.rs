@@ -296,7 +296,7 @@ impl InputSelector {
                 "Insufficient funds for transaction (pending confirmations)"
             );
             return Err(UtxoSelectionError::FundsPending {
-                available: total_unspent_balance - locked_amount,
+                available: total_unspent_balance.saturating_sub(locked_amount),
                 pending,
                 required: amount,
             });
@@ -345,7 +345,7 @@ impl InputSelector {
         let requires_change_output = selection.has_change;
         let final_fee = selection.final_fee + kernel_fee;
         let (fee_with_change, fee_without_change) = if requires_change_output {
-            (final_fee, final_fee - default_output_fee)
+            (final_fee, final_fee.saturating_sub(default_output_fee))
         } else {
             (final_fee + default_output_fee, final_fee)
         };

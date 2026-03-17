@@ -150,7 +150,7 @@ impl DisplayedTransactionBuilder {
 
         let mut payrefs = Vec::new();
         if let Some(block_hash) = &self.block_hash {
-            for output_hash in self.sent_output_hashes.iter() {
+            for output_hash in &self.sent_output_hashes {
                 let payref = generate_payment_reference(block_hash, output_hash);
                 payrefs.push(payref);
             }

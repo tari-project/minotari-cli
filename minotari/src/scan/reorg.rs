@@ -5,8 +5,8 @@ use crate::{
     webhooks::{WebhookTriggerConfig, utils::trigger_webhook_with_balance},
 };
 use anyhow::anyhow;
-use lightweight_wallet_libs::{HttpBlockchainScanner, scanning::BlockchainScanner};
 use log::{debug, info, warn};
+use minotari_scanning::{HttpBlockchainScanner, scanning::BlockchainScanner};
 use rusqlite::Connection;
 use std::collections::HashSet;
 use tari_common_types::types::FixedHash;
@@ -85,7 +85,7 @@ pub async fn handle_reorgs(
     } else {
         debug!("No reorgs detected.");
         Ok(ReorgResult {
-            resume_height: last_blocks[0].height + 1,
+            resume_height: last_blocks.first().expect("is already checked").height + 1,
             reorg_information: None,
         })
     }

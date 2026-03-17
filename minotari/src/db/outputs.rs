@@ -45,10 +45,13 @@ pub fn insert_output(
 
     let output_json = serde_json::to_string(&output)?;
 
+    #[allow(clippy::cast_possible_wrap)]
     let mined_timestamp_dt = DateTime::<Utc>::from_timestamp(mined_timestamp as i64, 0)
         .ok_or_else(|| WalletDbError::Decoding(format!("Invalid mined timestamp: {}", mined_timestamp)))?;
 
+    #[allow(clippy::cast_possible_wrap)]
     let block_height = block_height as i64;
+    #[allow(clippy::cast_possible_wrap)]
     let value = output.value().as_u64() as i64;
     let payment_reference_hex = hex::encode(payment_reference.as_slice());
 
@@ -171,6 +174,7 @@ pub fn get_unconfirmed_outputs(
     confirmation_blocks: u64,
 ) -> WalletDbResult<Vec<UnconfirmedOutputRow>> {
     let min_height_to_confirm = current_height.saturating_sub(confirmation_blocks);
+    #[allow(clippy::cast_possible_wrap)]
     let min_height = min_height_to_confirm as i64;
 
     let mut stmt = conn.prepare_cached(
@@ -205,6 +209,7 @@ pub fn mark_output_confirmed(
         "DB: Output Confirmed"
     );
 
+    #[allow(clippy::cast_possible_wrap)]
     let confirmed_height = confirmed_height as i64;
     conn.execute(
         r#"
@@ -235,7 +240,7 @@ pub fn soft_delete_outputs_from_height(conn: &Connection, account_id: i64, heigh
         height = height;
         "DB: Soft deleting outputs (Reorg)"
     );
-
+    #[allow(clippy::cast_possible_wrap)]
     let height_i64 = height as i64;
     let now = Utc::now();
 
@@ -435,6 +440,7 @@ pub fn fetch_unspent_outputs(
     min_height: u64,
 ) -> WalletDbResult<Vec<DbWalletOutput>> {
     let unspent_status = OutputStatus::Unspent.to_string();
+    #[allow(clippy::cast_possible_wrap)]
     let min_height_i64 = min_height as i64;
 
     let mut stmt = conn.prepare_cached(
@@ -567,6 +573,7 @@ pub fn get_active_outputs_from_height(
     account_id: i64,
     height: u64,
 ) -> WalletDbResult<Vec<ReorgOutputInfo>> {
+    #[allow(clippy::cast_possible_wrap)]
     let height_i64 = height as i64;
 
     let mut stmt = conn.prepare_cached(

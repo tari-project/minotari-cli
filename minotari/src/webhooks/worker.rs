@@ -153,6 +153,7 @@ fn calculate_backoff(attempt: i32) -> (NaiveDateTime, bool) {
         capped_seconds.saturating_sub(jitter)
     };
 
+    #[allow(clippy::cast_possible_wrap)]
     let next_time = Utc::now().naive_utc() + chrono::Duration::seconds(final_seconds as i64);
     (next_time, false)
 }

@@ -1,5 +1,5 @@
 use crate::{ScanError, scan::coordinator::AccountSyncTarget};
-use lightweight_wallet_libs::{HttpBlockchainScanner, ScanConfig};
+use minotari_scanning::{HttpBlockchainScanner, ScanConfig};
 use tari_transaction_components::key_manager::KeyManager;
 
 pub struct ScannerStateManager {

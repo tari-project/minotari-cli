@@ -38,7 +38,7 @@ impl<E: EventSender + Clone + Send + 'static> ScanDbHandler<E> {
     #[allow(clippy::too_many_arguments)]
     pub async fn process_blocks(
         &mut self,
-        blocks: Arc<Vec<lightweight_wallet_libs::BlockScanResult>>,
+        blocks: Arc<Vec<minotari_scanning::BlockScanResult>>,
         target_account_id: i64,
         has_pending_outbound: bool,
         webhook_config: Option<WebhookTriggerConfig>,

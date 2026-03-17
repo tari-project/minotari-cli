@@ -344,7 +344,7 @@ impl TransactionSender {
         processed_transaction: &mut ProcessedTransaction,
     ) -> Result<String, anyhow::Error> {
         let connection = self.get_connection()?;
-
+        #[allow(clippy::cast_possible_wrap)]
         let expires_at = Utc::now() + Duration::seconds(processed_transaction.seconds_to_lock_utxos as i64);
         let utxo_selection = self.create_utxo_selection(processed_transaction)?;
 
@@ -680,6 +680,12 @@ impl TransactionSender {
                 "Transaction was not accepted by the network: {}",
                 submission_response.rejection_reason
             ));
+        } else {
+            info!(
+                target: "audit",
+                id = completed_tx_id.to_string().as_str();
+                "Transaction already mined by network"
+            );
         }
 
         // Build and save DisplayedTransaction for immediate UI display

@@ -3,6 +3,7 @@ resolver = "2"
 members = [
     "minotari",
     "integration-tests",
+    "minotari-scanning"
 ]
 
 [workspace.package]
@@ -10,3 +11,21 @@ version = "0.1.0"
 edition = "2024"
 authors = ["The Tari Development Community"]
 license = "BSD-3-Clause"
+repository = "https://github.com/tari-project/minotari-cli"
+
+
+[workspace.dependencies]
+tari_common = { version = "5.3.0-pre.3"}
+tari_common_types = { version = "5.3.0-pre.3" }
+tari_crypto = { version = "0.22.1", features = ["borsh"] }
+tari_utilities = { version = "0.8", features = ["std"] }
+tari_script = { version = "5.3.0-pre.3" }
+tari_transaction_components = { version = "5.3.0-pre.3" }
+minotari_app_grpc = { version = "5.3.0-pre.3", default-features = false }
+tari_node_components = {version = "5.3.0-pre.3" }
+minotari-scanning = { path = "minotari-scanning", version = "0.1.0" }
+
+[profile.release]
+# By default, Rust will wrap an integer in release mode instead of throwing the overflow error
+# seen in debug mode. Panicking at this time is better than silently using the wrong value.
+overflow-checks = true

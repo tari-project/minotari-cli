@@ -6,6 +6,7 @@ use rusqlite::{Connection, OptionalExtension, named_params};
 use serde::Deserialize;
 use serde_rusqlite::from_rows;
 
+#[allow(clippy::cast_possible_wrap)]
 pub fn insert_balance_change(conn: &Connection, change: &BalanceChange) -> WalletDbResult<i64> {
     debug!(
         target: "audit",

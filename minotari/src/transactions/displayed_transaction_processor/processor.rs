@@ -51,6 +51,7 @@ impl DisplayedTransactionProcessor {
         self.create_new_updated_display_transactions(accumulator, &current_display_transactions)
     }
 
+    #[allow(clippy::too_many_lines)]
     pub fn create_new_updated_display_transactions(
         &self,
         accumulator: &BlockEventAccumulator,
@@ -262,7 +263,7 @@ impl DisplayedTransactionProcessor {
             if selected_inputs.contains(&i) {
                 continue;
             }
-            let input = &spent_inputs[i];
+            let input = &spent_inputs.get(i).expect("index is in bounds");
             if amount_already_selected + input.1.output.value() > amount_sent {
                 continue;
             }
@@ -381,6 +382,7 @@ impl DisplayedTransactionProcessor {
 
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::indexing_slicing)]
     use super::*;
     use crate::models::OutputStatus;
     use chrono::NaiveDateTime;
@@ -957,12 +959,12 @@ mod tests {
         let accumulator = BlockEventAccumulator::new(1, 500, vec![0u8; 32]);
 
         let mut current_display_transactions = Vec::new();
-        for i in 1..=100 {
+        for i in 1..=100u8 {
             let tx = create_test_displayed_transaction(
-                i as u64,
-                mock_fixed_hash(i as u8),
+                u64::from(i),
+                mock_fixed_hash(i),
                 TransactionDisplayStatus::Confirmed,
-                400 + (i % 50) as u64,
+                400 + u64::from(i % 50),
             );
             current_display_transactions.push(tx);
         }

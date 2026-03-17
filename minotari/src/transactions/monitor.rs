@@ -620,6 +620,7 @@ impl TransactionMonitor {
                     "Transaction mined (unconfirmed)"
                 );
                 let conn = Self::get_connection(db_pool)?;
+                #[allow(clippy::cast_possible_wrap)]
                 mark_completed_transaction_as_mined_unconfirmed(&conn, tx.id, block_height as i64, &block_hash)?;
 
                 let event = WalletEvent {
@@ -678,6 +679,7 @@ impl TransactionMonitor {
                 let payref = hex::encode(generate_payment_reference(&mined_block_hash, &sent_output_hash));
 
                 let conn = Self::get_connection(db_pool)?;
+                #[allow(clippy::cast_possible_wrap)]
                 mark_completed_transaction_as_confirmed(&conn, tx.id, current_height as i64, payref)?;
 
                 let event = WalletEvent {

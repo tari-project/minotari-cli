@@ -5,8 +5,8 @@
 //! manage confirmation status, and emit events for each processed block.
 
 use chrono::{DateTime, Utc};
-use lightweight_wallet_libs::BlockScanResult;
 use log::{error, info};
+use minotari_scanning::BlockScanResult;
 use rusqlite::Connection;
 use std::collections::HashMap;
 use tari_common_types::payment_reference::generate_payment_reference;
@@ -485,6 +485,7 @@ impl<E: EventSender> BlockProcessor<E> {
         value: MicroMinotari,
         block: &BlockScanResult,
     ) -> Result<BalanceChange, BlockProcessorError> {
+        #[allow(clippy::cast_possible_wrap)]
         let effective_date = DateTime::<Utc>::from_timestamp(block.mined_timestamp as i64, 0)
             .unwrap_or_else(Utc::now)
             .naive_utc();
@@ -523,6 +524,7 @@ impl<E: EventSender> BlockProcessor<E> {
         block: &BlockScanResult,
         account_id: i64,
     ) -> Result<(), BlockProcessorError> {
+        #[allow(clippy::cast_possible_wrap)]
         db::insert_scanned_tip_block(tx, account_id, block.height as i64, block.block_hash.as_slice())?;
         Ok(())
     }
@@ -650,6 +652,7 @@ fn make_balance_change_for_output(
     height: u64,
     output: &WalletOutput,
 ) -> BalanceChange {
+    #[allow(clippy::cast_possible_wrap)]
     let effective_date = DateTime::<Utc>::from_timestamp(timestamp as i64, 0)
         .unwrap_or_else(Utc::now)
         .naive_utc();

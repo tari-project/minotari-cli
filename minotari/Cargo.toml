@@ -3,6 +3,7 @@ name = "minotari"
 version.workspace = true
 edition.workspace = true
 authors.workspace = true
+repository.workspace = true
 license.workspace = true
 default-run = "minotari"
 
@@ -25,8 +26,7 @@ config = { version = "0.14.0", default-features = false, features = ["toml"] }
 hex = "0.4.3"
 hmac = "0.12.1"
 include_dir = "0.7.4"
-#lightweight_wallet_libs = { path = "../tari-wallet", features = ["grpc","http",] }
-lightweight_wallet_libs = { git = "https://github.com/tari-project/tari-wallet", rev = "a43164233665486d604f51996db6f892dc7a6e2e", features = [
+minotari-scanning = { workspace = true, features = [
     "grpc",
     "http",
 ] }
@@ -45,11 +45,11 @@ serde_json = "1.0"
 serde_rusqlite = "0.40.1"
 serde_yaml = "0.9.34"
 sha2 = "0.10"
-tari_common = { git = "https://github.com/tari-project/tari/", rev = "32df87fab620ae2ccd34d37aac9a7670351932d0" }
-tari_common_types = { git = "https://github.com/tari-project/tari/", rev = "32df87fab620ae2ccd34d37aac9a7670351932d0" }
+tari_common = { workspace = true }
+tari_common_types = { workspace = true }
 tari_crypto = { version = "0.22.1", features = ["borsh"] }
-tari_script = { git = "https://github.com/tari-project/tari/", rev = "32df87fab620ae2ccd34d37aac9a7670351932d0" }
-tari_transaction_components = { git = "https://github.com/tari-project/tari/", rev = "32df87fab620ae2ccd34d37aac9a7670351932d0" }
+tari_script = { workspace = true }
+tari_transaction_components = { workspace = true }
 tari_utilities = { version = "0.8", features = ["std"] }
 #tari_common = { path = "../tari/common" }
 #tari_common_types = { path = "../tari/base_layer/common_types" }
