@@ -17,7 +17,6 @@ pub fn insert_balance_change(conn: &Connection, change: &BalanceChange) -> Walle
         "DB: Inserting balance change"
     );
 
-
     let balance_credit = change.balance_credit.as_u64() as i64;
     let balance_debit = change.balance_debit.as_u64() as i64;
     let effective_height = change.effective_height as i64;

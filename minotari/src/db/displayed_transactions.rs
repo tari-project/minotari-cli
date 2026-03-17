@@ -38,7 +38,6 @@ fn process_json_rows(
     .map_err(WalletDbError::from)
 }
 
-
 pub fn insert_displayed_transaction(conn: &Connection, transaction: &DisplayedTransaction) -> WalletDbResult<()> {
     let id = transaction.id.to_string();
     debug!(
