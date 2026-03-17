@@ -99,7 +99,7 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
 
         let mut conn = self.pool.get().map_err(|e| ScanError::DbError(e.into()))?;
 
-        let first_km = accounts[0].get_key_manager(password)?;
+        let first_km = accounts.first().expect("is already checked").get_key_manager(password)?;
         let mut shared_reorg_scanner = self.create_reorg_scanner(first_km).await?;
 
         let mut sync_targets = Vec::with_capacity(accounts.len());
@@ -165,6 +165,7 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
         })
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn unified_scan_loop(
         &self,
         mut targets: Vec<AccountSyncTarget>,

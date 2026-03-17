@@ -46,7 +46,7 @@ pub fn create_account(
     );
 
     let fingerprint = calculate_fingerprint(wallet);
-    let birthday = wallet.get_birthday().unwrap_or(0) as i64;
+    let birthday = i64::from(wallet.get_birthday().unwrap_or(0));
     let wallet_json =
         serde_json::to_string(wallet).map_err(|e| WalletDbError::Unexpected(format!("Serialization failed: {}", e)))?;
 

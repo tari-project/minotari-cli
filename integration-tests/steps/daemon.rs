@@ -191,6 +191,7 @@ async fn send_shutdown_signal(world: &mut MinotariWorld) {
         {
             use nix::sys::signal::{Signal, kill};
             use nix::unistd::Pid;
+            #[allow(clippy::cast_possible_wrap)]
             let pid = Pid::from_raw(child.id() as i32);
             kill(pid, Signal::SIGINT).expect("Failed to send SIGINT");
         }

@@ -53,9 +53,10 @@ pub fn insert_input(
         "DB: Inserting input"
     );
 
+    #[allow(clippy::cast_possible_wrap)]
     let timestamp = DateTime::<Utc>::from_timestamp(mined_timestamp as i64, 0)
         .ok_or_else(|| WalletDbError::Decoding(format!("Invalid mined timestamp: {}", mined_timestamp)))?;
-
+    #[allow(clippy::cast_possible_wrap)]
     let mined_in_block_height = mined_in_block_height as i64;
 
     conn.execute(
@@ -107,7 +108,7 @@ pub fn soft_delete_inputs_from_height(conn: &Connection, account_id: i64, height
         height = height;
         "DB: Soft deleting inputs (Reorg)"
     );
-
+    #[allow(clippy::cast_possible_wrap)]
     let height_i64 = height as i64;
     let now = Utc::now();
 

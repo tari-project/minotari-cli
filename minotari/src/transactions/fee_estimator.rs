@@ -63,11 +63,11 @@ impl FeeEstimator {
         let (fast_fee, medium_fee, slow_fee) = match client.get_mempool_fee_per_gram_stats(3).await {
             Ok(stats) if !stats.is_empty() => {
                 // Fast: Average of the 1st block (next block)
-                let fast = stats.first().unwrap().avg_fee_per_gram;
+                let fast = stats.first().expect("Already checked").avg_fee_per_gram;
                 // Medium: Average of the 2nd block (if exists)
-                let medium = stats.get(1).unwrap_or(&stats[0]).avg_fee_per_gram;
+                let medium = stats.get(1).unwrap_or(stats.first().expect("Already checked")).avg_fee_per_gram;
                 // Slow: Minimum of the deepest block we got
-                let slow = stats.last().unwrap().min_fee_per_gram;
+                let slow = stats.last().expect("Already checked").min_fee_per_gram;
 
                 (fast, medium, slow)
             },

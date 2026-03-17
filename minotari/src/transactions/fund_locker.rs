@@ -170,7 +170,7 @@ impl FundLocker {
             input_selector.fetch_unspent_outputs(&conn, amount, num_outputs, fee_per_gram, estimated_output_size)?;
 
         let transaction = conn.transaction()?;
-
+        #[allow(clippy::cast_possible_wrap)]
         let expires_at = Utc::now() + Duration::seconds(seconds_to_lock_utxos as i64);
         let idempotency_key = idempotency_key.unwrap_or_else(|| Uuid::new_v4().to_string());
         let pending_tx_id = db::create_pending_transaction(

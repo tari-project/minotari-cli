@@ -10,3 +10,9 @@ version = "0.1.0"
 edition = "2024"
 authors = ["The Tari Development Community"]
 license = "BSD-3-Clause"
+
+
+[profile.release]
+# By default, Rust will wrap an integer in release mode instead of throwing the overflow error
+# seen in debug mode. Panicking at this time is better than silently using the wrong value.
+overflow-checks = true

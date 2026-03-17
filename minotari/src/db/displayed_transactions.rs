@@ -38,6 +38,7 @@ fn process_json_rows(
     .map_err(WalletDbError::from)
 }
 
+
 pub fn insert_displayed_transaction(conn: &Connection, transaction: &DisplayedTransaction) -> WalletDbResult<()> {
     let id = transaction.id.to_string();
     debug!(
@@ -55,7 +56,7 @@ pub fn insert_displayed_transaction(conn: &Connection, transaction: &DisplayedTr
     let transaction_json = serialize_tx(transaction)?;
     let now = current_db_timestamp();
     let payref = Some(serde_json::to_string(&transaction.details.sent_payrefs)?);
-
+    #[allow(clippy::cast_possible_wrap)]
     conn.execute(
         r#"
         INSERT INTO displayed_transactions (
@@ -150,7 +151,7 @@ pub fn get_displayed_transactions_from_height(
         ORDER BY block_height DESC, timestamp DESC
         "#,
     )?;
-
+    #[allow(clippy::cast_possible_wrap)]
     let rows = stmt.query(named_params! {
         ":account_id": account_id,
         ":height": from_height as i64
@@ -213,7 +214,7 @@ pub fn mark_displayed_transactions_reorganized(
             WHERE account_id = :account_id AND block_height >= :height
             "#,
         )?;
-
+        #[allow(clippy::cast_possible_wrap)]
         let rows = stmt.query(named_params! {
             ":account_id": account_id,
             ":height": from_height as i64
@@ -313,6 +314,7 @@ pub fn update_displayed_transaction_mined(conn: &Connection, tx: &DisplayedTrans
     let transaction_json = serialize_tx(tx)?;
     let payref = Some(serde_json::to_string(&tx.details.sent_payrefs)?);
 
+    #[allow(clippy::cast_possible_wrap)]
     let rows_affected = conn.execute(
         r#"
         UPDATE displayed_transactions
@@ -492,6 +494,7 @@ pub fn mark_displayed_transactions_reorganized_and_return(
             "#,
         )?;
 
+        #[allow(clippy::cast_possible_wrap)]
         let rows = stmt.query(named_params! {
             ":account_id": account_id,
             ":height": from_height as i64,

@@ -250,7 +250,7 @@ impl OneSidedTransaction {
             .collect();
 
         // Use first recipient's payment_id as the overall transaction memo
-        let main_payment_id = payment_recipients[0].payment_id.clone();
+        let main_payment_id = payment_recipients.first().expect("Already checked").payment_id.clone();
 
         let result = prepare_one_sided_transaction_for_signing(
             tx_id,

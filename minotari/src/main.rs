@@ -92,6 +92,7 @@ use tari_transaction_components::key_manager::wallet_types::WalletType;
 use tari_transaction_components::tari_amount::MicroMinotari;
 use tari_utilities::byte_array::ByteArray;
 
+#[allow(clippy::too_many_lines)]
 #[tokio::main]
 async fn main() -> Result<(), anyhow::Error> {
     init_logging();
@@ -483,10 +484,10 @@ fn handle_create_unsigned_transaction(
                     "Invalid recipient format. Expected 'address::amount' or 'address::amount::payment_id'"
                 ));
             }
-            let address = TariAddress::from_str(parts[0])?;
-            let amount = MicroMinotari::from_str(parts[1])?;
+            let address = TariAddress::from_str(parts.first().expect("Already checked"))?;
+            let amount = MicroMinotari::from_str(parts.get(1).expect("Already checked"))?;
             let payment_id = if parts.len() == 3 {
-                Some(parts[2].to_string())
+                Some(parts.get(2).expect("Already checked").to_string())
             } else {
                 None
             };

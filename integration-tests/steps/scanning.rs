@@ -21,7 +21,7 @@ async fn wallet_previously_scanned(world: &mut MinotariWorld) {
 async fn wallet_scanned_to_height(world: &mut MinotariWorld, height: String) {
     // This simulates scanning to a specific height
     // In practice, we'd scan until we reach that height
-    let _ = height; // Use the height parameter
+    let _unused = height; // Use the height parameter
     wallet_previously_scanned(world).await;
 }
 

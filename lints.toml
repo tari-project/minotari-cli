@@ -1,0 +1,61 @@
+deny = [
+    # Prevent spelling mistakes in lints
+    'unknown_lints',
+    # clippy groups:
+    'clippy::correctness',
+
+
+
+    # Common mistakes
+    'clippy::await_holding_lock',
+    'unused_variables',
+    'unused_imports',
+    'dead_code',
+    'unused_extern_crates',
+    'unused_must_use',
+    'unreachable_patterns',
+    'clippy::cloned_instead_of_copied',
+    'clippy::create_dir',
+    'clippy::dbg_macro',
+    'clippy::else_if_without_else',
+    'clippy::inline_always',
+    'let_underscore_drop',
+    'clippy::let_unit_value',
+    'clippy::indexing_slicing',
+    'clippy::match_wild_err_arm',
+    'clippy::needless_borrow',
+    # style
+    'clippy::style',
+    'clippy::explicit_into_iter_loop',
+    'clippy::explicit_iter_loop',
+    'clippy::if_not_else',
+    'clippy::match_bool',
+
+    'clippy::range_plus_one',
+    'clippy::struct_excessive_bools',
+    'clippy::too_many_lines',
+    'clippy::trivially_copy_pass_by_ref',
+    'clippy::cast_lossless',
+    'clippy::cast_possible_truncation',
+    'clippy::cast_possible_wrap',
+    'clippy::unnecessary_to_owned',
+    'clippy::nonminimal_bool',
+    'clippy::needless_question_mark',
+    'clippy::dbg_macro',
+    # math checking
+    # this gives a lot of noise with stuff like i+1 etc
+    #'clippy::arithmetic_side_effects'
+]
+
+allow = [
+    'clippy::default_trait_access',
+    'clippy::too_many_arguments',
+    'clippy::bool-assert-comparison',
+    'clippy::blocks_in_conditions',
+    'clippy::result_large_err',
+]
+
+warn = [
+    # TODO: resolve these
+    "clippy::large_enum_variant",
+]

@@ -141,7 +141,7 @@ pub fn delete_scanned_tip_blocks_from_height(conn: &Connection, account_id: i64,
         height = height;
         "DB: Deleting scanned tip blocks (Reorg)"
     );
-
+    #[allow(clippy::cast_possible_wrap)]
     let height = height as i64;
     conn.execute(
         r#"
@@ -165,7 +165,9 @@ pub fn prune_scanned_tip_blocks(conn: &Connection, account_id: i64, current_tip_
     );
 
     // Keep the last RECENT_BLOCKS_TO_KEEP blocks
+    #[allow(clippy::cast_possible_wrap)]
     let min_height_for_recent = current_tip_height.saturating_sub(RECENT_BLOCKS_TO_KEEP) as i64;
+    #[allow(clippy::cast_possible_wrap)]
     let interval = OLD_BLOCKS_PRUNING_INTERVAL as i64;
 
     // Delete blocks older than min_height_for_recent that are not at the pruning interval

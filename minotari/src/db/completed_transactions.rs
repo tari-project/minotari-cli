@@ -366,6 +366,7 @@ pub fn reset_mined_completed_transactions_from_height(
     let status_completed = CompletedTransactionStatus::Completed.to_string();
     let status_unconfirmed = CompletedTransactionStatus::MinedUnconfirmed.to_string();
     let status_confirmed = CompletedTransactionStatus::MinedConfirmed.to_string();
+    #[allow(clippy::cast_possible_wrap)]
     let height = reorg_height as i64;
     let now = Utc::now();
 

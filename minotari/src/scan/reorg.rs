@@ -85,7 +85,7 @@ pub async fn handle_reorgs(
     } else {
         debug!("No reorgs detected.");
         Ok(ReorgResult {
-            resume_height: last_blocks[0].height + 1,
+            resume_height: last_blocks.first().expect("is already checked").height + 1,
             reorg_information: None,
         })
     }
