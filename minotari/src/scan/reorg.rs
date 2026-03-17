@@ -5,8 +5,8 @@ use crate::{
     webhooks::{WebhookTriggerConfig, utils::trigger_webhook_with_balance},
 };
 use anyhow::anyhow;
-use lightweight_wallet_libs::{HttpBlockchainScanner, scanning::BlockchainScanner};
 use log::{debug, info, warn};
+use minotari_scanning::{HttpBlockchainScanner, scanning::BlockchainScanner};
 use rusqlite::Connection;
 use std::collections::HashSet;
 use tari_common_types::types::FixedHash;

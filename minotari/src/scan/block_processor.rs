@@ -5,8 +5,8 @@
 //! manage confirmation status, and emit events for each processed block.
 
 use chrono::{DateTime, Utc};
-use lightweight_wallet_libs::BlockScanResult;
 use log::{error, info};
+use minotari_scanning::BlockScanResult;
 use rusqlite::Connection;
 use std::collections::HashMap;
 use tari_common_types::payment_reference::generate_payment_reference;

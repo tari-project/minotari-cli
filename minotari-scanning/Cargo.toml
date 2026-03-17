@@ -1,0 +1,103 @@
+[package]
+name = "minotari-scanning"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+repository.workspace = true
+license.workspace = true
+
+[package.metadata.cargo-machete]
+ignored = [
+    "tonic-build", # Used in build.rs for GRPC code generation
+    "prost",       # Used by generated GRPC protobuf code (verified by compilation test)
+]
+
+[dependencies]
+# === Core Serialization & Error Handling ===
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+thiserror = "1.0"
+
+# === Tari Ecosystem Dependencies ===
+tari_common = { workspace = true }
+tari_common_types = { workspace = true }
+tari_crypto = { workspace = true , features = ["borsh"] }
+tari_utilities = { workspace = true, features = ["std"] }
+tari_script = { workspace = true }
+tari_transaction_components = { workspace = true }
+minotari_app_grpc = { workspace = true, optional = true, default-features = false }
+tari_node_components = { workspace = true }
+
+# === Encoding & Utilities ===
+primitive-types = { version = "0.12", features = ["serde"] } # U256, H256, etc.
+# === WebAssembly Support ===
+wasm-bindgen = "0.2"
+# === Parallel Processing ===
+num_cpus = "1.17.0"
+rayon = { version = "1.11"}
+
+# === Async & Concurrency ===
+tokio = { version = "1.47.1", features = ["full"] }
+async-trait = "0.1"
+
+# === Logging & Tracing ===
+tracing = { version = "0.1", optional = true }
+tracing-subscriber = { version = "0.3", optional = true }
+# === GRPC Dependencies (blockchain scanning) ===
+tonic = { version = "0.13", features = ["tls-ring", "prost"], optional = true }
+
+# === CLI Tools ===
+
+anyhow = "1.0.99"
+futures = "0.3.31"
+
+# === Platform-Specific Dependencies ===
+# Native targets (non-WASM) - Full reqwest with all features
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+reqwest = { version = "0.12.22", features = [
+    "json",
+    "stream",
+    "gzip",
+], optional = true }
+
+# WASM targets - Use web-sys instead of reqwest for HTTP functionality
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+web-sys = { version = "0.3", features = [
+    "console",
+    "Request",
+    "Response",
+    "Headers",
+    "RequestInit",
+    "RequestMode",
+    "Window",
+    "Performance",
+], optional = true }
+js-sys = { version = "0.3", optional = true }
+serde-wasm-bindgen = { version = "0.6", optional = true }
+getrandom = { version = "0.2", features = [
+    "js",
+] } # WASM-compatible random number generation
+wasm-bindgen-futures = { version = "0.4", optional = true }
+
+
+
+[features]
+default = ["http"]
+grpc = [
+    "tonic",
+    "tracing",
+    "tracing-subscriber",
+    "minotari_app_grpc",
+]
+http = [
+    "tracing",
+    "reqwest",
+    "web-sys",
+    "js-sys",
+    "serde-wasm-bindgen",
+    "wasm-bindgen-futures",
+]
+wasm = ["web-sys", "js-sys", "serde-wasm-bindgen", "wasm-bindgen-futures"]
+
+[lib]
+crate-type = ["cdylib", "rlib"]

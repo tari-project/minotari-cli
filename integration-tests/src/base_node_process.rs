@@ -40,6 +40,7 @@ use minotari_node::{BaseNodeConfig, GrpcMethod, MetricsConfig, run_base_node};
 use minotari_node_grpc_client::BaseNodeGrpcClient;
 use rand::Rng; // Add Rng trait for gen_range
 use rand::rngs::OsRng;
+use tari_common::configuration::Network;
 use tari_common::{
     MAX_GRPC_MESSAGE_SIZE,
     configuration::{CommonConfig, MultiaddrList},
@@ -49,7 +50,7 @@ use tari_common_sqlite::connection::DbConnectionUrl;
 use tari_common_types::tari_address::TariAddress;
 use tari_comms::{NodeIdentity, multiaddr::Multiaddr, peer_manager::PeerFeatures};
 use tari_comms_dht::DhtConfig;
-use tari_p2p::{Network, PeerSeedsConfig, TransportType, auto_update::AutoUpdateConfig};
+use tari_p2p::{PeerSeedsConfig, TransportType, auto_update::AutoUpdateConfig};
 use tari_shutdown::Shutdown;
 use tokio::task;
 use tonic::transport::Channel;

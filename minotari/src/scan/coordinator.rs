@@ -1,7 +1,7 @@
 use std::{collections::VecDeque, sync::Arc};
 
-use lightweight_wallet_libs::{HttpBlockchainScanner, ScanConfig, scanning::BlockchainScanner};
 use log::{info, warn};
+use minotari_scanning::{HttpBlockchainScanner, ScanConfig, scanning::BlockchainScanner};
 use tari_common_types::{seeds::cipher_seed::BIRTHDAY_GENESIS_FROM_UNIX_EPOCH, types::PrivateKey};
 use tari_transaction_components::key_manager::KeyManager;
 use tokio::time::timeout;
@@ -473,7 +473,7 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
         &self,
         scanner: &mut HttpBlockchainScanner<KeyManager>,
         config: &ScanConfig,
-    ) -> Result<(Vec<lightweight_wallet_libs::BlockScanResult>, bool), ScanError> {
+    ) -> Result<(Vec<minotari_scanning::BlockScanResult>, bool), ScanError> {
         let mut timeout_retries = 0;
         let mut error_retries = 0;
 
