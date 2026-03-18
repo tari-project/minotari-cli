@@ -1,4 +1,3 @@
-use std::cmp::Reverse;
 use super::builder::DisplayedTransactionBuilder;
 use super::error::ProcessorError;
 use super::types::{
@@ -10,6 +9,7 @@ use crate::scan::block_event_accumulator::BlockEventAccumulator;
 use crate::scan::{DetectedOutput, MemoInfo, SpentInput};
 use log::debug;
 use rusqlite::Connection;
+use std::cmp::Reverse;
 use std::collections::HashMap;
 use tari_common_types::transaction::TxId;
 use tari_common_types::types::FixedHash;
@@ -273,8 +273,8 @@ impl DisplayedTransactionProcessor {
                 selected_inputs.push(i);
                 return true;
             }
-            if i+1 == spent_inputs.len(){
-                return false
+            if i + 1 == spent_inputs.len() {
+                return false;
             }
             // search this branch further; backtrack if no match found
             selected_inputs.push(i);
