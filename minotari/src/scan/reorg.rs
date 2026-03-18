@@ -43,7 +43,6 @@ pub async fn handle_reorgs(
             reorg_information: None,
         });
     }
-
     let mut reorg_start_height = 0;
     let mut is_reorg_detected = false;
 
@@ -67,7 +66,6 @@ pub async fn handle_reorgs(
             is_reorg_detected = true;
         }
     }
-
     if is_reorg_detected {
         warn!(
             target: "audit",

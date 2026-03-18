@@ -353,6 +353,14 @@ where
                 "start_height cannot be greater than end_height".to_string(),
             ));
         }
+        let tip = self.get_tip_info().await?;
+        if tip.best_block_height <= config.start_height {
+            debug!(
+                "Tip height {} is less than requested start height {}, returning empty results",
+                tip.best_block_height, config.start_height
+            );
+            return Ok((Vec::new(), false));
+        }
 
         match &self.current_in_progress.get_config() {
             Some(existing_scan) if *existing_scan == config => {

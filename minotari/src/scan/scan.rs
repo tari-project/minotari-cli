@@ -353,7 +353,6 @@ async fn wait_for_next_poll_cycle<E: EventSender>(
     }
 
     let mut conn = db_handler.get_connection().await?;
-
     let reorg_result = reorg::handle_reorgs(&mut scanner_context.scanner, &mut conn, scanner_context.account_id)
         .await
         .map_err(ScanError::Fatal)?;
@@ -423,7 +422,6 @@ async fn prepare_account_scan(
     let mut scanner = HttpBlockchainScanner::new(base_url.to_string(), vec![key_manager.clone()], processing_threads)
         .await
         .map_err(|e| ScanError::Intermittent(e.to_string()))?;
-
     let reorg_result = reorg::handle_reorgs(&mut scanner, conn, account.id)
         .await
         .map_err(ScanError::Fatal)?;
@@ -615,7 +613,6 @@ async fn run_scan_loop<E: EventSender + Clone + Send + 'static>(
                 }));
             }
         }
-
         if more_blocks && blocks_since_reorg_check >= scanner_context.reorg_check_interval {
             let mut conn = db_handler.get_connection().await?;
             let reorg_result =
