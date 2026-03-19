@@ -9,6 +9,7 @@ use crate::scan::block_event_accumulator::BlockEventAccumulator;
 use crate::scan::{DetectedOutput, MemoInfo, SpentInput};
 use log::debug;
 use rusqlite::Connection;
+use std::cmp::Reverse;
 use std::collections::HashMap;
 use tari_common_types::transaction::TxId;
 use tari_common_types::types::FixedHash;
@@ -112,6 +113,7 @@ impl DisplayedTransactionProcessor {
             // we need to create a new display tx for this input
             new_debit.push((balance_change.clone(), output.clone()));
         }
+        new_debit.sort_by_key(|a| a.1.output.value());
 
         //Now we have a list of inputs and outputs that don't have matching transactions
         let mut new_transactions = Vec::new();
@@ -165,7 +167,7 @@ impl DisplayedTransactionProcessor {
                 // So this is change from our wallet.
                 let total_send =
                     amount + output.output.value() + output.output.payment_id().get_fee().unwrap_or_default();
-                let mut selected_inputs = Vec::new();
+                let mut selected_inputs = Vec::with_capacity(new_debit.len());
                 if Self::iter_search_for_matching_inputs(
                     total_send,
                     MicroMinotari::from(0),
@@ -255,34 +257,32 @@ impl DisplayedTransactionProcessor {
     fn iter_search_for_matching_inputs(
         amount_sent: MicroMinotari,
         amount_already_selected: MicroMinotari,
-        spent_inputs: &Vec<(BalanceChange, SpentInput)>,
+        spent_inputs: &[(BalanceChange, SpentInput)],
         selected_inputs: &mut Vec<usize>,
         start_index: usize,
     ) -> bool {
         for i in start_index..spent_inputs.len() {
-            if selected_inputs.contains(&i) {
-                continue;
+            let input_value = spent_inputs.get(i).expect("bounds are checked").1.output.value();
+            let new_total = amount_already_selected + input_value;
+            if new_total > amount_sent {
+                return false;
             }
-            let input = &spent_inputs.get(i).expect("index is in bounds");
-            if amount_already_selected + input.1.output.value() > amount_sent {
-                continue;
-            }
-            let new_total = amount_already_selected + input.1.output.value();
+
             if new_total == amount_sent {
-                selected_inputs.push(i);
                 // we have our match, stop searching
+                selected_inputs.push(i);
                 return true;
             }
-            // search this branch further
-            let mut new_selected = selected_inputs.clone();
-            new_selected.push(i);
-            if Self::iter_search_for_matching_inputs(amount_sent, new_total, spent_inputs, &mut new_selected, i + 1) {
-                *selected_inputs = new_selected;
+            if i + 1 == spent_inputs.len() {
+                return false;
+            }
+            // search this branch further; backtrack if no match found
+            selected_inputs.push(i);
+            if Self::iter_search_for_matching_inputs(amount_sent, new_total, spent_inputs, selected_inputs, i + 1) {
                 return true;
             }
-            //on to next output
+            selected_inputs.pop();
         }
-        // no match found in this search branch
         false
     }
 
