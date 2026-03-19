@@ -113,7 +113,7 @@ impl DisplayedTransactionProcessor {
             // we need to create a new display tx for this input
             new_debit.push((balance_change.clone(), output.clone()));
         }
-        new_debit.sort_by_key(|a| Reverse(a.1.output.value()));
+        new_debit.sort_by_key(|a| a.1.output.value());
 
         //Now we have a list of inputs and outputs that don't have matching transactions
         let mut new_transactions = Vec::new();
