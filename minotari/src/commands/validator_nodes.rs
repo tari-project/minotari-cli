@@ -129,6 +129,67 @@ async fn sign_save_and_broadcast(
     Ok(())
 }
 
+// ── Shared command runner ─────────────────────────────────────────────────────
+
+/// Handles the shared boilerplate for all three VN commands: initialise the
+/// database, fetch the account, call the operation-specific transaction
+/// constructor, then sign, persist, and broadcast the result.
+///
+/// `create_tx` is a closure that captures the operation-specific params and
+/// returns an unsigned transaction ready for signing.
+#[allow(clippy::too_many_arguments)]
+async fn run_vn_command<F>(
+    database_file: PathBuf,
+    account_name: &str,
+    network: Network,
+    password: &str,
+    idempotency_key: Option<String>,
+    seconds_to_lock: u64,
+    confirmation_window: u64,
+    base_url: &str,
+    tx_kind: &str,
+    create_tx: F,
+) -> Result<(), anyhow::Error>
+where
+    F: FnOnce(
+        &AccountRow,
+        db::SqlitePool,
+        Network,
+        &str,
+        Option<String>,
+        u64,
+        u64,
+    ) -> Result<PrepareOneSidedTransactionForSigningResult, anyhow::Error>,
+{
+    let idempotency_key = idempotency_key.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    let pool = init_db(database_file)?;
+    let conn = pool.get()?;
+    let account =
+        db::get_account_by_name(&conn, account_name)?.ok_or_else(|| anyhow!("Account not found: {}", account_name))?;
+
+    let unsigned_result = create_tx(
+        &account,
+        pool.clone(),
+        network,
+        password,
+        Some(idempotency_key.clone()),
+        seconds_to_lock,
+        confirmation_window,
+    )?;
+
+    sign_save_and_broadcast(
+        unsigned_result,
+        &account,
+        &conn,
+        password,
+        network,
+        &idempotency_key,
+        base_url,
+        tx_kind,
+    )
+    .await
+}
+
 // ── Public handlers ───────────────────────────────────────────────────────────
 
 #[allow(clippy::too_many_arguments)]
@@ -164,32 +225,28 @@ pub async fn handle_register_validator_node(
         sidechain_deployment_key,
     };
 
-    let idempotency_key = idempotency_key.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let pool = init_db(database_file)?;
-    let conn = pool.get()?;
-    let account =
-        db::get_account_by_name(&conn, &account_name)?.ok_or_else(|| anyhow!("Account not found: {}", account_name))?;
-
-    let unsigned_result = create_validator_node_registration_tx(
-        &account,
-        params,
-        pool.clone(),
+    run_vn_command(
+        database_file,
+        &account_name,
         network,
         &password,
-        Some(idempotency_key.clone()),
+        idempotency_key,
         seconds_to_lock,
         confirmation_window,
-    )?;
-
-    sign_save_and_broadcast(
-        unsigned_result,
-        &account,
-        &conn,
-        &password,
-        network,
-        &idempotency_key,
         &base_url,
         "VN registration",
+        |account, pool, network, password, idempotency_key, seconds_to_lock, confirmation_window| {
+            create_validator_node_registration_tx(
+                account,
+                params,
+                pool,
+                network,
+                password,
+                idempotency_key,
+                seconds_to_lock,
+                confirmation_window,
+            )
+        },
     )
     .await
 }
@@ -224,32 +281,28 @@ pub async fn handle_submit_validator_node_exit(
         sidechain_deployment_key,
     };
 
-    let idempotency_key = idempotency_key.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let pool = init_db(database_file)?;
-    let conn = pool.get()?;
-    let account =
-        db::get_account_by_name(&conn, &account_name)?.ok_or_else(|| anyhow!("Account not found: {}", account_name))?;
-
-    let unsigned_result = create_validator_node_exit_tx(
-        &account,
-        params,
-        pool.clone(),
+    run_vn_command(
+        database_file,
+        &account_name,
         network,
         &password,
-        Some(idempotency_key.clone()),
+        idempotency_key,
         seconds_to_lock,
         confirmation_window,
-    )?;
-
-    sign_save_and_broadcast(
-        unsigned_result,
-        &account,
-        &conn,
-        &password,
-        network,
-        &idempotency_key,
         &base_url,
         "VN exit",
+        |account, pool, network, password, idempotency_key, seconds_to_lock, confirmation_window| {
+            create_validator_node_exit_tx(
+                account,
+                params,
+                pool,
+                network,
+                password,
+                idempotency_key,
+                seconds_to_lock,
+                confirmation_window,
+            )
+        },
     )
     .await
 }
@@ -283,32 +336,28 @@ pub async fn handle_submit_validator_eviction_proof(
         sidechain_deployment_key,
     };
 
-    let idempotency_key = idempotency_key.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-    let pool = init_db(database_file)?;
-    let conn = pool.get()?;
-    let account =
-        db::get_account_by_name(&conn, &account_name)?.ok_or_else(|| anyhow!("Account not found: {}", account_name))?;
-
-    let unsigned_result = create_validator_node_eviction_tx(
-        &account,
-        params,
-        pool.clone(),
+    run_vn_command(
+        database_file,
+        &account_name,
         network,
         &password,
-        Some(idempotency_key.clone()),
+        idempotency_key,
         seconds_to_lock,
         confirmation_window,
-    )?;
-
-    sign_save_and_broadcast(
-        unsigned_result,
-        &account,
-        &conn,
-        &password,
-        network,
-        &idempotency_key,
         &base_url,
         "VN eviction proof",
+        |account, pool, network, password, idempotency_key, seconds_to_lock, confirmation_window| {
+            create_validator_node_eviction_tx(
+                account,
+                params,
+                pool,
+                network,
+                password,
+                idempotency_key,
+                seconds_to_lock,
+                confirmation_window,
+            )
+        },
     )
     .await
 }

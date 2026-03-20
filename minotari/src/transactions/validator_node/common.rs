@@ -73,8 +73,8 @@ pub(crate) fn build_vn_pay_to_self_tx(
 
     let tx_id = TxId::new_random();
     let memo = payment_id
-        .map(|s| MemoField::new_open_from_string(s, TxType::PaymentToOther).unwrap_or_else(|_| MemoField::new_empty()))
-        .unwrap_or_else(MemoField::new_empty);
+        .and_then(|s| MemoField::new_open_from_string(s, TxType::PaymentToOther).ok())
+        .unwrap_or_default();
 
     let payment_recipient = PaymentRecipient {
         amount: deposit_amount,
