@@ -49,6 +49,7 @@ tari_common = { workspace = true }
 tari_common_types = { workspace = true }
 tari_crypto = { version = "0.22.1", features = ["borsh"] }
 tari_script = { workspace = true }
+tari_sidechain = { workspace = true }
 tari_transaction_components = { workspace = true }
 tari_utilities = { version = "0.8", features = ["std"] }
 #tari_common = { path = "../tari/common" }
