@@ -444,6 +444,193 @@ pub enum Commands {
         )]
         seconds_to_lock_utxos: Option<u64>,
     },
+    /// Register a validator node on the Tari base layer.
+    ///
+    /// Creates, signs, and broadcasts a pay-to-self transaction that embeds the validator
+    /// node's public key and pre-computed signature into the output features, locking the
+    /// consensus-required minimum deposit back to the wallet.
+    ///
+    /// # Prerequisites
+    ///
+    /// - The account must be a full SeedWords wallet (view-only wallets are not supported)
+    /// - The caller must pre-compute the validator node signature using the VN's private key
+    ///   via `ValidatorNodeSignature::sign_for_registration` on the validator node side
+    ///
+    /// # Signature Format
+    ///
+    /// The signature is a Schnorr signature split into two 32-byte hex-encoded components:
+    /// - `--vn-sig-nonce`: the public nonce (compressed Ristretto point)
+    /// - `--vn-sig`: the signature scalar
+    RegisterValidatorNode {
+        #[command(flatten)]
+        security: SecurityArgs,
+        #[command(flatten)]
+        node: NodeArgs,
+        #[command(flatten)]
+        db: DatabaseArgs,
+        #[command(flatten)]
+        tx: TransactionArgs,
+
+        /// Name of the account to fund the registration deposit from.
+        #[arg(short, long, help = "Name of the account to fund the deposit from")]
+        account_name: String,
+
+        /// Validator node public key (hex-encoded, 32 bytes).
+        #[arg(long, help = "Validator node public key (hex)")]
+        vn_public_key: String,
+
+        /// Public nonce component of the validator node signature (hex-encoded, 32 bytes).
+        #[arg(long, help = "Validator node signature public nonce (hex)")]
+        vn_sig_nonce: String,
+
+        /// Scalar component of the validator node signature (hex-encoded, 32 bytes).
+        #[arg(long, help = "Validator node signature scalar (hex)")]
+        vn_sig: String,
+
+        /// Claim public key for validator node rewards (hex-encoded, 32 bytes).
+        #[arg(long, help = "Claim public key for VN rewards (hex)")]
+        claim_public_key: String,
+
+        /// Maximum epoch for replay protection.
+        #[arg(long, help = "Max epoch for replay protection")]
+        max_epoch: u64,
+
+        /// Fee rate in MicroMinotari per gram (default: 5).
+        #[arg(long, default_value_t = 5)]
+        fee_per_gram: u64,
+
+        /// Optional payment ID or memo attached to the transaction.
+        #[arg(long, help = "Optional payment ID or memo")]
+        payment_id: Option<String>,
+
+        /// Optional sidechain deployment key (hex-encoded private key, 32 bytes).
+        /// If provided, proves ownership of the sidechain and is included in the signature.
+        #[arg(long, help = "Optional sidechain deployment private key (hex)")]
+        sidechain_deployment_key: Option<String>,
+
+        /// Duration in seconds to lock input UTXOs (default: 24 hours).
+        #[arg(long, help = "Seconds to lock UTXOs", default_value_t = 86400)]
+        seconds_to_lock: u64,
+    },
+
+    /// Submit a validator node exit transaction on the Tari base layer.
+    ///
+    /// Creates, signs, and broadcasts a pay-to-self transaction that signals the validator
+    /// node's intention to leave the active set. The transaction embeds the validator node's
+    /// public key and pre-computed exit signature into the output features.
+    ///
+    /// # Prerequisites
+    ///
+    /// - The account must be a full SeedWords wallet (view-only wallets are not supported)
+    /// - The caller must pre-compute the validator node signature using the VN's private key
+    ///   via `ValidatorNodeSignature::sign_for_exit` on the validator node side
+    ///
+    /// # Signature Format
+    ///
+    /// The signature is a Schnorr signature split into two 32-byte hex-encoded components:
+    /// - `--vn-sig-nonce`: the public nonce (compressed Ristretto point)
+    /// - `--vn-sig`: the signature scalar
+    ///
+    /// The exit signature does NOT include a claim public key (unlike registration).
+    SubmitValidatorNodeExit {
+        #[command(flatten)]
+        security: SecurityArgs,
+        #[command(flatten)]
+        node: NodeArgs,
+        #[command(flatten)]
+        db: DatabaseArgs,
+        #[command(flatten)]
+        tx: TransactionArgs,
+
+        /// Name of the account to fund the exit deposit from.
+        #[arg(short, long, help = "Name of the account to fund the deposit from")]
+        account_name: String,
+
+        /// Validator node public key (hex-encoded, 32 bytes).
+        #[arg(long, help = "Validator node public key (hex)")]
+        vn_public_key: String,
+
+        /// Public nonce component of the validator node signature (hex-encoded, 32 bytes).
+        #[arg(long, help = "Validator node signature public nonce (hex)")]
+        vn_sig_nonce: String,
+
+        /// Scalar component of the validator node signature (hex-encoded, 32 bytes).
+        #[arg(long, help = "Validator node signature scalar (hex)")]
+        vn_sig: String,
+
+        /// Maximum epoch for replay protection.
+        #[arg(long, help = "Max epoch for replay protection")]
+        max_epoch: u64,
+
+        /// Fee rate in MicroMinotari per gram (default: 5).
+        #[arg(long, default_value_t = 5)]
+        fee_per_gram: u64,
+
+        /// Optional payment ID or memo attached to the transaction.
+        #[arg(long, help = "Optional payment ID or memo")]
+        payment_id: Option<String>,
+
+        /// Optional sidechain deployment key (hex-encoded private key, 32 bytes).
+        /// If provided, proves ownership of the sidechain and is included in the signature.
+        #[arg(long, help = "Optional sidechain deployment private key (hex)")]
+        sidechain_deployment_key: Option<String>,
+
+        /// Duration in seconds to lock input UTXOs (default: 24 hours).
+        #[arg(long, help = "Seconds to lock UTXOs", default_value_t = 86400)]
+        seconds_to_lock: u64,
+    },
+
+    /// Submit a validator node eviction proof transaction on the Tari base layer.
+    ///
+    /// Creates, signs, and broadcasts a pay-to-self transaction that embeds a self-validating
+    /// eviction proof into the output features. The proof contains sidechain quorum certificates
+    /// and a Merkle inclusion proof — no additional wallet signature is required.
+    ///
+    /// # Prerequisites
+    ///
+    /// - The account must be a full SeedWords wallet (view-only wallets are not supported)
+    /// - The eviction proof must be provided as a JSON file (e.g., generated by the sidechain node)
+    ///
+    /// # Proof File Format
+    ///
+    /// The proof file must contain a JSON-serialized [`EvictionProof`] as produced by the
+    /// sidechain node. The proof is self-validating via embedded quorum certificates.
+    SubmitValidatorEvictionProof {
+        #[command(flatten)]
+        security: SecurityArgs,
+        #[command(flatten)]
+        node: NodeArgs,
+        #[command(flatten)]
+        db: DatabaseArgs,
+        #[command(flatten)]
+        tx: TransactionArgs,
+
+        /// Name of the account to fund the eviction deposit from.
+        #[arg(short, long, help = "Name of the account to fund the deposit from")]
+        account_name: String,
+
+        /// Path to a JSON file containing the serialized EvictionProof.
+        #[arg(long, help = "Path to the eviction proof JSON file")]
+        proof_file: std::path::PathBuf,
+
+        /// Fee rate in MicroMinotari per gram (default: 5).
+        #[arg(long, default_value_t = 5)]
+        fee_per_gram: u64,
+
+        /// Optional payment ID or memo attached to the transaction.
+        #[arg(long, help = "Optional payment ID or memo")]
+        payment_id: Option<String>,
+
+        /// Optional sidechain deployment key (hex-encoded private key, 32 bytes).
+        /// If provided, creates a knowledge proof signed over the evicted node's public key.
+        #[arg(long, help = "Optional sidechain deployment private key (hex)")]
+        sidechain_deployment_key: Option<String>,
+
+        /// Duration in seconds to lock input UTXOs (default: 24 hours).
+        #[arg(long, help = "Seconds to lock UTXOs", default_value_t = 86400)]
+        seconds_to_lock: u64,
+    },
+
     /// Delete a wallet account and all associated data.
     ///
     /// This permanently removes the account, transaction history, and keys from the database.

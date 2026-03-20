@@ -77,6 +77,7 @@ pub mod manager;
 pub mod monitor;
 pub mod one_sided_transaction;
 pub mod transaction_history;
+pub mod validator_node;
 
 pub use displayed_transaction_processor::{
     BlockchainInfo, CounterpartyInfo, DisplayedTransaction, DisplayedTransactionBuilder, DisplayedTransactionProcessor,

@@ -45,6 +45,8 @@
 //! - Transaction and balance data is stored in a SQLite database
 //! - Default data directory is `./data/`
 
+mod commands;
+
 use std::{
     fs::{self, create_dir_all},
     path::{Path, PathBuf},
@@ -433,6 +435,122 @@ async fn main() -> Result<(), anyhow::Error> {
                 confirmation_window,
             };
             handle_lock_funds(wallet_config.database_path.clone(), account_name, output_file, request)
+        },
+        Commands::RegisterValidatorNode {
+            security,
+            node,
+            db,
+            tx,
+            account_name,
+            vn_public_key,
+            vn_sig_nonce,
+            vn_sig,
+            claim_public_key,
+            max_epoch,
+            fee_per_gram,
+            payment_id,
+            sidechain_deployment_key,
+            seconds_to_lock,
+        } => {
+            info!(target: "audit", account = account_name.as_str(); "Registering validator node...");
+
+            wallet_config.apply_node(&node);
+            wallet_config.apply_database(&db);
+            wallet_config.apply_transaction(&tx);
+
+            commands::validator_nodes::handle_register_validator_node(
+                vn_public_key,
+                vn_sig_nonce,
+                vn_sig,
+                claim_public_key,
+                max_epoch,
+                fee_per_gram,
+                payment_id,
+                sidechain_deployment_key,
+                wallet_config.database_path.clone(),
+                account_name,
+                wallet_config.network,
+                security.password,
+                tx.idempotency_key,
+                seconds_to_lock,
+                wallet_config.confirmation_window,
+                wallet_config.base_url,
+            )
+            .await
+        },
+        Commands::SubmitValidatorNodeExit {
+            security,
+            node,
+            db,
+            tx,
+            account_name,
+            vn_public_key,
+            vn_sig_nonce,
+            vn_sig,
+            max_epoch,
+            fee_per_gram,
+            payment_id,
+            sidechain_deployment_key,
+            seconds_to_lock,
+        } => {
+            info!(target: "audit", account = account_name.as_str(); "Submitting validator node exit...");
+
+            wallet_config.apply_node(&node);
+            wallet_config.apply_database(&db);
+            wallet_config.apply_transaction(&tx);
+
+            commands::validator_nodes::handle_submit_validator_node_exit(
+                vn_public_key,
+                vn_sig_nonce,
+                vn_sig,
+                max_epoch,
+                fee_per_gram,
+                payment_id,
+                sidechain_deployment_key,
+                wallet_config.database_path.clone(),
+                account_name,
+                wallet_config.network,
+                security.password,
+                tx.idempotency_key,
+                seconds_to_lock,
+                wallet_config.confirmation_window,
+                wallet_config.base_url,
+            )
+            .await
+        },
+        Commands::SubmitValidatorEvictionProof {
+            security,
+            node,
+            db,
+            tx,
+            account_name,
+            proof_file,
+            fee_per_gram,
+            payment_id,
+            sidechain_deployment_key,
+            seconds_to_lock,
+        } => {
+            info!(target: "audit", account = account_name.as_str(); "Submitting validator node eviction proof...");
+
+            wallet_config.apply_node(&node);
+            wallet_config.apply_database(&db);
+            wallet_config.apply_transaction(&tx);
+
+            commands::validator_nodes::handle_submit_validator_eviction_proof(
+                proof_file,
+                fee_per_gram,
+                payment_id,
+                sidechain_deployment_key,
+                wallet_config.database_path.clone(),
+                account_name,
+                wallet_config.network,
+                security.password,
+                tx.idempotency_key,
+                seconds_to_lock,
+                wallet_config.confirmation_window,
+                wallet_config.base_url,
+            )
+            .await
         },
         Commands::Delete { db, account } => {
             let name = account.account_name.as_deref().unwrap_or("default");
