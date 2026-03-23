@@ -7,8 +7,7 @@
 //!
 //! # Pattern
 //!
-//! Mirrors the Tari console wallet's `submit_validator_node_exit` service call:
-//! the caller pre-computes the [`ValidatorNodeSignature`] on the validator node
+//! The caller pre-computes the [`ValidatorNodeSignature`] on the validator node
 //! side, then passes the public key and signature to the wallet for transaction
 //! construction. Only [`WalletType::SeedWords`] wallets are supported.
 //!
@@ -34,7 +33,7 @@ use tari_transaction_components::{
 use super::common::build_vn_pay_to_self_tx;
 use crate::db::{AccountRow, SqlitePool};
 
-/// Parameters for validator node exit, mirroring `SubmitValidatorNodeExitRequest`.
+/// Parameters for validator node exit
 ///
 /// The `validator_node_signature` must be pre-computed by the validator node using
 /// [`ValidatorNodeSignature::sign_for_exit`] with the node's private key.
@@ -56,7 +55,6 @@ pub struct ValidatorNodeExitParams {
 
 /// Creates an unsigned validator node exit transaction.
 ///
-/// Mirrors the Tari console wallet's `TransactionService::submit_validator_node_exit`.
 /// The returned [`PrepareOneSidedTransactionForSigningResult`] is signed and broadcast
 /// by the caller, following the same flow as [`create_validator_node_registration_tx`].
 ///

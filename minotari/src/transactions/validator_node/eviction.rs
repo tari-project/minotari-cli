@@ -5,9 +5,6 @@
 //! [`EvictionProof`] (containing sidechain quorum certificates and a Merkle inclusion
 //! proof) into a pay-to-self transaction with special [`OutputFeatures`].
 //!
-//! # Pattern
-//!
-//! Mirrors the Tari console wallet's `submit_validator_eviction_proof` service call.
 //! Unlike registration and exit, no wallet-side signature validation is performed —
 //! the proof is self-validating via embedded quorum certificates.
 //! Only [`WalletType::SeedWords`] wallets are supported.
@@ -29,7 +26,7 @@ use tari_transaction_components::{
 use super::common::build_vn_pay_to_self_tx;
 use crate::db::{AccountRow, SqlitePool};
 
-/// Parameters for validator node eviction, mirroring `SubmitValidatorEvictionProofRequest`.
+/// Parameters for validator node eviction
 ///
 /// The `eviction_proof` is self-validating via embedded quorum certificates and a
 /// Merkle inclusion proof — no additional wallet signature is required.
@@ -47,7 +44,6 @@ pub struct ValidatorNodeEvictionParams {
 
 /// Creates an unsigned validator node eviction proof transaction.
 ///
-/// Mirrors the Tari console wallet's `TransactionService::submit_validator_eviction_proof`.
 /// Unlike registration and exit, no signature validation is performed — the
 /// [`EvictionProof`] is self-validating via embedded quorum certificates.
 ///

@@ -2,5 +2,6 @@
 /data
 .idea/
 logs/
+/config
 
 .DS_Store

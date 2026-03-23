@@ -7,8 +7,7 @@
 //!
 //! # Pattern
 //!
-//! Mirrors the Tari console wallet's `register_validator_node` service call:
-//! the caller pre-computes the [`ValidatorNodeSignature`] on the validator node
+//! The caller pre-computes the [`ValidatorNodeSignature`] on the validator node
 //! side, then passes the public key and signature to the wallet for transaction
 //! construction. Only [`WalletType::SeedWords`] wallets are supported.
 //!
@@ -34,7 +33,7 @@ use tari_transaction_components::{
 use super::common::build_vn_pay_to_self_tx;
 use crate::db::{AccountRow, SqlitePool};
 
-/// Parameters for validator node registration, mirroring `RegisterValidatorNodeRequest`.
+/// Parameters for validator node registration
 ///
 /// The `validator_node_signature` must be pre-computed by the validator node using
 /// [`ValidatorNodeSignature::sign_for_registration`] with the node's private key.
@@ -58,7 +57,6 @@ pub struct ValidatorNodeRegistrationParams {
 
 /// Creates an unsigned validator node registration transaction.
 ///
-/// Mirrors the Tari console wallet's `TransactionService::register_validator_node`.
 /// The returned [`PrepareOneSidedTransactionForSigningResult`] can be written to a
 /// file for external signing, following the same flow as [`CreateUnsignedTransaction`].
 ///
