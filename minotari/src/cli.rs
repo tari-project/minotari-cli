@@ -228,11 +228,11 @@ pub enum Commands {
         db: DatabaseArgs,
 
         /// Seconds to wait between scan cycles.
-        #[arg(short, long, help = "Interval between scans in seconds", default_value_t = 60)]
-        scan_interval_secs: u64,
+        #[arg(short, long, help = "Interval between scans in seconds")]
+        scan_interval_secs: Option<u64>,
         /// TCP port for the REST API server.
-        #[arg(long, help = "Port for the API server", default_value_t = 9000)]
-        api_port: u16,
+        #[arg(long, help = "Port for the API server")]
+        api_port: Option<u16>,
     },
 
     /// Display the wallet balance.
@@ -706,10 +706,16 @@ pub struct BurnArgs {
     pub burn_proofs_dir: Option<PathBuf>,
 }
 
+pub struct DaemonArgs {
+    pub scan_interval_secs: Option<u64>,
+    pub api_port: Option<u16>,
+}
+
 pub trait ApplyArgs {
     fn apply_database(&mut self, args: &DatabaseArgs);
     fn apply_node(&mut self, args: &NodeArgs);
     fn apply_account(&mut self, args: &AccountArgs);
     fn apply_transaction(&mut self, args: &TransactionArgs);
     fn apply_burn(&mut self, args: &BurnArgs);
+    fn apply_daemon(&mut self, args: &DaemonArgs);
 }

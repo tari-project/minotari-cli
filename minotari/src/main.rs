@@ -62,7 +62,7 @@ use log::info;
 use minotari::{
     ScanError,
     api::accounts::LockFundsRequest,
-    cli::{ApplyArgs, Cli, Commands},
+    cli::{ApplyArgs, Cli, Commands, DaemonArgs},
     commands::burn::handle_burn_funds,
     config::{defaults::WalletConfig, loader::load_configuration},
     daemon,
@@ -350,6 +350,10 @@ async fn main() -> Result<(), anyhow::Error> {
 
             wallet_config.apply_node(&node);
             wallet_config.apply_database(&db);
+            wallet_config.apply_daemon(&DaemonArgs {
+                scan_interval_secs,
+                api_port,
+            });
 
             let webhook_url = wallet_config.webhook.url.clone();
             let webhook_secret = wallet_config.webhook.secret.clone();
@@ -362,8 +366,8 @@ async fn main() -> Result<(), anyhow::Error> {
                 wallet_config.database_path,
                 max_blocks_to_scan,
                 wallet_config.batch_size,
-                scan_interval_secs,
-                api_port,
+                wallet_config.scan_interval_secs,
+                wallet_config.api_port,
                 wallet_config.network,
                 wallet_config.confirmation_window,
                 webhook_url,

@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tari_common::{SubConfigPath, configuration::Network};
 
-use crate::cli::{AccountArgs, ApplyArgs, BurnArgs, DatabaseArgs, NodeArgs, TransactionArgs};
+use crate::cli::{AccountArgs, ApplyArgs, BurnArgs, DaemonArgs, DatabaseArgs, NodeArgs, TransactionArgs};
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct WebhookConfig {
@@ -84,6 +84,15 @@ impl ApplyArgs for WalletConfig {
     fn apply_burn(&mut self, args: &BurnArgs) {
         if let Some(dir) = &args.burn_proofs_dir {
             self.burn_proofs_dir = dir.clone();
+        }
+    }
+
+    fn apply_daemon(&mut self, args: &DaemonArgs) {
+        if let Some(scan_interval_secs) = args.scan_interval_secs {
+            self.scan_interval_secs = scan_interval_secs;
+        }
+        if let Some(api_port) = args.api_port {
+            self.api_port = api_port;
         }
     }
 }
