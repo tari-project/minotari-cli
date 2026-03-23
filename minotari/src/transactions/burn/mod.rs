@@ -69,8 +69,8 @@ pub struct BurnTxParams {
 
 /// Builds, signs, and returns a burn transaction along with its partial proof data.
 ///
-/// Returns `None` for `new_burn_proof` when no `claim_public_key` is supplied,
-/// since there is nothing to prove on L2.
+/// A `claim_public_key` must be supplied, as this function is designed to
+/// always produce a burn proof.
 pub fn create_burn_tx(
     account: &AccountRow,
     db_pool: SqlitePool,
