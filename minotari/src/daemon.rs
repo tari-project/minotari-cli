@@ -323,7 +323,9 @@ impl Daemon {
                             },
                             ScanError::Intermittent(err_msg) => {
                                 warn!(error:% = err_msg; "An intermittent error occurred during the scan cycle");
-                                sleep(self.scan_interval).await;
+                                if self.wait_for_next_cycle(&mut shutdown_rx).await {
+                                    return Ok(());
+                                }
                             },
                             ScanError::DbError(err_msg) => {
                                 error!(error:% = err_msg; "A DB error occurred during the scan cycle");
@@ -331,7 +333,9 @@ impl Daemon {
                             },
                             ScanError::Timeout(retries) => {
                                 warn!(retries = retries; "Scan timed out, will retry after interval");
-                                sleep(self.scan_interval).await;
+                                if self.wait_for_next_cycle(&mut shutdown_rx).await {
+                                    return Ok(());
+                                }
                             },
                         }
                     }
@@ -339,5 +343,16 @@ impl Daemon {
             }
         }
         Ok(())
+    }
+
+    /// Sleeps for `scan_interval`, but returns `true` immediately if a shutdown signal arrives first.
+    async fn wait_for_next_cycle(&self, shutdown_rx: &mut broadcast::Receiver<()>) -> bool {
+        tokio::select! {
+            _ = sleep(self.scan_interval) => false,
+            _ = shutdown_rx.recv() => {
+                info!("Scanner task received shutdown signal. Exiting gracefully.");
+                true
+            }
+        }
     }
 }
