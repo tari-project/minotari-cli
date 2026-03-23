@@ -69,6 +69,7 @@
 //! - [`one_sided_transaction`]: Builds one-sided (non-interactive) transactions
 //! - [`transaction_history`]: Provides transaction history querying capabilities
 
+pub mod burn;
 pub mod displayed_transaction_processor;
 pub mod fee_estimator;
 pub mod fund_locker;

@@ -17,7 +17,7 @@ use thiserror::Error;
 
 use crate::scan::block_event_accumulator::BlockEventAccumulator;
 use crate::{
-    db::{self, WalletDbError},
+    db::{self, WalletDbError, get_burn_proof_by_output_hash},
     log::{mask_amount, mask_string},
     models::{BalanceChange, OutputStatus, WalletEvent, WalletEventType},
     scan::events::{
@@ -342,6 +342,8 @@ impl<E: EventSender> BlockProcessor<E> {
             // Compute the payment reference from block hash and output hash
             let payment_reference = generate_payment_reference(&block.block_hash, hash);
 
+            let is_burn = output.is_burned();
+
             let output_id = db::insert_output(
                 tx,
                 account_id,
@@ -354,6 +356,7 @@ impl<E: EventSender> BlockProcessor<E> {
                 memo.parsed.clone(),
                 memo.hex.clone(),
                 payment_reference,
+                is_burn,
             )?;
 
             let event_id = db::insert_wallet_event(tx, account_id, &event)?;
@@ -573,6 +576,30 @@ impl<E: EventSender> BlockProcessor<E> {
                 block.height,
                 block.block_hash.as_slice(),
             )?;
+
+            // If this is a burn output, check if we have a matching pending burn proof
+            // and log that the daemon should pick it up for merkle proof fetching.
+            if unconfirmed_output.is_burn != 0 {
+                match get_burn_proof_by_output_hash(tx, &unconfirmed_output.output_hash) {
+                    Ok(Some(_proof)) => {
+                        info!(
+                            target: "audit",
+                            output_hash = &*mask_string(&hex::encode(unconfirmed_output.output_hash));
+                            "Burn output confirmed — daemon will fetch kernel merkle proof"
+                        );
+                    },
+                    Ok(None) => {
+                        // Burn output detected but not created by this wallet instance; nothing to do.
+                    },
+                    Err(e) => {
+                        error!(
+                            output_hash = &*mask_string(&hex::encode(unconfirmed_output.output_hash)),
+                            error:% = e;
+                            "Failed to look up burn proof for confirmed burn output"
+                        );
+                    },
+                }
+            }
         }
 
         if let Some(config) = &self.webhook_config {

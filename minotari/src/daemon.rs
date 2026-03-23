@@ -55,8 +55,9 @@ use tari_common::configuration::Network;
 
 use crate::{
     api, db,
+    http::WalletHttpClient,
     scan::{self, ScanError, ScanMode},
-    tasks::unlocker::TransactionUnlocker,
+    tasks::{burn_proof_worker::BurnProofWorker, unlocker::TransactionUnlocker},
     webhooks::{
         WebhookTriggerConfig,
         worker::{WebhookWorker, WebhookWorkerConfig},
@@ -80,6 +81,7 @@ pub struct Daemon {
     required_confirmations: u64,
     webhook_config: WebhookWorkerConfig,
     webhook_trigger_config: Option<WebhookTriggerConfig>,
+    burn_proofs_dir: PathBuf,
 }
 
 impl Daemon {
@@ -112,6 +114,7 @@ impl Daemon {
         webhook_url: Option<String>,
         webhook_secret: Option<String>,
         send_only_event_types: Option<Vec<String>>,
+        burn_proofs_dir: PathBuf,
     ) -> Self {
         let webhook_worker_config = WebhookWorkerConfig {
             enabled: webhook_url.is_some() && webhook_secret.is_some(),
@@ -135,6 +138,7 @@ impl Daemon {
             required_confirmations,
             webhook_config: webhook_worker_config,
             webhook_trigger_config,
+            burn_proofs_dir,
         }
     }
 
@@ -165,6 +169,14 @@ impl Daemon {
 
         let unlocker = TransactionUnlocker::new(db_pool.clone());
         let unlocker_task_handle = unlocker.run(shutdown_tx.subscribe());
+
+        let http_client = WalletHttpClient::new(
+            self.base_url
+                .parse()
+                .map_err(|e| ScanError::Fatal(anyhow!("Invalid base URL '{}': {}", self.base_url, e)))?,
+        )?;
+        let burn_proof_worker = BurnProofWorker::new(db_pool.clone(), http_client, self.burn_proofs_dir.clone());
+        let burn_proof_handle = burn_proof_worker.run(shutdown_tx.subscribe());
 
         let webhook_worker = std::sync::Arc::new(WebhookWorker::new(db_pool.clone(), self.webhook_config.clone()));
         let worker_rx = shutdown_tx.subscribe();
@@ -222,10 +234,16 @@ impl Daemon {
             error!("Failed to send shutdown signal. All tasks may not have received it.");
         }
 
-        let join_res = tokio::try_join!(api_server_handle, unlocker_task_handle, webhook_handle, ctrlc_handle)
-            .map_err(|e| ScanError::Fatal(anyhow!("A task panicked during shutdown: {}", e)))?;
+        let join_res = tokio::try_join!(
+            api_server_handle,
+            unlocker_task_handle,
+            burn_proof_handle,
+            webhook_handle,
+            ctrlc_handle
+        )
+        .map_err(|e| ScanError::Fatal(anyhow!("A task panicked during shutdown: {}", e)))?;
 
-        let (_api_res, _unlocker_res, _webhook_res, _ctrlc_res) = join_res;
+        let (_api_res, _unlocker_res, _burn_proof_res, _webhook_res, _ctrlc_res) = join_res;
 
         info!("Daemon stopped gracefully.");
         Ok(())

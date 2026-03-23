@@ -152,6 +152,7 @@ impl FromRef<AppState> for SqlitePool {
         accounts::api_lock_funds,
         accounts::api_create_unsigned_transaction,
         accounts::api_estimate_fees,
+        accounts::api_burn_funds,
     ),
     components(
         schemas(
@@ -173,6 +174,8 @@ impl FromRef<AppState> for SqlitePool {
             crate::api::types::VersionResponse,
             crate::api::types::FeeEstimateResponse,
             crate::api::types::FeePriorityResponse,
+            accounts::BurnFundsRequest,
+            accounts::BurnFundsResponse,
             crate::transactions::DisplayedTransaction,
             crate::transactions::TransactionDirection,
             crate::transactions::TransactionSource,
@@ -280,5 +283,6 @@ pub fn create_router(
             post(accounts::api_create_unsigned_transaction),
         )
         .route("/accounts/{name}/estimate_fees", post(accounts::api_estimate_fees))
+        .route("/accounts/{name}/burn", post(accounts::api_burn_funds))
         .with_state(app_state)
 }

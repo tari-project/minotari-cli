@@ -63,6 +63,7 @@ use minotari::{
     ScanError,
     api::accounts::LockFundsRequest,
     cli::{ApplyArgs, Cli, Commands},
+    commands::burn::handle_burn_funds,
     config::{defaults::WalletConfig, loader::load_configuration},
     daemon,
     db::{self, WalletDbError, get_accounts, get_balance, init_db},
@@ -368,6 +369,7 @@ async fn main() -> Result<(), anyhow::Error> {
                 webhook_url,
                 webhook_secret,
                 send_only_event_types,
+                wallet_config.burn_proofs_dir,
             );
             daemon.run().await?;
             Ok(())
@@ -561,6 +563,45 @@ async fn main() -> Result<(), anyhow::Error> {
             utils::delete_wallet::delete_wallet(&wallet_config.database_path, name)?;
             println!("Wallet account '{}' deleted successfully.", name);
             Ok(())
+        },
+
+        Commands::BurnFunds {
+            security,
+            db,
+            tx,
+            burn,
+            node,
+            account_name,
+            amount,
+            claim_public_key,
+            sidechain_deployment_key,
+            fee_per_gram,
+            payment_id,
+            seconds_to_lock,
+        } => {
+            info!(target: "audit", "Burning funds...");
+
+            wallet_config.apply_database(&db);
+            wallet_config.apply_transaction(&tx);
+            wallet_config.apply_node(&node);
+            wallet_config.apply_burn(&burn);
+
+            handle_burn_funds(
+                account_name,
+                amount,
+                claim_public_key,
+                fee_per_gram,
+                payment_id,
+                sidechain_deployment_key,
+                wallet_config.database_path.clone(),
+                wallet_config.network,
+                security.password,
+                tx.idempotency_key,
+                seconds_to_lock,
+                wallet_config.confirmation_window,
+                wallet_config.base_url.clone(),
+            )
+            .await
         },
     }
 }

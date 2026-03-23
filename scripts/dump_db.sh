@@ -7,4 +7,4 @@ fi
 
 DB_PATH=$(echo $DATABASE_URL | sed 's/sqlite:\/\///')
 mkdir -p docs/db
-sqlite3 "$DB_PATH" .schema > docs/db/db_schema.sql
+sqlite3 "$DB_PATH" .schema > minotari/docs/db/db_schema.sql

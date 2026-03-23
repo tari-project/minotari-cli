@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tari_common::{SubConfigPath, configuration::Network};
 
-use crate::cli::{AccountArgs, ApplyArgs, DatabaseArgs, NodeArgs, TransactionArgs};
+use crate::cli::{AccountArgs, ApplyArgs, BurnArgs, DatabaseArgs, NodeArgs, TransactionArgs};
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct WebhookConfig {
@@ -25,6 +25,9 @@ pub struct WalletConfig {
     pub confirmation_window: u64,
     pub account_name: Option<String>,
     pub webhook: WebhookConfig,
+    /// Directory where complete burn proof JSON files are written after a burn transaction is confirmed
+    /// and the kernel merkle proof is fetched from the base node.
+    pub burn_proofs_dir: PathBuf,
 }
 
 impl Default for WalletConfig {
@@ -39,6 +42,7 @@ impl Default for WalletConfig {
             confirmation_window: 3,
             account_name: None,
             webhook: WebhookConfig::default(),
+            burn_proofs_dir: PathBuf::from("data/burn_proofs"),
         }
     }
 }
@@ -74,6 +78,12 @@ impl ApplyArgs for WalletConfig {
     fn apply_transaction(&mut self, args: &TransactionArgs) {
         if let Some(confirmation_window) = args.confirmation_window {
             self.confirmation_window = confirmation_window;
+        }
+    }
+
+    fn apply_burn(&mut self, args: &BurnArgs) {
+        if let Some(dir) = &args.burn_proofs_dir {
+            self.burn_proofs_dir = dir.clone();
         }
     }
 }

@@ -640,6 +640,70 @@ pub enum Commands {
         #[command(flatten)]
         account: AccountArgs,
     },
+
+    /// Burn funds and generate an L2 claim proof.
+    ///
+    /// Creates a burn transaction that destroys L1 funds. After the transaction is
+    /// confirmed on-chain, the daemon automatically fetches the kernel merkle proof
+    /// from the base node and writes a complete `CompleteClaimBurnProof` JSON file
+    /// to the configured `burn_proofs_dir` directory.
+    ///
+    /// # Claim Public Key
+    ///
+    /// The `--claim-public-key` is the L2 wallet's public key. The L2 wallet can use
+    /// this key to decrypt the encrypted output value and verify the ownership proof.
+    ///
+    /// # Example
+    ///
+    /// ```bash
+    /// tari burn-funds \
+    ///     --account-name main \
+    ///     --amount 1000000 \
+    ///     --claim-public-key <hex> \
+    ///     --password secret
+    /// ```
+    BurnFunds {
+        #[command(flatten)]
+        security: SecurityArgs,
+        #[command(flatten)]
+        db: DatabaseArgs,
+        #[command(flatten)]
+        tx: TransactionArgs,
+        #[command(flatten)]
+        burn: BurnArgs,
+        #[command(flatten)]
+        node: NodeArgs,
+
+        /// Name of the account to burn funds from.
+        #[arg(short, long, help = "Name of the account to burn from")]
+        account_name: String,
+        /// Amount to burn in microTari.
+        #[arg(short = 'm', long, help = "Amount to burn in microTari")]
+        amount: MicroMinotari,
+        /// L2 claim public key (hex). Required to generate an L2 claim proof.
+        #[arg(long, help = "L2 claim public key in hex")]
+        claim_public_key: Option<String>,
+        /// Sidechain deployment key (hex), for L2 template burns.
+        #[arg(long, help = "Sidechain deployment key in hex")]
+        sidechain_deployment_key: Option<String>,
+        /// Fee rate in microTari per gram.
+        #[arg(short, long, help = "Fee per gram", default_value_t = MicroMinotari(5))]
+        fee_per_gram: MicroMinotari,
+        /// Optional payment memo.
+        #[arg(long, help = "Optional payment memo")]
+        payment_id: Option<String>,
+        /// Seconds to lock UTXOs while the transaction confirms.
+        #[arg(long, default_value_t = 86400)]
+        seconds_to_lock: u64,
+    },
+}
+
+#[derive(Args, Debug)]
+pub struct BurnArgs {
+    /// Directory where burn proof JSON files are written.
+    /// Defaults to `data/burn_proofs` relative to the working directory.
+    #[arg(long, help = "Directory for burn proof output files")]
+    pub burn_proofs_dir: Option<PathBuf>,
 }
 
 pub trait ApplyArgs {
@@ -647,4 +711,5 @@ pub trait ApplyArgs {
     fn apply_node(&mut self, args: &NodeArgs);
     fn apply_account(&mut self, args: &AccountArgs);
     fn apply_transaction(&mut self, args: &TransactionArgs);
+    fn apply_burn(&mut self, args: &BurnArgs);
 }

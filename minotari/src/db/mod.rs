@@ -112,6 +112,12 @@ pub use balance_changes::{
 mod inputs;
 pub use inputs::{DbInput, get_input_by_id, insert_input, soft_delete_inputs_from_height};
 
+mod burn_proofs;
+pub use burn_proofs::{
+    DbBurnProof, NewBurnProof, get_burn_proof_by_output_hash, get_pending_burn_proofs, insert_burn_proof,
+    mark_burn_proof_complete,
+};
+
 mod displayed_transactions;
 pub use displayed_transactions::{
     find_pending_outbound_by_output_hash, get_displayed_transaction_by_id, get_displayed_transactions_by_account,
