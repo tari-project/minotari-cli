@@ -219,7 +219,7 @@ impl DisplayedTransactionProcessor {
 
     fn dp_search_inputs(
         &self,
-        inputs: Vec<(BalanceChange, SpentInput)>,
+        mut inputs: Vec<(BalanceChange, SpentInput)>,
         outputs: Vec<(BalanceChange, DetectedOutput)>,
         accumulator: &BlockEventAccumulator,
     ) -> Result<Vec<DisplayedTransaction>, ProcessorError> {
@@ -227,6 +227,8 @@ impl DisplayedTransactionProcessor {
             solutions: Vec<MicroMinotari>,
             matching_targets: usize,
         }
+        //lets sort inputs to desc
+        inputs.sort_by_key(|a| a.1.output.value());
         let mut result = Vec::new();
         // hashmap is vec<solutions, vec<indices of inputs used for this solution>>
         // the targets is the matching outputs + for no matching inputs, last will always be no matching
@@ -258,14 +260,23 @@ impl DisplayedTransactionProcessor {
         let mut dp: HashMap<Vec<MicroMinotari>, Vec<Vec<usize>>> = HashMap::new();
         dp.insert(vec![0.into(); targets.len() + 1], vec![Vec::new();targets.len() + 1]);
         dbg!(inputs.len());
+        let mut remaining_input_sum: Vec<MicroMinotari> = vec![0.into(); inputs.len() + 1];
+        for i in (0..inputs.len()).rev() {
+            remaining_input_sum[i] = remaining_input_sum[i + 1] + inputs[i].1.output.value();
+        }
         for (i, input) in inputs.iter().enumerate() {
             let mut next: HashMap<Vec<MicroMinotari>, Vec<Vec<usize>>> = HashMap::new();
 dbg!(i);
             dbg!(dp.len());
             for (solutions, indexes) in &dp {
+
+
                 for (index, target) in targets.iter().enumerate() {
                     let potential_solution = solutions.get(index).expect("should exist") + &input.1.output.value();
-                    if potential_solution <= *target {
+                    if potential_solution + remaining_input_sum[i+1] < *target{
+                        break;
+                    }
+                    if potential_solution <= *target  {
                         let mut new_solutions = solutions.clone();
                         *(new_solutions.get_mut(index).expect("should exist")) = potential_solution;
                         next.entry(new_solutions).or_insert_with(|| {
