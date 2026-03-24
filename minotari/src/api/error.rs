@@ -166,6 +166,19 @@ pub enum ApiError {
     /// - Cryptographic operation failure
     #[error("Failed to create an unsigned transaction: {0}")]
     FailedCreateUnsignedTx(String),
+
+    /// Failed to build or broadcast a burn transaction.
+    ///
+    /// This occurs during burn transaction construction or network submission.
+    /// Returns HTTP 500 Internal Server Error.
+    ///
+    /// # Common Causes
+    ///
+    /// - Insufficient balance
+    /// - Invalid claim public key
+    /// - Base node rejected the transaction
+    #[error("Failed to burn funds: {0}")]
+    FailedToBurnFunds(String),
 }
 
 /// Converts database errors into API errors.
@@ -250,6 +263,10 @@ impl IntoResponse for ApiError {
             },
             ApiError::FailedCreateUnsignedTx(e) => {
                 error!(target: "audit", error = e.as_str(); "API: Failed to create unsigned transaction");
+                (StatusCode::INTERNAL_SERVER_ERROR, e.clone())
+            },
+            ApiError::FailedToBurnFunds(e) => {
+                error!(target: "audit", error = e.as_str(); "API: Failed to burn funds");
                 (StatusCode::INTERNAL_SERVER_ERROR, e.clone())
             },
         };

@@ -467,6 +467,25 @@ impl WalletHttpClient {
         Ok(response)
     }
 
+    /// Fetches the kernel merkle proof for a burn transaction kernel.
+    ///
+    /// Called after a burn transaction reaches sufficient confirmations to produce
+    /// the [`EncodedMerkleProof`] needed for the complete burn claim proof.
+    pub async fn get_kernel_merkle_proof(
+        &self,
+        excess_sig_nonce: &[u8],
+        excess_sig: &[u8],
+    ) -> Result<tari_transaction_components::rpc::models::GenerateKernelMerkleProofResponse, anyhow::Error> {
+        let nonce_hex = to_hex(excess_sig_nonce);
+        let sig_hex = to_hex(excess_sig);
+        let path = format!(
+            "/generate_kernel_merkle_proof?excess_sig_public_nonce={}&excess_sig_signature={}",
+            nonce_hex, sig_hex,
+        );
+        let response = self.http_client.send_request(Method::GET, &path, None).await?;
+        Ok(response)
+    }
+
     pub async fn get_mempool_fee_per_gram_stats(&self, count: u64) -> Result<Vec<FeePerGramStat>, anyhow::Error> {
         debug!(
             count = count;

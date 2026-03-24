@@ -7,6 +7,8 @@ use chacha20poly1305::{
     Key, XChaCha20Poly1305, XNonce,
     aead::{Aead, AeadCore, KeyInit},
 };
+use tari_common_types::types::{CompressedPublicKey, PrivateKey};
+use tari_utilities::byte_array::ByteArray;
 
 fn derive_key(password: &str, salt: &[u8]) -> Result<Key, anyhow::Error> {
     let params = Params::default();
@@ -62,4 +64,16 @@ pub fn decrypt_data<S: AsRef<[u8]>>(data: &FullEncryptedData<S>, password: &str)
         .map_err(|e| anyhow!("Decryption failed: {}", e))?;
 
     Ok(plaintext)
+}
+
+/// Decodes a hex string into a [`CompressedPublicKey`].
+pub fn parse_public_key_hex(s: &str) -> Result<CompressedPublicKey, anyhow::Error> {
+    let bytes = hex::decode(s).map_err(|e| anyhow!("Invalid public key hex: {}", e))?;
+    CompressedPublicKey::from_canonical_bytes(&bytes).map_err(|e| anyhow!("Invalid public key: {}", e))
+}
+
+/// Decodes a hex string into a [`PrivateKey`].
+pub fn parse_private_key_hex(s: &str) -> Result<PrivateKey, anyhow::Error> {
+    let bytes = hex::decode(s).map_err(|e| anyhow!("Invalid private key hex: {}", e))?;
+    PrivateKey::from_canonical_bytes(&bytes).map_err(|e| anyhow!("Invalid private key: {}", e))
 }

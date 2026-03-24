@@ -8,6 +8,7 @@ use indexmap::IndexMap;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Command;
+use tari_common_types::seeds::mnemonic::{Mnemonic, MnemonicLanguage};
 use tari_transaction_components::key_manager::wallet_types::WalletType;
 use tari_utilities::hex::Hex;
 use tempfile::TempDir;
@@ -230,6 +231,37 @@ pub async fn database_with_wallet(world: &mut MinotariWorld) {
         .args(&args)
         .output()
         .expect("Failed to set up test wallet");
+}
+
+#[given("I have a test database with a full signing wallet")]
+pub async fn database_with_signing_wallet(world: &mut MinotariWorld) {
+    world.setup_database();
+    let db_path = world.database_path.as_ref().expect("Database not set up");
+    let seed_words = match &world.wallet {
+        WalletType::SeedWords(sw) => sw
+            .cipher_seed()
+            .to_mnemonic(MnemonicLanguage::English, None)
+            .expect("Failed to generate mnemonic")
+            .join(" ")
+            .reveal()
+            .to_string(),
+        _ => panic!("Expected a SeedWords wallet type"),
+    };
+    let (cmd, mut args) = world.get_minotari_command();
+    args.extend_from_slice(&[
+        "create".to_string(),
+        "--password".to_string(),
+        world.test_password.clone(),
+        "--database-path".to_string(),
+        db_path.to_str().unwrap().to_string(),
+        "--seed-words".to_string(),
+        seed_words,
+    ]);
+
+    let _unused = Command::new(&cmd)
+        .args(&args)
+        .output()
+        .expect("Failed to set up signing wallet");
 }
 
 #[given("I have a test database with multiple accounts")]

@@ -2,7 +2,15 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tari_common::{SubConfigPath, configuration::Network};
 
-use crate::cli::{AccountArgs, ApplyArgs, DatabaseArgs, NodeArgs, TransactionArgs};
+pub fn default_burn_proofs_dir(network: Network) -> PathBuf {
+    dirs_next::data_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("tari")
+        .join(network.as_key_str())
+        .join("burn_proofs")
+}
+
+use crate::cli::{AccountArgs, ApplyArgs, BurnArgs, DaemonArgs, DatabaseArgs, NodeArgs, TransactionArgs};
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct WebhookConfig {
@@ -25,6 +33,10 @@ pub struct WalletConfig {
     pub confirmation_window: u64,
     pub account_name: Option<String>,
     pub webhook: WebhookConfig,
+    /// Directory where complete burn proof JSON files are written after a burn transaction is confirmed
+    /// and the kernel merkle proof is fetched from the base node.
+    /// If not set, defaults to the platform data directory: `<data_dir>/tari/<network>/burn_proofs`.
+    pub burn_proofs_dir: Option<PathBuf>,
 }
 
 impl Default for WalletConfig {
@@ -39,7 +51,16 @@ impl Default for WalletConfig {
             confirmation_window: 3,
             account_name: None,
             webhook: WebhookConfig::default(),
+            burn_proofs_dir: None,
         }
+    }
+}
+
+impl WalletConfig {
+    pub fn effective_burn_proofs_dir(&self) -> PathBuf {
+        self.burn_proofs_dir
+            .clone()
+            .unwrap_or_else(|| default_burn_proofs_dir(self.network))
     }
 }
 
@@ -74,6 +95,21 @@ impl ApplyArgs for WalletConfig {
     fn apply_transaction(&mut self, args: &TransactionArgs) {
         if let Some(confirmation_window) = args.confirmation_window {
             self.confirmation_window = confirmation_window;
+        }
+    }
+
+    fn apply_burn(&mut self, args: &BurnArgs) {
+        if let Some(dir) = &args.burn_proofs_dir {
+            self.burn_proofs_dir = Some(dir.clone());
+        }
+    }
+
+    fn apply_daemon(&mut self, args: &DaemonArgs) {
+        if let Some(scan_interval_secs) = args.scan_interval_secs {
+            self.scan_interval_secs = scan_interval_secs;
+        }
+        if let Some(api_port) = args.api_port {
+            self.api_port = api_port;
         }
     }
 }

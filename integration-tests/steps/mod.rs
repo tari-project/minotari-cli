@@ -5,6 +5,7 @@
 
 pub mod balance;
 pub mod base_node;
+pub mod burn;
 pub mod common;
 pub mod daemon;
 pub mod fund_locking;

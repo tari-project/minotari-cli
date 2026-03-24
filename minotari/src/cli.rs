@@ -228,11 +228,11 @@ pub enum Commands {
         db: DatabaseArgs,
 
         /// Seconds to wait between scan cycles.
-        #[arg(short, long, help = "Interval between scans in seconds", default_value_t = 60)]
-        scan_interval_secs: u64,
+        #[arg(short, long, help = "Interval between scans in seconds")]
+        scan_interval_secs: Option<u64>,
         /// TCP port for the REST API server.
-        #[arg(long, help = "Port for the API server", default_value_t = 9000)]
-        api_port: u16,
+        #[arg(long, help = "Port for the API server")]
+        api_port: Option<u16>,
     },
 
     /// Display the wallet balance.
@@ -640,6 +640,75 @@ pub enum Commands {
         #[command(flatten)]
         account: AccountArgs,
     },
+
+    /// Burn funds and generate an L2 claim proof.
+    ///
+    /// Creates a burn transaction that destroys L1 funds. After the transaction is
+    /// confirmed on-chain, the daemon automatically fetches the kernel merkle proof
+    /// from the base node and writes a complete `CompleteClaimBurnProof` JSON file
+    /// to the configured `burn_proofs_dir` directory.
+    ///
+    /// # Claim Public Key
+    ///
+    /// The `--claim-public-key` is the L2 wallet's public key. The L2 wallet can use
+    /// this key to decrypt the encrypted output value and verify the ownership proof.
+    ///
+    /// # Example
+    ///
+    /// ```bash
+    /// tari burn-funds \
+    ///     --account-name main \
+    ///     --amount 1000000 \
+    ///     --claim-public-key <hex> \
+    ///     --password secret
+    /// ```
+    BurnFunds {
+        #[command(flatten)]
+        security: SecurityArgs,
+        #[command(flatten)]
+        db: DatabaseArgs,
+        #[command(flatten)]
+        tx: TransactionArgs,
+        #[command(flatten)]
+        burn: BurnArgs,
+        #[command(flatten)]
+        node: NodeArgs,
+
+        /// Name of the account to burn funds from.
+        #[arg(short, long, help = "Name of the account to burn from")]
+        account_name: String,
+        /// Amount to burn in microTari.
+        #[arg(short = 'm', long, help = "Amount to burn in microTari")]
+        amount: MicroMinotari,
+        /// L2 claim public key (hex). Required to generate an L2 claim proof.
+        #[arg(long, help = "L2 claim public key in hex")]
+        claim_public_key: Option<String>,
+        /// Sidechain deployment key (hex), for L2 template burns.
+        #[arg(long, help = "Sidechain deployment key in hex")]
+        sidechain_deployment_key: Option<String>,
+        /// Fee rate in microTari per gram.
+        #[arg(short, long, help = "Fee per gram", default_value_t = MicroMinotari(5))]
+        fee_per_gram: MicroMinotari,
+        /// Optional payment memo.
+        #[arg(long, help = "Optional payment memo")]
+        payment_id: Option<String>,
+        /// Seconds to lock UTXOs while the transaction confirms.
+        #[arg(long, default_value_t = 86400)]
+        seconds_to_lock: u64,
+    },
+}
+
+#[derive(Args, Debug)]
+pub struct BurnArgs {
+    /// Directory where burn proof JSON files are written by the daemon.
+    /// Defaults to `<platform data dir>/tari/<network>/burn_proofs`.
+    #[arg(long, help = "Directory for burn proof output files (daemon only)")]
+    pub burn_proofs_dir: Option<PathBuf>,
+}
+
+pub struct DaemonArgs {
+    pub scan_interval_secs: Option<u64>,
+    pub api_port: Option<u16>,
 }
 
 pub trait ApplyArgs {
@@ -647,4 +716,6 @@ pub trait ApplyArgs {
     fn apply_node(&mut self, args: &NodeArgs);
     fn apply_account(&mut self, args: &AccountArgs);
     fn apply_transaction(&mut self, args: &TransactionArgs);
+    fn apply_burn(&mut self, args: &BurnArgs);
+    fn apply_daemon(&mut self, args: &DaemonArgs);
 }

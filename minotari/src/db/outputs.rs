@@ -32,6 +32,7 @@ pub fn insert_output(
     memo_parsed: Option<String>,
     memo_hex: Option<String>,
     payment_reference: PaymentReference,
+    is_burn: bool,
 ) -> WalletDbResult<i64> {
     info!(
         target: "audit",
@@ -68,7 +69,8 @@ pub fn insert_output(
             wallet_output_json,
             memo_parsed,
             memo_hex,
-            payment_reference
+            payment_reference,
+            is_burn
        )
        VALUES (
             :account_id,
@@ -81,7 +83,8 @@ pub fn insert_output(
             :output_json,
             :memo_parsed,
             :memo_hex,
-            :payment_reference
+            :payment_reference,
+            :is_burn
        )
         "#,
         named_params! {
@@ -96,6 +99,7 @@ pub fn insert_output(
             ":memo_parsed": memo_parsed,
             ":memo_hex": memo_hex,
             ":payment_reference": payment_reference_hex,
+            ":is_burn": is_burn,
         },
     )?;
 
@@ -165,6 +169,7 @@ pub struct UnconfirmedOutputRow {
     pub memo_parsed: Option<String>,
     pub memo_hex: Option<String>,
     pub tx_id: i64,
+    pub is_burn: i64,
 }
 
 pub fn get_unconfirmed_outputs(
@@ -179,7 +184,7 @@ pub fn get_unconfirmed_outputs(
 
     let mut stmt = conn.prepare_cached(
         r#"
-        SELECT output_hash, mined_in_block_height, memo_parsed, memo_hex, tx_id
+        SELECT output_hash, mined_in_block_height, memo_parsed, memo_hex, tx_id, is_burn
         FROM outputs o
         WHERE o.account_id = :account_id
           AND o.mined_in_block_height <= :min_height
@@ -451,6 +456,7 @@ pub fn fetch_unspent_outputs(
           AND status = :unspent_status
           AND mined_in_block_height <= :min_height
           AND deleted_at IS NULL
+          AND is_burn = 0
         ORDER BY value DESC
         "#,
     )?;
@@ -541,7 +547,7 @@ pub fn get_output_totals_for_account(
             COALESCE(SUM(CASE WHEN confirmed_height IS NULL THEN value ELSE 0 END), 0) as unconfirmed_val,
             COALESCE(SUM(CASE WHEN status = :locked AND confirmed_height IS NULL THEN value ELSE 0 END), 0) as locked_and_unconfirmed_val
         FROM outputs
-        WHERE account_id = :account_id AND deleted_at IS NULL
+        WHERE account_id = :account_id AND deleted_at IS NULL AND is_burn = 0
         "#,
     )?;
 
@@ -606,6 +612,7 @@ pub fn get_total_unspent_balance(conn: &Connection, account_id: i64) -> WalletDb
         WHERE account_id = :account_id
           AND status = :unspent_status
           AND deleted_at IS NULL
+          AND is_burn = 0
         "#,
     )?;
 

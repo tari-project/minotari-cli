@@ -12,4 +12,5 @@
 //! Tasks are typically started by the daemon and run in the background until
 //! a shutdown signal is received.
 
+pub mod burn_proof_worker;
 pub mod unlocker;
