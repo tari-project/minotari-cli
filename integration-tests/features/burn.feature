@@ -12,13 +12,13 @@ Feature: Burn Funds
     And the wallet has zero balance
     When I try to burn "1000000" microTari
     Then the burn command should fail
-    And the error output should contain "lock"
+    And the error output should contain "insufficient funds"
 
   Scenario: Burn fails with invalid claim public key
     Given I have a test database with an existing wallet
     When I try to burn "1000000" microTari with claim public key "not-valid-hex"
     Then the burn command should fail
-    And the error output should contain "hex"
+    And the error output should contain "claim-public-key"
 
   # ─────────────────────────────────────────────────────────────────────────────
   # Durability scenario: burn proof is written to the DB *before* broadcast.
