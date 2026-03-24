@@ -700,9 +700,9 @@ pub enum Commands {
 
 #[derive(Args, Debug)]
 pub struct BurnArgs {
-    /// Directory where burn proof JSON files are written.
-    /// Defaults to `data/burn_proofs` relative to the working directory.
-    #[arg(long, help = "Directory for burn proof output files")]
+    /// Directory where burn proof JSON files are written by the daemon.
+    /// Defaults to `<platform data dir>/tari/<network>/burn_proofs`.
+    #[arg(long, help = "Directory for burn proof output files (daemon only)")]
     pub burn_proofs_dir: Option<PathBuf>,
 }
 

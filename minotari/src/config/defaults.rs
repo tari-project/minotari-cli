@@ -2,6 +2,14 @@ use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 use tari_common::{SubConfigPath, configuration::Network};
 
+pub fn default_burn_proofs_dir(network: Network) -> PathBuf {
+    dirs_next::data_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join("tari")
+        .join(network.as_key_str())
+        .join("burn_proofs")
+}
+
 use crate::cli::{AccountArgs, ApplyArgs, BurnArgs, DaemonArgs, DatabaseArgs, NodeArgs, TransactionArgs};
 
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
@@ -27,7 +35,8 @@ pub struct WalletConfig {
     pub webhook: WebhookConfig,
     /// Directory where complete burn proof JSON files are written after a burn transaction is confirmed
     /// and the kernel merkle proof is fetched from the base node.
-    pub burn_proofs_dir: PathBuf,
+    /// If not set, defaults to the platform data directory: `<data_dir>/tari/<network>/burn_proofs`.
+    pub burn_proofs_dir: Option<PathBuf>,
 }
 
 impl Default for WalletConfig {
@@ -42,8 +51,16 @@ impl Default for WalletConfig {
             confirmation_window: 3,
             account_name: None,
             webhook: WebhookConfig::default(),
-            burn_proofs_dir: PathBuf::from("data/burn_proofs"),
+            burn_proofs_dir: None,
         }
+    }
+}
+
+impl WalletConfig {
+    pub fn effective_burn_proofs_dir(&self) -> PathBuf {
+        self.burn_proofs_dir
+            .clone()
+            .unwrap_or_else(|| default_burn_proofs_dir(self.network))
     }
 }
 
@@ -83,7 +100,7 @@ impl ApplyArgs for WalletConfig {
 
     fn apply_burn(&mut self, args: &BurnArgs) {
         if let Some(dir) = &args.burn_proofs_dir {
-            self.burn_proofs_dir = dir.clone();
+            self.burn_proofs_dir = Some(dir.clone());
         }
     }
 

@@ -356,6 +356,7 @@ async fn main() -> Result<(), anyhow::Error> {
             let webhook_url = wallet_config.webhook.url.clone();
             let webhook_secret = wallet_config.webhook.secret.clone();
             let send_only_event_types = wallet_config.webhook.send_only_event_types.clone();
+            let burn_proofs_dir = wallet_config.effective_burn_proofs_dir();
 
             let max_blocks_to_scan = u64::MAX;
             let daemon = daemon::Daemon::new(
@@ -371,7 +372,7 @@ async fn main() -> Result<(), anyhow::Error> {
                 webhook_url,
                 webhook_secret,
                 send_only_event_types,
-                wallet_config.burn_proofs_dir,
+                burn_proofs_dir,
             );
             daemon.run().await?;
             Ok(())

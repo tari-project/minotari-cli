@@ -3744,6 +3744,7 @@ dependencies = [
  "chrono",
  "clap 4.5.49",
  "config",
+ "dirs-next 2.0.0",
  "hex",
  "hmac",
  "include_dir",
