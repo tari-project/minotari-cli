@@ -45,8 +45,6 @@
 //! - Transaction and balance data is stored in a SQLite database
 //! - Default data directory is `./data/`
 
-mod commands;
-
 use std::{
     fs::{self, create_dir_all},
     path::{Path, PathBuf},
@@ -63,7 +61,7 @@ use minotari::{
     ScanError,
     api::accounts::LockFundsRequest,
     cli::{ApplyArgs, Cli, Commands, DaemonArgs},
-    commands::burn::handle_burn_funds,
+    commands::{burn::handle_burn_funds, validator_nodes},
     config::{defaults::WalletConfig, loader::load_configuration},
     daemon,
     db::{self, WalletDbError, get_accounts, get_balance, init_db},
@@ -464,7 +462,7 @@ async fn main() -> Result<(), anyhow::Error> {
             wallet_config.apply_database(&db);
             wallet_config.apply_transaction(&tx);
 
-            commands::validator_nodes::handle_register_validator_node(
+            validator_nodes::handle_register_validator_node(
                 vn_public_key,
                 vn_sig_nonce,
                 vn_sig,
@@ -505,7 +503,7 @@ async fn main() -> Result<(), anyhow::Error> {
             wallet_config.apply_database(&db);
             wallet_config.apply_transaction(&tx);
 
-            commands::validator_nodes::handle_submit_validator_node_exit(
+            validator_nodes::handle_submit_validator_node_exit(
                 vn_public_key,
                 vn_sig_nonce,
                 vn_sig,
@@ -542,7 +540,7 @@ async fn main() -> Result<(), anyhow::Error> {
             wallet_config.apply_database(&db);
             wallet_config.apply_transaction(&tx);
 
-            commands::validator_nodes::handle_submit_validator_eviction_proof(
+            validator_nodes::handle_submit_validator_eviction_proof(
                 proof_file,
                 fee_per_gram,
                 payment_id,

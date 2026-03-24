@@ -5,9 +5,7 @@
 
 use std::{fs, path::PathBuf};
 
-use anyhow::anyhow;
-use log::info;
-use minotari::{
+use crate::{
     db::{self, AccountRow, init_db},
     http::WalletHttpClient,
     models::PendingTransactionStatus,
@@ -17,6 +15,8 @@ use minotari::{
         registration::{ValidatorNodeRegistrationParams, create_validator_node_registration_tx},
     },
 };
+use anyhow::anyhow;
+use log::info;
 use rusqlite::Connection;
 use tari_common::configuration::Network;
 use tari_common_types::{
