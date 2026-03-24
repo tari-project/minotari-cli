@@ -190,8 +190,8 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
             self.required_confirmations,
         );
         let mut db_handler = ScanDbHandler::new(self.pool.clone(), block_processor);
-        let mut total_scanned_globally: u64 = 0;
-        let mut blocks_since_reorg_check: u64 = 0;
+        let mut total_scanned_globally = 0;
+        let mut blocks_since_reorg_check = 0;
 
         let mut state_manager = ScannerStateManager::new();
 
@@ -236,7 +236,8 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
                 .await?;
 
             let (scanned_blocks, mut more_blocks) = self.scan_blocks_with_timeout(scanner, &scanner_config).await?;
-
+            let new_blocks_count = scanned_blocks.len() as u64;
+            let is_batch_empty = scanned_blocks.is_empty();
             // Go on, if we stopped on artificial horizon
             if let Some(horizon) = next_horizon_height
                 && let Some(last_block) = scanned_blocks.last()
@@ -256,7 +257,6 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
             }
 
             let mut max_new_height_in_batch = global_next_block;
-            let is_batch_empty = scanned_blocks.is_empty();
 
             if !is_batch_empty {
                 let shared_blocks = Arc::new(scanned_blocks);
@@ -314,12 +314,6 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
                 }
             }
 
-            let new_blocks_count = if is_batch_empty {
-                0
-            } else {
-                (max_new_height_in_batch.saturating_sub(global_next_block)) + 1
-            };
-
             blocks_since_reorg_check += new_blocks_count;
             total_scanned_globally += new_blocks_count;
 
@@ -327,11 +321,11 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
                 self.check_global_reorgs(&mut targets, &db_handler, scanner).await?;
                 blocks_since_reorg_check = 0;
             }
-
             // Handle Partial scan limits
             if let ScanMode::Partial { max_blocks } = mode
                 && total_scanned_globally >= max_blocks
             {
+                info!(last_scanned_block = max_new_height_in_batch; "Scan completed successfully up to stop height");
                 return self.handle_pause(
                     &targets,
                     PauseReason::MaxBlocksReached { limit: max_blocks },

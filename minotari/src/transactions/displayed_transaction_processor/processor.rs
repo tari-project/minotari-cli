@@ -9,15 +9,14 @@ use crate::scan::block_event_accumulator::BlockEventAccumulator;
 use crate::scan::{DetectedOutput, MemoInfo, SpentInput};
 use log::debug;
 use rusqlite::Connection;
-use std::cmp::Reverse;
 use std::collections::HashMap;
+use std::time::Instant;
 use tari_common_types::transaction::TxId;
 use tari_common_types::types::FixedHash;
 use tari_common_types::types::PrivateKey;
 use tari_transaction_components::MicroMinotari;
 use tari_transaction_components::transaction_components::OutputType;
 use tari_utilities::ByteArray;
-
 /// Processes balance changes into user-displayable transactions.
 pub struct DisplayedTransactionProcessor {
     current_tip_height: u64,
@@ -114,98 +113,84 @@ impl DisplayedTransactionProcessor {
             new_debit.push((balance_change.clone(), output.clone()));
         }
         new_debit.sort_by_key(|a| a.1.output.value());
-
-        //Now we have a list of inputs and outputs that don't have matching transactions
+        dbg!(new_debit.len());
+        let start = Instant::now();
         let mut new_transactions = Vec::new();
-        while let Some((balance_change, output)) = new_credit.pop() {
-            let (initial_status, initial_confirmations) = self.calculate_status_and_confirmations(output.height);
-            //lets do coinbases first, they are easy to identify as they have no matching inputs.
-            if output.output.is_coinbase() {
-                //create new display transaction for this coinbase output
-                let id = TxId::new_deterministic(self.view_key.as_bytes(), &output.output.output_hash());
-                let memo = MemoInfo::from_output(&output.output);
-                let display_tx = DisplayedTransactionBuilder::new()
-                    .account_id(accumulator.account_id as Id)
-                    .source(TransactionSource::Coinbase)
-                    .status(initial_status)
-                    .credits_and_debits(balance_change.balance_credit, 0.into())
-                    .counterparty(None)
-                    .blockchain_info(
-                        accumulator.height,
-                        output.mined_in_block_hash,
-                        balance_change.effective_date,
-                        initial_confirmations,
-                    )
-                    .fee(None)
-                    .inputs(vec![])
-                    .outputs(vec![TransactionOutput {
-                        hash: output.output.output_hash(),
-                        amount: output.output.value(),
-                        status: OutputStatus::Unspent,
-                        mined_in_block_height: output.height,
-                        mined_in_block_hash: output.mined_in_block_hash,
-                        output_type: OutputType::Coinbase,
-                        is_change: false,
-                    }])
-                    .message(memo.parsed)
-                    .memo_hex(memo.hex)
-                    .output_type(Some(OutputType::Coinbase))
-                    .coinbase_extra(Some(output.output.features().coinbase_extra.clone()))
-                    .build(id)?;
-                new_transactions.push(display_tx);
+        // Now we have a list of inputs and outputs that don't have matching transactions
+        // lets start by looking at the coinbases first, we do in reverse, se we can remove them without changing the order.
+        for i in (0..new_credit.len()).rev() {
+            if !new_credit.get(i).expect("should exist").1.output.is_coinbase() {
+                //is not coinbase, go to next
                 continue;
             }
-            let mut debit_value = 0.into();
-            let mut inputs = Vec::new();
-            let mut other_party = output.output.payment_id().get_sender_address();
+            let (balance_change, output) = new_credit.remove(i);
+            let (initial_status, initial_confirmations) = self.calculate_status_and_confirmations(output.height);
             let id = TxId::new_deterministic(self.view_key.as_bytes(), &output.output.output_hash());
             let memo = MemoInfo::from_output(&output.output);
-            //create new display transaction for each
-            if let Some((sender, amount, _tx_type, _one_sided)) =
-                output.output.payment_id().get_transaction_info_details()
+            let display_tx = DisplayedTransactionBuilder::new()
+                .account_id(accumulator.account_id as Id)
+                .source(TransactionSource::Coinbase)
+                .status(initial_status)
+                .credits_and_debits(balance_change.balance_credit, 0.into())
+                .counterparty(None)
+                .blockchain_info(
+                    accumulator.height,
+                    output.mined_in_block_hash,
+                    balance_change.effective_date,
+                    initial_confirmations,
+                )
+                .fee(None)
+                .inputs(vec![])
+                .outputs(vec![TransactionOutput {
+                    hash: output.output.output_hash(),
+                    amount: output.output.value(),
+                    status: OutputStatus::Unspent,
+                    mined_in_block_height: output.height,
+                    mined_in_block_hash: output.mined_in_block_hash,
+                    output_type: OutputType::Coinbase,
+                    is_change: false,
+                }])
+                .message(memo.parsed)
+                .memo_hex(memo.hex)
+                .output_type(Some(OutputType::Coinbase))
+                .coinbase_extra(Some(output.output.features().coinbase_extra.clone()))
+                .build(id)?;
+            new_transactions.push(display_tx);
+        }
+        // Now lets search at all non-change, ake received outputs
+        for i in (0..new_credit.len()).rev() {
+            if new_credit
+                .get(i)
+                .expect("should exist")
+                .1
+                .output
+                .payment_id()
+                .get_transaction_info_details()
+                .is_some()
             {
-                // So this is change from our wallet.
-                let total_send =
-                    amount + output.output.value() + output.output.payment_id().get_fee().unwrap_or_default();
-                let mut selected_inputs = Vec::with_capacity(new_debit.len());
-                if Self::iter_search_for_matching_inputs(
-                    total_send,
-                    MicroMinotari::from(0),
-                    &new_debit,
-                    &mut selected_inputs,
-                    0,
-                ) {
-                    selected_inputs.sort();
-                    selected_inputs.reverse();
-                    for i in selected_inputs {
-                        let input = &new_debit.remove(i);
-                        debit_value += input.1.output.value();
-                        inputs.push(TransactionInput {
-                            output_hash: input.1.output.output_hash(),
-                            amount: input.1.output.value(),
-                            mined_in_block_hash: input.1.mined_in_block,
-                            matched_output_id: input.1.output_id,
-                        });
-                    }
-                }
-                other_party = Some(sender);
+                //is not change, go to next
+                continue;
             }
+            let (balance_change, output) = new_credit.remove(i);
+            let (initial_status, initial_confirmations) = self.calculate_status_and_confirmations(output.height);
+            let id = TxId::new_deterministic(self.view_key.as_bytes(), &output.output.output_hash());
+            let memo = MemoInfo::from_output(&output.output);
             let sent = output.output.payment_id().get_sent_hashes().unwrap_or_default();
             // this must be some received output
+            let other_party = output.output.payment_id().get_sender_address();
             let display_tx = DisplayedTransactionBuilder::new()
                 .account_id(accumulator.account_id as Id)
                 .source(TransactionSource::Transfer)
                 .status(initial_status)
-                .credits_and_debits(balance_change.balance_credit, debit_value)
+                .credits_and_debits(balance_change.balance_credit, 0.into())
                 .counterparty(other_party)
                 .blockchain_info(
                     accumulator.height,
                     output.mined_in_block_hash,
                     balance_change.effective_date,
-                    0,
+                    initial_confirmations,
                 )
                 .fee(output.output.payment_id().get_fee())
-                .inputs(inputs)
                 .message(memo.parsed)
                 .memo_hex(memo.hex)
                 .outputs(vec![TransactionOutput {
@@ -222,7 +207,200 @@ impl DisplayedTransactionProcessor {
                 .build(id)?;
             new_transactions.push(display_tx);
         }
-        while let Some((balance_change, input)) = new_debit.pop() {
+        new_transactions.append(&mut self.dp_search_inputs(new_debit, new_credit, accumulator)?);
+
+        let duration = start.elapsed();
+        println!("Time taken to process transactions: {:?}", duration);
+        dbg!(new_transactions.len());
+        panic!("end here");
+
+        Ok((updated_transactions.into_values().collect(), new_transactions))
+    }
+
+    fn dp_search_inputs(
+        &self,
+        inputs: Vec<(BalanceChange, SpentInput)>,
+        outputs: Vec<(BalanceChange, DetectedOutput)>,
+        accumulator: &BlockEventAccumulator,
+    ) -> Result<Vec<DisplayedTransaction>, ProcessorError> {
+        struct DPSolution {
+            solutions: Vec<MicroMinotari>,
+            matching_targets: usize,
+        }
+        let mut result = Vec::new();
+        // hashmap is vec<solutions, vec<indices of inputs used for this solution>>
+        // the targets is the matching outputs + for no matching inputs, last will always be no matching
+        let mut targets = Vec::new();
+        let mut unmatched_index = Vec::new();
+        for (i, output) in outputs.iter().enumerate() {
+            if let Some((_sender, amount, _tx_type, _one_sided)) =
+                output.1.output.payment_id().get_transaction_info_details()
+            {
+                let total_send =
+                    amount + output.1.output.value() + output.1.output.payment_id().get_fee().unwrap_or_default();
+                targets.push(total_send);
+            } else {
+                unmatched_index.push(i);
+            }
+        }
+        dbg!(&targets);
+        let mut tot_target: MicroMinotari = 0.into();
+        for target in &targets{
+            tot_target += *target;
+        }
+        dbg!(tot_target);
+        dbg!(&unmatched_index);
+        let mut total_in:MicroMinotari = 0.into();
+        for input in &inputs{
+            total_in += input.1.output.value();
+        }
+        dbg!(total_in);
+        let mut dp: HashMap<Vec<MicroMinotari>, Vec<Vec<usize>>> = HashMap::new();
+        dp.insert(vec![0.into(); targets.len() + 1], vec![Vec::new();targets.len() + 1]);
+        dbg!(inputs.len());
+        for (i, input) in inputs.iter().enumerate() {
+            let mut next: HashMap<Vec<MicroMinotari>, Vec<Vec<usize>>> = HashMap::new();
+dbg!(i);
+            dbg!(dp.len());
+            for (solutions, indexes) in &dp {
+                for (index, target) in targets.iter().enumerate() {
+                    let potential_solution = solutions.get(index).expect("should exist") + &input.1.output.value();
+                    if potential_solution <= *target {
+                        let mut new_solutions = solutions.clone();
+                        *(new_solutions.get_mut(index).expect("should exist")) = potential_solution;
+                        next.entry(new_solutions).or_insert_with(|| {
+                            let mut new_indexes = indexes.clone();
+                            new_indexes.get_mut(index).expect("should exist").push(i);
+                            new_indexes
+                        });
+                    }
+                }
+                // lets test the last case of it not matching any output
+                let potential_solution = solutions.last().expect("should exist") + &input.1.output.value();
+                let mut new_solutions = solutions.clone();
+                *(new_solutions.last_mut().expect("should exist")) = potential_solution;
+                next.entry(new_solutions).or_insert_with(|| {
+                    let mut new_indexes = indexes.clone();
+                    new_indexes.last_mut().expect("should exist").push(i);
+                    new_indexes
+                });
+            }
+            dp = next;
+        }
+        let mut best_solution: Option<DPSolution> = None;
+        // the last solution will always be the unmatche one, so we go down the order and hopefully is all went good, the first one would be a full matching one.
+        'solution_loop: for (solutions, _indexes) in &dp {
+            let mut matching_targets = 0;
+            for (index, target) in targets.iter().enumerate() {
+                if solutions.get(index).expect("Should exist") != target
+                    || solutions.get(index).expect("Should exist") == &0.into()
+                {
+                    continue 'solution_loop;
+                }
+                if solutions.get(index).expect("Should exist") == target {
+                    matching_targets += 1;
+                }
+            }
+            // if we are here, it means there is no broken match
+            match &best_solution {
+                Some(d_p_solution) => {
+                    if matching_targets > d_p_solution.matching_targets {
+                        best_solution = Some(DPSolution {
+                            solutions: solutions.clone(),
+                            matching_targets,
+                        });
+                    }
+                },
+                None => {
+                    best_solution = Some(DPSolution {
+                        solutions: solutions.clone(),
+                        matching_targets,
+                    })
+                },
+            }
+        }
+
+        // lets see if there is one(there should be), but lets be safe
+        let best_solution = if best_solution.is_none() {
+            // should not be here, but lets just mark as all unmatched
+            unmatched_index = Vec::new();
+            for i in 0..outputs.len() {
+                unmatched_index.push(i);
+            }
+            DPSolution {
+                solutions: Vec::new(),
+                matching_targets: 0,
+            }
+        } else {
+            best_solution.unwrap()
+        };
+        let mut solution_counter = 0;
+        let mut paired_inputs = Vec::new();
+        for (i, (balance_change, output)) in outputs.iter().enumerate() {
+            let sent = output.output.payment_id().get_sent_hashes().unwrap_or_default();
+            let (initial_status, initial_confirmations) = self.calculate_status_and_confirmations(output.height);
+            let mut other_party = output.output.payment_id().get_sender_address();
+            let mut debit_value = 0.into();
+            let mut tx_inputs = Vec::new();
+            let id = TxId::new_deterministic(self.view_key.as_bytes(), &output.output.output_hash());
+            let memo = MemoInfo::from_output(&output.output);
+            let mut builder = DisplayedTransactionBuilder::new()
+                .account_id(accumulator.account_id as Id)
+                .source(TransactionSource::Transfer)
+                .status(initial_status)
+                .blockchain_info(
+                    accumulator.height,
+                    output.mined_in_block_hash,
+                    balance_change.effective_date,
+                    initial_confirmations,
+                )
+                .fee(output.output.payment_id().get_fee())
+                .message(memo.parsed)
+                .memo_hex(memo.hex)
+                .outputs(vec![TransactionOutput {
+                    hash: output.output.output_hash(),
+                    amount: output.output.value(),
+                    status: OutputStatus::Unspent,
+                    mined_in_block_height: output.height,
+                    mined_in_block_hash: output.mined_in_block_hash,
+                    output_type: OutputType::Standard,
+                    is_change: false,
+                }])
+                .output_type(Some(OutputType::Standard))
+                .sent_output_hashes(sent);
+            if !unmatched_index.contains(&i) {
+                let (sender, _amount, _tx_type, _one_sided) = output
+                    .output
+                    .payment_id()
+                    .get_transaction_info_details()
+                    .ok_or(ProcessorError::MissingError("Missing info on transaction".to_string()))?;
+                other_party = Some(sender);
+                let indexes = dp.get(&best_solution.solutions).expect("should exist").clone();
+                for input_index in indexes.get(solution_counter).expect("should exist") {
+                    let (_balance, input) = inputs.get(*input_index).expect("should exist").clone();
+                    debit_value += input.output.value();
+                    tx_inputs.push(TransactionInput {
+                        output_hash: input.output.output_hash(),
+                        amount: input.output.value(),
+                        mined_in_block_hash: input.mined_in_block,
+                        matched_output_id: input.output_id,
+                    });
+                    paired_inputs.push(*input_index);
+                }
+                solution_counter += 1;
+            }
+            builder = builder
+                .inputs(tx_inputs)
+                .credits_and_debits(balance_change.balance_credit, debit_value)
+                .counterparty(other_party);
+            let tx = builder.build(id)?;
+            result.push(tx);
+        }
+        // Now lets handle all unmatched inputs
+        for (i, (balance_change, input)) in inputs.iter().enumerate() {
+            if paired_inputs.contains(&i) {
+                continue;
+            }
             let (initial_status, initial_confirmations) =
                 self.calculate_status_and_confirmations(input.mined_in_block_height);
             // these are unpaired inputs, so they must be outgoing transactions that don't have a change output
@@ -248,42 +426,10 @@ impl DisplayedTransactionProcessor {
                     self.view_key.as_bytes(),
                     &input.output.output_hash(),
                 ))?;
-            new_transactions.push(display_tx);
+            result.push(display_tx);
         }
-        Ok((updated_transactions.into_values().collect(), new_transactions))
-    }
 
-    // A recursive function to search for matching inputs that sum up to the amount sent returns on the first matched set
-    fn iter_search_for_matching_inputs(
-        amount_sent: MicroMinotari,
-        amount_already_selected: MicroMinotari,
-        spent_inputs: &[(BalanceChange, SpentInput)],
-        selected_inputs: &mut Vec<usize>,
-        start_index: usize,
-    ) -> bool {
-        for i in start_index..spent_inputs.len() {
-            let input_value = spent_inputs.get(i).expect("bounds are checked").1.output.value();
-            let new_total = amount_already_selected + input_value;
-            if new_total > amount_sent {
-                return false;
-            }
-
-            if new_total == amount_sent {
-                // we have our match, stop searching
-                selected_inputs.push(i);
-                return true;
-            }
-            if i + 1 == spent_inputs.len() {
-                return false;
-            }
-            // search this branch further; backtrack if no match found
-            selected_inputs.push(i);
-            if Self::iter_search_for_matching_inputs(amount_sent, new_total, spent_inputs, selected_inputs, i + 1) {
-                return true;
-            }
-            selected_inputs.pop();
-        }
-        false
+        Ok(result)
     }
 
     pub fn process_all_stored_with_conn(
