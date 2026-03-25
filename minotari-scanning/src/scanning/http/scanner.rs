@@ -354,7 +354,7 @@ where
             ));
         }
         let tip = self.get_tip_info().await?;
-        if config.start_height > tip.best_block_height  {
+        if config.start_height > tip.best_block_height {
             debug!(
                 "Tip height {} is less than requested start height {}, returning empty results",
                 tip.best_block_height, config.start_height
