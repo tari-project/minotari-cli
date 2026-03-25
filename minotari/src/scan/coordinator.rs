@@ -136,7 +136,6 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
     ) -> Result<AccountSyncTarget, ScanError> {
         let key_manager = account.get_key_manager(password)?;
         let view_key = key_manager.get_private_view_key();
-
         let reorg_result = reorg::handle_reorgs(scanner, conn, account.id, self.webhook_config.clone())
             .await
             .map_err(ScanError::Fatal)?;
@@ -391,7 +390,6 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
         }
 
         let mut conn = db_handler.get_connection().await?;
-
         for target in targets {
             let res = reorg::handle_reorgs(scanner, &mut conn, target.account.id, self.webhook_config.clone())
                 .await
