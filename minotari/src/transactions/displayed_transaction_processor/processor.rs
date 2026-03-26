@@ -9,14 +9,14 @@ use crate::scan::block_event_accumulator::BlockEventAccumulator;
 use crate::scan::{DetectedOutput, MemoInfo, SpentInput};
 use log::debug;
 use rusqlite::Connection;
-use std::collections::HashMap;
-use std::time::Instant;
+use std::collections::{BinaryHeap, HashMap};
 use tari_common_types::transaction::TxId;
 use tari_common_types::types::FixedHash;
 use tari_common_types::types::PrivateKey;
 use tari_transaction_components::MicroMinotari;
 use tari_transaction_components::transaction_components::OutputType;
 use tari_utilities::ByteArray;
+
 /// Processes balance changes into user-displayable transactions.
 pub struct DisplayedTransactionProcessor {
     current_tip_height: u64,
@@ -113,8 +113,6 @@ impl DisplayedTransactionProcessor {
             new_debit.push((balance_change.clone(), output.clone()));
         }
         new_debit.sort_by_key(|a| a.1.output.value());
-        dbg!(new_debit.len());
-        let start = Instant::now();
         let mut new_transactions = Vec::new();
         // Now we have a list of inputs and outputs that don't have matching transactions
         // lets start by looking at the coinbases first, we do in reverse, se we can remove them without changing the order.
@@ -207,28 +205,17 @@ impl DisplayedTransactionProcessor {
                 .build(id)?;
             new_transactions.push(display_tx);
         }
-        new_transactions.append(&mut self.dp_search_inputs(new_debit, new_credit, accumulator)?);
-
-        let duration = start.elapsed();
-        println!("Time taken to process transactions: {:?}", duration);
-        dbg!(new_transactions.len());
-        panic!("end here");
+        new_transactions.append(&mut self.search_inputs(new_debit, new_credit, accumulator)?);
 
         Ok((updated_transactions.into_values().collect(), new_transactions))
     }
 
-    fn dp_search_inputs(
+    fn search_inputs(
         &self,
         mut inputs: Vec<(BalanceChange, SpentInput)>,
         outputs: Vec<(BalanceChange, DetectedOutput)>,
         accumulator: &BlockEventAccumulator,
     ) -> Result<Vec<DisplayedTransaction>, ProcessorError> {
-        struct DPSolution {
-            solutions: Vec<MicroMinotari>,
-            matching_targets: usize,
-        }
-        //lets sort inputs to desc
-        inputs.sort_by_key(|a| a.1.output.value());
         let mut result = Vec::new();
         // hashmap is vec<solutions, vec<indices of inputs used for this solution>>
         // the targets is the matching outputs + for no matching inputs, last will always be no matching
@@ -240,122 +227,56 @@ impl DisplayedTransactionProcessor {
             {
                 let total_send =
                     amount + output.1.output.value() + output.1.output.payment_id().get_fee().unwrap_or_default();
-                targets.push(total_send);
+                targets.push((total_send, i));
             } else {
                 unmatched_index.push(i);
             }
         }
-        dbg!(&targets);
-        let mut tot_target: MicroMinotari = 0.into();
-        for target in &targets{
-            tot_target += *target;
-        }
-        dbg!(tot_target);
-        dbg!(&unmatched_index);
-        let mut total_in:MicroMinotari = 0.into();
-        for input in &inputs{
-            total_in += input.1.output.value();
-        }
-        dbg!(total_in);
-        let mut dp: HashMap<Vec<MicroMinotari>, Vec<Vec<usize>>> = HashMap::new();
-        dp.insert(vec![0.into(); targets.len() + 1], vec![Vec::new();targets.len() + 1]);
-        dbg!(inputs.len());
-        let mut remaining_input_sum: Vec<MicroMinotari> = vec![0.into(); inputs.len() + 1];
-        for i in (0..inputs.len()).rev() {
-            remaining_input_sum[i] = remaining_input_sum[i + 1] + inputs[i].1.output.value();
-        }
-        for (i, input) in inputs.iter().enumerate() {
-            let mut next: HashMap<Vec<MicroMinotari>, Vec<Vec<usize>>> = HashMap::new();
-dbg!(i);
-            dbg!(dp.len());
-            for (solutions, indexes) in &dp {
 
+        let solutions = Self::solve_back_track(&inputs, targets.clone());
+        let mut used_inputs = BinaryHeap::new();
 
-                for (index, target) in targets.iter().enumerate() {
-                    let potential_solution = solutions.get(index).expect("should exist") + &input.1.output.value();
-                    if potential_solution + remaining_input_sum[i+1] < *target{
-                        break;
-                    }
-                    if potential_solution <= *target  {
-                        let mut new_solutions = solutions.clone();
-                        *(new_solutions.get_mut(index).expect("should exist")) = potential_solution;
-                        next.entry(new_solutions).or_insert_with(|| {
-                            let mut new_indexes = indexes.clone();
-                            new_indexes.get_mut(index).expect("should exist").push(i);
-                            new_indexes
-                        });
-                    }
-                }
-                // lets test the last case of it not matching any output
-                let potential_solution = solutions.last().expect("should exist") + &input.1.output.value();
-                let mut new_solutions = solutions.clone();
-                *(new_solutions.last_mut().expect("should exist")) = potential_solution;
-                next.entry(new_solutions).or_insert_with(|| {
-                    let mut new_indexes = indexes.clone();
-                    new_indexes.last_mut().expect("should exist").push(i);
-                    new_indexes
+        for (output_index, solution) in solutions {
+            let mut balance = MicroMinotari::from(0);
+            let mut debit_value = 0.into();
+            let mut tx_inputs = Vec::new();
+            for index in &solution {
+                let (_input_balance, input) = inputs
+                    .get(*index)
+                    .ok_or(ProcessorError::MissingError("Input index out of bounds".to_string()))?;
+                balance += input.output.value();
+                debit_value += input.output.value();
+                tx_inputs.push(TransactionInput {
+                    output_hash: input.output.output_hash(),
+                    amount: input.output.value(),
+                    mined_in_block_hash: input.mined_in_block,
+                    matched_output_id: input.output_id,
                 });
             }
-            dp = next;
-        }
-        let mut best_solution: Option<DPSolution> = None;
-        // the last solution will always be the unmatche one, so we go down the order and hopefully is all went good, the first one would be a full matching one.
-        'solution_loop: for (solutions, _indexes) in &dp {
-            let mut matching_targets = 0;
-            for (index, target) in targets.iter().enumerate() {
-                if solutions.get(index).expect("Should exist") != target
-                    || solutions.get(index).expect("Should exist") == &0.into()
-                {
-                    continue 'solution_loop;
-                }
-                if solutions.get(index).expect("Should exist") == target {
-                    matching_targets += 1;
-                }
-            }
-            // if we are here, it means there is no broken match
-            match &best_solution {
-                Some(d_p_solution) => {
-                    if matching_targets > d_p_solution.matching_targets {
-                        best_solution = Some(DPSolution {
-                            solutions: solutions.clone(),
-                            matching_targets,
-                        });
-                    }
-                },
-                None => {
-                    best_solution = Some(DPSolution {
-                        solutions: solutions.clone(),
-                        matching_targets,
-                    })
-                },
-            }
-        }
 
-        // lets see if there is one(there should be), but lets be safe
-        let best_solution = if best_solution.is_none() {
-            // should not be here, but lets just mark as all unmatched
-            unmatched_index = Vec::new();
-            for i in 0..outputs.len() {
-                unmatched_index.push(i);
+            let (balance_change, output) = outputs
+                .get(output_index)
+                .ok_or(ProcessorError::MissingError("Output index out of bounds".to_string()))?;
+            let (sender, amount, _tx_type, _one_sided) = output
+                .output
+                .payment_id()
+                .get_transaction_info_details()
+                .ok_or(ProcessorError::MissingError("Missing Output details".to_string()))?;
+            let total_send = amount + output.output.value() + output.output.payment_id().get_fee().unwrap_or_default();
+            if total_send != balance {
+                unmatched_index.push(output_index);
+                debug!("Output does not have a matching input solution");
+                continue;
             }
-            DPSolution {
-                solutions: Vec::new(),
-                matching_targets: 0,
+            for index in solution {
+                used_inputs.push(index);
             }
-        } else {
-            best_solution.unwrap()
-        };
-        let mut solution_counter = 0;
-        let mut paired_inputs = Vec::new();
-        for (i, (balance_change, output)) in outputs.iter().enumerate() {
             let sent = output.output.payment_id().get_sent_hashes().unwrap_or_default();
             let (initial_status, initial_confirmations) = self.calculate_status_and_confirmations(output.height);
             let mut other_party = output.output.payment_id().get_sender_address();
-            let mut debit_value = 0.into();
-            let mut tx_inputs = Vec::new();
             let id = TxId::new_deterministic(self.view_key.as_bytes(), &output.output.output_hash());
             let memo = MemoInfo::from_output(&output.output);
-            let mut builder = DisplayedTransactionBuilder::new()
+            let tx = DisplayedTransactionBuilder::new()
                 .account_id(accumulator.account_id as Id)
                 .source(TransactionSource::Transfer)
                 .status(initial_status)
@@ -378,44 +299,196 @@ dbg!(i);
                     is_change: false,
                 }])
                 .output_type(Some(OutputType::Standard))
-                .sent_output_hashes(sent);
-            if !unmatched_index.contains(&i) {
-                let (sender, _amount, _tx_type, _one_sided) = output
-                    .output
-                    .payment_id()
-                    .get_transaction_info_details()
-                    .ok_or(ProcessorError::MissingError("Missing info on transaction".to_string()))?;
-                other_party = Some(sender);
-                let indexes = dp.get(&best_solution.solutions).expect("should exist").clone();
-                for input_index in indexes.get(solution_counter).expect("should exist") {
-                    let (_balance, input) = inputs.get(*input_index).expect("should exist").clone();
-                    debit_value += input.output.value();
-                    tx_inputs.push(TransactionInput {
-                        output_hash: input.output.output_hash(),
-                        amount: input.output.value(),
-                        mined_in_block_hash: input.mined_in_block,
-                        matched_output_id: input.output_id,
-                    });
-                    paired_inputs.push(*input_index);
-                }
-                solution_counter += 1;
-            }
-            builder = builder
+                .sent_output_hashes(sent)
                 .inputs(tx_inputs)
                 .credits_and_debits(balance_change.balance_credit, debit_value)
-                .counterparty(other_party);
-            let tx = builder.build(id)?;
+                .counterparty(other_party)
+                .build(id)?;
+            other_party = Some(sender);
             result.push(tx);
         }
-        // Now lets handle all unmatched inputs
-        for (i, (balance_change, input)) in inputs.iter().enumerate() {
-            if paired_inputs.contains(&i) {
-                continue;
+        // these should be desc order, so lets pop them to remove them
+        while let Some(index) = used_inputs.pop() {
+            let _unused = inputs.remove(index);
+        }
+        result.append(&mut self.handle_unmatched_inputs_outputs(inputs, &outputs, &unmatched_index, accumulator)?);
+
+        Ok(result)
+    }
+
+    pub fn solve_back_track(
+        inputs: &[(BalanceChange, SpentInput)],
+        mut targets: Vec<(MicroMinotari, usize)>,
+    ) -> Vec<(usize, Vec<usize>)> {
+        let mut nums: Vec<MicroMinotari> = inputs.iter().map(|v| v.1.output.value()).collect();
+        let mut remaining: Vec<usize> = (0..nums.len()).collect();
+        let mut result: Vec<(usize, Vec<usize>)> = Vec::new();
+
+        targets.sort_unstable_by_key(|&(v, _)| v);
+        nums.sort_unstable_by_key(|&v| v);
+
+        for (target, original_output_idx) in targets {
+            let used = Self::backtrack_subset(&remaining, &nums, target).unwrap_or_default();
+            // Remove used indices from remaining pool
+            remaining.retain(|i| !used.contains(i));
+            result.push((original_output_idx, used));
+        }
+
+        result
+    }
+
+    fn backtrack_subset(pool: &[usize], nums: &[MicroMinotari], target: MicroMinotari) -> Option<Vec<usize>> {
+        // Only consider inputs that can possibly contribute
+        let mut candidates: Vec<usize> = Vec::new();
+        for index in pool {
+            if *nums.get(*index)? <= target {
+                candidates.push(*index);
             }
+        }
+
+        // Sort descending for pruning
+        candidates.sort_unstable_by(|&a, &b| {
+            nums.get(b)
+                .expect("Should exist")
+                .cmp(nums.get(a).expect("Should exist"))
+        });
+
+        let vals: Vec<MicroMinotari> = candidates
+            .iter()
+            .map(|&i| *nums.get(i).expect("Should exist"))
+            .collect();
+
+        let suffix: Vec<MicroMinotari> = {
+            let mut s = vec![0.into(); vals.len() + 1];
+            for i in (0..vals.len()).rev() {
+                let s_val = s.get(i + 1).expect("Should exist");
+                let val = vals.get(i).expect("Should exist");
+                *(s.get_mut(i).expect("Should exist")) = *s_val + *val;
+            }
+            s
+        };
+
+        // Quick check: can we even reach the target?
+        if suffix.first()? < &target {
+            return None;
+        }
+
+        let mut assignment = vec![false; vals.len()];
+
+        fn back_track(
+            vals: &[MicroMinotari],
+            suffix: &[MicroMinotari],
+            assignment: &mut Vec<bool>,
+            step: usize,
+            current: MicroMinotari,
+            target: MicroMinotari,
+        ) -> bool {
+            if current == target {
+                return true;
+            }
+            if step == vals.len() {
+                return false;
+            }
+
+            let n = match vals.get(step) {
+                Some(n) => n,
+                None => return false,
+            };
+            let rem = match suffix.get(step + 1) {
+                Some(rem) => rem,
+                None => return false,
+            };
+
+            // Prune: even taking everything remaining won't reach target
+            if current + rem + n < target {
+                return false;
+            }
+            // Prune: already over target
+            if current > target {
+                return false;
+            }
+            if assignment.len() <= step {
+                return false;
+            }
+
+            // Try taking this input
+            if current + n <= target {
+                *assignment.get_mut(step).expect("Already checked") = true;
+                if back_track(vals, suffix, assignment, step + 1, current + n, target) {
+                    return true;
+                }
+            }
+
+            // Try skipping this input
+            *assignment.get_mut(step).expect("Already checked") = false;
+            back_track(vals, suffix, assignment, step + 1, current, target)
+        }
+
+        if back_track(&vals, &suffix, &mut assignment, 0, 0.into(), target) {
+            Some(
+                candidates
+                    .iter()
+                    .zip(&assignment)
+                    .filter(|&(_, &taken)| taken)
+                    .map(|(&orig_idx, _)| orig_idx)
+                    .collect(),
+            )
+        } else {
+            None
+        }
+    }
+
+    fn handle_unmatched_inputs_outputs(
+        &self,
+        inputs: Vec<(BalanceChange, SpentInput)>,
+        outputs: &[(BalanceChange, DetectedOutput)],
+        unmatched_outputs: &[usize],
+        accumulator: &BlockEventAccumulator,
+    ) -> Result<Vec<DisplayedTransaction>, ProcessorError> {
+        let mut results = Vec::new();
+        for index in unmatched_outputs {
+            let (balance_change, output) = outputs
+                .get(*index)
+                .ok_or(ProcessorError::MissingError("Output index out of bounds".to_string()))?;
+            let (initial_status, initial_confirmations) = self.calculate_status_and_confirmations(output.height);
+            let id = TxId::new_deterministic(self.view_key.as_bytes(), &output.output.output_hash());
+            let memo = MemoInfo::from_output(&output.output);
+            let sent = output.output.payment_id().get_sent_hashes().unwrap_or_default();
+            let other_party = output.output.payment_id().get_sender_address();
+            let display_tx = DisplayedTransactionBuilder::new()
+                .account_id(accumulator.account_id as Id)
+                .source(TransactionSource::Transfer)
+                .status(initial_status)
+                .credits_and_debits(balance_change.balance_credit, 0.into())
+                .counterparty(other_party)
+                .blockchain_info(
+                    accumulator.height,
+                    output.mined_in_block_hash,
+                    balance_change.effective_date,
+                    initial_confirmations,
+                )
+                .fee(output.output.payment_id().get_fee())
+                .message(memo.parsed)
+                .memo_hex(memo.hex)
+                .outputs(vec![TransactionOutput {
+                    hash: output.output.output_hash(),
+                    amount: output.output.value(),
+                    status: OutputStatus::Unspent,
+                    mined_in_block_height: output.height,
+                    mined_in_block_hash: output.mined_in_block_hash,
+                    output_type: OutputType::Standard,
+                    is_change: false,
+                }])
+                .output_type(Some(OutputType::Standard))
+                .sent_output_hashes(sent)
+                .build(id)?;
+            results.push(display_tx);
+        }
+        for (balance_change, input) in inputs {
             let (initial_status, initial_confirmations) =
                 self.calculate_status_and_confirmations(input.mined_in_block_height);
             // these are unpaired inputs, so they must be outgoing transactions that don't have a change output
-            let display_tx = DisplayedTransactionBuilder::new()
+            let tx = DisplayedTransactionBuilder::new()
                 .account_id(accumulator.account_id as Id)
                 .source(TransactionSource::Transfer)
                 .status(initial_status)
@@ -437,10 +510,10 @@ dbg!(i);
                     self.view_key.as_bytes(),
                     &input.output.output_hash(),
                 ))?;
-            result.push(display_tx);
+            results.push(tx);
         }
 
-        Ok(result)
+        Ok(results)
     }
 
     pub fn process_all_stored_with_conn(
@@ -697,81 +770,6 @@ mod tests {
     fn test_processor_new_with_zero_tip_height() {
         let processor = DisplayedTransactionProcessor::new(0, 3, PrivateKey::default());
         assert_eq!(processor.current_tip_height, 0);
-    }
-
-    #[test]
-    fn test_iter_search_for_matching_inputs_exact_match_single_input() {
-        let _balance_change = create_debit_balance_change(1, 1000, 50);
-
-        // Create a mock SpentInput - we need to use the actual type from the crate
-        // For this test, we'll test the edge cases with empty inputs
-        let spent_inputs: Vec<(BalanceChange, SpentInput)> = vec![];
-        let mut selected_inputs: Vec<usize> = vec![];
-
-        // With empty inputs, should return false
-        let result = DisplayedTransactionProcessor::iter_search_for_matching_inputs(
-            MicroMinotari::from(1000),
-            MicroMinotari::from(0),
-            &spent_inputs,
-            &mut selected_inputs,
-            0,
-        );
-
-        assert!(!result);
-        assert!(selected_inputs.is_empty());
-    }
-
-    #[test]
-    fn test_iter_search_for_matching_inputs_no_match_when_empty() {
-        let spent_inputs: Vec<(BalanceChange, SpentInput)> = vec![];
-        let mut selected_inputs: Vec<usize> = vec![];
-
-        let result = DisplayedTransactionProcessor::iter_search_for_matching_inputs(
-            MicroMinotari::from(500),
-            MicroMinotari::from(0),
-            &spent_inputs,
-            &mut selected_inputs,
-            0,
-        );
-
-        assert!(!result);
-        assert!(selected_inputs.is_empty());
-    }
-
-    #[test]
-    fn test_iter_search_for_matching_inputs_already_selected_skipped() {
-        // Test that indices already in selected_inputs are skipped
-        let spent_inputs: Vec<(BalanceChange, SpentInput)> = vec![];
-        let mut selected_inputs: Vec<usize> = vec![0, 1]; // Pre-populated
-
-        let result = DisplayedTransactionProcessor::iter_search_for_matching_inputs(
-            MicroMinotari::from(500),
-            MicroMinotari::from(0),
-            &spent_inputs,
-            &mut selected_inputs,
-            0,
-        );
-
-        assert!(!result);
-        // Should still have the original selected inputs
-        assert_eq!(selected_inputs.len(), 2);
-    }
-
-    #[test]
-    fn test_iter_search_with_zero_amount_sent() {
-        let spent_inputs: Vec<(BalanceChange, SpentInput)> = vec![];
-        let mut selected_inputs: Vec<usize> = vec![];
-
-        // With zero amount, nothing matches
-        let result = DisplayedTransactionProcessor::iter_search_for_matching_inputs(
-            MicroMinotari::from(0),
-            MicroMinotari::from(0),
-            &spent_inputs,
-            &mut selected_inputs,
-            0,
-        );
-
-        assert!(!result);
     }
 
     #[test]
