@@ -1464,4 +1464,381 @@ mod tests {
                 .is_ok()
         );
     }
+
+    // ── Helper to build a mock WalletOutput with a given value ──────────────────
+    fn mock_wallet_output(value: u64) -> tari_transaction_components::transaction_components::WalletOutput {
+        use tari_common_types::types::{ComAndPubSignature, CompressedPublicKey};
+        use tari_script::{ExecutionStack, TariScript};
+        use tari_transaction_components::{
+            key_manager::TariKeyId,
+            transaction_components::{
+                EncryptedData, MemoField, OutputFeatures, TransactionOutputVersion, WalletOutput, covenants::Covenant,
+            },
+        };
+
+        WalletOutput::new_from_parts(
+            TransactionOutputVersion::default(),
+            MicroMinotari::from(value),
+            TariKeyId::default(),
+            OutputFeatures::default(),
+            TariScript::default(),
+            ExecutionStack::default(),
+            TariKeyId::default(),
+            CompressedPublicKey::default(),
+            ComAndPubSignature::default(),
+            0,
+            Covenant::default(),
+            EncryptedData::default(),
+            MicroMinotari::from(0),
+            None,
+            MemoField::new_empty(),
+            mock_fixed_hash(0),
+            Default::default(),
+        )
+    }
+
+    fn mock_spent_input(value: u64, hash_byte: u8) -> SpentInput {
+        SpentInput {
+            output_id: 0,
+            mined_in_block: mock_fixed_hash(hash_byte),
+            mined_in_block_height: 10,
+            output: mock_wallet_output(value),
+        }
+    }
+
+    fn mock_detected_output(value: u64, hash_byte: u8, height: u64) -> DetectedOutput {
+        DetectedOutput {
+            height,
+            mined_in_block_hash: mock_fixed_hash(hash_byte),
+            output: mock_wallet_output(value),
+        }
+    }
+
+    // ── solve_back_track tests ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_solve_back_track_empty_inputs_empty_targets() {
+        let inputs: Vec<(BalanceChange, SpentInput)> = vec![];
+        let targets: Vec<(MicroMinotari, usize)> = vec![];
+        let result = DisplayedTransactionProcessor::solve_back_track(&inputs, targets);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_solve_back_track_empty_inputs_with_targets() {
+        let inputs: Vec<(BalanceChange, SpentInput)> = vec![];
+        let targets = vec![(MicroMinotari::from(100), 0)];
+        let result = DisplayedTransactionProcessor::solve_back_track(&inputs, targets);
+        // Should return one entry with empty used-indices (no inputs to match)
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, 0);
+        assert!(result[0].1.is_empty());
+    }
+
+    #[test]
+    fn test_solve_back_track_inputs_with_no_targets() {
+        let inputs = vec![
+            (create_debit_balance_change(1, 100, 10), mock_spent_input(100, 1)),
+            (create_debit_balance_change(1, 200, 10), mock_spent_input(200, 2)),
+        ];
+        let targets: Vec<(MicroMinotari, usize)> = vec![];
+        let result = DisplayedTransactionProcessor::solve_back_track(&inputs, targets);
+        assert!(result.is_empty());
+    }
+
+    #[test]
+    fn test_solve_back_track_single_exact_match() {
+        let inputs = vec![(create_debit_balance_change(1, 500, 10), mock_spent_input(500, 1))];
+        let targets = vec![(MicroMinotari::from(500), 0)];
+        let result = DisplayedTransactionProcessor::solve_back_track(&inputs, targets);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, 0); // output index
+        assert_eq!(result[0].1, vec![0]); // input index 0 used
+    }
+
+    #[test]
+    fn test_solve_back_track_no_subset_matches() {
+        let inputs = vec![
+            (create_debit_balance_change(1, 100, 10), mock_spent_input(100, 1)),
+            (create_debit_balance_change(1, 200, 10), mock_spent_input(200, 2)),
+        ];
+        // Target 400 cannot be reached (100 + 200 = 300)
+        let targets = vec![(MicroMinotari::from(400), 0)];
+        let result = DisplayedTransactionProcessor::solve_back_track(&inputs, targets);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, 0);
+        assert!(result[0].1.is_empty()); // no solution found
+    }
+
+    #[test]
+    fn test_solve_back_track_multiple_inputs_sum_to_target() {
+        let inputs = vec![
+            (create_debit_balance_change(1, 100, 10), mock_spent_input(100, 1)),
+            (create_debit_balance_change(1, 200, 10), mock_spent_input(200, 2)),
+            (create_debit_balance_change(1, 300, 10), mock_spent_input(300, 3)),
+        ];
+        // Target 300: could be input[2] alone, or input[0]+input[1]
+        let targets = vec![(MicroMinotari::from(300), 0)];
+        let result = DisplayedTransactionProcessor::solve_back_track(&inputs, targets);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].0, 0);
+        // Verify the solution sums to 300
+        let total: u64 = result[0].1.iter().map(|&i| inputs[i].1.output.value().as_u64()).sum();
+        assert_eq!(total, 300);
+    }
+
+    #[test]
+    fn test_solve_back_track_two_targets_no_overlap() {
+        let inputs = vec![
+            (create_debit_balance_change(1, 100, 10), mock_spent_input(100, 1)),
+            (create_debit_balance_change(1, 200, 10), mock_spent_input(200, 2)),
+            (create_debit_balance_change(1, 300, 10), mock_spent_input(300, 3)),
+        ];
+        // Two targets: 100 and 200. Both should be satisfiable without overlap.
+        let targets = vec![(MicroMinotari::from(100), 0), (MicroMinotari::from(200), 1)];
+        let result = DisplayedTransactionProcessor::solve_back_track(&inputs, targets);
+        assert_eq!(result.len(), 2);
+
+        // Collect all used input indices
+        let used_0: Vec<usize> = result[0].1.clone();
+        let used_1: Vec<usize> = result[1].1.clone();
+        // No overlap
+        for idx in &used_0 {
+            assert!(!used_1.contains(idx), "Input index {} used for both targets", idx);
+        }
+    }
+
+    #[test]
+    fn test_solve_back_track_second_target_starved_by_first() {
+        // Only two inputs of value 100 each, two targets of 100 each.
+        // First target should consume one, second should consume the other.
+        let inputs = vec![
+            (create_debit_balance_change(1, 100, 10), mock_spent_input(100, 1)),
+            (create_debit_balance_change(1, 100, 10), mock_spent_input(100, 2)),
+        ];
+        let targets = vec![(MicroMinotari::from(100), 0), (MicroMinotari::from(100), 1)];
+        let result = DisplayedTransactionProcessor::solve_back_track(&inputs, targets);
+        assert_eq!(result.len(), 2);
+        // Both should find a solution
+        assert_eq!(result[0].1.len(), 1);
+        assert_eq!(result[1].1.len(), 1);
+        // Should use different inputs
+        assert_ne!(result[0].1[0], result[1].1[0]);
+    }
+
+    #[test]
+    fn test_solve_back_track_target_requires_all_inputs() {
+        let inputs = vec![
+            (create_debit_balance_change(1, 100, 10), mock_spent_input(100, 1)),
+            (create_debit_balance_change(1, 200, 10), mock_spent_input(200, 2)),
+            (create_debit_balance_change(1, 300, 10), mock_spent_input(300, 3)),
+        ];
+        // Target = sum of all inputs
+        let targets = vec![(MicroMinotari::from(600), 0)];
+        let result = DisplayedTransactionProcessor::solve_back_track(&inputs, targets);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].1.len(), 3);
+        let total: u64 = result[0].1.iter().map(|&i| inputs[i].1.output.value().as_u64()).sum();
+        assert_eq!(total, 600);
+    }
+
+    #[test]
+    fn test_solve_back_track_zero_value_target() {
+        let inputs = vec![(create_debit_balance_change(1, 100, 10), mock_spent_input(100, 1))];
+        let targets = vec![(MicroMinotari::from(0), 0)];
+        let result = DisplayedTransactionProcessor::solve_back_track(&inputs, targets);
+        assert_eq!(result.len(), 1);
+        // Zero target is immediately satisfied with no inputs
+        assert!(result[0].1.is_empty());
+    }
+
+    #[test]
+    fn test_solve_back_track_duplicate_input_values() {
+        let inputs = vec![
+            (create_debit_balance_change(1, 50, 10), mock_spent_input(50, 1)),
+            (create_debit_balance_change(1, 50, 10), mock_spent_input(50, 2)),
+            (create_debit_balance_change(1, 50, 10), mock_spent_input(50, 3)),
+        ];
+        let targets = vec![(MicroMinotari::from(100), 0)];
+        let result = DisplayedTransactionProcessor::solve_back_track(&inputs, targets);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].1.len(), 2);
+        let total: u64 = result[0].1.iter().map(|&i| inputs[i].1.output.value().as_u64()).sum();
+        assert_eq!(total, 100);
+    }
+
+    #[test]
+    fn test_solve_back_track_large_number_of_inputs() {
+        // 10 inputs of value 1 each, target = 5
+        let inputs: Vec<_> = (0..10)
+            .map(|i| (create_debit_balance_change(1, 1, 10), mock_spent_input(1, i as u8)))
+            .collect();
+        let targets = vec![(MicroMinotari::from(5), 0)];
+        let result = DisplayedTransactionProcessor::solve_back_track(&inputs, targets);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].1.len(), 5);
+        let total: u64 = result[0].1.iter().map(|&i| inputs[i].1.output.value().as_u64()).sum();
+        assert_eq!(total, 5);
+    }
+
+    #[test]
+    fn test_solve_back_track_preserves_output_indices() {
+        let inputs = vec![
+            (create_debit_balance_change(1, 100, 10), mock_spent_input(100, 1)),
+            (create_debit_balance_change(1, 200, 10), mock_spent_input(200, 2)),
+        ];
+        // Use non-zero output indices to verify they're preserved
+        let targets = vec![(MicroMinotari::from(100), 5), (MicroMinotari::from(200), 9)];
+        let result = DisplayedTransactionProcessor::solve_back_track(&inputs, targets);
+        assert_eq!(result.len(), 2);
+        let output_indices: Vec<usize> = result.iter().map(|r| r.0).collect();
+        assert!(output_indices.contains(&5));
+        assert!(output_indices.contains(&9));
+    }
+
+    #[test]
+    fn test_solve_back_track_targets_processed_in_ascending_value_order() {
+        // Targets are sorted by value internally, so smaller targets are solved first.
+        // This means the smaller target gets first pick of inputs.
+        let inputs = vec![
+            (create_debit_balance_change(1, 100, 10), mock_spent_input(100, 1)),
+            (create_debit_balance_change(1, 200, 10), mock_spent_input(200, 2)),
+        ];
+        // Give the large target first in the vec, but it should still process smallest first
+        let targets = vec![(MicroMinotari::from(200), 0), (MicroMinotari::from(100), 1)];
+        let result = DisplayedTransactionProcessor::solve_back_track(&inputs, targets);
+        assert_eq!(result.len(), 2);
+        // Both should find solutions since 100 + 200 exactly matches both targets
+        let total: u64 = result
+            .iter()
+            .flat_map(|r| &r.1)
+            .map(|&i| inputs[i].1.output.value().as_u64())
+            .sum();
+        assert_eq!(total, 300);
+    }
+
+    #[test]
+    fn test_solve_back_track_single_input_value_one() {
+        let inputs = vec![(create_debit_balance_change(1, 1, 10), mock_spent_input(1, 1))];
+        let targets = vec![(MicroMinotari::from(1), 0)];
+        let result = DisplayedTransactionProcessor::solve_back_track(&inputs, targets);
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].1, vec![0]);
+    }
+
+    // ── search_inputs tests ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_search_inputs_empty_inputs_and_outputs() {
+        let processor = DisplayedTransactionProcessor::new(100, 3, PrivateKey::default());
+        let accumulator = BlockEventAccumulator::new(1, 50, vec![0u8; 32]);
+        let inputs: Vec<(BalanceChange, SpentInput)> = vec![];
+        let outputs: Vec<(BalanceChange, DetectedOutput)> = vec![];
+
+        let result = processor.search_inputs(inputs, outputs, &accumulator);
+        assert!(result.is_ok());
+        assert!(result.unwrap().is_empty());
+    }
+
+    #[test]
+    fn test_search_inputs_only_unmatched_inputs() {
+        // Inputs with no matching outputs should become unmatched (outgoing) transactions
+        let processor = DisplayedTransactionProcessor::new(100, 3, PrivateKey::default());
+        let accumulator = BlockEventAccumulator::new(1, 50, vec![0u8; 32]);
+
+        let inputs = vec![
+            (create_debit_balance_change(1, 500, 50), mock_spent_input(500, 1)),
+            (create_debit_balance_change(1, 300, 50), mock_spent_input(300, 2)),
+        ];
+        let outputs: Vec<(BalanceChange, DetectedOutput)> = vec![];
+
+        let result = processor.search_inputs(inputs, outputs, &accumulator);
+        assert!(result.is_ok());
+        let txs = result.unwrap();
+        // Each unmatched input should generate a transaction
+        assert_eq!(txs.len(), 2);
+    }
+
+    #[test]
+    fn test_search_inputs_only_unmatched_outputs() {
+        // Outputs with no transaction_info_details go to unmatched (mock_wallet_output uses MemoField::new_empty)
+        let processor = DisplayedTransactionProcessor::new(100, 3, PrivateKey::default());
+        let accumulator = BlockEventAccumulator::new(1, 50, vec![0u8; 32]);
+
+        let inputs: Vec<(BalanceChange, SpentInput)> = vec![];
+        let outputs = vec![(
+            create_credit_balance_change(1, 1000, 50),
+            mock_detected_output(1000, 1, 50),
+        )];
+
+        let result = processor.search_inputs(inputs, outputs, &accumulator);
+        assert!(result.is_ok());
+        let txs = result.unwrap();
+        // Output without transaction_info_details -> unmatched output transaction
+        assert_eq!(txs.len(), 1);
+    }
+
+    #[test]
+    fn test_search_inputs_multiple_unmatched_inputs_creates_individual_transactions() {
+        let processor = DisplayedTransactionProcessor::new(100, 3, PrivateKey::default());
+        let accumulator = BlockEventAccumulator::new(1, 50, vec![0u8; 32]);
+
+        let inputs = vec![
+            (create_debit_balance_change(1, 100, 50), mock_spent_input(100, 1)),
+            (create_debit_balance_change(1, 200, 50), mock_spent_input(200, 2)),
+            (create_debit_balance_change(1, 300, 50), mock_spent_input(300, 3)),
+        ];
+        let outputs: Vec<(BalanceChange, DetectedOutput)> = vec![];
+
+        let result = processor.search_inputs(inputs, outputs, &accumulator);
+        assert!(result.is_ok());
+        let txs = result.unwrap();
+        assert_eq!(txs.len(), 3);
+    }
+
+    #[test]
+    fn test_search_inputs_mixed_unmatched_inputs_and_outputs() {
+        let processor = DisplayedTransactionProcessor::new(100, 3, PrivateKey::default());
+        let accumulator = BlockEventAccumulator::new(1, 50, vec![0u8; 32]);
+
+        let inputs = vec![(create_debit_balance_change(1, 100, 50), mock_spent_input(100, 1))];
+        let outputs = vec![(
+            create_credit_balance_change(1, 500, 50),
+            mock_detected_output(500, 2, 50),
+        )];
+
+        let result = processor.search_inputs(inputs, outputs, &accumulator);
+        assert!(result.is_ok());
+        let txs = result.unwrap();
+        // 1 unmatched input + 1 unmatched output = 2 transactions
+        assert_eq!(txs.len(), 2);
+    }
+
+    #[test]
+    fn test_search_inputs_status_confirmed_when_enough_confirmations() {
+        let processor = DisplayedTransactionProcessor::new(100, 3, PrivateKey::default());
+        let accumulator = BlockEventAccumulator::new(1, 50, vec![0u8; 32]);
+
+        let inputs = vec![(create_debit_balance_change(1, 100, 50), mock_spent_input(100, 1))];
+        let outputs: Vec<(BalanceChange, DetectedOutput)> = vec![];
+
+        let result = processor.search_inputs(inputs, outputs, &accumulator).unwrap();
+        assert_eq!(result.len(), 1);
+        // tip=100, mined_height=10 (from mock_spent_input), confirmations=90 >= 3
+        assert_eq!(result[0].status, TransactionDisplayStatus::Confirmed);
+    }
+
+    #[test]
+    fn test_search_inputs_status_unconfirmed_when_few_confirmations() {
+        // tip=12, req=3, mined_at=10 -> confirmations=2 < 3
+        let processor = DisplayedTransactionProcessor::new(12, 3, PrivateKey::default());
+        let accumulator = BlockEventAccumulator::new(1, 50, vec![0u8; 32]);
+
+        let inputs = vec![(create_debit_balance_change(1, 100, 50), mock_spent_input(100, 1))];
+        let outputs: Vec<(BalanceChange, DetectedOutput)> = vec![];
+
+        let result = processor.search_inputs(inputs, outputs, &accumulator).unwrap();
+        assert_eq!(result.len(), 1);
+        assert_eq!(result[0].status, TransactionDisplayStatus::Unconfirmed);
+    }
 }
