@@ -104,13 +104,6 @@ impl HttpClient {
         })
     }
 
-    /// Returns a reference to the base URL.
-    ///
-    /// This can be used to inspect or display the server address.
-    pub fn base_url(&self) -> &Url {
-        &self.base_url
-    }
-
     /// Sends an HTTP request and deserializes the JSON response.
     ///
     /// This method handles the full request lifecycle:
@@ -199,18 +192,5 @@ impl HttpClient {
             "HTTP: Request completed"
         );
         *self.last_latency.write().await = Some((duration, Instant::now()));
-    }
-
-    /// Returns the latency of the most recent request.
-    ///
-    /// This can be used for monitoring and diagnostics to track
-    /// the responsiveness of the base node.
-    ///
-    /// # Returns
-    ///
-    /// Returns `Some(duration)` if a request has been made, or `None` if
-    /// no requests have been sent yet.
-    pub async fn get_latency(&self) -> Option<Duration> {
-        self.last_latency.read().await.map(|(d, _)| d)
     }
 }
