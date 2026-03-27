@@ -1670,8 +1670,8 @@ mod tests {
     #[test]
     fn test_solve_back_track_large_number_of_inputs() {
         // 10 inputs of value 1 each, target = 5
-        let inputs: Vec<_> = (0..10)
-            .map(|i| (create_debit_balance_change(1, 1, 10), mock_spent_input(1, i as u8)))
+        let inputs: Vec<_> = (0u8..10)
+            .map(|i| (create_debit_balance_change(1, 1, 10), mock_spent_input(1, i)))
             .collect();
         let targets = vec![(MicroMinotari::from(5), 0)];
         let result = DisplayedTransactionProcessor::solve_back_track(&inputs, targets);
