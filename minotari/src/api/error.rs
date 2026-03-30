@@ -80,6 +80,7 @@ pub enum ApiError {
     /// Used for unexpected errors that don't fit other categories.
     /// Returns HTTP 500 Internal Server Error.
     #[error("Internal server error: {0}")]
+    #[allow(dead_code)]
     InternalServerError(String),
 
     /// A database operation failed.

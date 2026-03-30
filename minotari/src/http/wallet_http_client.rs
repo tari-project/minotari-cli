@@ -8,9 +8,9 @@
 //! The `WalletHttpClient` wraps the low-level HTTP client and provides
 //! domain-specific methods for common wallet operations:
 //!
+//! - Checking node connectivity and sync status
 //! - Submitting transactions to the network
 //! - Querying transaction status by signature
-//! - Querying blockchain tip and fee statistics
 //!
 //! # Example
 //!
@@ -21,11 +21,16 @@
 //! # async fn example() -> Result<(), anyhow::Error> {
 //! let client = WalletHttpClient::new(Url::parse("http://localhost:18142")?)?;
 //!
-//! let tip = client.get_tip_info().await?;
-//! println!("Chain height: {:?}", tip.metadata.map(|m| m.best_block_height()));
+//! // Check connectivity
+//! if client.is_online().await {
+//!     let tip = client.get_tip_info().await?;
+//!     println!("Chain height: {:?}", tip.metadata.map(|m| m.best_block_height()));
+//! }
 //! # Ok(())
 //! # }
 //! ```
+
+use std::time::Duration;
 
 use log::{debug, info, warn};
 use reqwest::Method;
@@ -64,12 +69,19 @@ use super::http_client::HttpClient;
 /// # Example
 ///
 /// ```rust,no_run
+/// use std::time::Duration;
 /// use url::Url;
 /// use minotari::http::WalletHttpClient;
 ///
 /// # async fn example() -> Result<(), anyhow::Error> {
-/// let client = WalletHttpClient::new(Url::parse("http://localhost:18142")?)?;
+/// // Create with custom timeout and retry settings
+/// let client = WalletHttpClient::with_config(
+///     Url::parse("http://localhost:18142")?,
+///     5,  // max retries
+///     Duration::from_secs(60),  // timeout
+/// )?;
 ///
+/// // Check if the node is reachable and synced
 /// let tip_info = client.get_tip_info().await?;
 /// if tip_info.is_synced {
 ///     println!("Node is ready for transactions");
@@ -116,6 +128,53 @@ impl WalletHttpClient {
         Ok(Self { http_client })
     }
 
+    /// Creates a new wallet HTTP client with custom configuration.
+    ///
+    /// # Arguments
+    ///
+    /// * `base_url` - The base URL of the Tari base node HTTP RPC endpoint
+    /// * `max_retries` - Maximum number of retry attempts for transient failures.
+    ///   Set to 0 to disable retries.
+    /// * `timeout` - Maximum duration to wait for a response
+    ///
+    /// # Returns
+    ///
+    /// Returns a configured `WalletHttpClient` instance.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the HTTP client cannot be initialized.
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use std::time::Duration;
+    /// use url::Url;
+    /// use minotari::http::WalletHttpClient;
+    ///
+    /// // Client with longer timeout for slow connections
+    /// let client = WalletHttpClient::with_config(
+    ///     Url::parse("http://localhost:18142").unwrap(),
+    ///     5,  // more retries
+    ///     Duration::from_secs(120),  // 2 minute timeout
+    /// ).unwrap();
+    /// ```
+    pub fn with_config(base_url: Url, max_retries: u32, timeout: Duration) -> Result<Self, anyhow::Error> {
+        let http_client = HttpClient::with_config(base_url, max_retries, timeout)?;
+        Ok(Self { http_client })
+    }
+
+    /// Returns the base node address as a string.
+    ///
+    /// This is useful for logging and displaying the configured endpoint.
+    ///
+    /// # Returns
+    ///
+    /// The base URL as a string (e.g., `"http://localhost:18142/"`).
+    pub fn get_address(&self) -> String {
+        self.http_client.base_url().to_string()
+    }
+
     /// Retrieves the current blockchain tip information from the base node.
     ///
     /// This method queries the `/get_tip_info` endpoint to get information
@@ -157,6 +216,82 @@ impl WalletHttpClient {
             .send_request(Method::GET, "/get_tip_info", None)
             .await?;
         Ok(response)
+    }
+
+    /// Checks if the base node is online and reachable.
+    ///
+    /// This is a convenience method that attempts to fetch tip info
+    /// and returns `true` if successful, `false` otherwise.
+    ///
+    /// # Returns
+    ///
+    /// - `true` if the node responded successfully
+    /// - `false` if the request failed for any reason
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use url::Url;
+    /// use minotari::http::WalletHttpClient;
+    ///
+    /// # async fn example() -> Result<(), anyhow::Error> {
+    /// let client = WalletHttpClient::new(Url::parse("http://localhost:18142")?)?;
+    ///
+    /// if client.is_online().await {
+    ///     println!("Base node is reachable");
+    /// } else {
+    ///     println!("Cannot connect to base node");
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn is_online(&self) -> bool {
+        match self.get_tip_info().await {
+            Ok(_) => {
+                debug!("Base node is online");
+                true
+            },
+            Err(e) => {
+                warn!(
+                    error:? = e;
+                    "Base node is offline"
+                );
+                false
+            },
+        }
+    }
+
+    /// Returns the latency of the most recent HTTP request.
+    ///
+    /// This can be used to monitor the responsiveness of the base node
+    /// connection and detect network issues.
+    ///
+    /// # Returns
+    ///
+    /// - `Some(duration)` - The round-trip time of the last request
+    /// - `None` - No requests have been made yet
+    ///
+    /// # Example
+    ///
+    /// ```rust,no_run
+    /// use url::Url;
+    /// use minotari::http::WalletHttpClient;
+    ///
+    /// # async fn example() -> Result<(), anyhow::Error> {
+    /// let client = WalletHttpClient::new(Url::parse("http://localhost:18142")?)?;
+    ///
+    /// // Make a request first
+    /// let _ = client.get_tip_info().await;
+    ///
+    /// // Check latency
+    /// if let Some(latency) = client.get_last_request_latency().await {
+    ///     println!("Last request took {:?}", latency);
+    /// }
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub async fn get_last_request_latency(&self) -> Option<Duration> {
+        self.http_client.get_latency().await
     }
 
     /// Submits a transaction to the network via the base node.

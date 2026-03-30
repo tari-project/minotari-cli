@@ -31,11 +31,13 @@
 //! let base_url = Url::parse("http://localhost:18142")?;
 //! let client = WalletHttpClient::new(base_url)?;
 //!
-//! // Query the chain tip
-//! let tip_info = client.get_tip_info().await?;
-//! if tip_info.is_synced {
-//!     println!("Node is synced at height {:?}",
-//!         tip_info.metadata.map(|m| m.best_block_height()));
+//! // Check if the node is online and synced
+//! if client.is_online().await {
+//!     let tip_info = client.get_tip_info().await?;
+//!     if tip_info.is_synced {
+//!         println!("Node is synced at height {:?}",
+//!             tip_info.metadata.map(|m| m.best_block_height()));
+//!     }
 //! }
 //! # Ok(())
 //! # }
