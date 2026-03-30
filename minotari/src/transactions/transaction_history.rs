@@ -55,13 +55,10 @@
 use crate::db::{self, SqlitePool, WalletDbError};
 use crate::models::Id;
 use crate::scan::DisplayedTransactionsEvent;
-use crate::transactions::{
-    DisplayedTransaction, DisplayedTransactionProcessor, ProcessorError, TransactionDisplayStatus,
-};
+use crate::transactions::{DisplayedTransaction, ProcessorError, TransactionDisplayStatus};
 use log::debug;
 use r2d2::PooledConnection;
 use r2d2_sqlite::SqliteConnectionManager;
-use tari_common_types::types::PrivateKey;
 
 /// Errors that can occur during transaction history operations.
 ///
@@ -389,41 +386,5 @@ impl TransactionHistoryService {
         }
 
         Ok(total)
-    }
-
-    /// Rebuilds transaction history from balance change records.
-    ///
-    /// This is a fallback method for legacy data migration scenarios where
-    /// displayed transactions need to be regenerated from underlying balance
-    /// change data.
-    ///
-    /// # Arguments
-    ///
-    /// * `account_id` - The account ID to rebuild history for
-    ///
-    /// # Returns
-    ///
-    /// A vector of reconstructed [`DisplayedTransaction`] records.
-    ///
-    /// # Errors
-    ///
-    /// Returns [`TransactionHistoryError`] if database queries or processing fails.
-    #[allow(dead_code)]
-    pub fn rebuild_from_balance_changes(
-        &self,
-        account_id: Id,
-        required_confirmations: u64,
-        view_key: PrivateKey,
-    ) -> Result<(Vec<DisplayedTransaction>, Vec<DisplayedTransaction>), TransactionHistoryError> {
-        let conn = self.get_connection()?;
-
-        let tip_height = db::get_latest_scanned_tip_block_by_account(&conn, account_id)?
-            .map(|block| block.height)
-            .unwrap_or(0);
-
-        let processor = DisplayedTransactionProcessor::new(tip_height, required_confirmations, view_key);
-        let transactions = processor.process_all_stored_with_conn(account_id, &conn)?;
-
-        Ok(transactions)
     }
 }

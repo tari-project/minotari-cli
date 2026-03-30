@@ -9,6 +9,7 @@ pub mod burn;
 pub mod common;
 pub mod daemon;
 pub mod fund_locking;
+pub mod load_testing;
 pub mod scanning;
 pub mod transactions;
 pub mod wallet_benchmark;
