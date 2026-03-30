@@ -262,7 +262,6 @@ async fn send_burst(world: &mut MinotariWorld, count: usize) {
 #[then("all pool payout transactions should succeed")]
 async fn pool_payout_success(world: &mut MinotariWorld) {
     if let Some(output) = &world.last_command_output {
-        // We don't require 100% success — print the results for analysis
         println!("Pool payout results: {}", output);
     }
     // Verify scan succeeded
