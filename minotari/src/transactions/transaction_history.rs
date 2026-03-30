@@ -387,5 +387,4 @@ impl TransactionHistoryService {
 
         Ok(total)
     }
-
 }

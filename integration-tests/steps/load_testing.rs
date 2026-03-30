@@ -17,8 +17,8 @@ use std::time::{Duration, Instant};
 use tari_common::configuration::Network::LocalNet;
 use tari_common_types::tari_address::{TariAddress, TariAddressFeatures};
 use tari_transaction_components::consensus::ConsensusConstantsBuilder;
-use tari_transaction_components::key_manager::wallet_types::WalletType;
 use tari_transaction_components::key_manager::KeyManager;
+use tari_transaction_components::key_manager::wallet_types::WalletType;
 use tari_transaction_components::offline_signing::models::PrepareOneSidedTransactionForSigningResult;
 use tari_transaction_components::offline_signing::models::TransactionResult;
 use tari_transaction_components::offline_signing::sign_locked_transaction;
@@ -42,16 +42,8 @@ fn random_recipient_address() -> String {
 }
 
 /// Create, sign, and submit a single transaction. Returns true on success.
-async fn send_one_transaction(
-    world: &mut MinotariWorld,
-    amount: u64,
-    tx_index: usize,
-) -> bool {
-    let db_path = world
-        .database_path
-        .as_ref()
-        .expect("Database not set up")
-        .clone();
+async fn send_one_transaction(world: &mut MinotariWorld, amount: u64, tx_index: usize) -> bool {
+    let db_path = world.database_path.as_ref().expect("Database not set up").clone();
     let base_url = base_node_url(world);
     let address = random_recipient_address();
     let recipient = format!("{}::{}", address, amount);
@@ -101,16 +93,10 @@ async fn send_one_transaction(
         },
     };
 
-    let key_manager =
-        KeyManager::new(world.wallet.clone()).expect("Failed to create key manager");
+    let key_manager = KeyManager::new(world.wallet.clone()).expect("Failed to create key manager");
     let consensus_constants = ConsensusConstantsBuilder::new(LocalNet).build();
 
-    let signed = match sign_locked_transaction(
-        &key_manager,
-        consensus_constants,
-        LocalNet,
-        unsigned_tx,
-    ) {
+    let signed = match sign_locked_transaction(&key_manager, consensus_constants, LocalNet, unsigned_tx) {
         Ok(r) => r,
         Err(e) => {
             println!("Load tx {} signing failed: {}", tx_index, e);
@@ -155,11 +141,7 @@ fn base_node_url(world: &MinotariWorld) -> String {
 }
 
 fn run_scan(world: &mut MinotariWorld) {
-    let db_path = world
-        .database_path
-        .as_ref()
-        .expect("Database not set up")
-        .clone();
+    let db_path = world.database_path.as_ref().expect("Database not set up").clone();
     let base_url = base_node_url(world);
 
     let (cmd, mut args) = world.get_minotari_command();
@@ -228,7 +210,11 @@ async fn send_constant_rate(world: &mut MinotariWorld, count: usize, tps: usize)
         "Constant rate: {}/{} succeeded in {:.2?} ({:.2} effective tx/s)",
         successes, count, total_duration, effective_tps
     );
-    assert_eq!(failures, 0, "Expected all transactions to succeed, but {} failed", failures);
+    assert_eq!(
+        failures, 0,
+        "Expected all transactions to succeed, but {} failed",
+        failures
+    );
 
     world
         .benchmark_timings
@@ -304,10 +290,13 @@ async fn send_poisson(world: &mut MinotariWorld, count: usize, avg_tps: f64) {
 
     let start = Instant::now();
     let mut successes = 0u64;
+    let mut failures = 0u64;
 
     for i in 0..count {
         if send_one_transaction(world, amount, offset + i).await {
             successes += 1;
+        } else {
+            failures += 1;
         }
 
         // Exponential inter-arrival time (Poisson process)
@@ -318,9 +307,11 @@ async fn send_poisson(world: &mut MinotariWorld, count: usize, avg_tps: f64) {
     }
 
     let duration = start.elapsed();
-    println!(
-        "Inbound flood: {}/{} sent in {:.2?}",
-        successes, count, duration
+    println!("Inbound flood: {}/{} sent in {:.2?}", successes, count, duration);
+    assert_eq!(
+        failures, 0,
+        "Expected all transactions to be sent successfully, but {} failed",
+        failures
     );
 
     world
@@ -374,6 +365,7 @@ async fn send_ramping(world: &mut MinotariWorld, start_tpm: usize, max_tpm: usiz
 
     let run_start = Instant::now();
     let mut total_successes = 0u64;
+    let mut total_failures = 0u64;
     let mut total_sent = 0usize;
     let mut tx_index = offset;
 
@@ -398,6 +390,8 @@ async fn send_ramping(world: &mut MinotariWorld, start_tpm: usize, max_tpm: usiz
             let tx_start = Instant::now();
             if send_one_transaction(world, amount, tx_index).await {
                 total_successes += 1;
+            } else {
+                total_failures += 1;
             }
             total_sent += 1;
             tx_index += 1;
@@ -413,6 +407,11 @@ async fn send_ramping(world: &mut MinotariWorld, start_tpm: usize, max_tpm: usiz
     println!(
         "Bidirectional: {}/{} succeeded in {:.2?}",
         total_successes, total_sent, total_duration
+    );
+    assert_eq!(
+        total_failures, 0,
+        "Expected all transactions to succeed, but {} failed",
+        total_failures
     );
 
     world
@@ -438,17 +437,17 @@ async fn bidirectional_success(world: &mut MinotariWorld) {
 async fn fragment_utxos(world: &mut MinotariWorld, count: usize, amount: u64) {
     let offset = 40_000;
 
-    println!(
-        "Fragmentation: creating {} small UTXOs of {} µT each",
-        count, amount
-    );
+    println!("Fragmentation: creating {} small UTXOs of {} µT each", count, amount);
 
     let start = Instant::now();
     let mut successes = 0u64;
+    let mut failures = 0u64;
 
     for i in 0..count {
         if send_one_transaction(world, amount, offset + i).await {
             successes += 1;
+        } else {
+            failures += 1;
         }
     }
 
@@ -456,6 +455,11 @@ async fn fragment_utxos(world: &mut MinotariWorld, count: usize, amount: u64) {
     println!(
         "Fragmentation: {}/{} fragment txs in {:.2?}",
         successes, count, duration
+    );
+    assert_eq!(
+        failures, 0,
+        "Expected all fragmentation transactions to succeed, but {} failed",
+        failures
     );
 
     world
@@ -519,14 +523,16 @@ async fn send_rapid_batch(world: &mut MinotariWorld, count: usize) {
 
     let start = Instant::now();
     let mut successes = 0u64;
+    let mut failures = 0u64;
     for i in 0..count {
         if send_one_transaction(world, amount, offset + i).await {
             successes += 1;
+        } else {
+            failures += 1;
         }
     }
 
     let duration = start.elapsed();
-    let failures = count as u64 - successes;
     let effective_tps = if duration.as_secs_f64() > 0.0 {
         successes as f64 / duration.as_secs_f64()
     } else {
@@ -536,6 +542,11 @@ async fn send_rapid_batch(world: &mut MinotariWorld, count: usize) {
     println!(
         "Batch {}: {}/{} succeeded in {:.2?} ({:.2} tx/s), {} failures",
         count, successes, count, duration, effective_tps, failures
+    );
+    assert_eq!(
+        failures, 0,
+        "Expected all transactions to succeed, but {} failed",
+        failures
     );
 
     let key = format!("lock_contention_batch_{}", count);

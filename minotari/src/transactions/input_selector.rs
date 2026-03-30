@@ -284,19 +284,23 @@ impl InputSelector {
             .saturating_sub(self.confirmation_window);
         let (locked_amount, _unconfirmed_amount, _locked_and_unconfirmed_amount) =
             crate::db::get_output_totals_for_account(conn, self.account_id)?;
+        // total_unspent_balance only counts outputs with status='UNSPENT', so locked
+        // outputs are already excluded. The available balance IS the unspent balance.
         let total_unspent_balance: MicroMinotari = get_total_unspent_balance(conn, self.account_id)?.into();
-        let available_balance = total_unspent_balance.saturating_sub(locked_amount);
-        if available_balance <= amount && total_unspent_balance >= amount {
-            let pending = total_unspent_balance.saturating_sub(locked_amount);
+        let available_balance = total_unspent_balance;
+        // To detect "funds exist but are locked", compare against the total including locked.
+        let total_including_locked = total_unspent_balance + locked_amount;
+        if available_balance <= amount && total_including_locked >= amount {
+            let pending = locked_amount;
             warn!(
                 target: "audit",
-                available = &*mask_amount(total_unspent_balance),
+                available = &*mask_amount(available_balance),
                 pending = &*mask_amount(pending),
                 required = &*mask_amount(amount);
                 "Insufficient funds for transaction (pending confirmations)"
             );
             return Err(UtxoSelectionError::FundsPending {
-                available: total_unspent_balance.saturating_sub(locked_amount),
+                available: available_balance,
                 pending,
                 required: amount,
             });

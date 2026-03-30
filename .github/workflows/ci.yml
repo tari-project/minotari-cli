@@ -54,7 +54,7 @@ jobs:
         run: cargo test --release --all-targets --all-features --workspace --exclude integration-tests
 
       - name: Run integration tests
-        run: cargo test --release --test cucumber -- -t "not (@benchmark or @load_test)"
+        run: cargo test --release --test cucumber -- -t "not @benchmark"
 
       - name: Check unused dependencies
         run: cargo machete
