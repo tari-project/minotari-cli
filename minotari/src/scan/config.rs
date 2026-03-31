@@ -20,6 +20,10 @@ pub const MAX_BACKOFF_SECONDS: u64 = 60;
 
 pub const OPTIMAL_SCANNING_THREADS: usize = 0; // Based on num_cpus
 
+/// Default safety buffer for fast sync mode (approximately 24 hours of blocks).
+/// Blocks within this distance from the tip are scanned fully rather than fast-synced.
+pub const DEFAULT_FAST_SYNC_SAFETY_BUFFER: u64 = 720;
+
 /// Configuration for scan operation timeouts.
 ///
 /// This is a simplified configuration struct for controlling timeout behavior.
@@ -100,6 +104,24 @@ pub enum ScanMode {
     Continuous {
         /// Duration to wait between scan cycles after reaching chain tip.
         poll_interval: Duration,
+    },
+
+    /// Three-phase fast synchronization mode.
+    ///
+    /// Optimized for wallets that are far behind the chain tip:
+    ///
+    /// 1. **Fast UTXO scan**: Scans from birthday to `tip - safety_buffer` asking
+    ///    the base node for unspent UTXOs only (`exclude_spent=true`). This skips
+    ///    already-spent outputs for much faster initial sync.
+    /// 2. **Recent full scan**: Full scan from `tip - safety_buffer` to tip with
+    ///    complete output and input processing.
+    /// 3. **History backfill**: Full scan from birthday to `tip - safety_buffer`
+    ///    to fill in complete transaction history (spent outputs, inputs, balance
+    ///    changes). Uses idempotent inserts to skip already-recorded data.
+    FastSync {
+        /// Number of blocks from chain tip that define the boundary between
+        /// fast scanning and full scanning. Defaults to [`DEFAULT_FAST_SYNC_SAFETY_BUFFER`] (720).
+        safety_buffer: u64,
     },
 }
 

@@ -106,6 +106,55 @@ pub fn insert_output(
     Ok(conn.last_insert_rowid())
 }
 
+/// Inserts an output only if one with the same output_hash does not already exist.
+/// Used during backfill to avoid duplicate outputs. Outputs inserted here are set
+/// to `SpentUnconfirmed` status since they were not found as unspent during fast
+/// sync and are therefore known to be spent.
+/// Returns `Some(id)` if inserted, `None` if the output already existed.
+#[allow(clippy::too_many_arguments)]
+pub fn insert_spent_output_if_not_exists(
+    conn: &Connection,
+    account_id: i64,
+    account_view_key: &PrivateKey,
+    output_hash: Vec<u8>,
+    output: &WalletOutput,
+    block_height: u64,
+    block_hash: &FixedHash,
+    mined_timestamp: u64,
+    memo_parsed: Option<String>,
+    memo_hex: Option<String>,
+    payment_reference: PaymentReference,
+    is_burn: bool,
+) -> WalletDbResult<Option<i64>> {
+    let hash_as_fixed = FixedHash::try_from(output_hash.as_slice())
+        .map_err(|e| WalletDbError::Decoding(format!("Invalid output hash: {}", e)))?;
+    if get_output_info_by_hash(conn, &hash_as_fixed)?.is_some() {
+        return Ok(None);
+    }
+
+    let id = insert_output(
+        conn,
+        account_id,
+        account_view_key,
+        output_hash,
+        output,
+        block_height,
+        block_hash,
+        mined_timestamp,
+        memo_parsed,
+        memo_hex,
+        payment_reference,
+        is_burn,
+    )?;
+
+    // Mark as SpentUnconfirmed — these outputs were not found as unspent during
+    // Phase 1 fast sync, so they are known to be spent. The status will transition
+    // to Spent once the backfill processes the corresponding input.
+    update_output_status(conn, id, OutputStatus::SpentUnconfirmed)?;
+
+    Ok(Some(id))
+}
+
 pub fn get_output_info_by_hash(
     conn: &Connection,
     output_hash: &FixedHash,
@@ -309,6 +358,81 @@ pub fn soft_delete_outputs_from_height(conn: &Connection, account_id: i64, heigh
     )?;
 
     Ok(())
+}
+
+/// Marks `SpentUnconfirmed` outputs that have a matching input as `Spent`.
+/// Returns the number of outputs marked as spent.
+pub fn resolve_spent_unconfirmed_with_inputs(conn: &Connection, account_id: i64) -> WalletDbResult<u64> {
+    let spent_unconfirmed = OutputStatus::SpentUnconfirmed.to_string();
+    let spent = OutputStatus::Spent.to_string();
+
+    let marked_spent = conn.execute(
+        r#"
+        UPDATE outputs
+        SET status = :spent_status
+        WHERE account_id = :account_id
+          AND status = :spent_unconfirmed_status
+          AND deleted_at IS NULL
+          AND id IN (
+              SELECT output_id FROM inputs WHERE deleted_at IS NULL
+          )
+        "#,
+        named_params! {
+            ":spent_status": spent,
+            ":account_id": account_id,
+            ":spent_unconfirmed_status": spent_unconfirmed,
+        },
+    )? as u64;
+
+    info!(
+        target: "audit",
+        account_id = account_id,
+        marked_spent = marked_spent;
+        "Resolved SpentUnconfirmed outputs with matching inputs"
+    );
+
+    Ok(marked_spent)
+}
+
+/// Returns output hashes and block heights for remaining `SpentUnconfirmed` outputs
+/// that have no matching input. These need to be verified against the base node.
+pub fn get_unresolved_spent_unconfirmed_outputs(
+    conn: &Connection,
+    account_id: i64,
+) -> WalletDbResult<Vec<(i64, Vec<u8>, u64)>> {
+    let spent_unconfirmed = OutputStatus::SpentUnconfirmed.to_string();
+
+    let mut stmt = conn.prepare_cached(
+        r#"
+        SELECT id, output_hash, mined_in_block_height
+        FROM outputs
+        WHERE account_id = :account_id
+          AND status = :status
+          AND deleted_at IS NULL
+        ORDER BY mined_in_block_height
+        "#,
+    )?;
+
+    let rows = stmt.query_map(
+        named_params! {
+            ":account_id": account_id,
+            ":status": spent_unconfirmed,
+        },
+        |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, Vec<u8>>(1)?,
+                row.get::<_, i64>(2).map(|h| h as u64)?,
+            ))
+        },
+    )?;
+
+    let mut results = Vec::new();
+    for row in rows {
+        results.push(row?);
+    }
+
+    Ok(results)
 }
 
 pub fn update_output_status(conn: &Connection, output_id: i64, status: OutputStatus) -> WalletDbResult<()> {
