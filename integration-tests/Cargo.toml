@@ -35,9 +35,6 @@ tari_comms_dht = { git = "https://github.com/tari-project/tari/"}
 tari_p2p = {  git = "https://github.com/tari-project/tari/"}
 tari_shutdown = { git = "https://github.com/tari-project/tari/" }
 
-# Minotari wallet library (for fast sync tests)
-minotari = { path = "../minotari" }
-tari_utilities = { version = "0.8", features = ["std"] }
 
 # Other dependencies
 rand = "0.8"
