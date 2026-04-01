@@ -359,8 +359,7 @@ impl Scanner {
     /// The backfill fills in complete transaction history (spent outputs, inputs,
     /// balance changes) for the period that was fast-synced.
     pub async fn run_backfill(self, backfill_to_height: u64) -> Result<(Vec<WalletEvent>, bool), ScanError> {
-        self.run_backfill_internal(backfill_to_height, NoopEventSender)
-            .await
+        self.run_backfill_internal(backfill_to_height, NoopEventSender).await
     }
 
     /// Runs the history backfill with real-time event streaming.

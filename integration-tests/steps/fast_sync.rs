@@ -26,7 +26,7 @@ async fn perform_fast_sync_no_backfill(world: &mut MinotariWorld) {
     let db_path = world.database_path.as_ref().expect("Database not set up");
     let base_url = get_base_url(world);
 
-    let scanner = Scanner::new(&world.test_password, &base_url, db_path.clone(), 100, 3)
+    let scanner = Scanner::new(&world.test_password, &base_url, db_path.clone(), 120, 3)
         .mode(ScanMode::FastSync {
             safety_buffer: TEST_FAST_SYNC_SAFETY_BUFFER,
         })
@@ -255,32 +255,34 @@ async fn fast_sync_balance_is_zero(world: &mut MinotariWorld) {
 #[then(regex = r"^the fast sync balance should be at least (\d+) microTari$")]
 async fn fast_sync_balance_at_least(world: &mut MinotariWorld, minimum: u64) {
     let balance = world.fetch_balance();
-    println!("Balance after fast sync: {} µT (expected at least {} µT)", balance, minimum);
+    println!(
+        "Balance after fast sync: {} µT (expected at least {} µT)",
+        balance, minimum
+    );
 
     // Also print DB diagnostics for debugging
-    if let Some(db_path) = &world.database_path {
-        if let Ok(pool) = db::init_db(db_path.clone()) {
-            if let Ok(conn) = pool.get() {
-                let accounts = db::get_accounts(&conn, Some("default")).unwrap_or_default();
-                if let Some(account) = accounts.first() {
-                    if let Ok(bal) = db::get_balance(&conn, account.id) {
-                        println!(
-                            "  DB balance detail: total={}, available={}, locked={}, unconfirmed={}, credits={:?}, debits={:?}",
-                            bal.total, bal.available, bal.locked, bal.unconfirmed, bal.total_credits, bal.total_debits
-                        );
-                    }
+    if let Some(db_path) = &world.database_path
+        && let Ok(pool) = db::init_db(db_path.clone())
+        && let Ok(conn) = pool.get()
+    {
+        let accounts = db::get_accounts(&conn, Some("default")).unwrap_or_default();
+        if let Some(account) = accounts.first() {
+            if let Ok(bal) = db::get_balance(&conn, account.id) {
+                println!(
+                    "  DB balance detail: total={}, available={}, locked={}, unconfirmed={}, credits={:?}, debits={:?}",
+                    bal.total, bal.available, bal.locked, bal.unconfirmed, bal.total_credits, bal.total_debits
+                );
+            }
 
-                    // Count outputs by status
-                    let output_counts: String = conn
+            // Count outputs by status
+            let output_counts: String = conn
                         .query_row(
                             "SELECT GROUP_CONCAT(status || ':' || cnt) FROM (SELECT status, COUNT(*) as cnt FROM outputs WHERE account_id = ?1 AND deleted_at IS NULL GROUP BY status)",
                             [account.id],
                             |row| row.get(0),
                         )
                         .unwrap_or_else(|_| "error".to_string());
-                    println!("  Output counts by status: {}", output_counts);
-                }
-            }
+            println!("  Output counts by status: {}", output_counts);
         }
     }
 
@@ -289,6 +291,32 @@ async fn fast_sync_balance_at_least(world: &mut MinotariWorld, minimum: u64) {
         "Expected balance at least {} microTari after fast sync, got {}",
         minimum,
         balance
+    );
+}
+
+#[then("the fast sync and normal scan should complete in similar time")]
+async fn fast_sync_similar_time(world: &mut MinotariWorld) {
+    let normal = world
+        .benchmark_timings
+        .get("normal_scan")
+        .expect("Normal scan timing not recorded");
+    let fast = world
+        .benchmark_timings
+        .get("fast_sync")
+        .expect("Fast sync timing not recorded");
+
+    println!("Normal scan: {:?}", normal);
+    println!("Fast sync:   {:?}", fast);
+
+    // With no spent outputs, both should take roughly the same time.
+    // Allow fast sync to be up to 3x slower due to phase overhead on small chains.
+    let ratio = fast.as_secs_f64() / normal.as_secs_f64().max(0.001);
+    println!("Ratio (fast/normal): {:.2}x", ratio);
+    assert!(
+        ratio < 3.0,
+        "Fast sync ({:?}) took more than 3x longer than normal scan ({:?}) with no spent outputs",
+        fast,
+        normal
     );
 }
 

@@ -6,22 +6,38 @@ Feature: Fast Sync Scanning
   # =============================
   # Performance Comparisons
   # =============================
-  @pie
-  Scenario: Fast sync without backfill is faster than normal sync
+  Scenario: Fast sync without backfill is faster than normal sync when there are spent outputs
+    Given I have a seed node MinerNode
+    And I have a test database with a full signing wallet
+    When I mine 20 blocks on MinerNode
+    And I perform a normal full scan
+    And I send 15 transactions
+    And I mine 100 blocks on MinerNode
+    And I reset the wallet database keeping account
+    And I measure the time for a normal full scan
+    And I reset the wallet database keeping account
+    And I measure the time for a fast sync without backfill
+    Then the fast sync should be faster than the normal scan
+
+  Scenario: Fast sync without backfill completes in similar time to normal sync with no spent outputs
     Given I have a seed node MinerNode
     And I have a test database with an existing wallet
     When I mine 100 blocks on MinerNode
     And I measure the time for a normal full scan
     And I reset the wallet database
     And I measure the time for a fast sync without backfill
-    Then the fast sync should be faster than the normal scan
-  @pie
+    Then the fast sync and normal scan should complete in similar time
+
   Scenario: Fast sync with backfill completes within reasonable time of normal sync
     Given I have a seed node MinerNode
-    And I have a test database with an existing wallet
-    When I mine 100 blocks on MinerNode
+    And I have a test database with a full signing wallet
+    When I mine 10 blocks on MinerNode
+    And I perform a normal full scan
+    And I send 1 transactions
+    And I mine 100 blocks on MinerNode
+    And I reset the wallet database keeping account
     And I measure the time for a normal full scan
-    And I reset the wallet database
+    And I reset the wallet database keeping account
     And I measure the time for a fast sync with backfill
     Then I print the fast sync benchmark results
 
@@ -29,7 +45,7 @@ Feature: Fast Sync Scanning
   # Balance Correctness - No Transactions
   # =============================
 
-  @pie
+
   Scenario: Fast sync without backfill shows correct balance with no transactions
     Given I have a seed node MinerNode
     And I have a test database with an existing wallet
@@ -37,7 +53,7 @@ Feature: Fast Sync Scanning
     And I perform a fast sync without backfill
     Then the fast sync should complete successfully
     And the fast sync balance should be zero
-  @pie
+
   Scenario: Fast sync with backfill shows correct balance with no transactions
     Given I have a seed node MinerNode
     And I have a test database with an existing wallet
@@ -50,7 +66,7 @@ Feature: Fast Sync Scanning
   # =============================
   # Balance Correctness - With Transactions
   # =============================
-  @pie
+
   Scenario: Fast sync without backfill shows correct balance with transactions
     Given I have a seed node MinerNode
     And I have a test database with a full signing wallet
@@ -62,7 +78,7 @@ Feature: Fast Sync Scanning
     And I perform a fast sync without backfill
     Then the fast sync should complete successfully
     And the fast sync balance should be at least 1 microTari
-  @pie
+
   Scenario: Fast sync with backfill shows correct balance with transactions
     Given I have a seed node MinerNode
     And I have a test database with a full signing wallet

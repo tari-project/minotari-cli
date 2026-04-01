@@ -122,9 +122,7 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
         }
 
         match mode {
-            ScanMode::FastSync { safety_buffer } => {
-                self.run_fast_sync(sync_targets, safety_buffer, cancel_token).await
-            },
+            ScanMode::FastSync { safety_buffer } => self.run_fast_sync(sync_targets, safety_buffer, cancel_token).await,
             _ => self.unified_scan_loop(sync_targets, mode, cancel_token).await,
         }
     }
@@ -587,11 +585,9 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
             return Ok((all_events, true));
         }
 
-        // --- Phase 2: Recent full scan (fast_sync_target -> tip) using unified_scan_loop ---
-        for target in &mut targets {
-            target.next_block_to_scan = fast_sync_target;
-        }
-
+        // --- Phase 2: Recent full scan (fast_sync_target -> tip) ---
+        // Targets already have next_block_to_scan set to fast_sync_target + 1
+        // from Phase 1, so no reset needed.
         for target in &targets {
             self.event_sender
                 .send(ProcessingEvent::ScanStatus(ScanStatusEvent::FastSyncPhaseStarted {
@@ -604,9 +600,7 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
 
         // Phase 2 uses the same simple loop pattern as fast_sync_loop but without
         // exclude_spent, effectively doing a full scan of recent blocks.
-        let (events, _) = self
-            .recent_full_scan_loop(&mut targets, &cancel_token)
-            .await?;
+        let (events, _) = self.recent_full_scan_loop(&mut targets, &cancel_token).await?;
         all_events.extend(events);
 
         for target in &targets {
@@ -701,7 +695,8 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
                     count = unresolved.len();
                     "Verifying remaining SpentUnconfirmed outputs against base node"
                 );
-                self.verify_spent_unconfirmed_outputs(&conn, target, &unresolved).await?;
+                self.verify_spent_unconfirmed_outputs(&conn, target, &unresolved)
+                    .await?;
             }
 
             self.event_sender
@@ -730,8 +725,12 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
             .iter()
             .map(|target| (target.account.id, target.view_key.clone()))
             .collect();
-        let block_processor =
-            BlockProcessor::with_event_sender(all_accounts, self.event_sender.clone(), false, self.required_confirmations);
+        let block_processor = BlockProcessor::with_event_sender(
+            all_accounts,
+            self.event_sender.clone(),
+            false,
+            self.required_confirmations,
+        );
         let mut db_handler = ScanDbHandler::new(self.pool.clone(), block_processor);
 
         loop {
@@ -830,8 +829,12 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
             .iter()
             .map(|target| (target.account.id, target.view_key.clone()))
             .collect();
-        let block_processor =
-            BlockProcessor::with_event_sender(all_accounts, self.event_sender.clone(), false, self.required_confirmations);
+        let block_processor = BlockProcessor::with_event_sender(
+            all_accounts,
+            self.event_sender.clone(),
+            false,
+            self.required_confirmations,
+        );
         let mut db_handler = ScanDbHandler::new(self.pool.clone(), block_processor);
 
         loop {
@@ -925,8 +928,12 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
             .iter()
             .map(|target| (target.account.id, target.view_key.clone()))
             .collect();
-        let mut block_processor =
-            BlockProcessor::with_event_sender(all_accounts, self.event_sender.clone(), false, self.required_confirmations);
+        let mut block_processor = BlockProcessor::with_event_sender(
+            all_accounts,
+            self.event_sender.clone(),
+            false,
+            self.required_confirmations,
+        );
         block_processor.set_backfill_mode(true);
         let mut db_handler = ScanDbHandler::new(self.pool.clone(), block_processor);
 
@@ -1020,10 +1027,7 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
         use std::collections::HashMap;
 
         // Build a map from output_hash -> output_id for quick lookup
-        let hash_to_id: HashMap<Vec<u8>, i64> = unresolved
-            .iter()
-            .map(|(id, hash, _)| (hash.clone(), *id))
-            .collect();
+        let hash_to_id: HashMap<Vec<u8>, i64> = unresolved.iter().map(|(id, hash, _)| (hash.clone(), *id)).collect();
 
         let output_hashes: Vec<Vec<u8>> = unresolved.iter().map(|(_, hash, _)| hash.clone()).collect();
 
@@ -1042,12 +1046,10 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
             };
 
             if utxo_info.spent_in_header.is_some() {
-                crate::db::update_output_status(conn, output_id, OutputStatus::Spent)
-                    .map_err(ScanError::DbError)?;
+                crate::db::update_output_status(conn, output_id, OutputStatus::Spent).map_err(ScanError::DbError)?;
                 confirmed_spent += 1;
             } else {
-                crate::db::update_output_status(conn, output_id, OutputStatus::Unspent)
-                    .map_err(ScanError::DbError)?;
+                crate::db::update_output_status(conn, output_id, OutputStatus::Unspent).map_err(ScanError::DbError)?;
                 marked_unspent += 1;
             }
         }
