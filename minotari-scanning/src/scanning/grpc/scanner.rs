@@ -135,6 +135,7 @@ where
             batch_size: Some(100),
             request_timeout: self.timeout,
             exclude_spent: false,
+            exclude_inputs: false,
         })
     }
 
@@ -375,6 +376,7 @@ where
                 batch_size: config.batch_size,
                 request_timeout: config.request_timeout,
                 exclude_spent: config.exclude_spent,
+                exclude_inputs: config.exclude_inputs,
             };
             self.current_in_progress = InProgressScan::new(adjusted_config);
             return Ok(());
@@ -477,12 +479,16 @@ where
                     });
                 });
 
-                let inputs = tari_block
-                    .body
-                    .inputs()
-                    .iter()
-                    .map(tari_transaction_components::transaction_components::TransactionInput::output_hash)
-                    .collect();
+                let inputs = if config.exclude_inputs {
+                    Vec::new()
+                } else {
+                    tari_block
+                        .body
+                        .inputs()
+                        .iter()
+                        .map(tari_transaction_components::transaction_components::TransactionInput::output_hash)
+                        .collect()
+                };
 
                 batch_results.push(BlockScanResult {
                     height: tari_block.header.height,
