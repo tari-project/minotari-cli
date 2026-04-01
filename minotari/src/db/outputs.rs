@@ -106,10 +106,8 @@ pub fn insert_output(
     Ok(conn.last_insert_rowid())
 }
 
-/// Inserts an output only if one with the same output_hash does not already exist.
-/// Used during backfill to avoid duplicate outputs. Outputs inserted here are set
-/// to `SpentUnconfirmed` status since they were not found as unspent during fast
-/// sync and are therefore known to be spent.
+/// Inserts an output with `SpentUnconfirmed` status using `INSERT OR IGNORE`.
+/// Used during backfill to avoid duplicate outputs in a single atomic statement.
 /// Returns `Some(id)` if inserted, `None` if the output already existed.
 #[allow(clippy::too_many_arguments)]
 pub fn insert_spent_output_if_not_exists(
@@ -126,33 +124,75 @@ pub fn insert_spent_output_if_not_exists(
     payment_reference: PaymentReference,
     is_burn: bool,
 ) -> WalletDbResult<Option<i64>> {
-    let hash_as_fixed = FixedHash::try_from(output_hash.as_slice())
-        .map_err(|e| WalletDbError::Decoding(format!("Invalid output hash: {}", e)))?;
-    if get_output_info_by_hash(conn, &hash_as_fixed)?.is_some() {
-        return Ok(None);
-    }
+    let tx_id = TxId::new_deterministic(account_view_key.as_bytes(), &output.output_hash()).as_i64_wrapped();
+    let output_json = serde_json::to_string(&output)?;
 
-    let id = insert_output(
-        conn,
-        account_id,
-        account_view_key,
-        output_hash,
-        output,
-        block_height,
-        block_hash,
-        mined_timestamp,
-        memo_parsed,
-        memo_hex,
-        payment_reference,
-        is_burn,
+    #[allow(clippy::cast_possible_wrap)]
+    let mined_timestamp_dt = DateTime::<Utc>::from_timestamp(mined_timestamp as i64, 0)
+        .ok_or_else(|| WalletDbError::Decoding(format!("Invalid mined timestamp: {}", mined_timestamp)))?;
+
+    #[allow(clippy::cast_possible_wrap)]
+    let block_height = block_height as i64;
+    #[allow(clippy::cast_possible_wrap)]
+    let value = output.value().as_u64() as i64;
+    let payment_reference_hex = hex::encode(payment_reference.as_slice());
+    let status = OutputStatus::SpentUnconfirmed.to_string();
+
+    conn.execute(
+        r#"
+       INSERT OR IGNORE INTO outputs (
+            account_id,
+            tx_id,
+            output_hash,
+            mined_in_block_height,
+            mined_in_block_hash,
+            value,
+            mined_timestamp,
+            wallet_output_json,
+            memo_parsed,
+            memo_hex,
+            payment_reference,
+            is_burn,
+            status
+       )
+       VALUES (
+            :account_id,
+            :tx_id,
+            :output_hash,
+            :block_height,
+            :block_hash,
+            :value,
+            :mined_timestamp,
+            :output_json,
+            :memo_parsed,
+            :memo_hex,
+            :payment_reference,
+            :is_burn,
+            :status
+       )
+        "#,
+        named_params! {
+            ":account_id": account_id,
+            ":tx_id": tx_id,
+            ":output_hash": output_hash,
+            ":block_height": block_height,
+            ":block_hash": block_hash.as_slice(),
+            ":value": value,
+            ":mined_timestamp": mined_timestamp_dt,
+            ":output_json": output_json,
+            ":memo_parsed": memo_parsed,
+            ":memo_hex": memo_hex,
+            ":payment_reference": payment_reference_hex,
+            ":is_burn": is_burn,
+            ":status": status,
+        },
     )?;
 
-    // Mark as SpentUnconfirmed — these outputs were not found as unspent during
-    // Phase 1 fast sync, so they are known to be spent. The status will transition
-    // to Spent once the backfill processes the corresponding input.
-    update_output_status(conn, id, OutputStatus::SpentUnconfirmed)?;
-
-    Ok(Some(id))
+    if conn.changes() == 0 {
+        Ok(None)
+    } else {
+        Ok(Some(conn.last_insert_rowid()))
+    }
 }
 
 pub fn get_output_info_by_hash(

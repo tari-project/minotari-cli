@@ -1,6 +1,6 @@
 use std::{collections::VecDeque, sync::Arc};
 
-use log::{info, warn};
+use log::{debug, info, warn};
 use minotari_scanning::{HttpBlockchainScanner, ScanConfig, scanning::BlockchainScanner};
 use tari_common_types::{seeds::cipher_seed::BIRTHDAY_GENESIS_FROM_UNIX_EPOCH, types::PrivateKey};
 use tari_transaction_components::key_manager::KeyManager;
@@ -25,6 +25,7 @@ use crate::{
     webhooks::WebhookTriggerConfig,
 };
 use tari_transaction_components::key_manager::TransactionKeyManagerInterface;
+use tari_utilities::hex::Hex;
 
 const MAX_CONTINUOUS_BUFFERED_EVENTS: usize = 10_000;
 
@@ -1030,63 +1031,71 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
         let hash_to_output: HashMap<Vec<u8>, &crate::db::UnresolvedSpentOutput> =
             unresolved.iter().map(|o| (o.output_hash.clone(), o)).collect();
 
-        let output_hashes: Vec<Vec<u8>> = unresolved.iter().map(|o| o.output_hash.clone()).collect();
-
-        let response = self
-            .client
-            .get_utxos_deleted_info(output_hashes)
-            .await
-            .map_err(|e| ScanError::Intermittent(format!("Failed to query UTXO deleted info: {}", e)))?;
+        let all_output_hashes: Vec<Vec<u8>> = unresolved.iter().map(|o| o.output_hash.clone()).collect();
 
         let mut marked_unspent = 0u64;
         let mut confirmed_spent = 0u64;
 
-        for utxo_info in &response.utxos {
-            let Some(output) = hash_to_output.get(&utxo_info.utxo_hash) else {
-                continue;
-            };
+        for output_hashes in all_output_hashes.chunks(50) {
+            let response = self
+                .client
+                .get_utxos_deleted_info(output_hashes.to_vec())
+                .await
+                .map_err(|e| ScanError::Intermittent(format!("Failed to query UTXO deleted info: {}", e)))?;
 
-            if let Some((spent_height, spent_block_hash)) = &utxo_info.spent_in_header {
-                // Create input record so the spend is tracked in the DB
-                let input_id = crate::db::insert_input(
-                    conn,
-                    target.account.id,
-                    output.output_id,
-                    *spent_height,
-                    spent_block_hash,
-                    0, // timestamp not available from deleted info
-                )
-                .map_err(ScanError::DbError)?;
-
-                // Create debit balance change so credits - debits nets correctly
-                let change = crate::models::BalanceChange {
-                    account_id: target.account.id,
-                    caused_by_output_id: None,
-                    caused_by_input_id: Some(input_id),
-                    description: "Output spent (verified by base node)".to_string(),
-                    balance_credit: 0.into(),
-                    balance_debit: output.value.into(),
-                    effective_date: chrono::Utc::now().naive_utc(),
-                    effective_height: *spent_height,
-                    claimed_recipient_address: None,
-                    claimed_sender_address: None,
-                    memo_hex: None,
-                    memo_parsed: None,
-                    claimed_fee: None,
-                    claimed_amount: None,
-                    is_reversal: false,
-                    reversal_of_balance_change_id: None,
-                    is_reversed: false,
+            for utxo_info in &response.utxos {
+                let Some(output) = hash_to_output.get(&utxo_info.utxo_hash) else {
+                    continue;
                 };
-                crate::db::insert_balance_change(conn, &change).map_err(ScanError::DbError)?;
 
-                crate::db::update_output_status(conn, output.output_id, OutputStatus::Spent)
+                if let Some((spent_height, spent_block_hash)) = &utxo_info.spent_in_header {
+                    // Create input record so the spend is tracked in the DB
+                    let input_id = crate::db::insert_input(
+                        conn,
+                        target.account.id,
+                        output.output_id,
+                        *spent_height,
+                        spent_block_hash,
+                        0, // timestamp not available from deleted info
+                    )
                     .map_err(ScanError::DbError)?;
-                confirmed_spent += 1;
-            } else {
-                crate::db::update_output_status(conn, output.output_id, OutputStatus::Unspent)
-                    .map_err(ScanError::DbError)?;
-                marked_unspent += 1;
+
+                    // Create debit balance change so credits - debits nets correctly
+                    let change = crate::models::BalanceChange {
+                        account_id: target.account.id,
+                        caused_by_output_id: None,
+                        caused_by_input_id: Some(input_id),
+                        description: "Output spent (verified by base node)".to_string(),
+                        balance_credit: 0.into(),
+                        balance_debit: output.value.into(),
+                        effective_date: chrono::Utc::now().naive_utc(),
+                        effective_height: *spent_height,
+                        claimed_recipient_address: None,
+                        claimed_sender_address: None,
+                        memo_hex: None,
+                        memo_parsed: None,
+                        claimed_fee: None,
+                        claimed_amount: None,
+                        is_reversal: false,
+                        reversal_of_balance_change_id: None,
+                        is_reversed: false,
+                    };
+                    crate::db::insert_balance_change(conn, &change).map_err(ScanError::DbError)?;
+
+                    crate::db::update_output_status(conn, output.output_id, OutputStatus::Spent)
+                        .map_err(ScanError::DbError)?;
+                    confirmed_spent += 1;
+                } else if utxo_info.found_in_header.is_some() {
+                    crate::db::update_output_status(conn, output.output_id, OutputStatus::Unspent)
+                        .map_err(ScanError::DbError)?;
+                    marked_unspent += 1;
+                } else {
+                    debug!(
+                        account = &*target.account.friendly_name,
+                        output_hash = &*utxo_info.utxo_hash.to_hex();
+                        "Ouput unkown by base node, status kept as SpentUnconfirmed"
+                    );
+                }
             }
         }
 
