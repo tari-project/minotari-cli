@@ -1017,19 +1017,20 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
 
     /// Verifies remaining SpentUnconfirmed outputs against the base node using
     /// the `get_utxos_deleted_info` endpoint. If `spent_in_header` is present,
-    /// the output is confirmed Spent. Otherwise it's marked Unspent.
+    /// the output is confirmed Spent and an input record + debit balance change
+    /// are created so the balance sums correctly. Otherwise it's marked Unspent.
     async fn verify_spent_unconfirmed_outputs(
         &self,
         conn: &rusqlite::Connection,
         target: &AccountSyncTarget,
-        unresolved: &[(i64, Vec<u8>, u64)],
+        unresolved: &[crate::db::UnresolvedSpentOutput],
     ) -> Result<(), ScanError> {
         use std::collections::HashMap;
 
-        // Build a map from output_hash -> output_id for quick lookup
-        let hash_to_id: HashMap<Vec<u8>, i64> = unresolved.iter().map(|(id, hash, _)| (hash.clone(), *id)).collect();
+        let hash_to_output: HashMap<Vec<u8>, &crate::db::UnresolvedSpentOutput> =
+            unresolved.iter().map(|o| (o.output_hash.clone(), o)).collect();
 
-        let output_hashes: Vec<Vec<u8>> = unresolved.iter().map(|(_, hash, _)| hash.clone()).collect();
+        let output_hashes: Vec<Vec<u8>> = unresolved.iter().map(|o| o.output_hash.clone()).collect();
 
         let response = self
             .client
@@ -1041,15 +1042,50 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
         let mut confirmed_spent = 0u64;
 
         for utxo_info in &response.utxos {
-            let Some(&output_id) = hash_to_id.get(&utxo_info.utxo_hash) else {
+            let Some(output) = hash_to_output.get(&utxo_info.utxo_hash) else {
                 continue;
             };
 
-            if utxo_info.spent_in_header.is_some() {
-                crate::db::update_output_status(conn, output_id, OutputStatus::Spent).map_err(ScanError::DbError)?;
+            if let Some((spent_height, spent_block_hash)) = &utxo_info.spent_in_header {
+                // Create input record so the spend is tracked in the DB
+                let input_id = crate::db::insert_input(
+                    conn,
+                    target.account.id,
+                    output.output_id,
+                    *spent_height,
+                    spent_block_hash,
+                    0, // timestamp not available from deleted info
+                )
+                .map_err(ScanError::DbError)?;
+
+                // Create debit balance change so credits - debits nets correctly
+                let change = crate::models::BalanceChange {
+                    account_id: target.account.id,
+                    caused_by_output_id: None,
+                    caused_by_input_id: Some(input_id),
+                    description: "Output spent (verified by base node)".to_string(),
+                    balance_credit: 0.into(),
+                    balance_debit: output.value.into(),
+                    effective_date: chrono::Utc::now().naive_utc(),
+                    effective_height: *spent_height,
+                    claimed_recipient_address: None,
+                    claimed_sender_address: None,
+                    memo_hex: None,
+                    memo_parsed: None,
+                    claimed_fee: None,
+                    claimed_amount: None,
+                    is_reversal: false,
+                    reversal_of_balance_change_id: None,
+                    is_reversed: false,
+                };
+                crate::db::insert_balance_change(conn, &change).map_err(ScanError::DbError)?;
+
+                crate::db::update_output_status(conn, output.output_id, OutputStatus::Spent)
+                    .map_err(ScanError::DbError)?;
                 confirmed_spent += 1;
             } else {
-                crate::db::update_output_status(conn, output_id, OutputStatus::Unspent).map_err(ScanError::DbError)?;
+                crate::db::update_output_status(conn, output.output_id, OutputStatus::Unspent)
+                    .map_err(ScanError::DbError)?;
                 marked_unspent += 1;
             }
         }

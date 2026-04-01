@@ -394,17 +394,25 @@ pub fn resolve_spent_unconfirmed_with_inputs(conn: &Connection, account_id: i64)
     Ok(marked_spent)
 }
 
-/// Returns output hashes and block heights for remaining `SpentUnconfirmed` outputs
-/// that have no matching input. These need to be verified against the base node.
+/// Returned data for an unresolved SpentUnconfirmed output.
+pub struct UnresolvedSpentOutput {
+    pub output_id: i64,
+    pub output_hash: Vec<u8>,
+    pub mined_in_block_height: u64,
+    pub value: u64,
+}
+
+/// Returns info for remaining `SpentUnconfirmed` outputs that have no matching input.
+/// These need to be verified against the base node.
 pub fn get_unresolved_spent_unconfirmed_outputs(
     conn: &Connection,
     account_id: i64,
-) -> WalletDbResult<Vec<(i64, Vec<u8>, u64)>> {
+) -> WalletDbResult<Vec<UnresolvedSpentOutput>> {
     let spent_unconfirmed = OutputStatus::SpentUnconfirmed.to_string();
 
     let mut stmt = conn.prepare_cached(
         r#"
-        SELECT id, output_hash, mined_in_block_height
+        SELECT id, output_hash, mined_in_block_height, value
         FROM outputs
         WHERE account_id = :account_id
           AND status = :status
@@ -419,11 +427,12 @@ pub fn get_unresolved_spent_unconfirmed_outputs(
             ":status": spent_unconfirmed,
         },
         |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                row.get::<_, Vec<u8>>(1)?,
-                row.get::<_, i64>(2).map(|h| h as u64)?,
-            ))
+            Ok(UnresolvedSpentOutput {
+                output_id: row.get(0)?,
+                output_hash: row.get(1)?,
+                mined_in_block_height: row.get::<_, i64>(2).map(|h| h as u64)?,
+                value: row.get::<_, i64>(3).map(|v| v as u64)?,
+            })
         },
     )?;
 
