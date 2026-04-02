@@ -1,8 +1,8 @@
+use crate::{BlockHeaderInfo, BlockScanResult, ScanConfig, TipInfo, WalletResult};
 use async_trait::async_trait;
 use tari_node_components::blocks::Block;
 use tari_transaction_components::transaction_components::TransactionOutput;
-
-use crate::{BlockHeaderInfo, BlockScanResult, ScanConfig, TipInfo, WalletResult};
+use tokio::sync::mpsc;
 
 /// Blockchain scanner trait for scanning UTXOs
 ///
@@ -12,7 +12,10 @@ use crate::{BlockHeaderInfo, BlockScanResult, ScanConfig, TipInfo, WalletResult}
 #[async_trait]
 pub trait BlockchainScanner: Send + Sync {
     /// Scan for wallet outputs in the specified block range
-    async fn scan_blocks(&mut self, config: &ScanConfig) -> WalletResult<(Vec<BlockScanResult>, bool)>;
+    async fn scan_blocks(
+        &mut self,
+        config: &ScanConfig,
+    ) -> WalletResult<mpsc::Receiver<WalletResult<Vec<BlockScanResult>>>>;
     /// Get the current chain tip information
     async fn get_tip_info(&mut self) -> WalletResult<TipInfo>;
 
