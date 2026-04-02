@@ -4,12 +4,6 @@
 //! that connects to a Tari base node via HTTP API to scan for wallet outputs.
 
 // Native targets use reqwest
-use std::{
-    collections::{HashMap, HashSet},
-    sync::{Arc, RwLock},
-    time::{Duration, Instant},
-};
-
 use crate::{
     BlockHeaderInfo, UtxoScanResult,
     errors::{WalletError, WalletResult},
@@ -17,8 +11,14 @@ use crate::{
     scanning::{BlockScanResult, InProgressScan, ScanConfig, TipInfo, interface::BlockchainScanner},
 };
 use async_trait::async_trait;
+use futures::stream::{FuturesUnordered, StreamExt};
 use rayon::iter::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator};
 use reqwest::Client;
+use std::{
+    collections::{HashMap, HashSet},
+    sync::{Arc, RwLock},
+    time::{Duration, Instant},
+};
 use tari_common_types::types::FixedHash;
 use tari_node_components::blocks::Block;
 use tari_transaction_components::{
@@ -436,99 +436,54 @@ where
                         return;
                     },
                 };
-                let handle = Handle::current();
-                block_in_place(|| {
-                    processing_pool.install(|| {
-                        http_blocks.into_par_iter().for_each(|http_block| {
-                            let mut wallet_outputs = Vec::new();
+                let pool_scanner = processing_scanner.clone();
+                processing_pool.install(|| {
+                    http_blocks.into_par_iter().for_each(|http_block| {
+                        let mut wallet_outputs = Vec::new();
 
-                            let header_hash = match FixedHash::try_from(http_block.header_hash.clone()) {
-                                Ok(h) => h,
+                        let header_hash = match FixedHash::try_from(http_block.header_hash.clone()) {
+                            Ok(h) => h,
+                            Err(e) => {
+                                errors
+                                    .write()
+                                    .expect("write lock should not be poisoned")
+                                    .push(WalletError::ConversionError(e.to_string()));
+                                return;
+                            },
+                        };
+                        for output in &http_block.outputs {
+                            let scanned_output = match output.clone().try_into() {
+                                Ok(o) => o,
                                 Err(e) => {
-                                    errors
-                                        .write()
-                                        .expect("write lock should not be poisoned")
-                                        .push(WalletError::ConversionError(e.to_string()));
-                                    return;
+                                    errors.write().expect("write lock should not be poisoned").push(e);
+                                    continue;
                                 },
                             };
-                            for output in &http_block.outputs {
-                                let scanned_output = match output.clone().try_into() {
-                                    Ok(o) => o,
-                                    Err(e) => {
-                                        errors.write().expect("write lock should not be poisoned").push(e);
-                                        continue;
-                                    },
-                                };
-                                match processing_scanner.scan_for_recoverable_output(&scanned_output) {
-                                    Ok(Some(wallet_output)) => {
-                                        wallet_outputs.push(wallet_output);
-                                    },
-                                    Ok(None) => {},
-                                    Err(e) => {
-                                        errors.write().expect("write lock should not be poisoned").push(e);
-                                    },
-                                }
+                            match pool_scanner.scan_for_recoverable_output(&scanned_output) {
+                                Ok(Some(wallet_output)) => {
+                                    wallet_outputs.push(wallet_output);
+                                },
+                                Ok(None) => {},
+                                Err(e) => {
+                                    errors.write().expect("write lock should not be poisoned").push(e);
+                                },
                             }
-                            let mut procssed_outputs = Vec::new();
-                            if !wallet_outputs.is_empty() {
-                                let block_response = match handle
-                                    .block_on(processing_scanner.get_utxos_by_block(&header_hash.to_hex()))
-                                {
-                                    Ok(r) => r,
-                                    Err(e) => {
-                                        errors.write().expect("write lock should not be poisoned").push(e);
-                                        return;
-                                    },
-                                };
-                                for output in &wallet_outputs {
-                                    if let Some(index) = block_response
-                                        .outputs
-                                        .iter()
-                                        .position(|o| *o.encrypted_data() == output.encrypted_data)
-                                    {
-                                        let tx_output =
-                                            block_response.outputs.get(index).expect("should exist").clone();
-                                        let output_hash = output.output_hash;
-                                        // Attempt to convert to wallet output
-                                        match output.to_wallet_output(
-                                            tx_output,
-                                            processing_scanner
-                                                .key_managers
-                                                .get(output.key_manager_index)
-                                                .expect("should exist"),
-                                        ) {
-                                            Ok(Some(wallet_output)) => {
-                                                procssed_outputs.push((
-                                                    output_hash,
-                                                    wallet_output,
-                                                    output.key_manager_index,
-                                                ));
-                                            },
-                                            Ok(None) => {},
-                                            Err(e) => {
-                                                errors.write().expect("Write lock should not be poisoned").push(e);
-                                            },
-                                        }
-                                    }
-                                }
-                            }
+                        }
 
-                            results
-                                .write()
-                                .expect("lock should not be poisoned")
-                                .push(BlockScanResult {
-                                    height: http_block.height,
-                                    block_hash: header_hash,
-                                    wallet_outputs: procssed_outputs,
-                                    inputs: http_block
-                                        .inputs
-                                        .into_iter()
-                                        .map(|i| FixedHash::try_from(i).unwrap_or_default())
-                                        .collect(),
-                                    mined_timestamp: http_block.mined_timestamp,
-                                });
-                        });
+                        results.write().expect("lock should not be poisoned").push((
+                            BlockScanResult {
+                                height: http_block.height,
+                                block_hash: header_hash,
+                                wallet_outputs: Vec::new(),
+                                inputs: http_block
+                                    .inputs
+                                    .into_iter()
+                                    .map(|i| FixedHash::try_from(i).unwrap_or_default())
+                                    .collect(),
+                                mined_timestamp: http_block.mined_timestamp,
+                            },
+                            wallet_outputs,
+                        ));
                     });
                 });
                 let first_error = errors.read().expect("...").first().cloned();
@@ -539,13 +494,64 @@ where
                     return;
                 }
                 let mut results = results.into_inner().expect("Lock should not be poisoned");
-                results.sort_by_key(|a| a.height);
+                let network_results = results
+                    .into_iter()
+                    .map(|(mut block, wallet_outputs)| {
+                        let scanner = processing_scanner.clone();
+                        async move {
+                            if wallet_outputs.is_empty() {
+                                return Ok(block);
+                            }
+                            let block_response = scanner.get_utxos_by_block(&block.block_hash.to_hex()).await?;
+                            for output in &wallet_outputs {
+                                if let Some(index) = block_response
+                                    .outputs
+                                    .iter()
+                                    .position(|o| *o.encrypted_data() == output.encrypted_data)
+                                {
+                                    let tx_output =
+                                        block_response.outputs.get(index).expect("should exist").clone();
+                                    let output_hash = output.output_hash;
+                                    let final_output_optional = output.to_wallet_output(
+                                        tx_output,
+                                        scanner
+                                            .key_managers
+                                            .get(output.key_manager_index)
+                                            .expect("should exist"),
+                                    )?;
+                                    if let Some(final_output) = final_output_optional {
+                                        block.wallet_outputs.push((
+                                            output_hash,
+                                            final_output,
+                                            output.key_manager_index,
+                                        ))
+                                    }
+                                }
+                            }
+                            Ok(block)
+                        }
+                    })
+                    .collect::<FuturesUnordered<_>>()  // concurrent, not sequential
+                    .collect::<Vec<_>>()
+                    .await;
+                let mut final_results = Vec::new();
+                for r in network_results {
+                    match r {
+                        Ok(block_result) => final_results.push(block_result),
+                        Err(e) => {
+                            send_download.send(Err(e)).await.ok();
+                            return;
+                        },
+                    }
+                }
+
+                final_results.sort_by_key(|a| a.height);
 
                 debug!(
                     "HTTP batch completed, found {} blocks with wallet outputs",
-                    results.len(),
+                    final_results.len(),
                 );
-                send_download.send(Ok(results)).await.inspect_err(|e| {
+                send_download.send(Ok(final_results)).await.inspect_err(|e| {
                     error!("Failed to send download error with error: {}", e);
                 });
             }
