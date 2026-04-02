@@ -20,6 +20,7 @@ use tari_transaction_components::{
     key_manager::TransactionKeyManagerInterface,
     transaction_components::{TransactionInput, TransactionKernel, TransactionOutput, WalletOutput},
 };
+use tokio::sync::mpsc;
 use tonic::{Request, transport::Channel};
 use tracing::debug;
 
@@ -394,113 +395,118 @@ impl<KM> BlockchainScanner for GrpcBlockchainScanner<KM>
 where
     KM: TransactionKeyManagerInterface,
 {
-    async fn scan_blocks(&mut self, config: &ScanConfig) -> WalletResult<(Vec<BlockScanResult>, bool)> {
-        if let Some(end_height) = config.end_height
-            && config.start_height > end_height
-        {
-            return Err(WalletError::OperationNotSupported(
-                "start_height cannot be greater than end_height".to_string(),
-            ));
-        }
-        match &self.current_in_progress.get_config() {
-            Some(existing_scan) if *existing_scan == config => {
-                if *existing_scan == config {
-                    debug!(
-                        "Resuming existing grpc block scan from height {} to {:?}",
-                        existing_scan.start_height, existing_scan.end_height
-                    );
-                }
-            },
-            _ => {
-                self.update_scan_config(config).await?;
-            },
-        }
-        // Get tip info to determine end height
-        let tip_info = self.get_tip_info().await?;
-        let end_height = std::cmp::min(
-            config.end_height.unwrap_or(tip_info.best_block_height),
-            tip_info.best_block_height,
-        );
-
-        let batch_end = std::cmp::min(
-            config.start_height + ((self.current_in_progress.page() + 1) * config.batch_size.unwrap_or(10)) - 1,
-            end_height,
-        );
-
-        let mut results = Vec::new();
-        let mut current_height =
-            config.start_height + (self.current_in_progress.page() * config.batch_size.unwrap_or(10));
-        let heights: Vec<u64> = (current_height..=batch_end).collect();
-        let request = tari_rpc::GetBlocksRequest { heights };
-        let mut stream = self
-            .client
-            .clone()
-            .get_blocks(Request::new(request))
-            .await
-            .map_err(|e| {
-                WalletError::ScanningError(crate::errors::ScanningError::blockchain_connection_failed(&format!(
-                    "GRPC error: {e}"
-                )))
-            })?
-            .into_inner();
-        let mut batch_results = Vec::new();
-        let errors = RwLock::new(Vec::new());
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(self.number_processing_threads)
-            .build()
-            .map_err(|e| WalletError::ConfigurationError(format!("Failed to build thread pool: {e}")))?;
-        while let Some(grpc_block) = stream.message().await.map_err(|e| {
-            WalletError::ScanningError(crate::errors::ScanningError::blockchain_connection_failed(&format!(
-                "Stream error: {e}"
-            )))
-        })? {
-            if let Some(block) = grpc_block.block {
-                let tari_block: Block = block.try_into()?;
-                current_height = tari_block.header.height;
-                let wallet_outputs = RwLock::new(Vec::new());
-
-                pool.install(|| {
-                    tari_block.body.outputs().par_iter().for_each(|output| {
-                        match self.scan_for_recoverable_output(output) {
-                            Ok(Some((wallet_output, index))) => {
-                                wallet_outputs.write().expect("wallet_outputs lock poisoned").push((
-                                    output.hash(),
-                                    wallet_output,
-                                    index,
-                                ));
-                            },
-                            Ok(None) => {},
-                            Err(e) => {
-                                errors.write().expect("wallet_outputs lock poisoned").push(e);
-                            },
-                        }
-                    });
-                });
-
-                let inputs = tari_block
-                    .body
-                    .inputs()
-                    .iter()
-                    .map(tari_transaction_components::transaction_components::TransactionInput::output_hash)
-                    .collect();
-
-                batch_results.push(BlockScanResult {
-                    height: tari_block.header.height,
-                    block_hash: tari_block.hash(),
-                    wallet_outputs: wallet_outputs.into_inner().expect("wallet_outputs lock poisoned"),
-                    inputs,
-                    mined_timestamp: tari_block.header.timestamp.as_u64(),
-                });
-                if current_height >= end_height {
-                    self.current_in_progress.clear();
-                    break;
-                }
-            }
-        }
-        results.extend(batch_results);
-        self.current_in_progress.increment_page();
-        results.sort_by_key(|a| a.height);
-        Ok((results, (current_height < end_height)))
+    async fn scan_blocks(
+        &mut self,
+        config: &ScanConfig,
+    ) -> WalletResult<mpsc::Receiver<WalletResult<Vec<BlockScanResult>>>> {
+        let (send_scan_result, rec_scan_result) = mpsc::channel(1000);
+        Ok(rec_scan_result)
+        // if let Some(end_height) = config.end_height
+        //     && config.start_height > end_height
+        // {
+        //     return Err(WalletError::OperationNotSupported(
+        //         "start_height cannot be greater than end_height".to_string(),
+        //     ));
+        // }
+        // match &self.current_in_progress.get_config() {
+        //     Some(existing_scan) if *existing_scan == config => {
+        //         if *existing_scan == config {
+        //             debug!(
+        //                 "Resuming existing grpc block scan from height {} to {:?}",
+        //                 existing_scan.start_height, existing_scan.end_height
+        //             );
+        //         }
+        //     },
+        //     _ => {
+        //         self.update_scan_config(config).await?;
+        //     },
+        // }
+        // // Get tip info to determine end height
+        // let tip_info = self.get_tip_info().await?;
+        // let end_height = std::cmp::min(
+        //     config.end_height.unwrap_or(tip_info.best_block_height),
+        //     tip_info.best_block_height,
+        // );
+        //
+        // let batch_end = std::cmp::min(
+        //     config.start_height + ((self.current_in_progress.page() + 1) * config.batch_size.unwrap_or(10)) - 1,
+        //     end_height,
+        // );
+        //
+        // let mut results = Vec::new();
+        // let mut current_height =
+        //     config.start_height + (self.current_in_progress.page() * config.batch_size.unwrap_or(10));
+        // let heights: Vec<u64> = (current_height..=batch_end).collect();
+        // let request = tari_rpc::GetBlocksRequest { heights };
+        // let mut stream = self
+        //     .client
+        //     .clone()
+        //     .get_blocks(Request::new(request))
+        //     .await
+        //     .map_err(|e| {
+        //         WalletError::ScanningError(crate::errors::ScanningError::blockchain_connection_failed(&format!(
+        //             "GRPC error: {e}"
+        //         )))
+        //     })?
+        //     .into_inner();
+        // let mut batch_results = Vec::new();
+        // let errors = RwLock::new(Vec::new());
+        // let pool = rayon::ThreadPoolBuilder::new()
+        //     .num_threads(self.number_processing_threads)
+        //     .build()
+        //     .map_err(|e| WalletError::ConfigurationError(format!("Failed to build thread pool: {e}")))?;
+        // while let Some(grpc_block) = stream.message().await.map_err(|e| {
+        //     WalletError::ScanningError(crate::errors::ScanningError::blockchain_connection_failed(&format!(
+        //         "Stream error: {e}"
+        //     )))
+        // })? {
+        //     if let Some(block) = grpc_block.block {
+        //         let tari_block: Block = block.try_into()?;
+        //         current_height = tari_block.header.height;
+        //         let wallet_outputs = RwLock::new(Vec::new());
+        //
+        //         pool.install(|| {
+        //             tari_block.body.outputs().par_iter().for_each(|output| {
+        //                 match self.scan_for_recoverable_output(output) {
+        //                     Ok(Some((wallet_output, index))) => {
+        //                         wallet_outputs.write().expect("wallet_outputs lock poisoned").push((
+        //                             output.hash(),
+        //                             wallet_output,
+        //                             index,
+        //                         ));
+        //                     },
+        //                     Ok(None) => {},
+        //                     Err(e) => {
+        //                         errors.write().expect("wallet_outputs lock poisoned").push(e);
+        //                     },
+        //                 }
+        //             });
+        //         });
+        //
+        //         let inputs = tari_block
+        //             .body
+        //             .inputs()
+        //             .iter()
+        //             .map(tari_transaction_components::transaction_components::TransactionInput::output_hash)
+        //             .collect();
+        //
+        //         batch_results.push(BlockScanResult {
+        //             height: tari_block.header.height,
+        //             block_hash: tari_block.hash(),
+        //             wallet_outputs: wallet_outputs.into_inner().expect("wallet_outputs lock poisoned"),
+        //             inputs,
+        //             mined_timestamp: tari_block.header.timestamp.as_u64(),
+        //         });
+        //         if current_height >= end_height {
+        //             self.current_in_progress.clear();
+        //             break;
+        //         }
+        //     }
+        // }
+        // results.extend(batch_results);
+        // self.current_in_progress.increment_page();
+        // results.sort_by_key(|a| a.height);
+        // Ok((results, (current_height < end_height)))
     }
 
     async fn get_tip_info(&mut self) -> WalletResult<TipInfo> {

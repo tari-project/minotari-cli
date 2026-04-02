@@ -10,6 +10,12 @@ use std::{
     time::{Duration, Instant},
 };
 
+use crate::{
+    BlockHeaderInfo, UtxoScanResult,
+    errors::{WalletError, WalletResult},
+    http::models::{HttpBlockHeader, HttpTipInfoResponse, IncompleteScannedOutput, ScanningOutputStruct},
+    scanning::{BlockScanResult, InProgressScan, ScanConfig, TipInfo, interface::BlockchainScanner},
+};
 use async_trait::async_trait;
 use rayon::iter::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator};
 use reqwest::Client;
@@ -21,22 +27,18 @@ use tari_transaction_components::{
     transaction_components::TransactionOutput,
 };
 use tari_utilities::hex::Hex;
+use tokio::runtime::Handle;
+use tokio::sync::mpsc;
 use tokio::task::block_in_place;
+use tracing::log::error;
 use tracing::{debug, warn};
-
-use crate::{
-    BlockHeaderInfo, UtxoScanResult,
-    errors::{WalletError, WalletResult},
-    http::models::{HttpBlockHeader, HttpTipInfoResponse, IncompleteScannedOutput, ScanningOutputStruct},
-    scanning::{BlockScanResult, InProgressScan, ScanConfig, TipInfo, interface::BlockchainScanner},
-};
-
 const SYNC_UTXOS_BY_BLOCK_PAGE_LIMIT: u64 = 50;
 const HTTP2_INITIAL_WINDOW_SIZE: u32 = 4 * 1024 * 1024;
 const HTTP2_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(10);
 const HTTP2_KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// HTTP client for connecting to Tari base node
+#[derive(Clone)]
 pub struct HttpBlockchainScanner<KM> {
     /// HTTP client for making requests (native targets)
     client: Client,
@@ -46,7 +48,7 @@ pub struct HttpBlockchainScanner<KM> {
     timeout: Duration,
     key_managers: Vec<KM>,
     current_in_progress: InProgressScan,
-    processing_pool: Arc<rayon::ThreadPool>,
+    thread_count: usize,
 }
 
 impl<KM> HttpBlockchainScanner<KM>
@@ -66,7 +68,7 @@ where
         key_managers: Vec<KM>,
         number_processing_threads: usize,
     ) -> WalletResult<Self> {
-        let actual_threads = if number_processing_threads > 0 {
+        let thread_count = if number_processing_threads > 0 {
             number_processing_threads
         } else {
             (num_cpus::get().saturating_sub(2)).max(1)
@@ -76,12 +78,6 @@ where
                 "At least one key manager must be specified".to_string(),
             ));
         }
-        let processing_pool = Arc::new(
-            rayon::ThreadPoolBuilder::new()
-                .num_threads(actual_threads)
-                .build()
-                .map_err(|e| WalletError::ConfigurationError(format!("Failed to build thread pool: {e}")))?,
-        );
 
         let client = Client::builder()
             .http2_initial_stream_window_size(HTTP2_INITIAL_WINDOW_SIZE)
@@ -118,7 +114,7 @@ where
             timeout,
             key_managers,
             current_in_progress: InProgressScan::new_empty(),
-            processing_pool,
+            thread_count,
         })
     }
 
@@ -345,7 +341,10 @@ impl<KM> BlockchainScanner for HttpBlockchainScanner<KM>
 where
     KM: TransactionKeyManagerInterface,
 {
-    async fn scan_blocks(&mut self, config: &ScanConfig) -> WalletResult<(Vec<BlockScanResult>, bool)> {
+    async fn scan_blocks(
+        &mut self,
+        config: &ScanConfig,
+    ) -> WalletResult<mpsc::Receiver<WalletResult<Vec<BlockScanResult>>>> {
         if let Some(end_height) = config.end_height
             && config.start_height > end_height
         {
@@ -353,162 +352,207 @@ where
                 "start_height cannot be greater than end_height".to_string(),
             ));
         }
-        let tip = self.get_tip_info().await?;
-        if config.start_height > tip.best_block_height {
-            debug!(
-                "Tip height {} is less than requested start height {}, returning empty results",
-                tip.best_block_height, config.start_height
-            );
-            return Ok((Vec::new(), false));
-        }
 
-        match &self.current_in_progress.get_config() {
-            Some(existing_scan) if *existing_scan == config => {
+        let (send_scan_result, mut rec_scan_result) = mpsc::channel(1000);
+        let (send_download, rec_download) = mpsc::channel(1000);
+        self.update_scan_config(config)?;
+        let mut download_scanner = self.clone();
+        let send_download_1 = send_download.clone();
+        let scan_config = config.clone();
+        tokio::spawn(async move {
+            let tip = match download_scanner.get_tip_info().await {
+                Ok(tip) => tip,
+                Err(e) => {
+                    error!("Failed to get tip info: {}", e);
+                    return;
+                },
+            };
+            if scan_config.start_height > tip.best_block_height {
                 debug!(
-                    "Resuming existing HTTP block scan from height {} to {:?}",
-                    existing_scan.start_height, existing_scan.end_height
+                    "Tip height {} is less than requested start height {}, returning empty results",
+                    tip.best_block_height, scan_config.start_height
                 );
-            },
-            _ => {
-                self.update_scan_config(config)?;
-            },
-        }
-        let timer = Instant::now();
-        let (http_blocks, more_blocks) = self.fetch_block_range().await?;
 
-        let utxos = RwLock::new(Vec::new());
-        let blocks_with_utxos = RwLock::new(HashSet::new());
-        let errors = RwLock::new(Vec::new());
-
-        block_in_place(|| {
-            self.processing_pool.install(|| {
-                http_blocks.into_par_iter().for_each(|http_block| {
-                    let mut wallet_outputs = Vec::new();
-
-                    let header_hash = match FixedHash::try_from(http_block.header_hash.clone()) {
-                        Ok(h) => h,
-                        Err(e) => {
-                            errors
-                                .write()
-                                .expect("write lock should not be poisoned")
-                                .push(WalletError::ConversionError(e.to_string()));
+                send_download_1
+                    .send(Ok(Vec::<BlockScanResult>::new()))
+                    .await
+                    .inspect_err(|e| {
+                        error!("Failed to send tip result with error: {}", e);
+                    });
+                return;
+            }
+            loop {
+                let more_blocks = match download_scanner.fetch_block_range().await {
+                    Ok((http_blocks, more_blocks)) => {
+                        if let Err(e) = send_scan_result.send(Ok(http_blocks)).await {
+                            error!("Failed to send download result with error: {}", e);
                             return;
-                        },
-                    };
-                    for output in &http_block.outputs {
-                        let scanned_output = match output.clone().try_into() {
-                            Ok(o) => o,
-                            Err(e) => {
-                                errors.write().expect("write lock should not be poisoned").push(e);
-                                continue;
-                            },
                         };
-                        match self.scan_for_recoverable_output(&scanned_output) {
-                            Ok(Some(wallet_output)) => {
-                                wallet_outputs.push(wallet_output);
-                                blocks_with_utxos
-                                    .write()
-                                    .expect("write lock should not be poisoned")
-                                    .insert(header_hash);
-                            },
-                            Ok(None) => {},
-                            Err(e) => {
-                                errors.write().expect("write lock should not be poisoned").push(e);
-                            },
-                        }
-                    }
-                    let mined_timestamp = http_block.mined_timestamp;
-                    utxos
-                        .write()
-                        .expect("write lock should not be poisoned")
-                        .push(UtxoScanResult {
-                            height: http_block.height,
-                            block_hash: header_hash,
-                            wallet_outputs,
-                            inputs: http_block
-                                .inputs
-                                .into_iter()
-                                .map(|i| FixedHash::try_from(i).unwrap_or_default())
-                                .collect(),
-                            mined_timestamp,
+                        more_blocks
+                    },
+                    Err(e) => {
+                        send_download_1.send(Err(e)).await.inspect_err(|e| {
+                            error!("Failed to send download result with error: {}", e);
                         });
-                });
-            });
-        });
-        if let Some(e) = errors.read().expect("read lock should not be poisoned").first() {
-            return Err(e.clone());
-        }
-        let results = RwLock::new(Vec::new());
-        // fetch all the unique blocks we need before processing
-        let mut block_data = HashMap::new();
-        for block_hash in blocks_with_utxos.into_inner().expect("lock should not be poisoned") {
-            let block_response = self.get_utxos_by_block(&block_hash.to_hex()).await?;
-            block_data.insert(block_hash, block_response);
-        }
-        let utxos = utxos.into_inner().expect("lock should not be poisoned");
-        block_in_place(|| {
-            self.processing_pool.install(|| {
-                utxos.par_iter().for_each(|block| {
-                    let mut wallet_outputs = Vec::new();
+                        return;
+                    },
+                };
 
-                    if !block.wallet_outputs.is_empty() {
-                        // Block should always be present as we fetched them above
-                        let Some(block_response) = block_data.get(&block.block_hash) else {
-                            errors.write().expect("write lock should not be poisoned").push(
-                                WalletError::ScanningError(crate::errors::ScanningError::blockchain_connection_failed(
-                                    "Block data missing for output",
-                                )),
-                            );
-                            return;
-                        };
-                        for output in &block.wallet_outputs {
-                            if let Some(index) = block_response
-                                .outputs
-                                .iter()
-                                .position(|o| *o.encrypted_data() == output.encrypted_data)
-                            {
-                                let tx_output = block_response.outputs.get(index).expect("should exist").clone();
-                                let output_hash = output.output_hash;
-                                // Attempt to convert to wallet output
-                                match output.to_wallet_output(
-                                    tx_output,
-                                    self.key_managers.get(output.key_manager_index).expect("should exist"),
-                                ) {
+                if !more_blocks {
+                    break;
+                }
+            }
+            debug!("Finished downloading blocks");
+            if let Err(e) = send_download_1.send(Ok(Vec::new())).await {
+                error!("Failed to send download result with error: {}", e);
+                return;
+            };
+        });
+        let thread_count = self.thread_count;
+        let mut processing_scanner = self.clone();
+        tokio::spawn(async move {
+            let processing_pool = match rayon::ThreadPoolBuilder::new()
+                .num_threads(thread_count)
+                .build()
+                .map_err(|e| WalletError::ConfigurationError(format!("Failed to build thread pool: {e}")))
+            {
+                Ok(pool) => pool,
+                Err(e) => {
+                    send_download.send(Err(e)).await.inspect_err(|e| {
+                        error!("Failed to send download result with error: {}", e);
+                    });
+                    return;
+                },
+            };
+            while let Some(http_blocks_res) = rec_scan_result.recv().await {
+                let errors = RwLock::new(Vec::new());
+                let results = RwLock::new(Vec::new());
+                let http_blocks = match http_blocks_res {
+                    Ok(http_blocks) => http_blocks,
+                    Err(e) => {
+                        send_download.send(Err(e)).await.inspect_err(|e| {
+                            error!("Failed to send download error with error: {}", e);
+                        });
+                        return;
+                    },
+                };
+                let handle = Handle::current();
+                block_in_place(|| {
+                    processing_pool.install(|| {
+                        http_blocks.into_par_iter().for_each(|http_block| {
+                            let mut wallet_outputs = Vec::new();
+
+                            let header_hash = match FixedHash::try_from(http_block.header_hash.clone()) {
+                                Ok(h) => h,
+                                Err(e) => {
+                                    errors
+                                        .write()
+                                        .expect("write lock should not be poisoned")
+                                        .push(WalletError::ConversionError(e.to_string()));
+                                    return;
+                                },
+                            };
+                            for output in &http_block.outputs {
+                                let scanned_output = match output.clone().try_into() {
+                                    Ok(o) => o,
+                                    Err(e) => {
+                                        errors.write().expect("write lock should not be poisoned").push(e);
+                                        continue;
+                                    },
+                                };
+                                match processing_scanner.scan_for_recoverable_output(&scanned_output) {
                                     Ok(Some(wallet_output)) => {
-                                        wallet_outputs.push((output_hash, wallet_output, output.key_manager_index));
+                                        wallet_outputs.push(wallet_output);
                                     },
                                     Ok(None) => {},
                                     Err(e) => {
-                                        errors.write().expect("Write lock should not be poisoned").push(e);
+                                        errors.write().expect("write lock should not be poisoned").push(e);
                                     },
                                 }
                             }
-                        }
-                    }
-                    results
-                        .write()
-                        .expect("lock should not be poisoned")
-                        .push(BlockScanResult {
-                            height: block.height,
-                            block_hash: block.block_hash,
-                            wallet_outputs,
-                            inputs: block.inputs.clone(),
-                            mined_timestamp: block.mined_timestamp,
+                            let mut procssed_outputs = Vec::new();
+                            if !wallet_outputs.is_empty() {
+                                let block_response = match handle
+                                    .block_on(processing_scanner.get_utxos_by_block(&header_hash.to_hex()))
+                                {
+                                    Ok(r) => r,
+                                    Err(e) => {
+                                        errors.write().expect("write lock should not be poisoned").push(e);
+                                        return;
+                                    },
+                                };
+                                for output in &wallet_outputs {
+                                    if let Some(index) = block_response
+                                        .outputs
+                                        .iter()
+                                        .position(|o| *o.encrypted_data() == output.encrypted_data)
+                                    {
+                                        let tx_output =
+                                            block_response.outputs.get(index).expect("should exist").clone();
+                                        let output_hash = output.output_hash;
+                                        // Attempt to convert to wallet output
+                                        match output.to_wallet_output(
+                                            tx_output,
+                                            processing_scanner
+                                                .key_managers
+                                                .get(output.key_manager_index)
+                                                .expect("should exist"),
+                                        ) {
+                                            Ok(Some(wallet_output)) => {
+                                                procssed_outputs.push((
+                                                    output_hash,
+                                                    wallet_output,
+                                                    output.key_manager_index,
+                                                ));
+                                            },
+                                            Ok(None) => {},
+                                            Err(e) => {
+                                                errors.write().expect("Write lock should not be poisoned").push(e);
+                                            },
+                                        }
+                                    }
+                                }
+                            }
+
+                            results
+                                .write()
+                                .expect("lock should not be poisoned")
+                                .push(BlockScanResult {
+                                    height: http_block.height,
+                                    block_hash: header_hash,
+                                    wallet_outputs: procssed_outputs,
+                                    inputs: http_block
+                                        .inputs
+                                        .into_iter()
+                                        .map(|i| FixedHash::try_from(i).unwrap_or_default())
+                                        .collect(),
+                                    mined_timestamp: http_block.mined_timestamp,
+                                });
                         });
+                    });
                 });
-            });
+                let first_error = errors.read().expect("...").first().cloned();
+                if let Some(e) = first_error {
+                    if let Err(err) = send_download.send(Err(e)).await {
+                        error!("Failed to send download error with error: {}", err);
+                    };
+                    return;
+                }
+                let mut results = results.into_inner().expect("Lock should not be poisoned");
+                results.sort_by_key(|a| a.height);
+
+                debug!(
+                    "HTTP batch completed, found {} blocks with wallet outputs",
+                    results.len(),
+                );
+                send_download.send(Ok(results)).await.inspect_err(|e| {
+                    error!("Failed to send download error with error: {}", e);
+                });
+            }
+            debug!("HTTP scan completed, found",);
         });
-        if let Some(e) = errors.read().expect("read lock should not be poisoned").first() {
-            return Err(e.clone());
-        }
-        let mut results = results.into_inner().expect("Lock should not be poisoned");
-        results.sort_by_key(|a| a.height);
-        debug!(
-            "HTTP scan completed, found {} blocks with wallet outputs in {}s",
-            results.len(),
-            timer.elapsed().as_secs()
-        );
-        Ok((results, more_blocks))
+
+        Ok(rec_download)
     }
 
     async fn get_tip_info(&mut self) -> WalletResult<TipInfo> {
