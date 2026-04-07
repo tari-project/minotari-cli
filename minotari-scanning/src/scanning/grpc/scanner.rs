@@ -10,6 +10,11 @@
 
 use std::{sync::RwLock, time::Duration};
 
+use crate::{
+    BlockHeaderInfo,
+    errors::{WalletError, WalletResult},
+    scanning::{BlockScanResult, InProgressScan, ScanConfig, TipInfo, interface::BlockchainScanner},
+};
 use async_trait::async_trait;
 use minotari_app_grpc::tari_rpc;
 use primitive_types::U512;
@@ -20,15 +25,12 @@ use tari_transaction_components::{
     key_manager::TransactionKeyManagerInterface,
     transaction_components::{TransactionInput, TransactionKernel, TransactionOutput, WalletOutput},
 };
+use tokio::sync::mpsc;
 use tonic::{Request, transport::Channel};
 use tracing::debug;
-
-use crate::{
-    BlockHeaderInfo,
-    errors::{WalletError, WalletResult},
-    scanning::{BlockScanResult, InProgressScan, ScanConfig, TipInfo, interface::BlockchainScanner},
-};
+use tracing::log::error;
 /// GRPC client for connecting to Tari base node
+#[derive(Clone)]
 pub struct GrpcBlockchainScanner<KM> {
     /// GRPC channel to the base node
     client: tari_rpc::base_node_client::BaseNodeClient<Channel>,
@@ -46,6 +48,11 @@ where
 {
     /// Create a new GRPC scanner with the given base URL
     pub async fn new(base_url: String, key_managers: Vec<KM>, number_processing_threads: usize) -> WalletResult<Self> {
+        let thread_count = if number_processing_threads > 0 {
+            number_processing_threads
+        } else {
+            (num_cpus::get().saturating_sub(2)).max(1)
+        };
         if key_managers.is_empty() {
             return Err(WalletError::ConfigurationError(
                 "At least one key manager must be specified".to_string(),
@@ -77,7 +84,7 @@ where
             timeout,
             key_managers,
             current_in_progress: InProgressScan::new_empty(),
-            number_processing_threads,
+            number_processing_threads: thread_count,
         })
     }
 
@@ -88,6 +95,11 @@ where
         key_managers: Vec<KM>,
         number_processing_threads: usize,
     ) -> WalletResult<Self> {
+        let thread_count = if number_processing_threads > 0 {
+            number_processing_threads
+        } else {
+            (num_cpus::get().saturating_sub(2)).max(1)
+        };
         if key_managers.is_empty() {
             return Err(WalletError::ConfigurationError(
                 "At least one key manager must be specified".to_string(),
@@ -119,7 +131,7 @@ where
             timeout,
             key_managers,
             current_in_progress: InProgressScan::new_empty(),
-            number_processing_threads,
+            number_processing_threads: thread_count,
         })
     }
 
@@ -394,7 +406,10 @@ impl<KM> BlockchainScanner for GrpcBlockchainScanner<KM>
 where
     KM: TransactionKeyManagerInterface,
 {
-    async fn scan_blocks(&mut self, config: &ScanConfig) -> WalletResult<(Vec<BlockScanResult>, bool)> {
+    async fn scan_blocks(
+        &mut self,
+        config: &ScanConfig,
+    ) -> WalletResult<mpsc::Receiver<WalletResult<Vec<BlockScanResult>>>> {
         if let Some(end_height) = config.end_height
             && config.start_height > end_height
         {
@@ -402,35 +417,16 @@ where
                 "start_height cannot be greater than end_height".to_string(),
             ));
         }
-        match &self.current_in_progress.get_config() {
-            Some(existing_scan) if *existing_scan == config => {
-                if *existing_scan == config {
-                    debug!(
-                        "Resuming existing grpc block scan from height {} to {:?}",
-                        existing_scan.start_height, existing_scan.end_height
-                    );
-                }
-            },
-            _ => {
-                self.update_scan_config(config).await?;
-            },
-        }
-        // Get tip info to determine end height
+
+        let (send_scan_result, rec_scan_result) = mpsc::channel(1000);
+        self.update_scan_config(config).await?;
+        let download_scanner = self.clone();
         let tip_info = self.get_tip_info().await?;
         let end_height = std::cmp::min(
             config.end_height.unwrap_or(tip_info.best_block_height),
             tip_info.best_block_height,
         );
-
-        let batch_end = std::cmp::min(
-            config.start_height + ((self.current_in_progress.page() + 1) * config.batch_size.unwrap_or(10)) - 1,
-            end_height,
-        );
-
-        let mut results = Vec::new();
-        let mut current_height =
-            config.start_height + (self.current_in_progress.page() * config.batch_size.unwrap_or(10));
-        let heights: Vec<u64> = (current_height..=batch_end).collect();
+        let heights: Vec<u64> = (config.start_height..=end_height).collect();
         let request = tari_rpc::GetBlocksRequest { heights };
         let mut stream = self
             .client
@@ -443,25 +439,48 @@ where
                 )))
             })?
             .into_inner();
-        let mut batch_results = Vec::new();
-        let errors = RwLock::new(Vec::new());
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(self.number_processing_threads)
             .build()
             .map_err(|e| WalletError::ConfigurationError(format!("Failed to build thread pool: {e}")))?;
-        while let Some(grpc_block) = stream.message().await.map_err(|e| {
-            WalletError::ScanningError(crate::errors::ScanningError::blockchain_connection_failed(&format!(
-                "Stream error: {e}"
-            )))
-        })? {
-            if let Some(block) = grpc_block.block {
-                let tari_block: Block = block.try_into()?;
-                current_height = tari_block.header.height;
+        tokio::spawn(async move {
+            loop {
+                let grpc_block_response = stream.message().await;
+                let grpc_block = match grpc_block_response {
+                    Ok(Some(block_response)) => block_response,
+                    Err(e) => {
+                        let _unused = send_scan_result
+                            .send(Err(WalletError::GrpcError(e.to_string())))
+                            .await
+                            .inspect_err(|e| {
+                                error!("Failed to send download result with error: {}", e);
+                            });
+                        return;
+                    },
+                    Ok(None) => {
+                        return;
+                    },
+                };
+                let tari_block: Block = match grpc_block.block.map(|b| b.try_into()) {
+                    Some(Ok(block)) => block,
+                    Some(Err(e)) => {
+                        let _unused = send_scan_result
+                            .send(Err(WalletError::GrpcError(e.to_string())))
+                            .await
+                            .inspect_err(|e| {
+                                error!("Failed to send download result with error: {}", e);
+                            });
+                        return;
+                    },
+                    None => {
+                        return;
+                    },
+                };
+                let errors = RwLock::new(Vec::new());
                 let wallet_outputs = RwLock::new(Vec::new());
-
                 pool.install(|| {
                     tari_block.body.outputs().par_iter().for_each(|output| {
-                        match self.scan_for_recoverable_output(output) {
+                        match download_scanner.scan_for_recoverable_output(output) {
                             Ok(Some((wallet_output, index))) => {
                                 wallet_outputs.write().expect("wallet_outputs lock poisoned").push((
                                     output.hash(),
@@ -476,7 +495,6 @@ where
                         }
                     });
                 });
-
                 let inputs = tari_block
                     .body
                     .inputs()
@@ -484,23 +502,20 @@ where
                     .map(tari_transaction_components::transaction_components::TransactionInput::output_hash)
                     .collect();
 
-                batch_results.push(BlockScanResult {
+                let block_res = BlockScanResult {
                     height: tari_block.header.height,
                     block_hash: tari_block.hash(),
                     wallet_outputs: wallet_outputs.into_inner().expect("wallet_outputs lock poisoned"),
                     inputs,
                     mined_timestamp: tari_block.header.timestamp.as_u64(),
+                };
+                let _unused = send_scan_result.send(Ok(vec![block_res])).await.inspect_err(|e| {
+                    error!("Failed to send scan error with error: {}", e);
                 });
-                if current_height >= end_height {
-                    self.current_in_progress.clear();
-                    break;
-                }
             }
-        }
-        results.extend(batch_results);
-        self.current_in_progress.increment_page();
-        results.sort_by_key(|a| a.height);
-        Ok((results, (current_height < end_height)))
+        });
+
+        Ok(rec_scan_result)
     }
 
     async fn get_tip_info(&mut self) -> WalletResult<TipInfo> {
@@ -514,14 +529,6 @@ where
 
         let tip_info = response.into_inner();
         Ok(Self::convert_tip_info(&tip_info))
-    }
-
-    async fn search_utxos(&mut self, _commitments: Vec<Vec<u8>>) -> WalletResult<Vec<BlockScanResult>> {
-        Ok(Vec::new())
-    }
-
-    async fn fetch_utxos(&mut self, _hashes: Vec<Vec<u8>>) -> WalletResult<Vec<TransactionOutput>> {
-        Ok(Vec::new())
     }
 
     async fn get_blocks_by_heights(&mut self, heights: Vec<u64>) -> WalletResult<Vec<Block>> {

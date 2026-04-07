@@ -1,10 +1,8 @@
+use log::info;
+use minotari_scanning::{HttpBlockchainScanner, scanning::BlockchainScanner};
 use std::{collections::VecDeque, sync::Arc};
-
-use log::{info, warn};
-use minotari_scanning::{HttpBlockchainScanner, ScanConfig, scanning::BlockchainScanner};
 use tari_common_types::{seeds::cipher_seed::BIRTHDAY_GENESIS_FROM_UNIX_EPOCH, types::PrivateKey};
 use tari_transaction_components::key_manager::KeyManager;
-use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -15,7 +13,7 @@ use crate::{
     scan::{
         DisplayedTransactionsEvent, ReorgDetectedEvent, ScanError, ScanMode, ScanRetryConfig, TransactionsUpdatedEvent,
         block_processor::BlockProcessor,
-        config::{MAX_BACKOFF_EXPONENT, MAX_BACKOFF_SECONDS, OPTIMAL_SCANNING_THREADS},
+        config::OPTIMAL_SCANNING_THREADS,
         events::{EventSender, ProcessingEvent},
         reorg,
         scan_db_handler::ScanDbHandler,
@@ -194,7 +192,6 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
         let mut blocks_since_reorg_check = 0;
 
         let mut state_manager = ScannerStateManager::new();
-
         loop {
             if let Some(token) = &cancel_token
                 && token.is_cancelled()
@@ -217,7 +214,16 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
                 .filter(|&h| h > global_next_block)
                 .min();
 
-            let end_height = next_horizon_height.map(|h| h.saturating_sub(1));
+            let mut end_height = next_horizon_height.map(|h| h.saturating_sub(1));
+            if let ScanMode::Partial { max_blocks } = mode {
+                let max_height_to_scan = global_next_block
+                    .saturating_add(max_blocks)
+                    .saturating_sub(total_scanned_globally);
+                end_height = match end_height {
+                    Some(h) => Some(h.min(max_height_to_scan)),
+                    None => Some(max_height_to_scan),
+                };
+            }
 
             let effective_batch_size = next_horizon_height
                 .map(|h| h.saturating_sub(global_next_block).min(self.batch_size))
@@ -232,21 +238,25 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
                     &targets,
                     &self.base_url,
                     self.processing_threads,
+                    &self.retry_config,
                 )
                 .await?;
+            let mut utxo_stream = scanner
+                .scan_blocks(&scanner_config)
+                .await
+                .map_err(|e| ScanError::Intermittent(e.to_string()))?;
+            let mut is_batch_empty = false;
+            let mut max_new_height_in_batch = 0;
+            while let Some(response) = utxo_stream.recv().await {
+                let scanned_blocks = response.map_err(|e| ScanError::Intermittent(e.to_string()))?;
+                //let (scanned_blocks, mut more_blocks) = self.scan_blocks_with_timeout(scanner, &scanner_config).await?;
+                let new_blocks_count = scanned_blocks.len() as u64;
+                is_batch_empty = scanned_blocks.is_empty();
+                // Go on, if we stopped on artificial horizon
+                if is_batch_empty {
+                    break;
+                }
 
-            let (scanned_blocks, mut more_blocks) = self.scan_blocks_with_timeout(scanner, &scanner_config).await?;
-            let new_blocks_count = scanned_blocks.len() as u64;
-            let is_batch_empty = scanned_blocks.is_empty();
-            // Go on, if we stopped on artificial horizon
-            if let Some(horizon) = next_horizon_height
-                && let Some(last_block) = scanned_blocks.last()
-                && last_block.height >= horizon.saturating_sub(1)
-            {
-                more_blocks = true;
-            }
-
-            if more_blocks {
                 for account_id in &active_account_ids {
                     self.event_sender
                         .send(ProcessingEvent::ScanStatus(ScanStatusEvent::MoreBlocksAvailable {
@@ -254,11 +264,9 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
                             last_scanned_height: global_next_block.saturating_sub(1),
                         }));
                 }
-            }
 
-            let mut max_new_height_in_batch = global_next_block;
+                max_new_height_in_batch = global_next_block;
 
-            if !is_batch_empty {
                 let shared_blocks = Arc::new(scanned_blocks);
 
                 for account_id in &active_account_ids {
@@ -312,16 +320,15 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
                             }));
                     }
                 }
-            }
 
-            blocks_since_reorg_check += new_blocks_count;
-            total_scanned_globally += new_blocks_count;
+                blocks_since_reorg_check += new_blocks_count;
+                total_scanned_globally += new_blocks_count;
 
-            if blocks_since_reorg_check >= self.reorg_check_interval {
-                self.check_global_reorgs(&mut targets, &db_handler, scanner).await?;
-                blocks_since_reorg_check = 0;
+                if blocks_since_reorg_check >= self.reorg_check_interval {
+                    self.check_global_reorgs(&mut targets, &db_handler, scanner).await?;
+                    blocks_since_reorg_check = 0;
+                }
             }
-            // Handle Partial scan limits
             if let ScanMode::Partial { max_blocks } = mode
                 && total_scanned_globally >= max_blocks
             {
@@ -332,8 +339,7 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
                     all_events,
                 );
             }
-
-            if is_batch_empty || !more_blocks {
+            if is_batch_empty {
                 for account_id in &active_account_ids {
                     let Some(target) = targets.iter().find(|target| target.account.id == *account_id) else {
                         return Err(ScanError::Fatal(anyhow::anyhow!(
@@ -458,57 +464,6 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
                     block_height: Some(height),
                     is_initial_sync: false,
                 }));
-        }
-    }
-
-    async fn scan_blocks_with_timeout(
-        &self,
-        scanner: &mut HttpBlockchainScanner<KeyManager>,
-        config: &ScanConfig,
-    ) -> Result<(Vec<minotari_scanning::BlockScanResult>, bool), ScanError> {
-        let mut timeout_retries = 0;
-        let mut error_retries = 0;
-
-        loop {
-            match timeout(self.retry_config.timeout, scanner.scan_blocks(config)).await {
-                Ok(Ok(result)) => return Ok(result),
-                Ok(Err(e)) => {
-                    error_retries += 1;
-                    let error_msg = e.to_string();
-                    warn!(
-                        error = &*error_msg,
-                        retry = error_retries,
-                        max = self.retry_config.max_error_retries;
-                        "Blockchain scan failed"
-                    );
-                    if error_retries >= self.retry_config.max_error_retries {
-                        return Err(ScanError::Intermittent(e.to_string()));
-                    }
-                    let exponent = error_retries.min(MAX_BACKOFF_EXPONENT);
-                    let backoff_secs = self
-                        .retry_config
-                        .error_backoff_base_secs
-                        .pow(exponent)
-                        .min(MAX_BACKOFF_SECONDS);
-                    info!(
-                        seconds = backoff_secs;
-                        "Waiting before retrying..."
-                    );
-                    tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
-                },
-                Err(_) => {
-                    timeout_retries += 1;
-                    warn!(
-                        retry = timeout_retries,
-                        max = self.retry_config.max_timeout_retries;
-                        "scan_blocks timed out"
-                    );
-                    if timeout_retries >= self.retry_config.max_timeout_retries {
-                        return Err(ScanError::Timeout(timeout_retries));
-                    }
-                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                },
-            }
         }
     }
 

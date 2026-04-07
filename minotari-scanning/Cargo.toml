@@ -47,6 +47,7 @@ tonic = { version = "0.13", features = ["tls-ring", "prost"], optional = true }
 # === CLI Tools ===
 
 anyhow = "1.0.99"
+futures = "0.3"
 
 # === Platform-Specific Dependencies ===
 # Native targets (non-WASM) - Full reqwest with all features
@@ -56,7 +57,7 @@ reqwest = { version = "0.12.22", features = [
     "stream",
     "gzip",
 ], optional = true }
-
+log = { version = "0.4.29", features = ["kv"] }
 # WASM targets - Use web-sys instead of reqwest for HTTP functionality
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 web-sys = { version = "0.3", features = [

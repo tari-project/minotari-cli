@@ -1,3 +1,4 @@
+use crate::scan::ScanRetryConfig;
 use crate::{ScanError, scan::coordinator::AccountSyncTarget};
 use minotari_scanning::{HttpBlockchainScanner, ScanConfig};
 use tari_transaction_components::key_manager::KeyManager;
@@ -27,6 +28,7 @@ impl ScannerStateManager {
         all_targets: &[AccountSyncTarget],
         base_url: &str,
         processing_threads: usize,
+        retry_config: &ScanRetryConfig,
     ) -> Result<(&mut HttpBlockchainScanner<KeyManager>, ScanConfig), ScanError> {
         // Only recreate scanner if accounts change
         if self.scanner.is_none() || self.active_account_ids != new_active_account_ids {
@@ -41,9 +43,16 @@ impl ScannerStateManager {
                 })
                 .collect::<Result<Vec<_>, _>>()?;
 
-            let new_scanner = HttpBlockchainScanner::new(base_url.to_string(), active_key_managers, processing_threads)
-                .await
-                .map_err(|e| ScanError::Intermittent(e.to_string()))?;
+            let new_scanner = HttpBlockchainScanner::with_timeout(
+                base_url.to_string(),
+                retry_config.timeout,
+                active_key_managers,
+                processing_threads,
+                retry_config.max_error_retries,
+                retry_config.error_backoff_base_secs,
+            )
+            .await
+            .map_err(|e| ScanError::Intermittent(e.to_string()))?;
 
             self.scanner = Some(new_scanner);
             self.active_account_ids = new_active_account_ids.to_vec();

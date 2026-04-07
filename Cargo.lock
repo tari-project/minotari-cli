@@ -3788,8 +3788,10 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "futures",
  "getrandom 0.2.16",
  "js-sys",
+ "log",
  "minotari_app_grpc 5.3.0-pre.3 (registry+https://github.com/rust-lang/crates.io-index)",
  "num_cpus",
  "primitive-types",
