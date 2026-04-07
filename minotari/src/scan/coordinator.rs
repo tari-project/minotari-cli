@@ -1,10 +1,8 @@
-use log::{info, warn};
-use minotari_scanning::{HttpBlockchainScanner, ScanConfig, scanning::BlockchainScanner};
-use std::time::Instant;
+use log::{info};
+use minotari_scanning::{HttpBlockchainScanner, scanning::BlockchainScanner};
 use std::{collections::VecDeque, sync::Arc};
 use tari_common_types::{seeds::cipher_seed::BIRTHDAY_GENESIS_FROM_UNIX_EPOCH, types::PrivateKey};
 use tari_transaction_components::key_manager::KeyManager;
-use tokio::time::timeout;
 use tokio_util::sync::CancellationToken;
 
 use crate::{
@@ -15,7 +13,7 @@ use crate::{
     scan::{
         DisplayedTransactionsEvent, ReorgDetectedEvent, ScanError, ScanMode, ScanRetryConfig, TransactionsUpdatedEvent,
         block_processor::BlockProcessor,
-        config::{MAX_BACKOFF_EXPONENT, MAX_BACKOFF_SECONDS, OPTIMAL_SCANNING_THREADS},
+        config::{OPTIMAL_SCANNING_THREADS},
         events::{EventSender, ProcessingEvent},
         reorg,
         scan_db_handler::ScanDbHandler,
@@ -194,7 +192,6 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
         let mut blocks_since_reorg_check = 0;
 
         let mut state_manager = ScannerStateManager::new();
-        let timer = Instant::now();
         loop {
             if let Some(token) = &cancel_token
                 && token.is_cancelled()
@@ -241,6 +238,7 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
                     &targets,
                     &self.base_url,
                     self.processing_threads,
+                    &self.retry_config,
                 )
                 .await?;
             let mut utxo_stream = scanner
@@ -331,7 +329,6 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
                     blocks_since_reorg_check = 0;
                 }
             }
-            dbg!(timer.elapsed());
             if let ScanMode::Partial { max_blocks } = mode
                 && total_scanned_globally >= max_blocks
             {

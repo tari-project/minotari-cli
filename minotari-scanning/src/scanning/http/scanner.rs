@@ -5,19 +5,18 @@
 
 // Native targets use reqwest
 use crate::{
-    BlockHeaderInfo, UtxoScanResult,
+    BlockHeaderInfo,
     errors::{WalletError, WalletResult},
     http::models::{HttpBlockHeader, HttpTipInfoResponse, IncompleteScannedOutput, ScanningOutputStruct},
     scanning::{BlockScanResult, InProgressScan, ScanConfig, TipInfo, interface::BlockchainScanner},
 };
 use async_trait::async_trait;
 use futures::stream::{FuturesUnordered, StreamExt};
-use rayon::iter::{IntoParallelIterator, IntoParallelRefIterator, ParallelIterator};
+use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use reqwest::Client;
 use std::{
-    collections::{HashMap, HashSet},
-    sync::{Arc, RwLock},
-    time::{Duration, Instant},
+    sync::{ RwLock},
+    time::{Duration},
 };
 use tari_common_types::types::FixedHash;
 use tari_node_components::blocks::Block;
@@ -27,15 +26,15 @@ use tari_transaction_components::{
     transaction_components::TransactionOutput,
 };
 use tari_utilities::hex::Hex;
-use tokio::runtime::Handle;
 use tokio::sync::mpsc;
-use tokio::task::block_in_place;
-use tracing::log::error;
-use tracing::{debug, warn};
+use tokio::time::timeout;
+use log::{debug, warn,error, info};
 const SYNC_UTXOS_BY_BLOCK_PAGE_LIMIT: u64 = 50;
 const HTTP2_INITIAL_WINDOW_SIZE: u32 = 4 * 1024 * 1024;
 const HTTP2_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(10);
 const HTTP2_KEEP_ALIVE_TIMEOUT: Duration = Duration::from_secs(5);
+pub const MAX_BACKOFF_EXPONENT: u32 = 5;
+pub const MAX_BACKOFF_SECONDS: u64 = 60;
 
 /// HTTP client for connecting to Tari base node
 #[derive(Clone)]
@@ -49,6 +48,8 @@ pub struct HttpBlockchainScanner<KM> {
     key_managers: Vec<KM>,
     current_in_progress: InProgressScan,
     thread_count: usize,
+    max_error_retries: u32,
+    error_backoff_base_secs: u64,
 }
 
 impl<KM> HttpBlockchainScanner<KM>
@@ -58,7 +59,9 @@ where
     /// Create a new HTTP scanner with the given base URL
     pub async fn new(base_url: String, key_managers: Vec<KM>, number_processing_threads: usize) -> WalletResult<Self> {
         let timeout = Duration::from_secs(30);
-        Self::with_timeout(base_url, timeout, key_managers, number_processing_threads).await
+        let max_error_retries =  3;
+        let error_backoff_base_secs = 2;
+        Self::with_timeout(base_url, timeout, key_managers, number_processing_threads, max_error_retries, error_backoff_base_secs).await
     }
 
     /// Create a new HTTP scanner with custom timeout (native only)
@@ -67,6 +70,8 @@ where
         timeout: Duration,
         key_managers: Vec<KM>,
         number_processing_threads: usize,
+        max_error_retries: u32,
+        error_backoff_base_secs: u64,
     ) -> WalletResult<Self> {
         let thread_count = if number_processing_threads > 0 {
             number_processing_threads
@@ -115,11 +120,64 @@ where
             key_managers,
             current_in_progress: InProgressScan::new_empty(),
             thread_count,
+            max_error_retries,
+            error_backoff_base_secs,
         })
     }
-
-    /// Sync UTXOs by block - matches WASM example usage
     async fn sync_utxos_by_block(
+        &self,
+        start_header_hash: &str,
+        limit: u64,
+        page: u64,
+        exclude_spent: bool,
+    ) -> WalletResult<SyncUtxosByBlockResponseV0>{
+            let mut timeout_retries = 0;
+            let mut error_retries = 0;
+
+            loop {
+                match timeout(self.timeout, self.sync_utxos_by_block_http_call(start_header_hash, limit, page, exclude_spent)).await {
+                    Ok(Ok(result)) => return Ok(result),
+                    Ok(Err(e)) => {
+                        error_retries += 1;
+                        let error_msg = e.to_string();
+                        warn!(
+                            error = &*error_msg,
+                            retry = error_retries,
+                            max = self.max_error_retries;
+                            "Blockchain scan failed"
+                        );
+                        if error_retries >= self.max_error_retries {
+                            return Err(e);
+                        }
+                        let exponent = error_retries.min(MAX_BACKOFF_EXPONENT);
+                        let backoff_secs = self
+                            .error_backoff_base_secs
+                            .pow(exponent)
+                            .min(MAX_BACKOFF_SECONDS);
+                        info!(
+                            seconds = backoff_secs;
+                            "Waiting before retrying..."
+                        );
+                        tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+                    },
+                    Err(_) => {
+                        timeout_retries += 1;
+                        warn!(
+                            retry = timeout_retries,
+                            max = self.max_error_retries;
+                            "scan_blocks timed out"
+                        );
+                        if timeout_retries >= self.max_error_retries {
+                            return Err(WalletError::Timeout(format!("Failed after {timeout_retries}")));
+                        }
+                        tokio::time::sleep(Duration::from_secs(1)).await;
+                    },
+                }
+            }
+        }
+
+    /// Sync UTXOs by block
+    async fn sync_utxos_by_block_http_call(
         &self,
         start_header_hash: &str,
         limit: u64,
@@ -373,7 +431,7 @@ where
                     tip.best_block_height, scan_config.start_height
                 );
 
-                send_download_1
+                let _unused = send_download_1
                     .send(Ok(Vec::<BlockScanResult>::new()))
                     .await
                     .inspect_err(|e| {
@@ -391,7 +449,7 @@ where
                         more_blocks
                     },
                     Err(e) => {
-                        send_download_1.send(Err(e)).await.inspect_err(|e| {
+                        let _unused = send_download_1.send(Err(e)).await.inspect_err(|e| {
                             error!("Failed to send download result with error: {}", e);
                         });
                         return;
@@ -409,7 +467,7 @@ where
             };
         });
         let thread_count = self.thread_count;
-        let mut processing_scanner = self.clone();
+        let processing_scanner = self.clone();
         tokio::spawn(async move {
             let processing_pool = match rayon::ThreadPoolBuilder::new()
                 .num_threads(thread_count)
@@ -418,7 +476,7 @@ where
             {
                 Ok(pool) => pool,
                 Err(e) => {
-                    send_download.send(Err(e)).await.inspect_err(|e| {
+                    let _unused = send_download.send(Err(e)).await.inspect_err(|e| {
                         error!("Failed to send download result with error: {}", e);
                     });
                     return;
@@ -430,7 +488,7 @@ where
                 let http_blocks = match http_blocks_res {
                     Ok(http_blocks) => http_blocks,
                     Err(e) => {
-                        send_download.send(Err(e)).await.inspect_err(|e| {
+                        let _unused = send_download.send(Err(e)).await.inspect_err(|e| {
                             error!("Failed to send download error with error: {}", e);
                         });
                         return;
@@ -493,7 +551,7 @@ where
                     };
                     return;
                 }
-                let mut results = results.into_inner().expect("Lock should not be poisoned");
+                let results = results.into_inner().expect("Lock should not be poisoned");
                 let network_results = results
                     .into_iter()
                     .map(|(mut block, wallet_outputs)| {
@@ -551,7 +609,7 @@ where
                     "HTTP batch completed, found {} blocks with wallet outputs",
                     final_results.len(),
                 );
-                send_download.send(Ok(final_results)).await.inspect_err(|e| {
+                let _unused = send_download.send(Ok(final_results)).await.inspect_err(|e| {
                     error!("Failed to send download error with error: {}", e);
                 });
             }
