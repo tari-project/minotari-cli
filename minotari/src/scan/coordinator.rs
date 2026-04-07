@@ -246,7 +246,7 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
                 .await
                 .map_err(|e| ScanError::Intermittent(e.to_string()))?;
             let mut is_batch_empty = false;
-            let mut max_new_height_in_batch = global_next_block;
+            let mut max_new_height_in_batch = 0;
             while let Some(response) = utxo_stream.recv().await {
                 let scanned_blocks = response.map_err(|e| ScanError::Intermittent(e.to_string()))?;
                 //let (scanned_blocks, mut more_blocks) = self.scan_blocks_with_timeout(scanner, &scanner_config).await?;
@@ -466,57 +466,6 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
                 }));
         }
     }
-
-    // async fn scan_blocks_with_timeout(
-    //     &self,
-    //     scanner: &mut HttpBlockchainScanner<KeyManager>,
-    //     config: &ScanConfig,
-    // ) -> Result<(Vec<minotari_scanning::BlockScanResult>, bool), ScanError> {
-    //     let mut timeout_retries = 0;
-    //     let mut error_retries = 0;
-    //
-    //     loop {
-    //         match timeout(self.retry_config.timeout, scanner.scan_blocks(config)).await {
-    //             Ok(Ok(result)) => return Ok(result),
-    //             Ok(Err(e)) => {
-    //                 error_retries += 1;
-    //                 let error_msg = e.to_string();
-    //                 warn!(
-    //                     error = &*error_msg,
-    //                     retry = error_retries,
-    //                     max = self.retry_config.max_error_retries;
-    //                     "Blockchain scan failed"
-    //                 );
-    //                 if error_retries >= self.retry_config.max_error_retries {
-    //                     return Err(ScanError::Intermittent(e.to_string()));
-    //                 }
-    //                 let exponent = error_retries.min(MAX_BACKOFF_EXPONENT);
-    //                 let backoff_secs = self
-    //                     .retry_config
-    //                     .error_backoff_base_secs
-    //                     .pow(exponent)
-    //                     .min(MAX_BACKOFF_SECONDS);
-    //                 info!(
-    //                     seconds = backoff_secs;
-    //                     "Waiting before retrying..."
-    //                 );
-    //                 tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
-    //             },
-    //             Err(_) => {
-    //                 timeout_retries += 1;
-    //                 warn!(
-    //                     retry = timeout_retries,
-    //                     max = self.retry_config.max_timeout_retries;
-    //                     "scan_blocks timed out"
-    //                 );
-    //                 if timeout_retries >= self.retry_config.max_timeout_retries {
-    //                     return Err(ScanError::Timeout(timeout_retries));
-    //                 }
-    //                 tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-    //             },
-    //         }
-    //     }
-    // }
 
     fn emit_reorg_event(&self, account_id: i64, reorg_info: reorg::ReorgInformation, resume_height: u64) {
         self.event_sender

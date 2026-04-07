@@ -510,7 +510,7 @@ where
                     mined_timestamp: tari_block.header.timestamp.as_u64(),
                 };
                 let _unused = send_scan_result.send(Ok(vec![block_res])).await.inspect_err(|e| {
-                    error!("Failed to send download error with error: {}", e);
+                    error!("Failed to send scan error with error: {}", e);
                 });
             }
         });
