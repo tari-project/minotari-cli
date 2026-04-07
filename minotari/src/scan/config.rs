@@ -15,8 +15,6 @@ pub const DEFAULT_ERROR_BACKOFF_BASE_SECS: u64 = 2;
 /// Default number of days to offset from wallet birthday when calculating start height.
 pub const DEFAULT_SCANNING_OFFSET_DAYS: u64 = 2;
 
-
-
 pub const OPTIMAL_SCANNING_THREADS: usize = 0; // Based on num_cpus
 
 /// Configuration for scan operation timeouts.

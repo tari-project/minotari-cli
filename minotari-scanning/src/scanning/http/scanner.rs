@@ -12,23 +12,19 @@ use crate::{
 };
 use async_trait::async_trait;
 use futures::stream::{FuturesUnordered, StreamExt};
+use log::{debug, error, info, warn};
 use rayon::iter::{IntoParallelIterator, ParallelIterator};
 use reqwest::Client;
-use std::{
-    sync::{ RwLock},
-    time::{Duration},
-};
+use std::{sync::RwLock, time::Duration};
 use tari_common_types::types::FixedHash;
 use tari_node_components::blocks::Block;
 use tari_transaction_components::{
     key_manager::TransactionKeyManagerInterface,
     rpc::models::{BlockUtxoInfo, GetUtxosByBlockResponse, SyncUtxosByBlockResponseV0, SyncUtxosByBlockResponseV1},
-    transaction_components::TransactionOutput,
 };
 use tari_utilities::hex::Hex;
 use tokio::sync::mpsc;
 use tokio::time::timeout;
-use log::{debug, warn,error, info};
 const SYNC_UTXOS_BY_BLOCK_PAGE_LIMIT: u64 = 50;
 const HTTP2_INITIAL_WINDOW_SIZE: u32 = 4 * 1024 * 1024;
 const HTTP2_KEEP_ALIVE_INTERVAL: Duration = Duration::from_secs(10);
@@ -59,9 +55,17 @@ where
     /// Create a new HTTP scanner with the given base URL
     pub async fn new(base_url: String, key_managers: Vec<KM>, number_processing_threads: usize) -> WalletResult<Self> {
         let timeout = Duration::from_secs(30);
-        let max_error_retries =  3;
+        let max_error_retries = 3;
         let error_backoff_base_secs = 2;
-        Self::with_timeout(base_url, timeout, key_managers, number_processing_threads, max_error_retries, error_backoff_base_secs).await
+        Self::with_timeout(
+            base_url,
+            timeout,
+            key_managers,
+            number_processing_threads,
+            max_error_retries,
+            error_backoff_base_secs,
+        )
+        .await
     }
 
     /// Create a new HTTP scanner with custom timeout (native only)
@@ -124,57 +128,60 @@ where
             error_backoff_base_secs,
         })
     }
+
     async fn sync_utxos_by_block(
         &self,
         start_header_hash: &str,
         limit: u64,
         page: u64,
         exclude_spent: bool,
-    ) -> WalletResult<SyncUtxosByBlockResponseV0>{
-            let mut timeout_retries = 0;
-            let mut error_retries = 0;
+    ) -> WalletResult<SyncUtxosByBlockResponseV0> {
+        let mut timeout_retries = 0;
+        let mut error_retries = 0;
 
-            loop {
-                match timeout(self.timeout, self.sync_utxos_by_block_http_call(start_header_hash, limit, page, exclude_spent)).await {
-                    Ok(Ok(result)) => return Ok(result),
-                    Ok(Err(e)) => {
-                        error_retries += 1;
-                        let error_msg = e.to_string();
-                        warn!(
-                            error = &*error_msg,
-                            retry = error_retries,
-                            max = self.max_error_retries;
-                            "Blockchain scan failed"
-                        );
-                        if error_retries >= self.max_error_retries {
-                            return Err(e);
-                        }
-                        let exponent = error_retries.min(MAX_BACKOFF_EXPONENT);
-                        let backoff_secs = self
-                            .error_backoff_base_secs
-                            .pow(exponent)
-                            .min(MAX_BACKOFF_SECONDS);
-                        info!(
-                            seconds = backoff_secs;
-                            "Waiting before retrying..."
-                        );
-                        tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
-                    },
-                    Err(_) => {
-                        timeout_retries += 1;
-                        warn!(
-                            retry = timeout_retries,
-                            max = self.max_error_retries;
-                            "scan_blocks timed out"
-                        );
-                        if timeout_retries >= self.max_error_retries {
-                            return Err(WalletError::Timeout(format!("Failed after {timeout_retries}")));
-                        }
-                        tokio::time::sleep(Duration::from_secs(1)).await;
-                    },
-                }
+        loop {
+            match timeout(
+                self.timeout,
+                self.sync_utxos_by_block_http_call(start_header_hash, limit, page, exclude_spent),
+            )
+            .await
+            {
+                Ok(Ok(result)) => return Ok(result),
+                Ok(Err(e)) => {
+                    error_retries += 1;
+                    let error_msg = e.to_string();
+                    warn!(
+                        error = &*error_msg,
+                        retry = error_retries,
+                        max = self.max_error_retries;
+                        "Sync utxos by block scan failed"
+                    );
+                    if error_retries >= self.max_error_retries {
+                        return Err(e);
+                    }
+                    let exponent = error_retries.min(MAX_BACKOFF_EXPONENT);
+                    let backoff_secs = self.error_backoff_base_secs.pow(exponent).min(MAX_BACKOFF_SECONDS);
+                    info!(
+                        seconds = backoff_secs;
+                        "Waiting before retrying..."
+                    );
+                    tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+                },
+                Err(_) => {
+                    timeout_retries += 1;
+                    warn!(
+                        retry = timeout_retries,
+                        max = self.max_error_retries;
+                        "sync  timed out"
+                    );
+                    if timeout_retries >= self.max_error_retries {
+                        return Err(WalletError::Timeout(format!("Failed after {timeout_retries}")));
+                    }
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                },
             }
         }
+    }
 
     /// Sync UTXOs by block
     async fn sync_utxos_by_block_http_call(
@@ -224,7 +231,7 @@ where
         Ok(sync_response)
     }
 
-    async fn get_utxos_by_block(&self, current_header_hash: &str) -> WalletResult<GetUtxosByBlockResponse> {
+    async fn get_utxos_by_block_http_call(&self, current_header_hash: &str) -> WalletResult<GetUtxosByBlockResponse> {
         let url = format!("{}/get_utxos_by_block", self.base_url);
 
         let response = self
@@ -261,6 +268,49 @@ where
         })?;
 
         Ok(sync_response)
+    }
+
+    async fn get_utxos_by_block(&self, current_header_hash: &str) -> WalletResult<GetUtxosByBlockResponse> {
+        let mut timeout_retries = 0;
+        let mut error_retries = 0;
+
+        loop {
+            match timeout(self.timeout, self.get_utxos_by_block_http_call(current_header_hash)).await {
+                Ok(Ok(result)) => return Ok(result),
+                Ok(Err(e)) => {
+                    error_retries += 1;
+                    let error_msg = e.to_string();
+                    warn!(
+                        error = &*error_msg,
+                        retry = error_retries,
+                        max = self.max_error_retries;
+                        "get utxos by block failed"
+                    );
+                    if error_retries >= self.max_error_retries {
+                        return Err(e);
+                    }
+                    let exponent = error_retries.min(MAX_BACKOFF_EXPONENT);
+                    let backoff_secs = self.error_backoff_base_secs.pow(exponent).min(MAX_BACKOFF_SECONDS);
+                    info!(
+                        seconds = backoff_secs;
+                        "Waiting before retrying..."
+                    );
+                    tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+                },
+                Err(_) => {
+                    timeout_retries += 1;
+                    warn!(
+                        retry = timeout_retries,
+                        max = self.max_error_retries;
+                        "get utxos by block timed out"
+                    );
+                    if timeout_retries >= self.max_error_retries {
+                        return Err(WalletError::Timeout(format!("Failed after {timeout_retries}")));
+                    }
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                },
+            }
+        }
     }
 
     /// Create a scan config with wallet keys for block scanning
@@ -391,6 +441,91 @@ where
     pub fn clear_in_progress_scan(&mut self) {
         self.current_in_progress.clear();
     }
+
+    async fn get_tip_info_http_call(&mut self) -> WalletResult<TipInfo> {
+        let url = format!("{}/get_tip_info", self.base_url);
+
+        // Native implementation using reqwest
+        let response = self.client.get(&url).send().await.map_err(|e| {
+            WalletError::ScanningError(crate::errors::ScanningError::blockchain_connection_failed(&format!(
+                "HTTP request failed: {e}"
+            )))
+        })?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            warn!("HTTP error response body: {}", body);
+            return Err(WalletError::ScanningError(
+                crate::errors::ScanningError::blockchain_connection_failed(&format!("HTTP error: {status}")),
+            ));
+        }
+
+        let body_text = response.text().await.map_err(|e| {
+            WalletError::ScanningError(crate::errors::ScanningError::blockchain_connection_failed(&format!(
+                "Failed to read response body: {e}"
+            )))
+        })?;
+
+        let tip_response: HttpTipInfoResponse = serde_json::from_str(&body_text).map_err(|e| {
+            warn!("Failed to parse response body: {}", body_text);
+            WalletError::ScanningError(crate::errors::ScanningError::blockchain_connection_failed(&format!(
+                "Failed to parse response: {e}"
+            )))
+        })?;
+
+        Ok(TipInfo {
+            best_block_height: tip_response.metadata.best_block_height,
+            best_block_hash: FixedHash::try_from(tip_response.metadata.best_block_hash)
+                .map_err(|e| WalletError::ConversionError(e.to_string()))?,
+            accumulated_difficulty: tip_response.metadata.accumulated_difficulty,
+            pruned_height: tip_response.metadata.pruned_height,
+            timestamp: tip_response.metadata.timestamp,
+        })
+    }
+
+    async fn get_header_by_height_http_call(&mut self, height: u64) -> WalletResult<Option<BlockHeaderInfo>> {
+        use tari_utilities::epoch_time::EpochTime;
+
+        let url = format!("{}/get_header_by_height?height={}", self.base_url, height);
+
+        let response = self.client.get(&url).send().await.map_err(|e| {
+            WalletError::ScanningError(crate::errors::ScanningError::blockchain_connection_failed(&format!(
+                "HTTP request failed: {e}"
+            )))
+        })?;
+
+        if !response.status().is_success() {
+            if response.status() == 404 {
+                return Ok(None);
+            }
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            warn!("HTTP error response body: {}", body);
+            return Err(WalletError::ScanningError(
+                crate::errors::ScanningError::blockchain_connection_failed(&format!("HTTP error: {status}")),
+            ));
+        }
+
+        let body = response.text().await.map_err(|e| {
+            WalletError::ScanningError(crate::errors::ScanningError::blockchain_connection_failed(&format!(
+                "Failed to read response body: {e}"
+            )))
+        })?;
+
+        let header_response: HttpBlockHeader = serde_json::from_str(&body).map_err(|e| {
+            warn!("Failed to parse response body: {}", body);
+            WalletError::ScanningError(crate::errors::ScanningError::blockchain_connection_failed(&format!(
+                "Failed to parse response: {e}"
+            )))
+        })?;
+
+        Ok(Some(BlockHeaderInfo {
+            height: header_response.height,
+            hash: FixedHash::try_from(header_response.hash).map_err(|e| WalletError::ConversionError(e.to_string()))?,
+            timestamp: EpochTime::from(header_response.timestamp),
+        }))
+    }
 }
 
 #[allow(clippy::too_many_lines)]
@@ -463,7 +598,6 @@ where
             debug!("Finished downloading blocks");
             if let Err(e) = send_download_1.send(Ok(Vec::new())).await {
                 error!("Failed to send download result with error: {}", e);
-                return;
             };
         });
         let thread_count = self.thread_count;
@@ -620,61 +754,46 @@ where
     }
 
     async fn get_tip_info(&mut self) -> WalletResult<TipInfo> {
-        let url = format!("{}/get_tip_info", self.base_url);
+        let mut timeout_retries = 0;
+        let mut error_retries = 0;
 
-        // Native implementation using reqwest
-        let response = self.client.get(&url).send().await.map_err(|e| {
-            WalletError::ScanningError(crate::errors::ScanningError::blockchain_connection_failed(&format!(
-                "HTTP request failed: {e}"
-            )))
-        })?;
-
-        if !response.status().is_success() {
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            warn!("HTTP error response body: {}", body);
-            return Err(WalletError::ScanningError(
-                crate::errors::ScanningError::blockchain_connection_failed(&format!("HTTP error: {status}")),
-            ));
+        loop {
+            match timeout(self.timeout, self.get_tip_info_http_call()).await {
+                Ok(Ok(result)) => return Ok(result),
+                Ok(Err(e)) => {
+                    error_retries += 1;
+                    let error_msg = e.to_string();
+                    warn!(
+                        error = &*error_msg,
+                        retry = error_retries,
+                        max = self.max_error_retries;
+                        "get tip failed"
+                    );
+                    if error_retries >= self.max_error_retries {
+                        return Err(e);
+                    }
+                    let exponent = error_retries.min(MAX_BACKOFF_EXPONENT);
+                    let backoff_secs = self.error_backoff_base_secs.pow(exponent).min(MAX_BACKOFF_SECONDS);
+                    info!(
+                        seconds = backoff_secs;
+                        "Waiting before retrying..."
+                    );
+                    tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+                },
+                Err(_) => {
+                    timeout_retries += 1;
+                    warn!(
+                        retry = timeout_retries,
+                        max = self.max_error_retries;
+                        "get tip timed out"
+                    );
+                    if timeout_retries >= self.max_error_retries {
+                        return Err(WalletError::Timeout(format!("Failed after {timeout_retries}")));
+                    }
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                },
+            }
         }
-
-        let body_text = response.text().await.map_err(|e| {
-            WalletError::ScanningError(crate::errors::ScanningError::blockchain_connection_failed(&format!(
-                "Failed to read response body: {e}"
-            )))
-        })?;
-
-        let tip_response: HttpTipInfoResponse = serde_json::from_str(&body_text).map_err(|e| {
-            warn!("Failed to parse response body: {}", body_text);
-            WalletError::ScanningError(crate::errors::ScanningError::blockchain_connection_failed(&format!(
-                "Failed to parse response: {e}"
-            )))
-        })?;
-
-        Ok(TipInfo {
-            best_block_height: tip_response.metadata.best_block_height,
-            best_block_hash: FixedHash::try_from(tip_response.metadata.best_block_hash)
-                .map_err(|e| WalletError::ConversionError(e.to_string()))?,
-            accumulated_difficulty: tip_response.metadata.accumulated_difficulty,
-            pruned_height: tip_response.metadata.pruned_height,
-            timestamp: tip_response.metadata.timestamp,
-        })
-    }
-
-    async fn search_utxos(&mut self, _commitments: Vec<Vec<u8>>) -> WalletResult<Vec<BlockScanResult>> {
-        // This endpoint is not implemented in the current HTTP API
-        // It would require a different endpoint that searches for specific commitments
-        Err(WalletError::ScanningError(
-            crate::errors::ScanningError::blockchain_connection_failed("search_utxos not implemented for HTTP scanner"),
-        ))
-    }
-
-    async fn fetch_utxos(&mut self, _hashes: Vec<Vec<u8>>) -> WalletResult<Vec<TransactionOutput>> {
-        // This endpoint is not implemented in the current HTTP API
-        // It would require a different endpoint that fetches specific UTXOs by hash
-        Err(WalletError::ScanningError(
-            crate::errors::ScanningError::blockchain_connection_failed("fetch_utxos not implemented for HTTP scanner"),
-        ))
     }
 
     async fn get_blocks_by_heights(&mut self, heights: Vec<u64>) -> WalletResult<Vec<Block>> {
@@ -695,45 +814,45 @@ where
     }
 
     async fn get_header_by_height(&mut self, height: u64) -> WalletResult<Option<BlockHeaderInfo>> {
-        use tari_utilities::epoch_time::EpochTime;
+        let mut timeout_retries = 0;
+        let mut error_retries = 0;
 
-        let url = format!("{}/get_header_by_height?height={}", self.base_url, height);
-
-        let response = self.client.get(&url).send().await.map_err(|e| {
-            WalletError::ScanningError(crate::errors::ScanningError::blockchain_connection_failed(&format!(
-                "HTTP request failed: {e}"
-            )))
-        })?;
-
-        if !response.status().is_success() {
-            if response.status() == 404 {
-                return Ok(None);
+        loop {
+            match timeout(self.timeout, self.get_header_by_height_http_call(height)).await {
+                Ok(Ok(result)) => return Ok(result),
+                Ok(Err(e)) => {
+                    error_retries += 1;
+                    let error_msg = e.to_string();
+                    warn!(
+                        error = &*error_msg,
+                        retry = error_retries,
+                        max = self.max_error_retries;
+                        "get header by height failed"
+                    );
+                    if error_retries >= self.max_error_retries {
+                        return Err(e);
+                    }
+                    let exponent = error_retries.min(MAX_BACKOFF_EXPONENT);
+                    let backoff_secs = self.error_backoff_base_secs.pow(exponent).min(MAX_BACKOFF_SECONDS);
+                    info!(
+                        seconds = backoff_secs;
+                        "Waiting before retrying..."
+                    );
+                    tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
+                },
+                Err(_) => {
+                    timeout_retries += 1;
+                    warn!(
+                        retry = timeout_retries,
+                        max = self.max_error_retries;
+                        "get header by height timed out"
+                    );
+                    if timeout_retries >= self.max_error_retries {
+                        return Err(WalletError::Timeout(format!("Failed after {timeout_retries}")));
+                    }
+                    tokio::time::sleep(Duration::from_secs(1)).await;
+                },
             }
-            let status = response.status();
-            let body = response.text().await.unwrap_or_default();
-            warn!("HTTP error response body: {}", body);
-            return Err(WalletError::ScanningError(
-                crate::errors::ScanningError::blockchain_connection_failed(&format!("HTTP error: {status}")),
-            ));
         }
-
-        let body = response.text().await.map_err(|e| {
-            WalletError::ScanningError(crate::errors::ScanningError::blockchain_connection_failed(&format!(
-                "Failed to read response body: {e}"
-            )))
-        })?;
-
-        let header_response: HttpBlockHeader = serde_json::from_str(&body).map_err(|e| {
-            warn!("Failed to parse response body: {}", body);
-            WalletError::ScanningError(crate::errors::ScanningError::blockchain_connection_failed(&format!(
-                "Failed to parse response: {e}"
-            )))
-        })?;
-
-        Ok(Some(BlockHeaderInfo {
-            height: header_response.height,
-            hash: FixedHash::try_from(header_response.hash).map_err(|e| WalletError::ConversionError(e.to_string()))?,
-            timestamp: EpochTime::from(header_response.timestamp),
-        }))
     }
 }

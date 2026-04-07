@@ -1,4 +1,4 @@
-use log::{info};
+use log::info;
 use minotari_scanning::{HttpBlockchainScanner, scanning::BlockchainScanner};
 use std::{collections::VecDeque, sync::Arc};
 use tari_common_types::{seeds::cipher_seed::BIRTHDAY_GENESIS_FROM_UNIX_EPOCH, types::PrivateKey};
@@ -13,7 +13,7 @@ use crate::{
     scan::{
         DisplayedTransactionsEvent, ReorgDetectedEvent, ScanError, ScanMode, ScanRetryConfig, TransactionsUpdatedEvent,
         block_processor::BlockProcessor,
-        config::{OPTIMAL_SCANNING_THREADS},
+        config::OPTIMAL_SCANNING_THREADS,
         events::{EventSender, ProcessingEvent},
         reorg,
         scan_db_handler::ScanDbHandler,

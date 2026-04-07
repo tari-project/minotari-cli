@@ -1,7 +1,6 @@
 use crate::{BlockHeaderInfo, BlockScanResult, ScanConfig, TipInfo, WalletResult};
 use async_trait::async_trait;
 use tari_node_components::blocks::Block;
-use tari_transaction_components::transaction_components::TransactionOutput;
 use tokio::sync::mpsc;
 
 /// Blockchain scanner trait for scanning UTXOs
@@ -18,12 +17,6 @@ pub trait BlockchainScanner: Send + Sync {
     ) -> WalletResult<mpsc::Receiver<WalletResult<Vec<BlockScanResult>>>>;
     /// Get the current chain tip information
     async fn get_tip_info(&mut self) -> WalletResult<TipInfo>;
-
-    /// Search for specific UTXOs by commitment
-    async fn search_utxos(&mut self, commitments: Vec<Vec<u8>>) -> WalletResult<Vec<BlockScanResult>>;
-
-    /// Fetch specific UTXOs by hash
-    async fn fetch_utxos(&mut self, hashes: Vec<Vec<u8>>) -> WalletResult<Vec<TransactionOutput>>;
 
     /// Get blocks by height range
     async fn get_blocks_by_heights(&mut self, heights: Vec<u64>) -> WalletResult<Vec<Block>>;
