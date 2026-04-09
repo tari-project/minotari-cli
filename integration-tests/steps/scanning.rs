@@ -19,10 +19,51 @@ async fn wallet_previously_scanned(world: &mut MinotariWorld) {
 
 #[given(regex = r#"^the wallet has been previously scanned to height "([^"]*)"$"#)]
 async fn wallet_scanned_to_height(world: &mut MinotariWorld, height: String) {
-    // This simulates scanning to a specific height
-    // In practice, we'd scan until we reach that height
-    let _unused = height; // Use the height parameter
-    wallet_previously_scanned(world).await;
+    let target_height: u64 = height.parse().expect("Height must be a valid number");
+
+    // Scan enough blocks to reach the target height
+    scan_with_max_blocks(world, target_height.to_string()).await;
+
+    assert_eq!(
+        world.last_command_exit_code,
+        Some(0),
+        "Scan command failed: {}",
+        world.last_command_error.as_deref().unwrap_or("")
+    );
+
+    // Verify the wallet actually scanned to the specified height by running
+    // the balance command, which outputs "Balance at height {height}({date}): {amount}"
+    let db_path = world.database_path.as_ref().expect("Database not set up");
+    let (cmd, mut args) = world.get_minotari_command();
+    args.extend_from_slice(&[
+        "balance".to_string(),
+        "--database-path".to_string(),
+        db_path.to_str().unwrap().to_string(),
+        "--account-name".to_string(),
+        "default".to_string(),
+    ]);
+
+    let output = Command::new(&cmd)
+        .args(&args)
+        .output()
+        .expect("Failed to execute balance command");
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+
+    // Parse "Balance at height {N}(...)" to extract the scanned height
+    let height_re = cucumber::codegen::Regex::new(r"Balance at height (\d+)").expect("Invalid regex");
+    let scanned_height = height_re
+        .captures(&stdout)
+        .and_then(|caps| caps.get(1))
+        .and_then(|m| m.as_str().parse::<u64>().ok())
+        .unwrap_or_else(|| panic!("Could not parse scanned height from balance output: {}", stdout));
+
+    assert!(
+        scanned_height >= target_height,
+        "Wallet scanned to height {} but expected at least {}",
+        scanned_height,
+        target_height
+    );
 }
 
 #[when(regex = r#"^I perform a scan with max blocks "([^"]*)"$"#)]
