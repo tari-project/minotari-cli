@@ -3,6 +3,7 @@ use crate::{
     models::{PendingTransactionStatus, WalletEvent, WalletEventType},
     transactions::DisplayedTransaction,
     webhooks::{WebhookTriggerConfig, utils::trigger_webhook_with_balance},
+    wallet_db_extensions, // New import for payref tracking
 };
 use anyhow::anyhow;
 use log::{debug, info, warn};
@@ -115,6 +116,99 @@ pub fn rollback_from_height(
             },
             description: format!("Block at height {} was rolled back due to reorg", block.height),
         };
+        db::insert_wallet_event(tx, &event)?;
+        generated_events.push((account_id, event));
+    }
+
+    // 2. Invalidate affected outputs
+    let invalidated_output_hashes = get_active_outputs_from_height(tx, account_id, reorg_start_height)?;
+    for output_hash in &invalidated_output_hashes {
+        db::mark_output_as_invalidated(tx, output_hash)?;
+        let event = WalletEvent {
+            id: 0,
+            account_id,
+            event_type: WalletEventType::OutputInvalidated {
+                output_hash: *output_hash,
+            },
+            description: format!("Output {} invalidated due to reorg", output_hash),
+        };
+        db::insert_wallet_event(tx, &event)?;
+        generated_events.push((account_id, event));
+    }
+
+    // 3. Mark pending transactions as cancelled if their outputs are invalidated
+    let cancelled_transaction_ids =
+        db::get_pending_transactions_by_output_hashes(tx, account_id, &invalidated_output_hashes)?;
+
+    for tx_id in &cancelled_transaction_ids {
+        db::update_pending_transaction_status(tx, *tx_id, PendingTransactionStatus::Cancelled)?;
+        let event = WalletEvent {
+            id: 0,
+            account_id,
+            event_type: WalletEventType::PendingTransactionCancelled {
+                transaction_id: *tx_id,
+            },
+            description: format!("Pending transaction {} cancelled due to reorg", tx_id),
+        };
+        db::insert_wallet_event(tx, &event)?;
+        generated_events.push((account_id, event));
+    }
+
+    // 4. Update completed transactions that were in reorged blocks and store old payrefs
+    let reorganized_displayed_transactions =
+        db::get_displayed_transactions_above_height(tx, account_id, reorg_start_height)?;
+
+    for tx_to_reorg in &reorganized_displayed_transactions {
+        // If a completed transaction had a payref and is now being reorged,
+        // its payref might change if it gets re-mined. Store the old payref.
+        if let Some(old_payref) = tx_to_reorg.payref {
+            for output in &tx_to_reorg.outputs {
+                wallet_db_extensions::insert_reorg_payref_entry(
+                    tx,
+                    tx_to_reorg.transaction_id,
+                    output.output_hash,
+                    old_payref,
+                )?;
+            }
+        }
+        // Mark the completed transaction as unconfirmed so it can be re-scanned
+        // and re-confirmed, potentially with a new block hash and thus a new payref.
+        db::mark_completed_transaction_as_unconfirmed(tx, tx_to_reorg.transaction_id)?;
+        let event = WalletEvent {
+            id: 0,
+            account_id,
+            event_type: WalletEventType::CompletedTransactionReorged {
+                transaction_id: tx_to_reorg.transaction_id,
+                payref: tx_to_reorg.payref,
+            },
+            description: format!(
+                "Completed transaction {} (payref: {:?}) reorged",
+                tx_to_reorg.transaction_id, tx_to_reorg.payref
+            ),
+        };
+        db::insert_wallet_event(tx, &event)?;
+        generated_events.push((account_id, event));
+    }
+
+    // 5. Delete scanned tip blocks above reorg_start_height
+    db::delete_scanned_tip_blocks_above_height(tx, account_id, reorg_start_height)?;
+
+    // 6. Trigger webhook for balance update if configured
+    if let Some(webhook_cfg) = webhook_config {
+        trigger_webhook_with_balance(tx, account_id, webhook_cfg, &generated_events)?;
+    }
+
+    Ok(ReorgInformation {
+        rolled_back_from_height: reorg_start_height,
+        rolled_back_blocks_count: blocks_rolled_back,
+        invalidated_output_hashes,
+        cancelled_transaction_ids: cancelled_transaction_ids
+            .into_iter()
+            .map(|id| id.to_string())
+            .collect(),
+        reorganized_displayed_transactions,
+    })
+}};
         let event_id = db::insert_wallet_event(tx, account_id, &event)?;
         generated_events.push((event_id, event));
     }
