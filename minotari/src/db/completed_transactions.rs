@@ -540,5 +540,41 @@ pub fn get_completed_transaction_by_payref(
         )
         .optional()?;
 
-    Ok(result)
+    if result.is_some() {
+        return Ok(result);
+    }
+
+    // Fall back to payref_history table for stale payrefs from reorgs
+    debug!(
+        account_id = account_id,
+        payref = payref;
+        "DB: Primary payref lookup missed, checking history table"
+    );
+
+    let tx_id = super::payref_history::get_transaction_id_by_historical_payref(conn, account_id, payref)?;
+    if let Some(tx_id) = tx_id {
+        let mut stmt = conn.prepare_cached(
+            r#"
+            SELECT id, account_id, pending_tx_id, status, last_rejected_reason, kernel_excess,
+                   sent_payref, sent_output_hash, mined_height, mined_block_hash, confirmation_height,
+                   broadcast_attempts, serialized_transaction, created_at, updated_at
+            FROM completed_transactions
+            WHERE account_id = :account_id AND id = :tx_id
+            "#,
+        )?;
+
+        let result = stmt
+            .query_row(
+                named_params! {
+                    ":account_id": account_id,
+                    ":tx_id": tx_id
+                },
+                map_row,
+            )
+            .optional()?;
+
+        return Ok(result);
+    }
+
+    Ok(None)
 }

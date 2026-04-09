@@ -175,8 +175,29 @@ pub fn rollback_from_height(
     db::soft_delete_outputs_from_height(tx, account_id, reorg_start_height)?;
     db::delete_scanned_tip_blocks_from_height(tx, account_id, reorg_start_height)?;
 
+    // Save displayed transaction payrefs to history before they get overwritten on re-mine
+    let saved_displayed_payrefs =
+        db::save_displayed_transaction_payrefs_before_reorg(tx, account_id, reorg_start_height)?;
+    if saved_displayed_payrefs > 0 {
+        info!(
+            target: "audit",
+            count = saved_displayed_payrefs;
+            "Saved displayed transaction payref(s) to history before reorg"
+        );
+    }
+
     let reorganized_displayed_transactions =
         db::mark_displayed_transactions_reorganized_and_return(tx, account_id, reorg_start_height)?;
+
+    // Save old payrefs to history before they are cleared by the reset
+    let saved_payrefs = db::save_completed_transaction_payrefs_before_reorg(tx, account_id, reorg_start_height)?;
+    if saved_payrefs > 0 {
+        info!(
+            target: "audit",
+            count = saved_payrefs;
+            "Saved payref(s) to history before reorg reset"
+        );
+    }
 
     let affected_count = db::reset_mined_completed_transactions_from_height(tx, account_id, reorg_start_height)?;
     if affected_count > 0 {

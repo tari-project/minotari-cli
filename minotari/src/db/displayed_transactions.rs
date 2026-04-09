@@ -575,5 +575,26 @@ pub fn get_displayed_transactions_by_payref(
         ":pattern": search_pattern
     })?;
 
-    process_json_rows(from_rows::<TransactionJsonRow>(rows))
+    let results = process_json_rows(from_rows::<TransactionJsonRow>(rows))?;
+
+    if !results.is_empty() {
+        return Ok(results);
+    }
+
+    // Fall back to payref_history table for stale payrefs from reorgs
+    debug!(
+        account_id = account_id,
+        payref = payref;
+        "DB: Primary displayed payref lookup missed, checking history table"
+    );
+
+    let tx_id =
+        super::payref_history::get_transaction_id_by_historical_payref(conn, account_id, payref)?;
+    if let Some(tx_id) = tx_id {
+        if let Some(tx) = get_displayed_transaction_by_id(conn, &tx_id)? {
+            return Ok(vec![tx]);
+        }
+    }
+
+    Ok(vec![])
 }
