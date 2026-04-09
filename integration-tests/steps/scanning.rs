@@ -3,6 +3,7 @@
 // Step definitions for testing blockchain scanning functionality.
 
 use cucumber::{given, then, when};
+use rusqlite::Connection;
 use std::process::Command;
 
 use super::common::MinotariWorld;
@@ -31,32 +32,23 @@ async fn wallet_scanned_to_height(world: &mut MinotariWorld, height: String) {
         world.last_command_error.as_deref().unwrap_or("")
     );
 
-    // Verify the wallet actually scanned to the specified height by running
-    // the balance command, which outputs "Balance at height {height}({date}): {amount}"
+    // Verify the wallet actually scanned to the specified height by querying
+    // the scanned_tip_blocks table directly. This is more reliable than parsing
+    // CLI output since the balance height only reflects heights with transactions,
+    // not the actual scan tip.
     let db_path = world.database_path.as_ref().expect("Database not set up");
-    let (cmd, mut args) = world.get_minotari_command();
-    args.extend_from_slice(&[
-        "balance".to_string(),
-        "--database-path".to_string(),
-        db_path.to_str().unwrap().to_string(),
-        "--account-name".to_string(),
-        "default".to_string(),
-    ]);
+    let conn = Connection::open(db_path).expect("Failed to open wallet database");
 
-    let output = Command::new(&cmd)
-        .args(&args)
-        .output()
-        .expect("Failed to execute balance command");
+    let scanned_height: Option<u64> = conn
+        .query_row(
+            "SELECT MAX(height) FROM scanned_tip_blocks",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or(None);
 
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-
-    // Parse "Balance at height {N}(...)" to extract the scanned height
-    let height_re = cucumber::codegen::Regex::new(r"Balance at height (\d+)").expect("Invalid regex");
-    let scanned_height = height_re
-        .captures(&stdout)
-        .and_then(|caps| caps.get(1))
-        .and_then(|m| m.as_str().parse::<u64>().ok())
-        .unwrap_or_else(|| panic!("Could not parse scanned height from balance output: {}", stdout));
+    let scanned_height = scanned_height
+        .unwrap_or_else(|| panic!("No scanned blocks found in database after scanning"));
 
     assert!(
         scanned_height >= target_height,
