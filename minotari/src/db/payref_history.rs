@@ -1,19 +1,24 @@
 use crate::db::error::WalletDbResult;
 use log::{debug, warn};
 use rusqlite::{Connection, OptionalExtension, named_params};
+use tari_common_types::transaction::TxId;
 
-/// Save old payrefs to the history table before they are cleared during a reorg.
+/// Save an old payref to the history table before it is cleared during a reorg.
 /// This allows lookups by stale payrefs to still resolve to the correct transaction.
+///
+/// `TxId` is a `u64`; SQLite does not support unsigned 64-bit integers, so the
+/// id is stored as the wrapping `i64` (`TxId::as_i64_wrapped`) and converted
+/// back on read. This matches how `completed_transactions.id` is persisted.
 pub fn save_payref_history(
     conn: &Connection,
     account_id: i64,
-    transaction_id: &str,
+    transaction_id: TxId,
     old_payref: &str,
     output_hash: Option<&str>,
 ) -> WalletDbResult<()> {
     debug!(
         account_id = account_id,
-        transaction_id = transaction_id,
+        transaction_id = transaction_id.to_string().as_str(),
         old_payref = old_payref;
         "DB: Saving payref to history"
     );
@@ -25,7 +30,7 @@ pub fn save_payref_history(
         "#,
         named_params! {
             ":account_id": account_id,
-            ":transaction_id": transaction_id,
+            ":transaction_id": transaction_id.as_i64_wrapped(),
             ":old_payref": old_payref,
             ":output_hash": output_hash,
         },
@@ -34,12 +39,13 @@ pub fn save_payref_history(
     Ok(())
 }
 
-/// Look up a transaction ID by a historical (stale) payref.
+/// Look up a transaction id by a historical (stale) payref.
+/// Returns the most-recently-saved match, if any.
 pub fn get_transaction_id_by_historical_payref(
     conn: &Connection,
     account_id: i64,
     payref: &str,
-) -> WalletDbResult<Option<String>> {
+) -> WalletDbResult<Option<TxId>> {
     debug!(
         account_id = account_id,
         payref = payref;
@@ -62,11 +68,12 @@ pub fn get_transaction_id_by_historical_payref(
                 ":account_id": account_id,
                 ":payref": payref
             },
-            |row| row.get::<_, String>(0),
+            |row| row.get::<_, i64>(0),
         )
         .optional()?;
 
-    Ok(result)
+    #[allow(clippy::cast_sign_loss)]
+    Ok(result.map(|id| TxId::from(id as u64)))
 }
 
 /// Save historical payrefs for displayed transactions being reorganized.
@@ -95,6 +102,7 @@ pub fn save_displayed_transaction_payrefs_before_reorg(
         "#,
     )?;
 
+    // `displayed_transactions.id` is the stringified form of the `TxId`.
     let rows = stmt.query_map(
         named_params! {
             ":account_id": account_id,
@@ -105,12 +113,23 @@ pub fn save_displayed_transaction_payrefs_before_reorg(
 
     let mut count = 0u64;
     for row in rows {
-        let (tx_id, payref_json) = row?;
+        let (tx_id_str, payref_json) = row?;
+        let tx_id = match tx_id_str.parse::<u64>().map(TxId::from) {
+            Ok(id) => id,
+            Err(e) => {
+                warn!(
+                    id = tx_id_str.as_str(),
+                    error = e.to_string().as_str();
+                    "DB: Skipping displayed tx with unparsable id while saving payref history"
+                );
+                continue;
+            },
+        };
         // payref column stores a JSON array of payref strings
         if let Ok(payrefs) = serde_json::from_str::<Vec<String>>(&payref_json) {
             for payref in payrefs {
                 if !payref.is_empty() {
-                    save_payref_history(conn, account_id, &tx_id, &payref, None)?;
+                    save_payref_history(conn, account_id, tx_id, &payref, None)?;
                     count += 1;
                 }
             }
@@ -150,6 +169,7 @@ pub fn save_completed_transaction_payrefs_before_reorg(
         "#,
     )?;
 
+    // `completed_transactions.id` is stored as the wrapping i64 of the TxId.
     let rows = stmt.query_map(
         named_params! {
             ":account_id": account_id,
@@ -159,7 +179,7 @@ pub fn save_completed_transaction_payrefs_before_reorg(
         },
         |row| {
             Ok((
-                row.get::<_, String>(0)?,
+                row.get::<_, i64>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, Option<String>>(2)?,
             ))
@@ -168,8 +188,10 @@ pub fn save_completed_transaction_payrefs_before_reorg(
 
     let mut count = 0u64;
     for row in rows {
-        let (tx_id, payref, output_hash) = row?;
-        save_payref_history(conn, account_id, &tx_id, &payref, output_hash.as_deref())?;
+        let (tx_id_i64, payref, output_hash) = row?;
+        #[allow(clippy::cast_sign_loss)]
+        let tx_id = TxId::from(tx_id_i64 as u64);
+        save_payref_history(conn, account_id, tx_id, &payref, output_hash.as_deref())?;
         count += 1;
     }
 

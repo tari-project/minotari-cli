@@ -9,8 +9,9 @@ use log::debug;
 use crate::{
     api::{AppState, error::ApiError, types::CompletedTransactionResponse},
     db::{
-        get_account_by_name, get_completed_transaction_by_payref, get_completed_transactions_by_account,
-        get_displayed_transactions_by_payref, get_displayed_transactions_paginated,
+        get_account_by_name, get_completed_transaction_by_id, get_completed_transaction_by_payref,
+        get_completed_transactions_by_account, get_displayed_transaction_by_id, get_displayed_transactions_by_payref,
+        get_displayed_transactions_paginated, get_transaction_id_by_historical_payref,
     },
     transactions::DisplayedTransaction,
 };
@@ -285,9 +286,38 @@ pub async fn api_get_completed_transaction_by_payref(
             .map_err(|e| ApiError::DbError(e.to_string()))?
             .ok_or_else(|| ApiError::AccountNotFound(name.clone()))?;
 
-        get_completed_transaction_by_payref(&conn, account.id, &payref)
+        // Primary lookup against the live payref column.
+        if let Some(tx) = get_completed_transaction_by_payref(&conn, account.id, &payref)
             .map_err(|e| ApiError::DbError(e.to_string()))?
-            .ok_or_else(|| ApiError::NotFound(format!("No completed transaction found with payref: {}", payref)))
+        {
+            return Ok(tx);
+        }
+
+        // Fallback to the payref history table. The db layer only owns the
+        // single-table lookup — assembling the cross-table fallback lives in
+        // the api so that behaviour is explicit at the caller level (mirrors
+        // the console wallet pattern at
+        // applications/minotari_console_wallet/src/grpc/wallet_grpc_server.rs).
+        debug!(
+            account_id = account.id,
+            payref = &*payref;
+            "API: Primary completed payref lookup missed, checking history table"
+        );
+
+        let historical_tx_id = get_transaction_id_by_historical_payref(&conn, account.id, &payref)
+            .map_err(|e| ApiError::DbError(e.to_string()))?;
+
+        if let Some(tx_id) = historical_tx_id
+            && let Some(tx) =
+                get_completed_transaction_by_id(&conn, tx_id).map_err(|e| ApiError::DbError(e.to_string()))?
+        {
+            return Ok(tx);
+        }
+
+        Err(ApiError::NotFound(format!(
+            "No completed transaction found with payref: {}",
+            payref
+        )))
     })
     .await
     .map_err(|e| ApiError::InternalServerError(format!("Task join error: {}", e)))??;
@@ -352,7 +382,31 @@ pub async fn api_get_displayed_transactions_by_payref(
             .map_err(|e| ApiError::DbError(e.to_string()))?
             .ok_or_else(|| ApiError::AccountNotFound(name.clone()))?;
 
-        get_displayed_transactions_by_payref(&conn, account.id, &payref).map_err(|e| ApiError::DbError(e.to_string()))
+        // Primary lookup against the displayed_transactions.payref column.
+        let results = get_displayed_transactions_by_payref(&conn, account.id, &payref)
+            .map_err(|e| ApiError::DbError(e.to_string()))?;
+        if !results.is_empty() {
+            return Ok::<_, ApiError>(results);
+        }
+
+        // Fallback to payref history (same rationale as the completed path).
+        debug!(
+            account_id = account.id,
+            payref = &*payref;
+            "API: Primary displayed payref lookup missed, checking history table"
+        );
+
+        let historical_tx_id = get_transaction_id_by_historical_payref(&conn, account.id, &payref)
+            .map_err(|e| ApiError::DbError(e.to_string()))?;
+
+        if let Some(tx_id) = historical_tx_id
+            && let Some(tx) = get_displayed_transaction_by_id(&conn, &tx_id.to_string())
+                .map_err(|e| ApiError::DbError(e.to_string()))?
+        {
+            return Ok(vec![tx]);
+        }
+
+        Ok(vec![])
     })
     .await
     .map_err(|e| ApiError::InternalServerError(format!("Task join error: {}", e)))??;
