@@ -131,6 +131,7 @@ pub mod scan;
 pub mod tasks;
 pub mod transactions;
 pub mod utils;
+pub mod wallet_db_extensions;
 pub mod webhooks;
 
 pub use crate::api::ApiDoc;
