@@ -3,7 +3,7 @@
 // Step definitions for testing blockchain scanning functionality.
 
 use cucumber::{given, then, when};
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use std::process::Command;
 
 use super::common::MinotariWorld;
@@ -22,25 +22,19 @@ async fn wallet_previously_scanned(world: &mut MinotariWorld) {
 async fn wallet_scanned_to_height(world: &mut MinotariWorld, height: String) {
     let target_height: u64 = height.parse().expect("Height must be a valid number");
 
-
-
-    // Verify the wallet actually scanned to the specified height by querying
-    // the scanned_tip_blocks table directly. This is more reliable than parsing
-    // CLI output since the balance height only reflects heights with transactions,
-    // not the actual scan tip.
+    // Verify the wallet has previously scanned to at least the specified height by
+    // querying the scanned_tip_blocks table directly. This step asserts existing
+    // state; it does not trigger a scan.
     let db_path = world.database_path.as_ref().expect("Database not set up");
     let conn = Connection::open(db_path).expect("Failed to open wallet database");
 
     let scanned_height: Option<u64> = conn
-        .query_row(
-            "SELECT MAX(height) FROM scanned_tip_blocks",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap_or(None);
+        .query_row("SELECT MAX(height) FROM scanned_tip_blocks", [], |row| row.get(0))
+        .optional()
+        .expect("scanned_tip_blocks query failed")
+        .flatten();
 
-    let scanned_height = scanned_height
-        .unwrap_or_else(|| panic!("No scanned blocks found in database after scanning"));
+    let scanned_height = scanned_height.unwrap_or_else(|| panic!("No scanned blocks found in wallet database"));
 
     assert!(
         scanned_height >= target_height,
