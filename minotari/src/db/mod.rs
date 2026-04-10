@@ -53,6 +53,7 @@ use log::{debug, error, info};
 use r2d2::Pool;
 use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::Connection;
+use crate::wallet_db_extensions::init_reorg_payrefs_table;
 use rusqlite_migration::Migrations;
 
 mod error;
@@ -226,6 +227,9 @@ fn connect_and_migrate(path: &PathBuf) -> WalletDbResult<SqlitePool> {
 
     debug!("Applying migrations");
     MIGRATIONS.to_latest(&mut conn)?;
+
+    init_reorg_payrefs_table(&conn)?;
+    debug!("reorg_payrefs table initialized");
 
     Ok(pool)
 }
