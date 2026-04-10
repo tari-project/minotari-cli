@@ -100,12 +100,7 @@ pub fn save_displayed_transaction_payrefs_before_reorg(
             ":account_id": account_id,
             ":height": height
         },
-        |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-            ))
-        },
+        |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
     )?;
 
     let mut count = 0u64;
