@@ -197,3 +197,133 @@ pub fn save_completed_transaction_payrefs_before_reorg(
 
     Ok(count)
 }
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::indexing_slicing)]
+    use super::*;
+    use crate::db::{
+        create_account, get_account_by_name, get_displayed_transaction_by_id, init_db, insert_displayed_transaction,
+    };
+    use crate::transactions::{
+        DisplayedTransactionBuilder, TransactionDirection, TransactionDisplayStatus, TransactionSource,
+    };
+    use chrono::NaiveDateTime;
+    use tari_common_types::seeds::cipher_seed::CipherSeed;
+    use tari_common_types::types::FixedHash;
+    use tari_transaction_components::MicroMinotari;
+    use tari_transaction_components::key_manager::wallet_types::{SeedWordsWallet, WalletType};
+    use tempfile::tempdir;
+
+    fn mock_fixed_hash(seed: u8) -> FixedHash {
+        let mut bytes = [0u8; 32];
+        bytes[0] = seed;
+        FixedHash::from(bytes)
+    }
+
+    fn seed_displayed_transaction(conn: &Connection, account_id: i64, tx_id: TxId, block_height: u64) {
+        let timestamp =
+            NaiveDateTime::parse_from_str("2025-01-15 10:00:00", "%Y-%m-%d %H:%M:%S").expect("valid timestamp");
+        let tx = DisplayedTransactionBuilder::new()
+            .account_id(account_id)
+            .source(TransactionSource::Transfer)
+            .status(TransactionDisplayStatus::Confirmed)
+            .credits_and_debits(MicroMinotari::from(1_000), MicroMinotari::from(0))
+            .blockchain_info(block_height, mock_fixed_hash(1), timestamp, 10)
+            .inputs(vec![])
+            .outputs(vec![])
+            .build(tx_id)
+            .expect("displayed transaction builds");
+        // Sanity: builder populated an Incoming direction via credits_and_debits.
+        assert_eq!(tx.direction, TransactionDirection::Incoming);
+        insert_displayed_transaction(conn, &tx).expect("insert displayed transaction");
+    }
+
+    #[test]
+    fn historical_payref_lookup_round_trips_for_displayed_transactions() {
+        // Covers the db half of `api_get_displayed_transactions_by_payref`'s
+        // history fallback: after a reorg clears the live payref column on
+        // `displayed_transactions`, looking up the stale payref through
+        // `payref_history` must still resolve back to the original row via
+        // `get_displayed_transaction_by_id`. This is the displayed-path
+        // counterpart of the completed-path cucumber scenario and asserts
+        // behaviour end-to-end against the real SQLite schema.
+        let temp = tempdir().expect("temp dir");
+        let db_path = temp.path().join("payref_history_displayed.db");
+        let pool = init_db(db_path).expect("init db");
+        let conn = pool.get().expect("get connection");
+
+        let seeds = CipherSeed::random();
+        let seed_wallet = SeedWordsWallet::construct_new(seeds).unwrap();
+        let wallet_type = WalletType::SeedWords(seed_wallet);
+        let password = "correct horse battery staple";
+        create_account(&conn, "default", &wallet_type, password).expect("create account");
+        let account = get_account_by_name(&conn, "default")
+            .expect("query account")
+            .expect("account exists");
+
+        let tx_id = TxId::from(424242u64);
+        seed_displayed_transaction(&conn, account.id, tx_id, 500);
+
+        let stale = "stale_payref_after_reorg";
+        save_payref_history(&conn, account.id, tx_id, stale, None).expect("save history row");
+
+        // 1. Historical lookup resolves the stale payref to the original TxId.
+        let resolved = get_transaction_id_by_historical_payref(&conn, account.id, stale)
+            .expect("history lookup succeeds")
+            .expect("history row found");
+        assert_eq!(resolved, tx_id);
+
+        // 2. The resolved TxId fetches the real displayed row. This is the same
+        //    chain `api_get_displayed_transactions_by_payref` performs when the
+        //    primary `get_displayed_transactions_by_payref` lookup misses.
+        let fetched = get_displayed_transaction_by_id(&conn, &resolved.to_string())
+            .expect("fetch by id succeeds")
+            .expect("displayed transaction exists");
+        assert_eq!(fetched.id, tx_id);
+        assert_eq!(fetched.blockchain.block_height, 500);
+
+        // 3. An unrelated payref returns None so the handler can emit a 404.
+        let missing =
+            get_transaction_id_by_historical_payref(&conn, account.id, "never_seen").expect("history lookup ok");
+        assert!(missing.is_none());
+    }
+
+    #[test]
+    fn historical_payref_lookup_returns_most_recent_on_duplicates() {
+        // The schema intentionally allows duplicate (account, tx_id, payref)
+        // rows so every observed stale payref is appended. Verify `ORDER BY
+        // created_at DESC LIMIT 1` picks the newest row. We write two rows
+        // pointing at different TxIds and assert the second one wins.
+        let temp = tempdir().expect("temp dir");
+        let db_path = temp.path().join("payref_history_duplicates.db");
+        let pool = init_db(db_path).expect("init db");
+        let conn = pool.get().expect("get connection");
+
+        let seeds = CipherSeed::random();
+        let seed_wallet = SeedWordsWallet::construct_new(seeds).unwrap();
+        let wallet_type = WalletType::SeedWords(seed_wallet);
+        create_account(&conn, "default", &wallet_type, "pw").expect("create account");
+        let account = get_account_by_name(&conn, "default").unwrap().unwrap();
+
+        let first = TxId::from(1u64);
+        let second = TxId::from(2u64);
+        let stale = "collision_payref";
+
+        save_payref_history(&conn, account.id, first, stale, None).unwrap();
+        // SQLite's `datetime('now')` default has second-level precision, so we
+        // bump created_at explicitly to guarantee ordering without sleeping.
+        save_payref_history(&conn, account.id, second, stale, None).unwrap();
+        conn.execute(
+            "UPDATE payref_history SET created_at = datetime('now', '+1 second') \
+             WHERE transaction_id = ?1",
+            [second.as_i64_wrapped()],
+        )
+        .expect("bump created_at");
+
+        let winner = get_transaction_id_by_historical_payref(&conn, account.id, stale)
+            .expect("history lookup")
+            .expect("row exists");
+        assert_eq!(winner, second, "most-recent row should win the ORDER BY");
+    }
+}

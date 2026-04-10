@@ -575,7 +575,5 @@ pub fn get_displayed_transactions_by_payref(
         ":pattern": search_pattern
     })?;
 
-    let results = process_json_rows(from_rows::<TransactionJsonRow>(rows))?;
-
-    Ok(results)
+    process_json_rows(from_rows::<TransactionJsonRow>(rows))
 }
