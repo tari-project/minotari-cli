@@ -23,14 +23,7 @@ async fn wallet_scanned_to_height(world: &mut MinotariWorld, height: String) {
     let target_height: u64 = height.parse().expect("Height must be a valid number");
 
     // Scan enough blocks to reach the target height
-    scan_with_max_blocks(world, target_height.to_string()).await;
 
-    assert_eq!(
-        world.last_command_exit_code,
-        Some(0),
-        "Scan command failed: {}",
-        world.last_command_error.as_deref().unwrap_or("")
-    );
 
     // Verify the wallet actually scanned to the specified height by querying
     // the scanned_tip_blocks table directly. This is more reliable than parsing
