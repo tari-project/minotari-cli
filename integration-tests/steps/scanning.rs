@@ -22,7 +22,6 @@ async fn wallet_previously_scanned(world: &mut MinotariWorld) {
 async fn wallet_scanned_to_height(world: &mut MinotariWorld, height: String) {
     let target_height: u64 = height.parse().expect("Height must be a valid number");
 
-    // Scan enough blocks to reach the target height
 
 
     // Verify the wallet actually scanned to the specified height by querying
