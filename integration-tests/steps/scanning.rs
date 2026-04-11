@@ -4,16 +4,23 @@
 
 use cucumber::{codegen::Regex, given, then, when};
 use std::process::Command;
+use std::sync::OnceLock;
 
 use super::common::MinotariWorld;
+
+/// Compiled regex for extracting scanned block heights from command output.
+/// Uses OnceLock so the pattern is compiled exactly once across all calls.
+static SCAN_HEIGHT_RE: OnceLock<Regex> = OnceLock::new();
 
 /// Parse the last scanned block height from scan command output.
 ///
 /// Looks for structured log patterns like `last_scanned_block=N` or
 /// `current_height=N` in the scan output and returns the highest height found.
 fn parse_scanned_height(output: &str) -> Option<u64> {
-    let re = Regex::new(r"(?:last_scanned_block|current_height|final_height|height)[= ]+(\d+)")
-        .expect("Static regex must compile");
+    let re = SCAN_HEIGHT_RE.get_or_init(|| {
+        Regex::new(r"(?:last_scanned_block|current_height|final_height|height)[= ]+(\d+)")
+            .expect("Static regex must compile")
+    });
 
     let mut max_height: Option<u64> = None;
     for caps in re.captures_iter(output) {
