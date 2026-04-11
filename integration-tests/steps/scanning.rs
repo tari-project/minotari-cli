@@ -2,10 +2,35 @@
 //
 // Step definitions for testing blockchain scanning functionality.
 
-use cucumber::{given, then, when};
+use cucumber::{codegen::Regex, given, then, when};
 use std::process::Command;
 
 use super::common::MinotariWorld;
+
+/// Parse the last scanned block height from scan command output.
+///
+/// Looks for structured log patterns like `last_scanned_block=N` or
+/// `current_height=N` in the scan output and returns the highest height found.
+fn parse_scanned_height(output: &str) -> Option<u64> {
+    let patterns = [
+        r"last_scanned_block=(\d+)",
+        r"current_height=(\d+)",
+        r"final_height=(\d+)",
+        r"height[= ]+(\d+)",
+    ];
+
+    let mut max_height: Option<u64> = None;
+    for pattern in &patterns {
+        if let Ok(re) = Regex::new(pattern) {
+            for caps in re.captures_iter(output) {
+                if let Some(h) = caps.get(1).and_then(|m| m.as_str().parse::<u64>().ok()) {
+                    max_height = Some(max_height.map_or(h, |prev: u64| prev.max(h)));
+                }
+            }
+        }
+    }
+    max_height
+}
 
 // =============================
 // Scanning Steps
@@ -19,10 +44,21 @@ async fn wallet_previously_scanned(world: &mut MinotariWorld) {
 
 #[given(regex = r#"^the wallet has been previously scanned to height "([^"]*)"$"#)]
 async fn wallet_scanned_to_height(world: &mut MinotariWorld, height: String) {
-    // This simulates scanning to a specific height
-    // In practice, we'd scan until we reach that height
-    let _unused = height; // Use the height parameter
-    wallet_previously_scanned(world).await;
+    let target_height: u64 = height
+        .parse()
+        .expect("Height parameter must be a valid number");
+
+    // Scan enough blocks to reach the target height
+    scan_with_max_blocks(world, target_height.to_string()).await;
+
+    // Verify the wallet actually scanned to (at least) the target height
+    let scanned = world
+        .last_scanned_height
+        .expect("Scan did not report a scanned height");
+    assert!(
+        scanned >= target_height,
+        "Expected wallet to scan to height {target_height}, but only reached {scanned}"
+    );
 }
 
 #[when(regex = r#"^I perform a scan with max blocks "([^"]*)"$"#)]
@@ -57,6 +93,16 @@ async fn scan_with_max_blocks(world: &mut MinotariWorld, max_blocks: String) {
     world.last_command_exit_code = Some(output.status.code().unwrap_or(-1));
     world.last_command_output = Some(String::from_utf8_lossy(&output.stdout).to_string());
     world.last_command_error = Some(String::from_utf8_lossy(&output.stderr).to_string());
+
+    // Extract and record the scanned height from the output
+    let all_output = format!(
+        "{}\n{}",
+        world.last_command_output.as_deref().unwrap_or(""),
+        world.last_command_error.as_deref().unwrap_or("")
+    );
+    if let Some(height) = parse_scanned_height(&all_output) {
+        world.last_scanned_height = Some(height);
+    }
 
     println!("Scan output: {}", world.last_command_output.as_ref().unwrap());
     if !world.last_command_error.as_ref().unwrap().is_empty() {
@@ -104,6 +150,16 @@ async fn rescan_from_height(world: &mut MinotariWorld, height: String) {
     world.last_command_exit_code = Some(output.status.code().unwrap_or(-1));
     world.last_command_output = Some(String::from_utf8_lossy(&output.stdout).to_string());
     world.last_command_error = Some(String::from_utf8_lossy(&output.stderr).to_string());
+
+    // Extract and record the scanned height from re-scan output
+    let all_output = format!(
+        "{}\n{}",
+        world.last_command_output.as_deref().unwrap_or(""),
+        world.last_command_error.as_deref().unwrap_or("")
+    );
+    if let Some(h) = parse_scanned_height(&all_output) {
+        world.last_scanned_height = Some(h);
+    }
 }
 
 #[when(regex = r#"^I perform a scan with batch size "([^"]*)"$"#)]
@@ -177,14 +233,45 @@ async fn new_blocks_processed(world: &mut MinotariWorld) {
 }
 
 #[then(regex = r#"^the wallet state should be rolled back to height "([^"]*)"$"#)]
-async fn wallet_rolled_back(world: &mut MinotariWorld, _height: String) {
-    // Re-scan command should complete successfully
+async fn wallet_rolled_back(world: &mut MinotariWorld, height: String) {
     scan_succeeds(world).await;
+
+    let expected: u64 = height
+        .parse()
+        .expect("Height parameter must be a valid number");
+
+    // Verify the re-scan started from the expected rollback height
+    let output = format!(
+        "{}\n{}",
+        world.last_command_output.as_deref().unwrap_or(""),
+        world.last_command_error.as_deref().unwrap_or("")
+    );
+    // The re-scan output should reference the rollback height
+    assert!(
+        output.contains(&format!("height={expected}"))
+            || output.contains(&format!("height = {expected}"))
+            || output.contains(&format!("height\":{expected}"))
+            || world.last_scanned_height.map_or(false, |h| h >= expected),
+        "Expected wallet to roll back to height {expected}, output: {output}"
+    );
 }
 
 #[then(regex = r#"^scanning should resume from height "([^"]*)"$"#)]
-async fn scanning_resumes(world: &mut MinotariWorld, _height: String) {
+async fn scanning_resumes(world: &mut MinotariWorld, height: String) {
     scan_succeeds(world).await;
+
+    let expected: u64 = height
+        .parse()
+        .expect("Height parameter must be a valid number");
+
+    // Verify the scan resumed from the expected height by checking that
+    // the scanned height is at least the resume height
+    if let Some(scanned) = world.last_scanned_height {
+        assert!(
+            scanned >= expected,
+            "Expected scanning to resume from height {expected}, but last scanned height is {scanned}"
+        );
+    }
 }
 
 #[then(regex = r#"^blocks should be fetched in batches of "([^"]*)"$"#)]

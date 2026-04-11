@@ -44,6 +44,7 @@ pub struct MinotariWorld {
     pub seed_nodes: Vec<String>,
     pub benchmark_timings: HashMap<String, std::time::Duration>,
     pub pre_send_balance: Option<u64>,
+    pub last_scanned_height: Option<u64>,
 }
 
 impl MinotariWorld {
@@ -76,6 +77,7 @@ impl MinotariWorld {
             seed_nodes: Vec::new(),
             benchmark_timings: HashMap::new(),
             pre_send_balance: None,
+            last_scanned_height: None,
         }
     }
 
