@@ -3,6 +3,7 @@
 // Step definitions for testing blockchain scanning functionality.
 
 use cucumber::{given, then, when};
+use rusqlite::{Connection, OptionalExtension};
 use std::process::Command;
 
 use super::common::MinotariWorld;
@@ -19,10 +20,28 @@ async fn wallet_previously_scanned(world: &mut MinotariWorld) {
 
 #[given(regex = r#"^the wallet has been previously scanned to height "([^"]*)"$"#)]
 async fn wallet_scanned_to_height(world: &mut MinotariWorld, height: String) {
-    // This simulates scanning to a specific height
-    // In practice, we'd scan until we reach that height
-    let _unused = height; // Use the height parameter
-    wallet_previously_scanned(world).await;
+    let target_height: u64 = height.parse().expect("Height must be a valid number");
+
+    // Verify the wallet has previously scanned to at least the specified height by
+    // querying the scanned_tip_blocks table directly. This step asserts existing
+    // state; it does not trigger a scan.
+    let db_path = world.database_path.as_ref().expect("Database not set up");
+    let conn = Connection::open(db_path).expect("Failed to open wallet database");
+
+    let scanned_height: Option<u64> = conn
+        .query_row("SELECT MAX(height) FROM scanned_tip_blocks", [], |row| row.get(0))
+        .optional()
+        .expect("scanned_tip_blocks query failed")
+        .flatten();
+
+    let scanned_height = scanned_height.unwrap_or_else(|| panic!("No scanned blocks found in wallet database"));
+
+    assert!(
+        scanned_height >= target_height,
+        "Wallet scanned to height {} but expected at least {}",
+        scanned_height,
+        target_height
+    );
 }
 
 #[when(regex = r#"^I perform a scan with max blocks "([^"]*)"$"#)]
