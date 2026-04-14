@@ -12,7 +12,6 @@
 // 7. Start the daemon and verify the old payref still resolves via history fallback
 
 use cucumber::{given, then, when};
-use rusqlite::Connection;
 use std::net::TcpListener;
 use std::process::{Command, Stdio};
 use std::time::Duration;
@@ -27,12 +26,6 @@ use super::common::test_support;
 // =============================
 // Helper Functions
 // =============================
-
-/// Open a read-only connection to the wallet database for inspection.
-fn open_wallet_db(world: &MinotariWorld) -> Connection {
-    let db_path = world.database_path.as_ref().expect("Database not set up");
-    Connection::open(db_path).expect("Failed to open wallet database")
-}
 
 /// Find an unused port in a given range.
 fn find_free_port(start: u16, end: u16) -> u16 {
@@ -68,15 +61,28 @@ async fn start_isolated_base_node(world: &mut MinotariWorld, name: String) {
 
 #[then("the wallet should have displayed transactions with payrefs")]
 async fn wallet_has_displayed_transactions_with_payrefs(world: &mut MinotariWorld) {
-    let conn = open_wallet_db(world);
+    let port = world.api_port.expect("Daemon must be running before querying displayed transactions");
+    let url = format!("http://127.0.0.1:{}/accounts/default/displayed_transactions?limit=100", port);
 
-    let count: i64 = conn
-        .query_row(
-            "SELECT COUNT(*) FROM displayed_transactions WHERE payref IS NOT NULL AND payref != '[]'",
-            [],
-            |row| row.get(0),
-        )
-        .expect("Failed to query displayed transactions");
+    let client = reqwest::Client::new();
+    let txs: Vec<serde_json::Value> = client
+        .get(&url)
+        .send()
+        .await
+        .expect("Failed to query displayed transactions via API")
+        .json()
+        .await
+        .expect("Failed to parse displayed transactions response");
+
+    let count = txs
+        .iter()
+        .filter(|tx| {
+            tx["details"]["sent_payrefs"]
+                .as_array()
+                .map(|arr| !arr.is_empty())
+                .unwrap_or(false)
+        })
+        .count();
 
     assert!(
         count > 0,
@@ -89,30 +95,33 @@ async fn wallet_has_displayed_transactions_with_payrefs(world: &mut MinotariWorl
 
 #[when("I capture a payref from the displayed transactions")]
 async fn capture_payref_from_displayed_transactions(world: &mut MinotariWorld) {
-    let conn = open_wallet_db(world);
+    let port = world.api_port.expect("Daemon must be running before capturing payref");
+    let url = format!("http://127.0.0.1:{}/accounts/default/displayed_transactions?limit=100", port);
 
-    // The payref column stores a JSON array of hex-encoded payment references.
-    // Pick the first non-empty payref from any displayed transaction.
-    let payref_json: String = conn
-        .query_row(
-            "SELECT payref FROM displayed_transactions WHERE payref IS NOT NULL AND payref != '[]' LIMIT 1",
-            [],
-            |row| row.get(0),
-        )
-        .expect("No displayed transaction with payref found");
+    let client = reqwest::Client::new();
+    let txs: Vec<serde_json::Value> = client
+        .get(&url)
+        .send()
+        .await
+        .expect("Failed to query displayed transactions via API")
+        .json()
+        .await
+        .expect("Failed to parse displayed transactions response");
 
-    let payrefs: Vec<String> =
-        serde_json::from_str(&payref_json).expect("Failed to parse payref JSON array");
+    // Find the first transaction with at least one payref and extract it
+    let captured = txs
+        .iter()
+        .find_map(|tx| {
+            tx["details"]["sent_payrefs"]
+                .as_array()
+                .and_then(|arr| arr.first())
+                .and_then(|p| p.as_str())
+                .map(String::from)
+        })
+        .expect("No displayed transaction with payref found — did the scan generate payrefs?");
 
-    assert!(
-        !payrefs.is_empty(),
-        "Payref array is empty in the displayed transaction"
-    );
-
-    let captured = payrefs.into_iter().next().unwrap();
     println!("Captured payref for later verification: {}", captured);
 
-    // Store the captured payref in transaction_data for later use
     world.transaction_data.insert(
         "captured_payref".to_string(),
         serde_json::Value::String(captured),

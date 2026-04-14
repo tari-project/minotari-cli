@@ -10,8 +10,10 @@ Feature: Payref history fallback after reorg
     When I mine 5 blocks on NodeA
     And I perform a scan with max blocks "20"
     Then the scan should complete successfully
-    # Capture a payref from the scanned displayed transactions
-    And the wallet should have displayed transactions with payrefs
+    # Start the daemon so we can query transactions via the HTTP API
+    When I start the daemon on a free port
+    # Capture a payref from the scanned displayed transactions via the daemon API
+    Then the wallet should have displayed transactions with payrefs
     When I capture a payref from the displayed transactions
     # Create a competing longer chain that will trigger a reorg
     Given I have an isolated base node NodeB
@@ -22,8 +24,7 @@ Feature: Payref history fallback after reorg
     # Scan the wallet; the reorg handler detects the chain fork and saves old payrefs to history
     And I perform a scan with max blocks "50"
     Then the scan should complete successfully
-    # Start the daemon and verify the old payref still resolves
-    When I start the daemon on a free port
+    # Verify the old payref still resolves via the already-running daemon
     And I request the displayed transactions by the captured payref via the API
     Then the API should return the displayed transaction via history fallback
     # An unrelated payref should return empty
