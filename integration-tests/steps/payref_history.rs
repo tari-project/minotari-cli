@@ -50,9 +50,9 @@ async fn start_isolated_base_node(world: &mut MinotariWorld, name: String) {
         &base_dir,
         &mut world.assigned_ports,
         &mut world.base_nodes,
-        false,      // not a seed node
+        false, // not a seed node
         name.clone(),
-        vec![],     // no seed peers — isolated chain
+        vec![], // no seed peers — isolated chain
     )
     .await;
 
@@ -61,8 +61,13 @@ async fn start_isolated_base_node(world: &mut MinotariWorld, name: String) {
 
 #[then("the wallet should have displayed transactions with payrefs")]
 async fn wallet_has_displayed_transactions_with_payrefs(world: &mut MinotariWorld) {
-    let port = world.api_port.expect("Daemon must be running before querying displayed transactions");
-    let url = format!("http://127.0.0.1:{}/accounts/default/displayed_transactions?limit=100", port);
+    let port = world
+        .api_port
+        .expect("Daemon must be running before querying displayed transactions");
+    let url = format!(
+        "http://127.0.0.1:{}/accounts/default/displayed_transactions?limit=100",
+        port
+    );
 
     let client = reqwest::Client::new();
     let txs: Vec<serde_json::Value> = client
@@ -96,7 +101,10 @@ async fn wallet_has_displayed_transactions_with_payrefs(world: &mut MinotariWorl
 #[when("I capture a payref from the displayed transactions")]
 async fn capture_payref_from_displayed_transactions(world: &mut MinotariWorld) {
     let port = world.api_port.expect("Daemon must be running before capturing payref");
-    let url = format!("http://127.0.0.1:{}/accounts/default/displayed_transactions?limit=100", port);
+    let url = format!(
+        "http://127.0.0.1:{}/accounts/default/displayed_transactions?limit=100",
+        port
+    );
 
     let client = reqwest::Client::new();
     let txs: Vec<serde_json::Value> = client
@@ -122,10 +130,9 @@ async fn capture_payref_from_displayed_transactions(world: &mut MinotariWorld) {
 
     println!("Captured payref for later verification: {}", captured);
 
-    world.transaction_data.insert(
-        "captured_payref".to_string(),
-        serde_json::Value::String(captured),
-    );
+    world
+        .transaction_data
+        .insert("captured_payref".to_string(), serde_json::Value::String(captured));
 }
 
 #[when(expr = "I mine {int} blocks on {word} with a different wallet")]
@@ -196,14 +203,12 @@ async fn wait_for_node_to_sync(world: &mut MinotariWorld, node_name: String, exp
         .get(&node_name)
         .unwrap_or_else(|| panic!("Node {} not found", node_name));
 
-    node.wait_for_height(expected_height, 120)
-        .await
-        .unwrap_or_else(|e| {
-            panic!(
-                "Node {} failed to reach height {} within timeout: {}",
-                node_name, expected_height, e
-            )
-        });
+    node.wait_for_height(expected_height, 120).await.unwrap_or_else(|e| {
+        panic!(
+            "Node {} failed to reach height {} within timeout: {}",
+            node_name, expected_height, e
+        )
+    });
 
     let actual_height = node.get_tip_height().await.expect("Failed to get tip height");
     println!("Node {} synced to height {}", node_name, actual_height);
@@ -322,8 +327,7 @@ async fn assert_displayed_transaction_returned(world: &mut MinotariWorld) {
         exit, body
     );
 
-    let json: serde_json::Value =
-        serde_json::from_str(body).expect("Response body was not valid JSON");
+    let json: serde_json::Value = serde_json::from_str(body).expect("Response body was not valid JSON");
     let arr = json.as_array().expect("Expected a JSON array response");
 
     assert!(
@@ -352,8 +356,7 @@ async fn assert_empty_displayed_list(world: &mut MinotariWorld) {
         exit, body
     );
 
-    let json: serde_json::Value =
-        serde_json::from_str(body).expect("Response body was not valid JSON");
+    let json: serde_json::Value = serde_json::from_str(body).expect("Response body was not valid JSON");
     let arr = json.as_array().expect("Expected a JSON array response");
 
     assert!(
