@@ -336,10 +336,7 @@ async fn assert_displayed_transaction_returned(world: &mut MinotariWorld) {
         body
     );
 
-    println!(
-        "History fallback resolved {} displayed transaction(s)",
-        arr.len()
-    );
+    println!("History fallback resolved {} displayed transaction(s)", arr.len());
 }
 
 #[then("the API should return an empty list for the displayed transactions")]
