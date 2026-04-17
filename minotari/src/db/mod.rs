@@ -118,6 +118,12 @@ pub use burn_proofs::{
     mark_burn_proof_complete,
 };
 
+mod payref_history;
+pub use payref_history::{
+    get_transaction_id_by_historical_payref, save_completed_transaction_payrefs_before_reorg,
+    save_displayed_transaction_payrefs_before_reorg, save_payref_history,
+};
+
 mod displayed_transactions;
 pub use displayed_transactions::{
     find_pending_outbound_by_output_hash, get_displayed_transaction_by_id, get_displayed_transactions_by_account,

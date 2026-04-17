@@ -10,6 +10,7 @@ pub mod common;
 pub mod daemon;
 pub mod fund_locking;
 pub mod load_testing;
+pub mod payref_history;
 pub mod scanning;
 pub mod transactions;
 pub mod wallet_benchmark;
