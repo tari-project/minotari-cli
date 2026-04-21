@@ -3154,6 +3154,7 @@ dependencies = [
  "cucumber",
  "indexmap 1.9.3",
  "log",
+ "minotari",
  "minotari_app_grpc 5.3.0-pre.3 (git+https://github.com/tari-project/tari/)",
  "minotari_app_utilities",
  "minotari_node",
