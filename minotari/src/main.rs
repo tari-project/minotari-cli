@@ -51,10 +51,7 @@ use std::{
 };
 
 use anyhow::anyhow;
-use chacha20poly1305::{
-    AeadCore, Key, KeyInit, XChaCha20Poly1305,
-    aead::{Aead, OsRng},
-};
+use chacha20poly1305::{Key, KeyInit, XChaCha20Poly1305, XNonce, aead::Aead, aead::Generate};
 use clap::Parser;
 use log::info;
 use minotari::{
@@ -143,7 +140,7 @@ async fn main() -> Result<(), anyhow::Error> {
                 let key = Key::from(key_bytes);
                 let cipher = XChaCha20Poly1305::new(&key);
 
-                let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
+                let nonce = XNonce::generate();
                 let encrypted_view_key = cipher.encrypt(&nonce, view_key.as_bytes())?;
                 let encrypted_spend_key = cipher.encrypt(&nonce, spend_key.pub_key.as_bytes())?;
 

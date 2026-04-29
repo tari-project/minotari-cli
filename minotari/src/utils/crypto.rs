@@ -1,12 +1,10 @@
 use anyhow::anyhow;
-use argon2::{
-    Algorithm, Argon2, Params, Version,
-    password_hash::{SaltString, rand_core::OsRng},
-};
+use argon2::{Algorithm, Argon2, Params, Version};
 use chacha20poly1305::{
     Key, XChaCha20Poly1305, XNonce,
-    aead::{Aead, AeadCore, KeyInit},
+    aead::{Aead, Generate, KeyInit},
 };
+use phc::Salt;
 use tari_common_types::types::{CompressedPublicKey, PrivateKey};
 use tari_utilities::byte_array::ByteArray;
 
@@ -29,13 +27,12 @@ pub struct FullEncryptedData<S = Vec<u8>> {
 
 /// Encrypts data using XChaCha20-Poly1305.
 pub fn encrypt_data(data: &[u8], password: &str) -> Result<FullEncryptedData, anyhow::Error> {
-    let salt_string = SaltString::generate(&mut OsRng);
-    let salt_bytes = salt_string.as_str().as_bytes();
+    let salt = Salt::generate();
 
-    let key = derive_key(password, salt_bytes)?;
+    let key = derive_key(password, salt.as_ref())?;
     let cipher = XChaCha20Poly1305::new(&key);
 
-    let nonce = XChaCha20Poly1305::generate_nonce(&mut OsRng);
+    let nonce = XNonce::generate();
 
     let ciphertext = cipher
         .encrypt(&nonce, data)
@@ -44,7 +41,7 @@ pub fn encrypt_data(data: &[u8], password: &str) -> Result<FullEncryptedData, an
     Ok(FullEncryptedData {
         ciphertext,
         nonce: nonce.to_vec(),
-        salt_bytes: salt_bytes.to_vec(),
+        salt_bytes: salt.as_ref().to_vec(),
     })
 }
 

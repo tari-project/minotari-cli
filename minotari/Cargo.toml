@@ -17,9 +17,10 @@ path = "src/bin/generate_openapi.rs"
 
 [dependencies]
 anyhow = "1.0.99"
-argon2 = { version = "0.5.3", features = ["std", "alloc"] }
+argon2 = { version = "0.6.0-rc.8", features = ["alloc"] }
+phc = "0.6.1"
 axum = { version = "0.8.6", features = ["default", "http2", "macros"] }
-chacha20poly1305 = { version = "0.10.1", features = ["rand_core", "std"] }
+chacha20poly1305 = { version = "0.11.0-rc.3", features = ["rand_core"] }
 chrono = "0.4.42"
 clap = { version = "4.5.47", features = ["derive"] }
 dirs-next = "2"
@@ -48,11 +49,11 @@ serde_yaml = "0.9.34"
 sha2 = "0.10"
 tari_common = { workspace = true }
 tari_common_types = { workspace = true }
-tari_crypto = { version = "0.22.1", features = ["borsh"] }
+tari_crypto = { workspace = true, features = ["borsh"] }
 tari_script = { workspace = true }
 tari_sidechain = { workspace = true }
 tari_transaction_components = { workspace = true }
-tari_utilities = { version = "0.8", features = ["std"] }
+tari_utilities = { workspace = true, features = ["std"] }
 #tari_common = { path = "../tari/common" }
 #tari_common_types = { path = "../tari/base_layer/common_types" }
 #tari_script = { path = "../tari/infrastructure/tari_script" }
