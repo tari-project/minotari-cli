@@ -63,6 +63,7 @@ use minotari::{
     daemon,
     db::{self, WalletDbError, get_accounts, get_balance, init_db},
     log::{init_logging, mask_string},
+    migrate::{MigrationOptions, run_migration},
     models::WalletEvent,
     scan::{self, reorg::rollback_from_height},
     transactions::{
@@ -562,6 +563,55 @@ async fn main() -> Result<(), anyhow::Error> {
 
             utils::delete_wallet::delete_wallet(&wallet_config.database_path, name)?;
             println!("Wallet account '{}' deleted successfully.", name);
+            Ok(())
+        },
+
+        Commands::MigrateFromConsoleWallet {
+            source_db,
+            source_password,
+            security,
+            db,
+            account_name,
+        } => {
+            info!(
+                target: "audit",
+                source = source_db.display().to_string().as_str(),
+                account = account_name.as_str();
+                "Migrating from console wallet"
+            );
+
+            wallet_config.apply_database(&db);
+
+            let report = tokio::task::spawn_blocking(move || {
+                run_migration(MigrationOptions {
+                    source_db_path: source_db,
+                    source_passphrase: source_password,
+                    destination_db_path: wallet_config.database_path,
+                    destination_passphrase: security.password,
+                    account_name,
+                })
+            })
+            .await
+            .map_err(|e| anyhow!("Migration task join error: {}", e))??;
+
+            println!("---------------------------------------------------------");
+            println!("Migration complete:");
+            println!("  Account name           : {}", report.account_name);
+            println!("  Outputs migrated       : {}", report.outputs_migrated);
+            println!("    Unspent              : {}", report.unspent_outputs_count);
+            println!("    Spent                : {}", report.spent_outputs_count);
+            println!("  Outputs skipped        : {}", report.outputs_skipped);
+            println!("  Transactions migrated  : {}", report.displayed_transactions_migrated);
+            println!(
+                "  Net balance            : {} uT",
+                report.net_balance().as_u64()
+            );
+            if let Some(h) = report.scan_tip_height {
+                println!("  Resumed scan tip       : block {}", h);
+            } else {
+                println!("  Resumed scan tip       : none (full scan will be required)");
+            }
+            println!("---------------------------------------------------------");
             Ok(())
         },
 
