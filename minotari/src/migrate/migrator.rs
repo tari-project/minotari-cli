@@ -19,7 +19,7 @@ use std::path::PathBuf;
 
 use anyhow::{Context, anyhow};
 use chrono::{DateTime, NaiveDateTime, Utc};
-use log::{info, warn};
+use log::info;
 use rusqlite::{Connection, named_params};
 use tari_common_types::{seeds::cipher_seed::CipherSeed, types::FixedHash};
 use tari_transaction_components::MicroMinotari;
@@ -116,9 +116,16 @@ pub fn run_migration(options: MigrationOptions) -> Result<MigrationReport, anyho
         .map_err(|e| anyhow!("Failed to initialise destination database: {e}"))?;
     let mut conn = pool.get().context("Failed to get destination DB connection")?;
 
-    // Reject duplicate account names early; we can't recover from a partial
-    // INSERT-then-fail later.
-    if db::get_account_by_name(&conn, &options.account_name)
+    // 4. Single transaction for the whole migration. We use IMMEDIATE so the
+    //    write lock is acquired up-front, making the duplicate-name check
+    //    below atomic vs any concurrent writer.
+    let tx = conn
+        .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+        .context("Failed to start migration transaction")?;
+
+    // Reject duplicate account names; checked inside the transaction so a
+    // concurrent writer can't race in between the check and create_account.
+    if db::get_account_by_name(&tx, &options.account_name)
         .map_err(|e| anyhow!("Lookup of existing account failed: {e}"))?
         .is_some()
     {
@@ -128,8 +135,6 @@ pub fn run_migration(options: MigrationOptions) -> Result<MigrationReport, anyho
         ));
     }
 
-    // 4. Single transaction for the whole migration.
-    let tx = conn.transaction().context("Failed to start migration transaction")?;
     let report = migrate_in_transaction(&tx, &cipher_seed, &options, &outputs, &transactions, &scan_tip)?;
     tx.commit().context("Failed to commit migration transaction")?;
 
@@ -230,14 +235,14 @@ fn migrate_in_transaction(
         let converted = convert_transaction(raw_tx, account_id, sent_hashes)?;
         // The displayed_transactions PRIMARY KEY is text; we use the legacy
         // u64 stringified to preserve the exact value the user is used to.
-        if let Err(e) = db::insert_displayed_transaction(tx, &converted.display) {
-            warn!(
-                target: "audit",
-                tx_id = raw_tx.tx_id;
-                "Skipping displayed transaction migration due to insert error: {e}"
-            );
-            continue;
-        }
+        // Hard-fail rather than skip: a partial transaction history is worse
+        // than aborting and letting the user re-attempt.
+        db::insert_displayed_transaction(tx, &converted.display).with_context(|| {
+            format!(
+                "Failed to migrate displayed transaction with legacy tx_id {}",
+                raw_tx.tx_id
+            )
+        })?;
         report.displayed_transactions_migrated += 1;
     }
 
