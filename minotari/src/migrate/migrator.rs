@@ -147,9 +147,9 @@ pub fn run_migration(
         .map(|tx| convert_transaction(tx, 0))
         .collect::<Result<Vec<_>, _>>()?;
 
-    let source_balance_utari: u64 = converted_outputs
+    let source_balance_utari: u64 = source_outputs
         .iter()
-        .map(|output| output.wallet_output.value().as_u64())
+        .filter_map(|output| u64::try_from(output.value).ok())
         .sum();
     let resolved_sync_tip = resolve_sync_tip(&explicit_sync_tip, &converted_outputs, fallback_sync_tip);
 
@@ -221,7 +221,7 @@ pub fn run_migration(
     report.imported_balance_utari = imported_balance_utari;
     report.balance_match = imported_balance_utari == report.source_balance_utari;
 
-    if !report.balance_match {
+    if !(report.balance_match || allow_partial_import && report.outputs_skipped_legacy_key > 0) {
         return Err(anyhow!(
             "Imported balance {} does not match source balance {}",
             imported_balance_utari,

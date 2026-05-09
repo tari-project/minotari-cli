@@ -356,8 +356,9 @@ fn allow_partial_import_skips_legacy_outputs_and_reports_them() {
     assert!(report.partial_import);
     assert_eq!(report.outputs_imported, 1);
     assert_eq!(report.outputs_skipped_legacy_key, 1);
-    assert_eq!(report.source_balance_utari, 100);
+    assert_eq!(report.source_balance_utari, 350);
     assert_eq!(report.imported_balance_utari, 100);
+    assert!(!report.balance_match);
 
     let conn = pool.get().expect("destination connection");
     let output_count: i64 = conn
