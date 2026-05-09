@@ -237,12 +237,16 @@ impl ConsoleDb {
                     "SELECT height, header_hash FROM scanned_blocks ORDER BY height DESC LIMIT 1",
                     [],
                     |row| {
-                        let height: i64 = row.get(0)?;
+                        let height_i64: i64 = row.get(0)?;
+                        let height = height_i64.try_into().map_err(|_| {
+                            rusqlite::Error::FromSqlConversionFailure(
+                                0,
+                                rusqlite::types::Type::Integer,
+                                "Invalid negative height".into(),
+                            )
+                        })?;
                         let block_hash: Vec<u8> = row.get(1)?;
-                        Ok(ConsoleSyncTip {
-                            height: height.try_into().unwrap_or_default(),
-                            block_hash,
-                        })
+                        Ok(ConsoleSyncTip { height, block_hash })
                     },
                 )
                 .optional()?;
@@ -260,12 +264,16 @@ impl ConsoleDb {
                 if let Ok(mut stmt) = self.conn.prepare(query) {
                     let tip = stmt
                         .query_row([], |row| {
-                            let height: i64 = row.get(0)?;
+                            let height_i64: i64 = row.get(0)?;
+                            let height = height_i64.try_into().map_err(|_| {
+                                rusqlite::Error::FromSqlConversionFailure(
+                                    0,
+                                    rusqlite::types::Type::Integer,
+                                    "Invalid negative height".into(),
+                                )
+                            })?;
                             let block_hash: Vec<u8> = row.get(1)?;
-                            Ok(ConsoleSyncTip {
-                                height: height.try_into().unwrap_or_default(),
-                                block_hash,
-                            })
+                            Ok(ConsoleSyncTip { height, block_hash })
                         })
                         .optional()?;
 
