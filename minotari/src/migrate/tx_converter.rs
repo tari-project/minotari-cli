@@ -30,8 +30,8 @@ pub fn convert_transaction(tx: &ConsoleCompletedTx, account_id: i64) -> Result<C
     let direction = map_direction(tx.direction, tx.amount);
     let status = map_display_status(tx.status);
     let source = map_transaction_source(tx.status);
-    let amount = MicroMinotari::from(tx.amount.max(0) as u64);
-    let fee = MicroMinotari::from(tx.fee.max(0) as u64);
+    let amount = MicroMinotari::from(tx.amount.unsigned_abs());
+    let fee = MicroMinotari::from(tx.fee.unsigned_abs());
     let block_hash = tx
         .mined_in_block
         .clone()

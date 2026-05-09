@@ -380,7 +380,7 @@ impl ConsoleDb {
         let main_key = decrypt_integral_nonce(&secondary_cipher, &main_key_aad, &encrypted_main_key)
             .context("Failed to decrypt EncryptedMainKey")?;
 
-        let main_key = Key::try_from(main_key.as_ref()).expect("key must be 32 bytes");
+        let main_key = Key::try_from(main_key.as_ref()).map_err(|_| anyhow!("Decrypted main key has invalid length (expected 32 bytes)"))?;
         let main_cipher = XChaCha20Poly1305::new(&main_key);
 
         let encrypted_master_seed = hex::decode(&encrypted_master_seed_hex).context("MasterSeed is not valid hex")?;

@@ -200,13 +200,13 @@ pub fn run_migration(
 
     for source_tx in &source_transactions {
         let mut converted = convert_transaction(source_tx, account_id)?;
-        if let Some(output_row_id) = output_row_ids_by_source_tx_id.get(&source_tx.tx_id).copied()
-            && matches!(
+        if let Some(output_row_id) = output_row_ids_by_source_tx_id.get(&source_tx.tx_id).copied() {
+            if matches!(
                 converted.displayed.direction,
                 crate::transactions::TransactionDirection::Incoming
-            )
-        {
-            converted.metadata_balance_change.caused_by_output_id = Some(output_row_id);
+            ) {
+                converted.metadata_balance_change.caused_by_output_id = Some(output_row_id);
+            }
         }
 
         db::insert_balance_change(&tx, &converted.metadata_balance_change)?;
@@ -347,15 +347,15 @@ fn resolve_sync_tip(
         return Some(sync_tip.clone());
     }
 
-    if let Some(max_height) = fallback_max_height
-        && let Some(output) = converted_outputs
-            .iter()
-            .find(|output| output.mined_height == max_height)
-    {
-        return Some(ConsoleSyncTip {
-            height: max_height,
-            block_hash: output.mined_block_hash.to_vec(),
-        });
+    if let Some(max_height) = fallback_max_height {
+        if let Some(output) = converted_outputs.iter().find(|output| {
+            output.mined_height == max_height
+        }) {
+            return Some(ConsoleSyncTip {
+                height: max_height,
+                block_hash: output.mined_block_hash.to_vec(),
+            });
+        }
     }
 
     converted_outputs
