@@ -32,29 +32,19 @@ use crate::transactions::displayed_transaction_processor::{
 
 /// What the migrator emits per source transaction row. The orchestrator picks
 /// these apart and writes them into the new wallet's `displayed_transactions`
-/// (and, where the row represents a sent transaction, `completed_transactions`)
-/// tables.
+/// `displayed_transactions` table.
+///
+/// Note we deliberately do NOT produce a `completed_transactions` row from
+/// a migrated source. The runtime `TransactionMonitor` reads
+/// `completed_transactions` to attempt rebroadcast / status refresh of
+/// outbound transactions whose serialised blob is still around; populating
+/// it with historical, already-mined rows that have no recoverable
+/// broadcast blob would queue up bogus rebroadcasts. Historical context
+/// lives in `displayed_transactions` (which the UI reads) and
+/// `balance_changes` (which the ledger reads); the broadcast log stays
+/// empty.
 pub struct ConvertedTransaction {
     pub display: DisplayedTransaction,
-    /// `Some` only for outgoing transactions — the new wallet's
-    /// `completed_transactions` table is exclusively a "transactions I sent"
-    /// log (it carries the broadcast bookkeeping). Incoming or coinbase rows
-    /// only need to land in `displayed_transactions`.
-    pub completed_record: Option<CompletedTxRecord>,
-}
-
-/// Minimal info needed to populate the new wallet's `completed_transactions`
-/// row for a migrated outbound transaction. We don't have a full broadcast
-/// `Transaction` struct on hand (the legacy `transaction_protocol` blob is
-/// bincode and we'd prefer not to pull bincode into the migration crate just
-/// for this case), so we leave `serialized_transaction` empty and mark the
-/// status accordingly.
-pub struct CompletedTxRecord {
-    pub tx_id: u64,
-    pub kernel_excess: Vec<u8>,
-    pub mined_height: Option<u64>,
-    pub mined_block_hash: Option<Vec<u8>>,
-    pub status_label: &'static str,
 }
 
 pub fn convert_transaction(
@@ -156,25 +146,7 @@ pub fn convert_transaction(
         },
     };
 
-    let completed_record = if matches!(direction, TransactionDirection::Outgoing) {
-        Some(CompletedTxRecord {
-            tx_id,
-            // The source-table kernel signature columns are the kernel excess
-            // signature, not the kernel excess commitment — but we keep them
-            // here as a reasonable best-effort marker.
-            kernel_excess: Vec::new(),
-            mined_height: row.mined_height.map(|h| h as u64),
-            mined_block_hash: row.mined_in_block.clone(),
-            status_label: completed_status_label(legacy_status),
-        })
-    } else {
-        None
-    };
-
-    Ok(ConvertedTransaction {
-        display,
-        completed_record,
-    })
+    Ok(ConvertedTransaction { display })
 }
 
 fn parse_address(bytes: &[u8]) -> Result<TariAddress, anyhow::Error> {
@@ -214,17 +186,6 @@ fn map_source(status: LegacyTransactionStatus) -> TransactionSource {
         OneSidedUnconfirmed | OneSidedConfirmed | OneSidedConfirmedLocked => TransactionSource::OneSided,
         Imported => TransactionSource::Transfer,
         _ => TransactionSource::Transfer,
-    }
-}
-
-fn completed_status_label(status: LegacyTransactionStatus) -> &'static str {
-    use LegacyTransactionStatus::*;
-    match status {
-        MinedConfirmed | MinedConfirmedLocked | OneSidedConfirmed | OneSidedConfirmedLocked | CoinbaseConfirmed
-        | CoinbaseConfirmedLocked => "confirmed",
-        MinedUnconfirmed | OneSidedUnconfirmed | CoinbaseUnconfirmed => "unconfirmed",
-        Rejected => "rejected",
-        _ => "pending",
     }
 }
 
