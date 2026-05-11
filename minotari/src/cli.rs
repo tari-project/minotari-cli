@@ -734,6 +734,14 @@ pub enum Commands {
         /// Friendly name to give the new account in this wallet.
         #[arg(short = 'a', long, help = "Account name for the migrated wallet")]
         account_name: String,
+
+        /// Run the migration against an in-flight transaction but roll it
+        /// back instead of committing. Useful for checking the source DB
+        /// would migrate cleanly (balance match, no schema conflicts, no
+        /// tx_id collisions that need fallback ids) before touching the
+        /// destination wallet.
+        #[arg(long, help = "Validate the migration without writing the destination DB")]
+        dry_run: bool,
     },
 }
 

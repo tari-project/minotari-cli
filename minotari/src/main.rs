@@ -572,11 +572,13 @@ async fn main() -> Result<(), anyhow::Error> {
             security,
             db,
             account_name,
+            dry_run,
         } => {
             info!(
                 target: "audit",
                 source = source_db.display().to_string().as_str(),
-                account = account_name.as_str();
+                account = account_name.as_str(),
+                dry_run = dry_run;
                 "Migrating from console wallet"
             );
 
@@ -589,22 +591,36 @@ async fn main() -> Result<(), anyhow::Error> {
                     destination_db_path: wallet_config.database_path,
                     destination_passphrase: security.password,
                     account_name,
+                    dry_run,
                 })
             })
             .await
             .map_err(|e| anyhow!("Migration task join error: {}", e))??;
 
             println!("---------------------------------------------------------");
-            println!("Migration complete:");
+            if report.dry_run {
+                println!("Migration DRY-RUN complete (nothing was written):");
+            } else {
+                println!("Migration complete:");
+            }
             println!("  Account name           : {}", report.account_name);
             println!("  Outputs migrated       : {}", report.outputs_migrated);
             println!("    Unspent              : {}", report.unspent_outputs_count);
             println!("    Spent                : {}", report.spent_outputs_count);
             println!("  Outputs skipped        : {}", report.outputs_skipped);
+            println!("  tx_id collisions       : {}", report.tx_id_collisions_resolved);
             println!("  Transactions migrated  : {}", report.displayed_transactions_migrated);
             println!(
-                "  Net balance            : {} uT",
+                "  Source balance         : {} uT",
+                report.source_balance.as_u64()
+            );
+            println!(
+                "  Imported balance       : {} uT",
                 report.net_balance().as_u64()
+            );
+            println!(
+                "  Balance match          : {}",
+                if report.balance_match { "YES" } else { "NO" }
             );
             if let Some(h) = report.scan_tip_height {
                 println!("  Resumed scan tip       : block {}", h);
@@ -612,6 +628,14 @@ async fn main() -> Result<(), anyhow::Error> {
                 println!("  Resumed scan tip       : none (full scan will be required)");
             }
             println!("---------------------------------------------------------");
+            if !report.balance_match && !report.dry_run {
+                return Err(anyhow!(
+                    "Migration balance mismatch: source = {} uT, imported = {} uT. \
+                     Re-run with --dry-run to investigate.",
+                    report.source_balance.as_u64(),
+                    report.net_balance().as_u64()
+                ));
+            }
             Ok(())
         },
 

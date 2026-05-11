@@ -40,6 +40,7 @@ fn migration_creates_account_with_seed_words_recovered_from_source() {
         destination_db_path: dest_db.clone(),
         destination_passphrase: DEST_PASSPHRASE.to_string(),
         account_name: "imported".to_string(),
+        dry_run: false,
     })
     .expect("migration succeeds");
 
@@ -48,6 +49,11 @@ fn migration_creates_account_with_seed_words_recovered_from_source() {
     // produce zero migrated outputs, and a zero net balance, without panicking.
     assert_eq!(report.outputs_migrated, 0);
     assert_eq!(report.unspent_outputs_count, 0);
+    // Source balance = imported balance = 0; balance check must pass.
+    assert_eq!(report.source_balance.as_u64(), 0);
+    assert!(report.balance_match, "empty source must produce a matching imported balance");
+    assert_eq!(report.tx_id_collisions_resolved, 0);
+    assert!(!report.dry_run, "non-dry-run option must surface as dry_run = false in the report");
 
     // The destination DB should now contain exactly one account row, named
     // "imported". The exact view/spend keys come from the seed we generated
@@ -59,6 +65,58 @@ fn migration_creates_account_with_seed_words_recovered_from_source() {
         })
         .expect("count query");
     assert_eq!(count, 1, "exactly one account named 'imported' should exist");
+}
+
+#[test]
+fn migration_dry_run_writes_nothing_but_returns_report() {
+    // `--dry-run` must execute the full migration code path so the user can
+    // validate the source DB without committing. The destination DB must be
+    // left untouched (no account row) but the report must be fully populated.
+    let temp = tempdir().expect("temp dir");
+    let fixture = ConsoleFixtureBuilder::new(SOURCE_PASSPHRASE)
+        .write(temp.path())
+        .expect("write console fixture");
+    let dest_db = temp.path().join("destination_wallet.sqlite3");
+
+    let report = run_migration(MigrationOptions {
+        source_db_path: fixture.db_path.clone(),
+        source_passphrase: fixture.passphrase.clone(),
+        destination_db_path: dest_db.clone(),
+        destination_passphrase: DEST_PASSPHRASE.to_string(),
+        account_name: "dry_run_test".to_string(),
+        dry_run: true,
+    })
+    .expect("dry-run migration succeeds");
+
+    assert!(report.dry_run, "dry_run flag must propagate into the report");
+    assert!(report.balance_match);
+
+    // Destination DB exists (we ran init_db on it), but the migration
+    // transaction was rolled back so the account row never landed.
+    if dest_db.exists() {
+        let conn = Connection::open(&dest_db).expect("open destination");
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM accounts WHERE friendly_name = 'dry_run_test'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap_or(0);
+        assert_eq!(count, 0, "dry-run must NOT persist the account row");
+    }
+
+    // Sanity: a follow-up live migration with the same account name must
+    // still succeed (no leftover state from the dry-run blocking it).
+    let live = run_migration(MigrationOptions {
+        source_db_path: fixture.db_path,
+        source_passphrase: fixture.passphrase,
+        destination_db_path: dest_db,
+        destination_passphrase: DEST_PASSPHRASE.to_string(),
+        account_name: "dry_run_test".to_string(),
+        dry_run: false,
+    })
+    .expect("subsequent live migration succeeds");
+    assert!(!live.dry_run);
 }
 
 #[test]
@@ -75,6 +133,7 @@ fn migration_rejects_wrong_source_passphrase() {
         destination_db_path: dest_db.clone(),
         destination_passphrase: DEST_PASSPHRASE.to_string(),
         account_name: "imported".to_string(),
+        dry_run: false,
     });
 
     let err = result.expect_err("wrong source passphrase must fail");
@@ -132,6 +191,7 @@ fn migration_preserves_completed_transaction_ids() {
         destination_db_path: dest_db.clone(),
         destination_passphrase: DEST_PASSPHRASE.to_string(),
         account_name: "imported".to_string(),
+        dry_run: false,
     })
     .expect("migration succeeds");
 
@@ -176,6 +236,7 @@ fn migration_sets_scan_tip_from_source() {
         destination_db_path: dest_db.clone(),
         destination_passphrase: DEST_PASSPHRASE.to_string(),
         account_name: "imported".to_string(),
+        dry_run: false,
     })
     .expect("migration succeeds");
 
@@ -210,6 +271,7 @@ fn migration_rejects_duplicate_account_name() {
         destination_db_path: dest_db.clone(),
         destination_passphrase: DEST_PASSPHRASE.to_string(),
         account_name: "imported".to_string(),
+        dry_run: false,
     })
     .expect("first migration succeeds");
 
@@ -219,6 +281,7 @@ fn migration_rejects_duplicate_account_name() {
         destination_db_path: dest_db,
         destination_passphrase: DEST_PASSPHRASE.to_string(),
         account_name: "imported".to_string(),
+        dry_run: false,
     })
     .expect_err("second migration with same account name must fail");
 
