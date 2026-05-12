@@ -317,7 +317,7 @@ fn insert_output_row(conn: &Connection, account_id: i64, output: &ConvertedOutpu
             ":output_hash": output.output_hash.as_slice(),
             ":block_hash": output.mined_block_hash.as_slice(),
             ":block_height": output.mined_height as i64,
-            ":value": output.wallet_output.value().as_u64() as i64,
+            ":value": i64::try_from(output.wallet_output.value().as_u64()).map_err(|_| anyhow!("Output value exceeds i64::MAX"))?,
             ":wallet_output_json": output_json,
             ":mined_timestamp": output.mined_timestamp,
             ":confirmed_height": output.mined_height as i64,
