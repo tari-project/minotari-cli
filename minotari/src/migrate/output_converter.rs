@@ -101,6 +101,14 @@ pub fn convert_output(output: &ConsoleOutput) -> Result<ConvertedOutput, anyhow:
     let mined_timestamp = output
         .mined_timestamp
         .ok_or_else(|| anyhow!("Source output {} is missing mined_timestamp", hex::encode(&output.hash)))?;
+    let value = u64::try_from(output.value)
+        .map_err(|_| anyhow!("Invalid negative value for output {}", hex::encode(&output.hash)))?;
+    let minimum_value_promise = u64::try_from(output.minimum_value_promise).map_err(|_| {
+        anyhow!(
+            "Invalid negative minimum_value_promise for output {}",
+            hex::encode(&output.hash)
+        )
+    })?;
 
     let features: OutputFeatures = serde_json::from_str(&output.features_json)
         .with_context(|| format!("Failed to parse features_json for output {}", hex::encode(&output.hash)))?;
@@ -177,7 +185,7 @@ pub fn convert_output(output: &ConsoleOutput) -> Result<ConvertedOutput, anyhow:
 
     let wallet_output = WalletOutput::new_from_parts(
         TransactionOutputVersion::get_current_version(),
-        MicroMinotari::from(output.value as u64),
+        MicroMinotari::from(value),
         commitment_mask_key_id,
         features,
         TariScript::from_bytes(&output.script)
@@ -190,7 +198,7 @@ pub fn convert_output(output: &ConsoleOutput) -> Result<ConvertedOutput, anyhow:
         output.script_lock_height as u64,
         covenant,
         encrypted_data,
-        MicroMinotari::from(output.minimum_value_promise as u64),
+        MicroMinotari::from(minimum_value_promise),
         range_proof,
         payment_id,
         output_hash,
