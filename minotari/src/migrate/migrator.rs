@@ -60,8 +60,8 @@ impl MigrationReport {
         );
         println!("Legacy blockers:   {}", self.outputs_blocked_legacy_key);
         println!("Legacy skipped:    {}", self.outputs_skipped_legacy_key);
-        println!("Source balance:    {} ÂµXTM", self.source_balance_utari);
-        println!("Imported balance:  {} ÂµXTM", self.imported_balance_utari);
+        println!("Source balance:    {} µXTM", self.source_balance_utari);
+        println!("Imported balance:  {} µXTM", self.imported_balance_utari);
         println!("Balance match:     {}", if self.balance_match { "YES" } else { "NO" });
         match self.scan_tip_height {
             Some(height) => println!("Scan tip:          block {}", height),
