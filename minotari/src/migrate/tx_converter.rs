@@ -79,7 +79,7 @@ pub fn convert_transaction(
         message: None,
         counterparty,
         blockchain: BlockchainInfo {
-            block_height: tx.mined_height.unwrap_or_default() as u64,
+            block_height: u64::try_from(tx.mined_height.unwrap_or_default()).map_err(|_| anyhow!("Invalid negative mined height for tx {}", tx.tx_id))?,
             timestamp: tx.timestamp,
             confirmations: initial_confirmations(status),
             block_hash,
