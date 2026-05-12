@@ -20,7 +20,15 @@ use tari_transaction_components::{
 };
 use tari_utilities::ByteArray;
 
-use super::console_db::ConsoleOutput;
+use crate::models::OutputStatus;
+
+use super::console_db::{
+    ConsoleOutput, OUTPUT_STATUS_CANCELLED_INBOUND, OUTPUT_STATUS_CANCELLED_OUTBOUND,
+    OUTPUT_STATUS_ENCUMBERED_TO_BE_RECEIVED, OUTPUT_STATUS_ENCUMBERED_TO_BE_SPENT, OUTPUT_STATUS_INVALID,
+    OUTPUT_STATUS_SHORT_TERM_ENCUMBERED_TO_BE_RECEIVED, OUTPUT_STATUS_SHORT_TERM_ENCUMBERED_TO_BE_SPENT,
+    OUTPUT_STATUS_SPENT, OUTPUT_STATUS_SPENT_MINED_UNCONFIRMED, OUTPUT_STATUS_UNSPENT,
+    OUTPUT_STATUS_UNSPENT_MINED_UNCONFIRMED,
+};
 
 #[derive(Debug, Clone)]
 pub struct LegacyKeyBlocker {
@@ -35,7 +43,10 @@ pub struct ConvertedOutput {
     pub mined_block_hash: FixedHash,
     pub mined_height: u64,
     pub mined_timestamp: chrono::NaiveDateTime,
+    pub destination_status: OutputStatus,
+    pub source_status: i64,
     pub original_received_in_tx_id: Option<i64>,
+    pub original_spent_in_tx_id: Option<i64>,
     pub destination_tx_id: TxId,
 }
 
@@ -192,7 +203,10 @@ pub fn convert_output(output: &ConsoleOutput) -> Result<ConvertedOutput, anyhow:
         mined_block_hash,
         mined_height,
         mined_timestamp,
+        destination_status: map_output_status(output.status)?,
+        source_status: output.status,
         original_received_in_tx_id: output.original_received_in_tx_id(),
+        original_spent_in_tx_id: output.spent_in_tx_id,
         destination_tx_id: TxId::new_deterministic(&[], &[0u8; 32]),
     })
 }
@@ -202,13 +216,32 @@ pub fn assign_destination_tx_ids(outputs: &mut [ConvertedOutput], account_view_k
 
     for output in outputs {
         output.destination_tx_id = match output.original_received_in_tx_id {
-            Some(source_tx_id) if active_received_tx_ids.insert(source_tx_id) => TxId::from(source_tx_id as u64),
+            Some(source_tx_id) if active_received_tx_ids.insert(source_tx_id) => {
+                debug_assert!(source_tx_id >= 0, "Legacy tx_id should never be negative");
+                TxId::from(source_tx_id as u64)
+            },
             _ => {
                 // Active outputs have a unique index on outputs.tx_id, so duplicate received_in_tx_id values need a
                 // deterministic fallback that matches the wallet's normal scanner behavior.
                 TxId::new_deterministic(account_view_key.as_bytes(), &output.wallet_output.output_hash())
             },
         };
+    }
+}
+
+pub fn map_output_status(status: i64) -> Result<OutputStatus, anyhow::Error> {
+    match status {
+        OUTPUT_STATUS_UNSPENT | OUTPUT_STATUS_UNSPENT_MINED_UNCONFIRMED => Ok(OutputStatus::Unspent),
+        OUTPUT_STATUS_ENCUMBERED_TO_BE_RECEIVED
+        | OUTPUT_STATUS_ENCUMBERED_TO_BE_SPENT
+        | OUTPUT_STATUS_SHORT_TERM_ENCUMBERED_TO_BE_RECEIVED
+        | OUTPUT_STATUS_SHORT_TERM_ENCUMBERED_TO_BE_SPENT
+        | OUTPUT_STATUS_CANCELLED_OUTBOUND => Ok(OutputStatus::Locked),
+        OUTPUT_STATUS_SPENT
+        | OUTPUT_STATUS_INVALID
+        | OUTPUT_STATUS_CANCELLED_INBOUND
+        | OUTPUT_STATUS_SPENT_MINED_UNCONFIRMED => Ok(OutputStatus::Spent),
+        _ => Err(anyhow!("Unsupported legacy output status {}", status)),
     }
 }
 

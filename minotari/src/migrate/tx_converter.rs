@@ -3,13 +3,13 @@
 
 use anyhow::anyhow;
 use tari_common_types::{tari_address::TariAddress, transaction::TxId, types::FixedHash};
-use tari_transaction_components::MicroMinotari;
+use tari_transaction_components::{MicroMinotari, transaction_components::OutputType};
 
 use crate::{
-    models::BalanceChange,
+    models::OutputStatus,
     transactions::{
         BlockchainInfo, DisplayedTransaction, FeeInfo, TransactionDetails, TransactionDirection,
-        TransactionDisplayStatus, TransactionSource,
+        TransactionDisplayStatus, TransactionInput, TransactionOutput, TransactionSource,
     },
 };
 
@@ -21,13 +21,38 @@ use super::console_db::{
 };
 
 #[derive(Debug, Clone)]
-pub struct ConvertedTransaction {
-    pub displayed: DisplayedTransaction,
-    pub metadata_balance_change: BalanceChange,
+pub struct ImportedTxInput {
+    pub output_hash: FixedHash,
+    pub amount: MicroMinotari,
+    pub matched_output_id: i64,
+    pub mined_in_block_hash: FixedHash,
 }
 
-pub fn convert_transaction(tx: &ConsoleCompletedTx, account_id: i64) -> Result<ConvertedTransaction, anyhow::Error> {
-    let direction = map_direction(tx.direction, tx.amount);
+#[derive(Debug, Clone)]
+pub struct ImportedTxOutput {
+    pub hash: FixedHash,
+    pub amount: MicroMinotari,
+    pub status: OutputStatus,
+    pub mined_in_block_height: u64,
+    pub mined_in_block_hash: FixedHash,
+    pub output_type: OutputType,
+    pub is_change: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct TransactionIoSet {
+    pub total_credit: MicroMinotari,
+    pub total_debit: MicroMinotari,
+    pub inputs: Vec<ImportedTxInput>,
+    pub outputs: Vec<ImportedTxOutput>,
+}
+
+pub fn convert_transaction(
+    tx: &ConsoleCompletedTx,
+    account_id: i64,
+    io: TransactionIoSet,
+) -> Result<DisplayedTransaction, anyhow::Error> {
+    let direction = map_direction(tx.direction, tx.amount, &io);
     let status = map_display_status(tx.status);
     let source = map_transaction_source(tx.status);
     let amount = MicroMinotari::from(tx.amount.unsigned_abs());
@@ -45,7 +70,7 @@ pub fn convert_transaction(tx: &ConsoleCompletedTx, account_id: i64) -> Result<C
     };
     let memo_hex = tx.user_payment_id.as_ref().or(tx.payment_id.as_ref()).map(hex::encode);
 
-    let displayed = DisplayedTransaction {
+    Ok(DisplayedTransaction {
         id: TxId::from(tx.tx_id as u64),
         direction,
         source,
@@ -66,57 +91,46 @@ pub fn convert_transaction(tx: &ConsoleCompletedTx, account_id: i64) -> Result<C
         },
         details: TransactionDetails {
             account_id,
-            total_credit: if matches!(direction, TransactionDirection::Incoming) {
-                amount
-            } else {
-                MicroMinotari::from(0)
-            },
-            total_debit: if matches!(direction, TransactionDirection::Outgoing) {
-                amount.saturating_add(fee)
-            } else {
-                MicroMinotari::from(0)
-            },
-            inputs: Vec::new(),
-            outputs: Vec::new(),
+            total_credit: io.total_credit,
+            total_debit: io.total_debit,
+            inputs: io
+                .inputs
+                .into_iter()
+                .map(|input| TransactionInput {
+                    output_hash: input.output_hash,
+                    amount: input.amount,
+                    matched_output_id: input.matched_output_id,
+                    mined_in_block_hash: input.mined_in_block_hash,
+                })
+                .collect(),
+            outputs: io
+                .outputs
+                .into_iter()
+                .map(|output| TransactionOutput {
+                    hash: output.hash,
+                    amount: output.amount,
+                    status: output.status,
+                    mined_in_block_height: output.mined_in_block_height,
+                    mined_in_block_hash: output.mined_in_block_hash,
+                    output_type: output.output_type,
+                    is_change: output.is_change,
+                })
+                .collect(),
             output_type: None,
             coinbase_extra: None,
-            memo_hex: memo_hex.clone(),
+            memo_hex,
             sent_output_hashes: Vec::new(),
             sent_payrefs: Vec::new(),
         },
-    };
-
-    let metadata_balance_change = BalanceChange {
-        account_id,
-        caused_by_output_id: None,
-        caused_by_input_id: None,
-        description: format!("Migrated console wallet transaction {}", tx.tx_id),
-        balance_credit: MicroMinotari::from(0),
-        balance_debit: MicroMinotari::from(0),
-        effective_date: tx.timestamp,
-        effective_height: tx.mined_height.unwrap_or_default() as u64,
-        claimed_recipient_address: parse_address(&tx.destination_address),
-        claimed_sender_address: parse_address(&tx.source_address),
-        memo_parsed: None,
-        memo_hex,
-        claimed_fee: Some(fee),
-        claimed_amount: Some(amount),
-        is_reversal: false,
-        reversal_of_balance_change_id: None,
-        is_reversed: false,
-    };
-
-    Ok(ConvertedTransaction {
-        displayed,
-        metadata_balance_change,
     })
 }
 
-fn map_direction(direction: Option<i64>, amount: i64) -> TransactionDirection {
+fn map_direction(direction: Option<i64>, amount: i64, io: &TransactionIoSet) -> TransactionDirection {
     match direction {
         Some(1) => TransactionDirection::Outgoing,
         Some(0) => TransactionDirection::Incoming,
         _ if amount < 0 => TransactionDirection::Outgoing,
+        _ if io.total_debit > io.total_credit => TransactionDirection::Outgoing,
         _ => TransactionDirection::Incoming,
     }
 }

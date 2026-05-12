@@ -36,6 +36,16 @@ pub const STATUS_ONE_SIDED_CONFIRMED_LOCKED: i64 = 15;
 pub const STATUS_COINBASE_CONFIRMED_LOCKED: i64 = 16;
 
 pub const OUTPUT_STATUS_UNSPENT: i64 = 0;
+pub const OUTPUT_STATUS_SPENT: i64 = 1;
+pub const OUTPUT_STATUS_ENCUMBERED_TO_BE_RECEIVED: i64 = 2;
+pub const OUTPUT_STATUS_ENCUMBERED_TO_BE_SPENT: i64 = 3;
+pub const OUTPUT_STATUS_INVALID: i64 = 4;
+pub const OUTPUT_STATUS_CANCELLED_INBOUND: i64 = 5;
+pub const OUTPUT_STATUS_UNSPENT_MINED_UNCONFIRMED: i64 = 6;
+pub const OUTPUT_STATUS_SHORT_TERM_ENCUMBERED_TO_BE_RECEIVED: i64 = 7;
+pub const OUTPUT_STATUS_SHORT_TERM_ENCUMBERED_TO_BE_SPENT: i64 = 8;
+pub const OUTPUT_STATUS_SPENT_MINED_UNCONFIRMED: i64 = 9;
+pub const OUTPUT_STATUS_CANCELLED_OUTBOUND: i64 = 10;
 
 const ARGON2_MEMORY_KIB: u32 = 46 * 1024;
 const ARGON2_ITERATIONS: u32 = 1;
@@ -64,6 +74,7 @@ pub struct ConsoleCompletedTx {
 
 #[derive(Debug, Clone)]
 pub struct ConsoleOutput {
+    pub status: i64,
     pub commitment: Vec<u8>,
     pub rangeproof: Option<Vec<u8>>,
     pub spending_key: String,
@@ -84,6 +95,7 @@ pub struct ConsoleOutput {
     pub mined_height: Option<i64>,
     pub mined_in_block: Option<Vec<u8>>,
     pub received_in_tx_id: Option<i64>,
+    pub spent_in_tx_id: Option<i64>,
     pub features_json: String,
     pub covenant: Vec<u8>,
     pub mined_timestamp: Option<chrono::NaiveDateTime>,
@@ -130,13 +142,13 @@ impl ConsoleDb {
                 user_payment_id
             FROM completed_transactions
             WHERE (cancelled IS NULL OR cancelled = 0)
-              AND status NOT IN (?1, ?2)
+              AND status != ?1
             ORDER BY tx_id ASC
             "#,
         )?;
 
         let rows = stmt
-            .query_map(params![STATUS_PENDING, STATUS_REJECTED], |row| {
+            .query_map(params![STATUS_REJECTED], |row| {
                 Ok(ConsoleCompletedTx {
                     tx_id: row.get(0)?,
                     source_address: row.get(1)?,
@@ -157,10 +169,11 @@ impl ConsoleDb {
         Ok(rows)
     }
 
-    pub fn read_unspent_outputs(&self) -> Result<Vec<ConsoleOutput>, anyhow::Error> {
+    pub fn read_outputs(&self) -> Result<Vec<ConsoleOutput>, anyhow::Error> {
         let mut stmt = self.conn.prepare(
             r#"
             SELECT
+                status,
                 commitment,
                 rangeproof,
                 spending_key,
@@ -181,6 +194,7 @@ impl ConsoleDb {
                 mined_height,
                 mined_in_block,
                 received_in_tx_id,
+                spent_in_tx_id,
                 features_json,
                 covenant,
                 mined_timestamp,
@@ -188,40 +202,41 @@ impl ConsoleDb {
                 minimum_value_promise,
                 payment_id
             FROM outputs
-            WHERE status = ?1
             ORDER BY id ASC
             "#,
         )?;
 
         let rows = stmt
-            .query_map(params![OUTPUT_STATUS_UNSPENT], |row| {
+            .query_map([], |row| {
                 Ok(ConsoleOutput {
-                    commitment: row.get(0)?,
-                    rangeproof: row.get(1)?,
-                    spending_key: row.get(2)?,
-                    value: row.get(3)?,
-                    output_type: row.get(4)?,
-                    maturity: row.get(5)?,
-                    hash: row.get(6)?,
-                    script: row.get(7)?,
-                    input_data: row.get(8)?,
-                    script_private_key: row.get(9)?,
-                    script_lock_height: row.get(10)?,
-                    sender_offset_public_key: row.get(11)?,
-                    metadata_signature_ephemeral_commitment: row.get(12)?,
-                    metadata_signature_ephemeral_pubkey: row.get(13)?,
-                    metadata_signature_u_a: row.get(14)?,
-                    metadata_signature_u_x: row.get(15)?,
-                    metadata_signature_u_y: row.get(16)?,
-                    mined_height: row.get(17)?,
-                    mined_in_block: row.get(18)?,
-                    received_in_tx_id: row.get(19)?,
-                    features_json: row.get(20)?,
-                    covenant: row.get(21)?,
-                    mined_timestamp: row.get(22)?,
-                    encrypted_data: row.get(23)?,
-                    minimum_value_promise: row.get(24)?,
-                    payment_id: row.get(25)?,
+                    status: row.get(0)?,
+                    commitment: row.get(1)?,
+                    rangeproof: row.get(2)?,
+                    spending_key: row.get(3)?,
+                    value: row.get(4)?,
+                    output_type: row.get(5)?,
+                    maturity: row.get(6)?,
+                    hash: row.get(7)?,
+                    script: row.get(8)?,
+                    input_data: row.get(9)?,
+                    script_private_key: row.get(10)?,
+                    script_lock_height: row.get(11)?,
+                    sender_offset_public_key: row.get(12)?,
+                    metadata_signature_ephemeral_commitment: row.get(13)?,
+                    metadata_signature_ephemeral_pubkey: row.get(14)?,
+                    metadata_signature_u_a: row.get(15)?,
+                    metadata_signature_u_x: row.get(16)?,
+                    metadata_signature_u_y: row.get(17)?,
+                    mined_height: row.get(18)?,
+                    mined_in_block: row.get(19)?,
+                    received_in_tx_id: row.get(20)?,
+                    spent_in_tx_id: row.get(21)?,
+                    features_json: row.get(22)?,
+                    covenant: row.get(23)?,
+                    mined_timestamp: row.get(24)?,
+                    encrypted_data: row.get(25)?,
+                    minimum_value_promise: row.get(26)?,
+                    payment_id: row.get(27)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -290,11 +305,9 @@ impl ConsoleDb {
     pub fn fallback_max_mined_height(&self) -> Result<Option<u64>, anyhow::Error> {
         let max_height = self
             .conn
-            .query_row(
-                "SELECT MAX(mined_height) FROM outputs WHERE status = ?1",
-                params![OUTPUT_STATUS_UNSPENT],
-                |row| row.get::<_, Option<i64>>(0),
-            )
+            .query_row("SELECT MAX(mined_height) FROM outputs", [], |row| {
+                row.get::<_, Option<i64>>(0)
+            })
             .optional()?
             .flatten()
             .and_then(|height| height.try_into().ok());
@@ -380,7 +393,8 @@ impl ConsoleDb {
         let main_key = decrypt_integral_nonce(&secondary_cipher, &main_key_aad, &encrypted_main_key)
             .context("Failed to decrypt EncryptedMainKey")?;
 
-        let main_key = Key::try_from(main_key.as_ref()).map_err(|_| anyhow!("Decrypted main key has invalid length (expected 32 bytes)"))?;
+        let main_key = Key::try_from(main_key.as_ref())
+            .map_err(|_| anyhow!("Decrypted main key has invalid length (expected 32 bytes)"))?;
         let main_cipher = XChaCha20Poly1305::new(&main_key);
 
         let encrypted_master_seed = hex::decode(&encrypted_master_seed_hex).context("MasterSeed is not valid hex")?;

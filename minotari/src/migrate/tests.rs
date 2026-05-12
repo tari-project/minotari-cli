@@ -36,7 +36,7 @@ use crate::db::{
 };
 
 use super::{
-    console_db::{ConsoleDb, STATUS_MINED_CONFIRMED},
+    console_db::{ConsoleDb, OUTPUT_STATUS_SPENT, OUTPUT_STATUS_UNSPENT, STATUS_MINED_CONFIRMED},
     migrator::{MigrationOptions, MigrationReport, run_migration},
 };
 
@@ -60,7 +60,9 @@ struct TestContext {
 
 struct OutputSpec {
     value: u64,
+    status: i64,
     received_in_tx_id: Option<i64>,
+    spent_in_tx_id: Option<i64>,
     mined_height: i64,
     block_seed: u8,
     legacy_spending_key: bool,
@@ -71,7 +73,9 @@ impl OutputSpec {
     fn new(value: u64, received_in_tx_id: Option<i64>, mined_height: i64, block_seed: u8) -> Self {
         Self {
             value,
+            status: OUTPUT_STATUS_UNSPENT,
             received_in_tx_id,
+            spent_in_tx_id: None,
             mined_height,
             block_seed,
             legacy_spending_key: false,
@@ -157,17 +161,16 @@ fn migration_balance_matches_source() {
     let source_key_manager = source_key_manager(&ctx.source_seed);
 
     insert_completed_transaction(&ctx.source_db_path, 3001, 100, 1, 0, STATUS_MINED_CONFIRMED, Some(301));
-    insert_completed_transaction(&ctx.source_db_path, 3002, 200, 2, 0, STATUS_MINED_CONFIRMED, Some(302));
+    insert_completed_transaction(&ctx.source_db_path, 3002, 100, 2, 1, STATUS_MINED_CONFIRMED, Some(302));
     insert_completed_transaction(&ctx.source_db_path, 3003, 300, 3, 0, STATUS_MINED_CONFIRMED, Some(303));
     insert_output(
         &ctx.source_db_path,
         &source_key_manager,
-        OutputSpec::new(100, Some(3001), 301, 0x31),
-    );
-    insert_output(
-        &ctx.source_db_path,
-        &source_key_manager,
-        OutputSpec::new(200, Some(3002), 302, 0x32),
+        OutputSpec {
+            status: OUTPUT_STATUS_SPENT,
+            spent_in_tx_id: Some(3002),
+            ..OutputSpec::new(100, Some(3001), 301, 0x31)
+        },
     );
     insert_output(
         &ctx.source_db_path,
@@ -182,7 +185,62 @@ fn migration_balance_matches_source() {
         .expect("account exists");
     let balance = get_total_unspent_balance(&conn, account.id).expect("balance query");
 
-    assert_eq!(balance, 600);
+    assert_eq!(balance, 300);
+}
+
+#[test]
+fn migration_imports_spent_outputs_and_creates_credit_and_debit_balance_changes() {
+    let ctx = create_test_context("spent_outputs");
+    let source_key_manager = source_key_manager(&ctx.source_seed);
+
+    insert_completed_transaction(&ctx.source_db_path, 9101, 150, 1, 0, STATUS_MINED_CONFIRMED, Some(911));
+    insert_completed_transaction(&ctx.source_db_path, 9102, 150, 2, 1, STATUS_MINED_CONFIRMED, Some(912));
+    insert_output(
+        &ctx.source_db_path,
+        &source_key_manager,
+        OutputSpec {
+            status: OUTPUT_STATUS_SPENT,
+            spent_in_tx_id: Some(9102),
+            ..OutputSpec::new(150, Some(9101), 911, 0x91)
+        },
+    );
+
+    let (_report, pool) = run_live_migration(&ctx, false);
+    let conn = pool.get().expect("destination connection");
+
+    let output_rows = conn
+        .prepare("SELECT status FROM outputs ORDER BY id ASC")
+        .expect("prepare outputs")
+        .query_map([], |row| row.get::<_, String>(0))
+        .expect("query outputs")
+        .collect::<Result<Vec<_>, _>>()
+        .expect("collect outputs");
+    assert_eq!(output_rows, vec!["SPENT".to_string()]);
+
+    let input_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM inputs", [], |row| row.get(0))
+        .expect("count inputs");
+    assert_eq!(input_count, 1);
+
+    let (credit_sum, debit_sum): (i64, i64) = conn
+        .query_row(
+            "SELECT COALESCE(SUM(balance_credit), 0), COALESCE(SUM(balance_debit), 0) FROM balance_changes",
+            [],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("sum balance changes");
+    assert_eq!(credit_sum, 150);
+    assert_eq!(debit_sum, 150);
+
+    let account = get_account_by_name(&conn, "imported")
+        .expect("load account")
+        .expect("account exists");
+    let displayed = get_displayed_transactions_by_account(&conn, account.id).expect("displayed tx query");
+    let outgoing = displayed
+        .into_iter()
+        .find(|tx| tx.id.to_string() == "9102")
+        .expect("outgoing tx exists");
+    assert_eq!(outgoing.details.inputs.len(), 1);
 }
 
 #[test]
@@ -418,6 +476,7 @@ fn create_source_schema(conn: &Connection) {
             mined_height BIGINT NULL,
             mined_in_block BLOB NULL,
             received_in_tx_id BIGINT NULL,
+            spent_in_tx_id BIGINT NULL,
             features_json TEXT NOT NULL DEFAULT '{}',
             covenant BLOB NOT NULL,
             mined_timestamp DATETIME NULL,
@@ -602,6 +661,7 @@ fn insert_output(source_db_path: &Path, key_manager: &KeyManager, spec: OutputSp
             mined_height,
             mined_in_block,
             received_in_tx_id,
+            spent_in_tx_id,
             features_json,
             covenant,
             mined_timestamp,
@@ -609,8 +669,8 @@ fn insert_output(source_db_path: &Path, key_manager: &KeyManager, spec: OutputSp
             minimum_value_promise,
             payment_id
         ) VALUES (
-            ?1, ?2, ?3, ?4, ?5, ?6, 0, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21,
-            ?22, ?23, ?24, ?25, ?26
+            ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18, ?19, ?20, ?21, ?22,
+            ?23, ?24, ?25, ?26, ?27, ?28
         )
         "#,
         params![
@@ -620,6 +680,7 @@ fn insert_output(source_db_path: &Path, key_manager: &KeyManager, spec: OutputSp
             spec.value as i64,
             i64::from(wallet_output.features().output_type.as_byte()),
             wallet_output.features().maturity as i64,
+            spec.status,
             output_hash.to_vec(),
             wallet_output.script().to_bytes(),
             wallet_output.input_data().to_bytes(),
@@ -634,6 +695,7 @@ fn insert_output(source_db_path: &Path, key_manager: &KeyManager, spec: OutputSp
             spec.mined_height,
             fixed_hash_bytes(spec.block_seed),
             spec.received_in_tx_id,
+            spec.spent_in_tx_id,
             serde_json::to_string(wallet_output.features()).expect("serialize features"),
             covenant_bytes,
             chrono::NaiveDateTime::parse_from_str("2026-01-15 10:00:00", "%Y-%m-%d %H:%M:%S").expect("timestamp"),
