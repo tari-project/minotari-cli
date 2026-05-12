@@ -14,9 +14,7 @@ use std::path::PathBuf;
 use rusqlite::{Connection, OptionalExtension, params};
 use tempfile::tempdir;
 
-use super::test_fixture::{
-    ConsoleFixtureBuilder, insert_test_completed_transaction, insert_test_scanned_block,
-};
+use super::test_fixture::{ConsoleFixtureBuilder, insert_test_completed_transaction, insert_test_scanned_block};
 use super::{MigrationOptions, run_migration};
 
 const SOURCE_PASSPHRASE: &str = "old-console-wallet-pw";
@@ -51,18 +49,25 @@ fn migration_creates_account_with_seed_words_recovered_from_source() {
     assert_eq!(report.unspent_outputs_count, 0);
     // Source balance = imported balance = 0; balance check must pass.
     assert_eq!(report.source_balance.as_u64(), 0);
-    assert!(report.balance_match, "empty source must produce a matching imported balance");
-    assert_eq!(report.tx_id_collisions_resolved, 0);
-    assert!(!report.dry_run, "non-dry-run option must surface as dry_run = false in the report");
+    assert!(
+        report.balance_match,
+        "empty source must produce a matching imported balance"
+    );
+    assert!(
+        !report.dry_run,
+        "non-dry-run option must surface as dry_run = false in the report"
+    );
 
     // The destination DB should now contain exactly one account row, named
     // "imported". The exact view/spend keys come from the seed we generated
     // in the fixture; we check the row exists rather than re-deriving them.
     let conn = Connection::open(&dest_db).expect("open destination");
     let count: i64 = conn
-        .query_row("SELECT COUNT(*) FROM accounts WHERE friendly_name = 'imported'", [], |r| {
-            r.get(0)
-        })
+        .query_row(
+            "SELECT COUNT(*) FROM accounts WHERE friendly_name = 'imported'",
+            [],
+            |r| r.get(0),
+        )
         .expect("count query");
     assert_eq!(count, 1, "exactly one account named 'imported' should exist");
 }
@@ -156,7 +161,10 @@ fn migration_rejects_wrong_source_passphrase() {
         let count: i64 = conn
             .query_row("SELECT COUNT(*) FROM accounts", [], |r| r.get(0))
             .unwrap_or(0);
-        assert_eq!(count, 0, "destination must not contain any accounts after a failed migration");
+        assert_eq!(
+            count, 0,
+            "destination must not contain any accounts after a failed migration"
+        );
     }
 }
 
@@ -196,9 +204,15 @@ fn migration_preserves_completed_transaction_ids() {
     .expect("migration succeeds");
 
     assert_eq!(report.displayed_transactions_migrated, test_txs.len());
+    // The fixture seeds no outputs, so every migrated transaction is in the
+    // "orphan" path (no matched outputs) and must fall back to legacy amount.
+    assert_eq!(
+        report.displayed_transactions_with_matched_outputs, 0,
+        "fixture seeds no outputs, so no displayed transactions should have matched outputs"
+    );
 
     let conn = Connection::open(&dest_db).expect("open destination");
-    for &(tx_id, _, _, _, _) in test_txs {
+    for &(tx_id, amount, _, _, _) in test_txs {
         let stored_id: Option<String> = conn
             .query_row(
                 "SELECT id FROM displayed_transactions WHERE id = ?1",
@@ -211,6 +225,22 @@ fn migration_preserves_completed_transaction_ids() {
             stored_id.as_deref(),
             Some(tx_id.to_string().as_str()),
             "expected tx_id {tx_id} in destination displayed_transactions"
+        );
+        // Orphan path fallback: with no matched outputs, the legacy
+        // completed_transactions.amount value must surface as the displayed
+        // transaction's amount so the user-facing total is preserved.
+        let stored_amount: Option<i64> = conn
+            .query_row(
+                "SELECT amount FROM displayed_transactions WHERE id = ?1",
+                params![tx_id.to_string()],
+                |r| r.get(0),
+            )
+            .optional()
+            .expect("query amount");
+        assert_eq!(
+            stored_amount,
+            Some(amount as i64),
+            "orphan completed_transactions amount must propagate to displayed_transactions",
         );
     }
 }

@@ -608,16 +608,13 @@ async fn main() -> Result<(), anyhow::Error> {
             println!("    Unspent              : {}", report.unspent_outputs_count);
             println!("    Spent                : {}", report.spent_outputs_count);
             println!("  Outputs skipped        : {}", report.outputs_skipped);
-            println!("  tx_id collisions       : {}", report.tx_id_collisions_resolved);
             println!("  Transactions migrated  : {}", report.displayed_transactions_migrated);
             println!(
-                "  Source balance         : {} uT",
-                report.source_balance.as_u64()
+                "    With matched outputs : {}",
+                report.displayed_transactions_with_matched_outputs
             );
-            println!(
-                "  Imported balance       : {} uT",
-                report.net_balance().as_u64()
-            );
+            println!("  Source balance         : {} uT", report.source_balance.as_u64());
+            println!("  Imported balance       : {} uT", report.net_balance().as_u64());
             println!(
                 "  Balance match          : {}",
                 if report.balance_match { "YES" } else { "NO" }
