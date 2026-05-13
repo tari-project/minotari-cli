@@ -224,10 +224,7 @@ pub fn assign_destination_tx_ids(outputs: &mut [ConvertedOutput], account_view_k
 
     for output in outputs {
         output.destination_tx_id = match output.original_received_in_tx_id {
-            Some(source_tx_id) if active_received_tx_ids.insert(source_tx_id) => {
-                debug_assert!(source_tx_id >= 0, "Legacy tx_id should never be negative");
-                TxId::from(source_tx_id as u64)
-            },
+            Some(source_tx_id) if active_received_tx_ids.insert(source_tx_id) => TxId::from(source_tx_id as u64),
             _ => {
                 // Active outputs have a unique index on outputs.tx_id, so duplicate received_in_tx_id values need a
                 // deterministic fallback that matches the wallet's normal scanner behavior.
@@ -239,12 +236,13 @@ pub fn assign_destination_tx_ids(outputs: &mut [ConvertedOutput], account_view_k
 
 pub fn map_output_status(status: i64) -> Result<OutputStatus, anyhow::Error> {
     match status {
-        OUTPUT_STATUS_UNSPENT | OUTPUT_STATUS_UNSPENT_MINED_UNCONFIRMED => Ok(OutputStatus::Unspent),
-        OUTPUT_STATUS_ENCUMBERED_TO_BE_RECEIVED
+        OUTPUT_STATUS_UNSPENT
+        | OUTPUT_STATUS_UNSPENT_MINED_UNCONFIRMED
+        | OUTPUT_STATUS_ENCUMBERED_TO_BE_RECEIVED
         | OUTPUT_STATUS_ENCUMBERED_TO_BE_SPENT
         | OUTPUT_STATUS_SHORT_TERM_ENCUMBERED_TO_BE_RECEIVED
-        | OUTPUT_STATUS_SHORT_TERM_ENCUMBERED_TO_BE_SPENT
-        | OUTPUT_STATUS_CANCELLED_OUTBOUND => Ok(OutputStatus::Locked),
+        | OUTPUT_STATUS_SHORT_TERM_ENCUMBERED_TO_BE_SPENT => Ok(OutputStatus::Unspent),
+        OUTPUT_STATUS_CANCELLED_OUTBOUND => Ok(OutputStatus::Locked),
         OUTPUT_STATUS_SPENT
         | OUTPUT_STATUS_INVALID
         | OUTPUT_STATUS_CANCELLED_INBOUND

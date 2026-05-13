@@ -17,7 +17,7 @@ use crate::{
 };
 
 use super::{
-    console_db::{ConsoleCompletedTx, ConsoleDb, ConsoleOutput, ConsoleSyncTip},
+    console_db::{ConsoleCompletedTx, ConsoleDb, ConsoleOutput, ConsoleSyncTip, OUTPUT_STATUS_SPENT_MINED_UNCONFIRMED},
     output_converter::{
         ConvertedOutput, LegacyKeyBlocker, assign_destination_tx_ids, convert_output, detect_legacy_key_blocker,
         map_output_status,
@@ -208,7 +208,7 @@ pub fn run_migration(
             input_id: None,
         };
 
-        if imported.converted.destination_status == OutputStatus::Spent {
+        if should_insert_spend_for_output(&imported.converted) {
             let spend_context = resolve_spend_context(&imported.converted, &tx_by_id)?;
             let input_id = insert_input_row(&tx, account_id, output_row_id, &spend_context)?;
             insert_output_debit_balance_change(&tx, account_id, input_id, &imported.converted, &spend_context)?;
@@ -558,4 +558,8 @@ fn source_unspent_balance(outputs: &[ConsoleOutput]) -> Result<u64, anyhow::Erro
             })?;
             Ok(sum.saturating_add(value))
         })
+}
+
+fn should_insert_spend_for_output(output: &ConvertedOutput) -> bool {
+    output.destination_status == OutputStatus::Spent || output.source_status == OUTPUT_STATUS_SPENT_MINED_UNCONFIRMED
 }
