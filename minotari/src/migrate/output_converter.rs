@@ -22,8 +22,8 @@ use tari_transaction_components::{
     MicroMinotari,
     key_manager::TariKeyId,
     transaction_components::{
-        EncryptedData, OutputFeatures, TransactionOutputVersion, WalletOutput,
-        covenants::Covenant, memo_field::MemoField,
+        EncryptedData, OutputFeatures, OutputType, TransactionOutputVersion, WalletOutput, covenants::Covenant,
+        memo_field::MemoField,
     },
 };
 use tari_utilities::ByteArray;
@@ -43,6 +43,10 @@ pub struct ConvertedOutput {
     pub received_in_tx_id: Option<u64>,
     pub spent_in_tx_id: Option<u64>,
     pub legacy_status: LegacyOutputStatus,
+    /// Decoded from the source `outputs.output_type` i32 column. Used by
+    /// the displayed-transactions builder so coinbase / burn / etc. outputs
+    /// render with the correct icon and accounting.
+    pub output_type: OutputType,
 }
 
 /// The console wallet's `OutputStatus` enum, by integer value. We keep this
@@ -99,18 +103,21 @@ impl LegacyOutputStatus {
     }
 
     /// True if this output still represents claimable value in the wallet.
+    ///
+    /// Per maintainer feedback on PR #121: only the `Spent` variant is
+    /// actually spent. Every other migratable status is either an output
+    /// the wallet expects to receive, an output already received but with
+    /// a pending (not-yet-confirmed) spend, or an output locked in
+    /// preparation for a spend — in all those cases the value is still
+    /// part of the wallet's balance. The destination's per-output `status`
+    /// column captures the difference between "freely spendable" and
+    /// "encumbered / pending" separately.
     pub fn is_unspent(self) -> bool {
-        matches!(
-            self,
-            Self::Unspent
-                | Self::UnspentMinedUnconfirmed
-                | Self::EncumberedToBeReceived
-                | Self::ShortTermEncumberedToBeReceived
-        )
+        self.is_migratable() && !self.is_spent()
     }
 
     pub fn is_spent(self) -> bool {
-        matches!(self, Self::Spent | Self::SpentMinedUnconfirmed)
+        matches!(self, Self::Spent)
     }
 }
 
@@ -202,8 +209,8 @@ pub fn convert_output(row: &ConsoleOutputRow) -> Result<Option<ConvertedOutput>,
     let sender_offset_public_key = CompressedPublicKey::from_canonical_bytes(&row.sender_offset_public_key)
         .map_err(|e| anyhow!("Output {}: bad sender_offset_public_key: {e}", row_label(row)))?;
 
-    let script = TariScript::from_bytes(&row.script)
-        .map_err(|e| anyhow!("Output {}: bad script bytes: {e}", row_label(row)))?;
+    let script =
+        TariScript::from_bytes(&row.script).map_err(|e| anyhow!("Output {}: bad script bytes: {e}", row_label(row)))?;
     let input_data = ExecutionStack::from_bytes(&row.input_data)
         .map_err(|e| anyhow!("Output {}: bad input_data bytes: {e}", row_label(row)))?;
 
@@ -247,12 +254,92 @@ pub fn convert_output(row: &ConsoleOutputRow) -> Result<Option<ConvertedOutput>,
         received_in_tx_id: row.received_in_tx_id.map(|v| v as u64),
         spent_in_tx_id: row.spent_in_tx_id.map(|v| v as u64),
         legacy_status,
+        output_type: decode_output_type(row.output_type),
     }))
+}
+
+/// Decode the console wallet's `outputs.output_type` i32 column into a
+/// canonical `OutputType`. The i32 encoding is stable across versions of
+/// the console wallet (it maps directly to `OutputType as i32`). Unknown
+/// values fall back to `Standard` so a future protocol revision adding
+/// new variants does not crash the migration on an in-flight wallet.
+fn decode_output_type(value: i32) -> OutputType {
+    match value {
+        0 => OutputType::Standard,
+        1 => OutputType::Coinbase,
+        2 => OutputType::Burn,
+        3 => OutputType::ValidatorNodeRegistration,
+        4 => OutputType::CodeTemplateRegistration,
+        _ => OutputType::Standard,
+    }
 }
 
 fn row_label(row: &ConsoleOutputRow) -> String {
     match row.received_in_tx_id {
         Some(tx) => format!("(received_in_tx_id={tx})"),
         None => "(unknown tx_id)".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Tests for the classification helpers and the i32 -> OutputType
+    //! decoder. These pin behaviour the migrator depends on so a future
+    //! reshuffle of the legacy enum or the on-disk encoding can't silently
+    //! change which outputs end up in the balance / get input rows.
+
+    use super::*;
+
+    #[test]
+    fn only_spent_variant_is_actually_spent() {
+        // Per maintainer feedback on PR #121: every non-`Spent` migratable
+        // variant should be treated as unspent because the spend has not
+        // yet been finalised on chain (or never was a spend at all).
+        assert!(LegacyOutputStatus::Spent.is_spent());
+
+        for s in [
+            LegacyOutputStatus::Unspent,
+            LegacyOutputStatus::UnspentMinedUnconfirmed,
+            LegacyOutputStatus::SpentMinedUnconfirmed,
+            LegacyOutputStatus::EncumberedToBeReceived,
+            LegacyOutputStatus::EncumberedToBeSpent,
+            LegacyOutputStatus::ShortTermEncumberedToBeReceived,
+            LegacyOutputStatus::ShortTermEncumberedToBeSpent,
+        ] {
+            assert!(!s.is_spent(), "{:?} must not count as actually spent", s);
+            assert!(s.is_unspent(), "{:?} must count as unspent (value still in balance)", s);
+        }
+    }
+
+    #[test]
+    fn non_migratable_variants_are_neither_spent_nor_unspent() {
+        for s in [
+            LegacyOutputStatus::Invalid,
+            LegacyOutputStatus::CancelledInbound,
+            LegacyOutputStatus::NotStored,
+        ] {
+            assert!(!s.is_migratable());
+            assert!(!s.is_spent());
+            assert!(!s.is_unspent(), "{:?} must not be classified as unspent", s);
+        }
+    }
+
+    #[test]
+    fn output_type_decode_maps_each_known_i32_variant() {
+        assert!(matches!(decode_output_type(0), OutputType::Standard));
+        assert!(matches!(decode_output_type(1), OutputType::Coinbase));
+        assert!(matches!(decode_output_type(2), OutputType::Burn));
+        assert!(matches!(decode_output_type(3), OutputType::ValidatorNodeRegistration));
+        assert!(matches!(decode_output_type(4), OutputType::CodeTemplateRegistration));
+    }
+
+    #[test]
+    fn output_type_decode_falls_back_to_standard_for_unknown_variants() {
+        // An on-disk wallet built against a newer console version might
+        // store an output_type the migrator doesn't recognise yet. We
+        // prefer "best-effort import as Standard" over hard-failing the
+        // whole migration on a row we don't recognise.
+        assert!(matches!(decode_output_type(99), OutputType::Standard));
+        assert!(matches!(decode_output_type(-1), OutputType::Standard));
     }
 }

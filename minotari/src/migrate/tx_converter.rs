@@ -37,7 +37,7 @@ use tari_common_types::{
     types::FixedHash,
 };
 use tari_transaction_components::MicroMinotari;
-use tari_transaction_components::transaction_components::{CoinBaseExtra, OutputType};
+use tari_transaction_components::transaction_components::{CoinBaseExtra, OutputType, memo_field::MemoField};
 
 use super::console_db::ConsoleCompletedTxRow;
 use crate::models::{Id, OutputStatus};
@@ -211,13 +211,22 @@ pub fn convert_transaction(
 
     let sent_output_hashes: Vec<FixedHash> = matched.spent.iter().map(|m| m.hash).collect();
 
+    // Pull the user-visible message from the source transaction's memo
+    // (payment_id). Skip MemoFields that decode to an empty string so the
+    // destination keeps `None` rather than rendering an empty banner.
+    let message = row
+        .payment_id
+        .as_ref()
+        .map(|bytes| MemoField::from_bytes(bytes).payment_id_as_string())
+        .filter(|s| !s.is_empty());
+
     let display = DisplayedTransaction {
         id: TxId::from(tx_id),
         direction,
         source,
         status,
         amount,
-        message: None,
+        message,
         counterparty,
         blockchain: BlockchainInfo {
             block_height,
@@ -442,5 +451,63 @@ mod tests {
         let converted = convert_transaction(&row, 1, &matched).expect("convert");
         assert_eq!(converted.display.blockchain.block_height, 777);
         assert_eq!(converted.display.blockchain.block_hash, FixedHash::from([0xBB; 32]));
+    }
+
+    #[test]
+    fn payment_id_memo_field_populates_message_when_non_empty() {
+        // The console wallet stores the payment id as the raw MemoField
+        // encoding. The migrator must decode it and surface the
+        // human-readable string as `DisplayedTransaction::message` so the
+        // user sees the same memo content after migration as they saw
+        // before. We use the Raw variant in this test because its
+        // round-trip from bytes through `payment_id_as_string` does not
+        // depend on construction-time TariAddress / MicroMinotari values.
+        let mut row = make_row(12, 100, Some(0));
+        let memo = MemoField::new_raw(b"hello".to_vec()).expect("memo fits");
+        row.payment_id = Some(memo.to_bytes());
+
+        let converted = convert_transaction(&row, 1, &MatchedOutputs::default()).expect("convert");
+        let message = converted
+            .display
+            .message
+            .as_deref()
+            .expect("message must be set when memo is present");
+        assert!(
+            !message.is_empty(),
+            "Raw memo bytes must surface as a non-empty message"
+        );
+    }
+
+    #[test]
+    fn missing_payment_id_leaves_message_unset() {
+        // No memo on the source row -> no message rendered by the new
+        // wallet; the field must stay `None` rather than render an empty
+        // banner.
+        let mut row = make_row(13, 0, Some(0));
+        row.payment_id = None;
+        let converted = convert_transaction(&row, 1, &MatchedOutputs::default()).expect("convert");
+        assert!(converted.display.message.is_none());
+    }
+
+    #[test]
+    fn matched_output_type_propagates_to_displayed_outputs_list() {
+        // Coinbase outputs in the source must surface in the displayed
+        // transaction's outputs list with `output_type = Coinbase`, not
+        // the previous hardcoded Standard. This is what lets the new
+        // wallet's UI render coinbase rewards with the right icon /
+        // maturity treatment.
+        let row = make_row(14, 0, Some(0));
+        let mut coinbase = make_matched(1, 5_000, 100);
+        coinbase.output_type = OutputType::Coinbase;
+        let matched = MatchedOutputs {
+            received: vec![coinbase],
+            spent: vec![],
+        };
+        let converted = convert_transaction(&row, 1, &matched).expect("convert");
+        assert_eq!(converted.display.details.outputs.len(), 1);
+        assert!(matches!(
+            converted.display.details.outputs[0].output_type,
+            OutputType::Coinbase
+        ));
     }
 }

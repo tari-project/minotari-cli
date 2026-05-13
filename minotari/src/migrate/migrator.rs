@@ -288,13 +288,10 @@ fn migrate_in_transaction(
             mined_height: converted.mined_height,
             mined_block_hash: converted.mined_block_hash,
             destination_output_id: inserted_id,
-            // The console wallet doesn't surface OutputType on the row; the
-            // serialised features inside `wallet_output_json` does. For the
-            // displayed-transaction view (which only needs Standard vs not),
-            // Standard is correct unless the legacy status indicates
-            // coinbase. We default to Standard here and let the coinbase
-            // hint flow through the legacy completed_transactions status.
-            output_type: tari_transaction_components::transaction_components::OutputType::Standard,
+            // Read from the source `outputs.output_type` column so the
+            // displayed-transaction view can distinguish coinbase / burn /
+            // standard outputs correctly. Previously hardcoded to Standard.
+            output_type: converted.output_type,
         };
         if let Some(rx_id) = converted.received_in_tx_id {
             received_outputs_by_tx_id
@@ -397,11 +394,17 @@ fn insert_converted_output(
     let mined_dt = DateTime::<Utc>::from_naive_utc_and_offset(converted.mined_timestamp, Utc);
     let tx_id = deterministic_tx_id(view_key_bytes, &converted.output_hash);
 
+    // Per maintainer feedback on PR #121: only the `Spent` legacy variant is
+    // actually spent. `SpentMinedUnconfirmed` is the spending tx mined but
+    // not yet confirmed; the funds are still attributed to the wallet until
+    // that block confirms, so the destination row stays Locked (a pending
+    // spend exists) rather than Spent. The encumbered variants continue to
+    // map to Locked.
     let status_label = match converted.legacy_status {
-        LegacyOutputStatus::Spent | LegacyOutputStatus::SpentMinedUnconfirmed => OutputStatus::Spent.to_string(),
-        LegacyOutputStatus::EncumberedToBeSpent | LegacyOutputStatus::ShortTermEncumberedToBeSpent => {
-            OutputStatus::Locked.to_string()
-        },
+        LegacyOutputStatus::Spent => OutputStatus::Spent.to_string(),
+        LegacyOutputStatus::SpentMinedUnconfirmed
+        | LegacyOutputStatus::EncumberedToBeSpent
+        | LegacyOutputStatus::ShortTermEncumberedToBeSpent => OutputStatus::Locked.to_string(),
         _ => OutputStatus::Unspent.to_string(),
     };
 
