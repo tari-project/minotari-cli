@@ -24,7 +24,7 @@ use super::console_db::{
 pub struct ImportedTxInput {
     pub output_hash: FixedHash,
     pub amount: MicroMinotari,
-    pub matched_output_id: i64,
+    pub matched_output_id: TxId,
     pub mined_in_block_hash: FixedHash,
 }
 
