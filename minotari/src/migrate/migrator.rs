@@ -14,6 +14,7 @@ use tari_transaction_components::{
 use crate::{
     db::{self, SqlitePool},
     models::{BalanceChange, OutputStatus},
+    transactions::{TransactionInput, TransactionOutput},
 };
 
 use super::{
@@ -22,7 +23,7 @@ use super::{
         ConvertedOutput, LegacyKeyBlocker, assign_destination_tx_ids, convert_output, detect_legacy_key_blocker,
         map_output_status,
     },
-    tx_converter::{ImportedTxInput, ImportedTxOutput, TransactionIoSet, convert_transaction},
+    tx_converter::{TransactionIoSet, convert_transaction},
 };
 
 #[derive(Debug, Clone, Default)]
@@ -147,6 +148,12 @@ pub fn run_migration(
     let mut converted_outputs = Vec::new();
     let mut skipped_output_hashes = Vec::new();
     for output in &source_outputs {
+        if let Err(error) = map_output_status(output.status) {
+            if error.to_string().contains("never-mined output") {
+                continue;
+            }
+            return Err(error);
+        }
         match detect_legacy_key_blocker(output) {
             Some(blocker) if allow_partial_import && !dry_run => {
                 skipped_output_hashes.push(blocker.output_hash_hex);
@@ -471,7 +478,7 @@ fn build_transaction_io_set(
     let inputs = spent_outputs
         .iter()
         .filter_map(|output| {
-            output.input_id.map(|_| ImportedTxInput {
+            output.input_id.map(|_| TransactionInput {
                 output_hash: output.converted.output_hash,
                 amount: output.converted.wallet_output.value(),
                 matched_output_id: output.output_row_id,
@@ -486,7 +493,7 @@ fn build_transaction_io_set(
 
     let outputs = received_outputs
         .iter()
-        .map(|output| ImportedTxOutput {
+        .map(|output| TransactionOutput {
             hash: output.converted.output_hash,
             amount: output.converted.wallet_output.value(),
             status: output.converted.destination_status.clone(),

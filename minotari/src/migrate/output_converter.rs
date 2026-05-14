@@ -242,11 +242,11 @@ pub fn map_output_status(status: i64) -> Result<OutputStatus, anyhow::Error> {
         | OUTPUT_STATUS_ENCUMBERED_TO_BE_SPENT
         | OUTPUT_STATUS_SHORT_TERM_ENCUMBERED_TO_BE_RECEIVED
         | OUTPUT_STATUS_SHORT_TERM_ENCUMBERED_TO_BE_SPENT => Ok(OutputStatus::Unspent),
-        OUTPUT_STATUS_CANCELLED_OUTBOUND => Ok(OutputStatus::Locked),
-        OUTPUT_STATUS_SPENT
-        | OUTPUT_STATUS_INVALID
-        | OUTPUT_STATUS_CANCELLED_INBOUND
-        | OUTPUT_STATUS_SPENT_MINED_UNCONFIRMED => Ok(OutputStatus::Spent),
+        OUTPUT_STATUS_SPENT | OUTPUT_STATUS_SPENT_MINED_UNCONFIRMED => Ok(OutputStatus::Spent),
+        OUTPUT_STATUS_INVALID | OUTPUT_STATUS_CANCELLED_INBOUND | OUTPUT_STATUS_CANCELLED_OUTBOUND => Err(anyhow!(
+            "Output status {} indicates never-mined output, skipping",
+            status
+        )),
         _ => Err(anyhow!("Unsupported legacy output status {}", status)),
     }
 }

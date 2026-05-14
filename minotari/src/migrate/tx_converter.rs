@@ -3,14 +3,11 @@
 
 use anyhow::anyhow;
 use tari_common_types::{tari_address::TariAddress, transaction::TxId, types::FixedHash};
-use tari_transaction_components::{MicroMinotari, transaction_components::OutputType};
+use tari_transaction_components::MicroMinotari;
 
-use crate::{
-    models::OutputStatus,
-    transactions::{
-        BlockchainInfo, DisplayedTransaction, FeeInfo, TransactionDetails, TransactionDirection,
-        TransactionDisplayStatus, TransactionInput, TransactionOutput, TransactionSource,
-    },
+use crate::transactions::{
+    BlockchainInfo, DisplayedTransaction, FeeInfo, TransactionDetails, TransactionDirection, TransactionDisplayStatus,
+    TransactionInput, TransactionOutput, TransactionSource,
 };
 
 use super::console_db::{
@@ -20,31 +17,11 @@ use super::console_db::{
     STATUS_ONE_SIDED_CONFIRMED_LOCKED, STATUS_ONE_SIDED_UNCONFIRMED, STATUS_QUEUED, STATUS_REJECTED,
 };
 
-#[derive(Debug, Clone)]
-pub struct ImportedTxInput {
-    pub output_hash: FixedHash,
-    pub amount: MicroMinotari,
-    pub matched_output_id: TxId,
-    pub mined_in_block_hash: FixedHash,
-}
-
-#[derive(Debug, Clone)]
-pub struct ImportedTxOutput {
-    pub hash: FixedHash,
-    pub amount: MicroMinotari,
-    pub status: OutputStatus,
-    pub mined_in_block_height: u64,
-    pub mined_in_block_hash: FixedHash,
-    pub output_type: OutputType,
-    pub is_change: bool,
-}
-
-#[derive(Debug, Clone)]
 pub struct TransactionIoSet {
     pub total_credit: MicroMinotari,
     pub total_debit: MicroMinotari,
-    pub inputs: Vec<ImportedTxInput>,
-    pub outputs: Vec<ImportedTxOutput>,
+    pub inputs: Vec<TransactionInput>,
+    pub outputs: Vec<TransactionOutput>,
 }
 
 pub fn convert_transaction(
@@ -79,7 +56,8 @@ pub fn convert_transaction(
         message: None,
         counterparty,
         blockchain: BlockchainInfo {
-            block_height: u64::try_from(tx.mined_height.unwrap_or_default()).map_err(|_| anyhow!("Invalid negative mined height for tx {}", tx.tx_id))?,
+            block_height: u64::try_from(tx.mined_height.unwrap_or_default())
+                .map_err(|_| anyhow!("Invalid negative mined height for tx {}", tx.tx_id))?,
             timestamp: tx.timestamp,
             confirmations: initial_confirmations(status),
             block_hash,
@@ -93,29 +71,8 @@ pub fn convert_transaction(
             account_id,
             total_credit: io.total_credit,
             total_debit: io.total_debit,
-            inputs: io
-                .inputs
-                .into_iter()
-                .map(|input| TransactionInput {
-                    output_hash: input.output_hash,
-                    amount: input.amount,
-                    matched_output_id: input.matched_output_id,
-                    mined_in_block_hash: input.mined_in_block_hash,
-                })
-                .collect(),
-            outputs: io
-                .outputs
-                .into_iter()
-                .map(|output| TransactionOutput {
-                    hash: output.hash,
-                    amount: output.amount,
-                    status: output.status,
-                    mined_in_block_height: output.mined_in_block_height,
-                    mined_in_block_hash: output.mined_in_block_hash,
-                    output_type: output.output_type,
-                    is_change: output.is_change,
-                })
-                .collect(),
+            inputs: io.inputs,
+            outputs: io.outputs,
             output_type: None,
             coinbase_extra: None,
             memo_hex,
