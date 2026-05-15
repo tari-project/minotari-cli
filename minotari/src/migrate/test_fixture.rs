@@ -132,6 +132,7 @@ fn create_console_schema(conn: &Connection) -> Result<(), anyhow::Error> {
         CREATE TABLE outputs (
             id INTEGER PRIMARY KEY NOT NULL,
             commitment BLOB NOT NULL,
+            rangeproof BLOB NULL,
             spending_key TEXT NOT NULL,
             value BIGINT NOT NULL,
             output_type INTEGER NOT NULL,
@@ -213,8 +214,8 @@ fn seed_encryption_settings(conn: &Connection, seed: &CipherSeed, passphrase: &s
     // 1. Derive Argon2id-output, then secondary key/hash from it.
     let salt = generate_salt_string();
     let mut secondary_derivation_key = [0u8; ARGON2_OUTPUT_LEN];
-    let argon2_params = Params::new(46 * 1024, 1, 1, Some(ARGON2_OUTPUT_LEN))
-        .map_err(|e| anyhow!("argon2 params: {e}"))?;
+    let argon2_params =
+        Params::new(46 * 1024, 1, 1, Some(ARGON2_OUTPUT_LEN)).map_err(|e| anyhow!("argon2 params: {e}"))?;
     let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, argon2_params);
     argon2
         .hash_password_into(passphrase.as_bytes(), salt.as_bytes(), &mut secondary_derivation_key)

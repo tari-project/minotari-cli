@@ -221,11 +221,19 @@ pub fn convert_output(row: &ConsoleOutputRow) -> Result<Option<ConvertedOutput>,
     let value = MicroMinotari::from(u64::try_from(row.value).unwrap_or(0));
     let minimum_value_promise = MicroMinotari::from(u64::try_from(row.minimum_value_promise).unwrap_or(0));
 
-    // Range proof is not stored on the console wallet's outputs table after the
-    // 2023-10 migration that dropped MMR + range proof storage; for the purposes
-    // of holding this output and being able to spend it, `None` is the correct
-    // value (the new wallet reconstructs the proof when needed for spending).
-    let rangeproof: Option<RangeProof> = None;
+    // The console wallet stores the canonical-bytes serialisation of the
+    // output's `RangeProof` (when it has one) in the `rangeproof` BLOB NULL
+    // column, added by the 2023-06-20 schema migration. We decode it here
+    // so the migrated wallet does not have to reconstruct the proof on the
+    // first spend. `None` is preserved when the column is NULL (older imports,
+    // pre-rangeproof rows, or BulletProofPlus-only flows that don't carry one).
+    let rangeproof: Option<RangeProof> = match row.rangeproof.as_ref() {
+        Some(bytes) => Some(
+            RangeProof::from_canonical_bytes(bytes)
+                .map_err(|e| anyhow!("Output {}: bad rangeproof bytes: {e}", row_label(row)))?,
+        ),
+        None => None,
+    };
 
     let wallet_output = WalletOutput::new_from_parts(
         TransactionOutputVersion::get_current_version(),

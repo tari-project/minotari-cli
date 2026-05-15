@@ -93,6 +93,12 @@ pub struct ConsoleOutputRow {
     pub encrypted_data: Vec<u8>,
     pub minimum_value_promise: i64,
     pub payment_id: Option<Vec<u8>>,
+    /// Canonical-bytes serialised `RangeProof`. Stored as `rangeproof` (one
+    /// word) BLOB NULL on the source schema as of the 2023-06-20 migration.
+    /// `None` is a legitimate value for outputs whose proof never made it
+    /// into the source row (older imports, scanned-from-genesis under an
+    /// earlier schema, etc.).
+    pub rangeproof: Option<Vec<u8>>,
 }
 
 /// One row from the source `completed_transactions` table.
@@ -132,11 +138,9 @@ impl ConsoleWalletReader {
             return Err(anyhow!("Console wallet database not found: {}", path.display()));
         }
 
-        let conn = Connection::open_with_flags(
-            path,
-            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
-        )
-        .with_context(|| format!("Failed to open console wallet at {} (read-only)", path.display()))?;
+        let conn =
+            Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)
+                .with_context(|| format!("Failed to open console wallet at {} (read-only)", path.display()))?;
 
         let reader = Self { conn };
         let cipher_seed = reader.derive_cipher_seed(passphrase)?;
@@ -231,15 +235,15 @@ impl ConsoleWalletReader {
         let main_key_bytes = decrypt_integral_nonce(&secondary_cipher, &aad, &encrypted_main_key)
             .map_err(|e| anyhow!("Main-key decryption failed: {e}"))?;
         if main_key_bytes.len() != 32 {
-            return Err(anyhow!("Decrypted main key has unexpected length {}", main_key_bytes.len()));
+            return Err(anyhow!(
+                "Decrypted main key has unexpected length {}",
+                main_key_bytes.len()
+            ));
         }
 
         // 4. The main key drives the cipher for everything else stored under
         //    `wallet_settings` (master seed, etc.).
-        let main_key_array: [u8; 32] = main_key_bytes
-            .as_slice()
-            .try_into()
-            .expect("length checked above");
+        let main_key_array: [u8; 32] = main_key_bytes.as_slice().try_into().expect("length checked above");
         Ok(XChaCha20Poly1305::new(&Key::from(main_key_array)))
     }
 
@@ -267,7 +271,7 @@ impl ConsoleWalletReader {
                     metadata_signature_u_a, metadata_signature_u_x, metadata_signature_u_y, \
                     mined_height, mined_in_block, received_in_tx_id, spent_in_tx_id, \
                     features_json, covenant, mined_timestamp, encrypted_data, minimum_value_promise, \
-                    payment_id \
+                    payment_id, rangeproof \
              FROM outputs \
              ORDER BY id ASC",
         )?;
@@ -302,6 +306,7 @@ impl ConsoleWalletReader {
                     encrypted_data: row.get(24)?,
                     minimum_value_promise: row.get(25)?,
                     payment_id: row.get(26)?,
+                    rangeproof: row.get(27)?,
                 })
             })?
             .collect::<Result<Vec<_>, _>>()?;
@@ -378,11 +383,7 @@ impl ConsoleWalletReader {
 /// `tari_common_types` is built against `0.10.x` — the two versions of
 /// `XChaCha20Poly1305` are distinct types and cannot be passed across the
 /// crate boundary.
-fn decrypt_integral_nonce(
-    cipher: &XChaCha20Poly1305,
-    aad: &[u8],
-    blob: &[u8],
-) -> Result<Vec<u8>, String> {
+fn decrypt_integral_nonce(cipher: &XChaCha20Poly1305, aad: &[u8], blob: &[u8]) -> Result<Vec<u8>, String> {
     if blob.len() < XNONCE_SIZE {
         return Err(format!(
             "ciphertext too short: got {} bytes, need at least {}",
@@ -396,12 +397,6 @@ fn decrypt_integral_nonce(
         .map_err(|e: std::array::TryFromSliceError| format!("nonce slice conversion failed: {e}"))?;
     let nonce = XNonce::from(nonce_array);
     cipher
-        .decrypt(
-            &nonce,
-            chacha20poly1305::aead::Payload {
-                msg: ciphertext,
-                aad,
-            },
-        )
+        .decrypt(&nonce, chacha20poly1305::aead::Payload { msg: ciphertext, aad })
         .map_err(|e| format!("AEAD decryption failed: {e}"))
 }
