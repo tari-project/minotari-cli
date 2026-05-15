@@ -410,6 +410,8 @@ fn insert_output_debit_balance_change(
     output: &ConvertedOutput,
     spend_context: &SpendContext,
 ) -> Result<(), anyhow::Error> {
+    let payment_info = output.wallet_output.payment_id();
+    let memo_bytes = payment_info.get_payment_id();
     let change = BalanceChange {
         account_id,
         caused_by_output_id: None,
@@ -419,12 +421,12 @@ fn insert_output_debit_balance_change(
         balance_debit: output.wallet_output.value(),
         effective_date: spend_context.timestamp,
         effective_height: spend_context.height,
-        claimed_recipient_address: None,
-        claimed_sender_address: None,
-        memo_parsed: None,
-        memo_hex: None,
-        claimed_fee: None,
-        claimed_amount: None,
+        claimed_recipient_address: payment_info.get_recipient_address(),
+        claimed_sender_address: payment_info.get_sender_address(),
+        memo_parsed: Some(String::from_utf8_lossy(&memo_bytes).to_string()),
+        memo_hex: Some(hex::encode(&memo_bytes)),
+        claimed_fee: payment_info.get_fee(),
+        claimed_amount: payment_info.get_amount(),
         is_reversal: false,
         reversal_of_balance_change_id: None,
         is_reversed: false,
