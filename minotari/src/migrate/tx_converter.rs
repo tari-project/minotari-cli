@@ -212,13 +212,19 @@ pub fn convert_transaction(
     let sent_output_hashes: Vec<FixedHash> = matched.spent.iter().map(|m| m.hash).collect();
 
     // Pull the user-visible message from the source transaction's memo
-    // (payment_id). Skip MemoFields that decode to an empty string so the
-    // destination keeps `None` rather than rendering an empty banner.
-    let message = row
-        .payment_id
-        .as_ref()
-        .map(|bytes| MemoField::from_bytes(bytes).payment_id_as_string())
-        .filter(|s| !s.is_empty());
+    // (payment_id). Gate on the decoded MemoField's payment-id BYTES, not
+    // on the parsed string: `MemoField::Empty::payment_id_as_string()`
+    // returns the variant's Display rendering rather than "", so a bare
+    // `s.is_empty()` filter would not catch it and the destination would
+    // render the variant tag as a fake user memo.
+    let message = row.payment_id.as_ref().and_then(|bytes| {
+        let memo = MemoField::from_bytes(bytes);
+        if memo.payment_id_as_bytes().is_empty() {
+            None
+        } else {
+            Some(memo.payment_id_as_string())
+        }
+    });
 
     let display = DisplayedTransaction {
         id: TxId::from(tx_id),

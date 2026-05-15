@@ -104,20 +104,24 @@ impl LegacyOutputStatus {
 
     /// True if this output still represents claimable value in the wallet.
     ///
-    /// Per maintainer feedback on PR #121: only the `Spent` variant is
-    /// actually spent. Every other migratable status is either an output
-    /// the wallet expects to receive, an output already received but with
-    /// a pending (not-yet-confirmed) spend, or an output locked in
-    /// preparation for a spend — in all those cases the value is still
-    /// part of the wallet's balance. The destination's per-output `status`
-    /// column captures the difference between "freely spendable" and
-    /// "encumbered / pending" separately.
+    /// Per maintainer feedback on PR #121 (round 2):
+    ///   * `Spent` and `SpentMinedUnconfirmed` are the two "mined spend"
+    ///     states: in both cases the spend is in a block according to the
+    ///     source wallet, so the value is no longer attributable to the
+    ///     user. These are `is_spent()`.
+    ///   * `EncumberedToBeSpent` / `ShortTermEncumberedToBeSpent` are
+    ///     pre-broadcast intents — the wallet locked an output to spend
+    ///     it but no transaction has been mined yet, so the value still
+    ///     belongs to the user. These fall through to `is_unspent()`.
+    ///   * The remaining migratable states (Unspent / UnspentMinedUnconfirmed /
+    ///     EncumberedToBeReceived / ShortTermEncumberedToBeReceived) are
+    ///     trivially unspent.
     pub fn is_unspent(self) -> bool {
         self.is_migratable() && !self.is_spent()
     }
 
     pub fn is_spent(self) -> bool {
-        matches!(self, Self::Spent)
+        matches!(self, Self::Spent | Self::SpentMinedUnconfirmed)
     }
 }
 
@@ -291,23 +295,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_spent_variant_is_actually_spent() {
-        // Per maintainer feedback on PR #121: every non-`Spent` migratable
-        // variant should be treated as unspent because the spend has not
-        // yet been finalised on chain (or never was a spend at all).
-        assert!(LegacyOutputStatus::Spent.is_spent());
+    fn mined_spend_variants_count_as_spent_others_as_unspent() {
+        // Per maintainer feedback (round 2) on PR #121:
+        //   * Spent / SpentMinedUnconfirmed are mined-in-block spends; the
+        //     output's value has already left the wallet on chain.
+        //   * Encumbered* variants are pre-broadcast intent states; nothing
+        //     has been mined and the value still belongs to the user.
+        for spent in [LegacyOutputStatus::Spent, LegacyOutputStatus::SpentMinedUnconfirmed] {
+            assert!(spent.is_spent(), "{:?} must count as spent (spend is mined)", spent);
+            assert!(!spent.is_unspent(), "{:?} must NOT also count as unspent", spent);
+        }
 
-        for s in [
+        for unspent in [
             LegacyOutputStatus::Unspent,
             LegacyOutputStatus::UnspentMinedUnconfirmed,
-            LegacyOutputStatus::SpentMinedUnconfirmed,
             LegacyOutputStatus::EncumberedToBeReceived,
             LegacyOutputStatus::EncumberedToBeSpent,
             LegacyOutputStatus::ShortTermEncumberedToBeReceived,
             LegacyOutputStatus::ShortTermEncumberedToBeSpent,
         ] {
-            assert!(!s.is_spent(), "{:?} must not count as actually spent", s);
-            assert!(s.is_unspent(), "{:?} must count as unspent (value still in balance)", s);
+            assert!(!unspent.is_spent(), "{:?} must not count as actually spent", unspent);
+            assert!(
+                unspent.is_unspent(),
+                "{:?} must count as unspent (value still in balance, no mined spend)",
+                unspent
+            );
         }
     }
 

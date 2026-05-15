@@ -36,10 +36,13 @@ use anyhow::{Context, anyhow};
 use chrono::{DateTime, Utc};
 use log::info;
 use rusqlite::{Connection, named_params};
-use tari_common_types::{seeds::cipher_seed::CipherSeed, transaction::TxId, types::FixedHash};
+use tari_common_types::{
+    seeds::cipher_seed::CipherSeed, tari_address::TariAddress, transaction::TxId, types::FixedHash,
+};
 use tari_transaction_components::MicroMinotari;
 use tari_transaction_components::key_manager::wallet_types::{SeedWordsWallet, WalletType};
 use tari_transaction_components::key_manager::{KeyManager, TransactionKeyManagerInterface};
+use tari_transaction_components::transaction_components::memo_field::MemoField;
 use tari_utilities::ByteArray;
 
 use crate::db::{self, init_db};
@@ -306,24 +309,30 @@ fn migrate_in_transaction(
                 .push(matched_for_indexes);
         }
 
+        // Pull the recipient / sender / fee / memo out of the output's
+        // MemoField once and reuse the same claimed-fields struct for both
+        // the credit and (if applicable) the debit balance_change. Saves
+        // a re-decode and keeps the two sides consistent.
+        let memo_claims = ClaimedMemoFields::extract(converted.wallet_output.payment_id());
+
         // Balance changes: credit on receive, debit on spend. Keeping these
         // per-output (rather than per-transaction) matches what the runtime
         // ledger expects: each balance_change is linked to a specific
         // output or input id.
         if converted.legacy_status.is_unspent() {
             report.unspent_outputs_count += 1;
-            insert_credit_balance_change(tx, account_id, &converted, inserted_id)?;
+            insert_credit_balance_change(tx, account_id, &converted, inserted_id, &memo_claims)?;
             report.balance_credit = report.balance_credit.saturating_add(converted.value);
         } else if converted.legacy_status.is_spent() {
             report.spent_outputs_count += 1;
             // For spent outputs we need both a credit (the receive) and a
             // debit (the spend). The pair keeps the balance arithmetic
             // consistent and lets the user see a historical trail.
-            insert_credit_balance_change(tx, account_id, &converted, inserted_id)?;
+            insert_credit_balance_change(tx, account_id, &converted, inserted_id, &memo_claims)?;
             report.balance_credit = report.balance_credit.saturating_add(converted.value);
             insert_input_for_spent_output(tx, account_id, &converted, inserted_id)?;
             let input_id = tx.last_insert_rowid();
-            insert_debit_balance_change(tx, account_id, &converted, input_id)?;
+            insert_debit_balance_change(tx, account_id, &converted, input_id, &memo_claims)?;
             report.balance_debit = report.balance_debit.saturating_add(converted.value);
         }
     }
@@ -394,17 +403,17 @@ fn insert_converted_output(
     let mined_dt = DateTime::<Utc>::from_naive_utc_and_offset(converted.mined_timestamp, Utc);
     let tx_id = deterministic_tx_id(view_key_bytes, &converted.output_hash);
 
-    // Per maintainer feedback on PR #121: only the `Spent` legacy variant is
-    // actually spent. `SpentMinedUnconfirmed` is the spending tx mined but
-    // not yet confirmed; the funds are still attributed to the wallet until
-    // that block confirms, so the destination row stays Locked (a pending
-    // spend exists) rather than Spent. The encumbered variants continue to
-    // map to Locked.
+    // Per maintainer feedback (round 2) on PR #121:
+    //   * Spent / SpentMinedUnconfirmed are both mined-in-block spends -
+    //     the source wallet has them as spent on chain, so the destination
+    //     row is Spent in either case.
+    //   * Encumbered{ToBeSpent,ShortTerm*} are pre-broadcast intents with
+    //     no transaction actually linked to them, so they should NOT carry
+    //     over as Locked - that caused issues in the destination wallet's
+    //     accounting. Mark them Unspent and let the new wallet's normal
+    //     reservation flow re-lock them if the user actually spends them.
     let status_label = match converted.legacy_status {
-        LegacyOutputStatus::Spent => OutputStatus::Spent.to_string(),
-        LegacyOutputStatus::SpentMinedUnconfirmed
-        | LegacyOutputStatus::EncumberedToBeSpent
-        | LegacyOutputStatus::ShortTermEncumberedToBeSpent => OutputStatus::Locked.to_string(),
+        LegacyOutputStatus::Spent | LegacyOutputStatus::SpentMinedUnconfirmed => OutputStatus::Spent.to_string(),
         _ => OutputStatus::Unspent.to_string(),
     };
 
@@ -436,11 +445,51 @@ fn insert_converted_output(
     Ok(tx.last_insert_rowid())
 }
 
+/// Memo-derived claim fields shared between the credit and debit
+/// `balance_change` rows for one output. Built once from the output's
+/// `MemoField` and reused, so the two halves of a spent-output's
+/// ledger trail show the same counterparty / memo / fee.
+struct ClaimedMemoFields {
+    recipient_address: Option<TariAddress>,
+    sender_address: Option<TariAddress>,
+    memo_parsed: Option<String>,
+    memo_hex: Option<String>,
+    fee: Option<MicroMinotari>,
+}
+
+impl ClaimedMemoFields {
+    fn extract(memo: &MemoField) -> Self {
+        // Gate on the raw payment-id bytes rather than the parsed string:
+        // `MemoField::Empty::payment_id_as_string()` returns the variant's
+        // Display rendering ("Empty"-style), not "". The bytes-level check
+        // is the only thing that distinguishes "no user memo" from "memo
+        // with content".
+        let raw = memo.payment_id_as_bytes();
+        let (memo_parsed, memo_hex) = if raw.is_empty() {
+            (None, None)
+        } else {
+            (Some(memo.payment_id_as_string()), Some(hex::encode(&raw)))
+        };
+
+        Self {
+            // Only the `AddressAndData` MemoField variant carries a
+            // sender; the others return None. Same story for recipient
+            // on `TransactionInfo`.
+            recipient_address: memo.get_recipient_address(),
+            sender_address: memo.get_sender_address(),
+            memo_parsed,
+            memo_hex,
+            fee: memo.get_fee(),
+        }
+    }
+}
+
 fn insert_credit_balance_change(
     tx: &Connection,
     account_id: i64,
     converted: &ConvertedOutput,
     output_id: i64,
+    claims: &ClaimedMemoFields,
 ) -> Result<(), anyhow::Error> {
     let change = BalanceChange {
         account_id,
@@ -451,11 +500,11 @@ fn insert_credit_balance_change(
         balance_debit: MicroMinotari::from(0),
         effective_date: converted.mined_timestamp,
         effective_height: converted.mined_height,
-        claimed_recipient_address: None,
-        claimed_sender_address: None,
-        memo_parsed: None,
-        memo_hex: None,
-        claimed_fee: None,
+        claimed_recipient_address: claims.recipient_address.clone(),
+        claimed_sender_address: claims.sender_address.clone(),
+        memo_parsed: claims.memo_parsed.clone(),
+        memo_hex: claims.memo_hex.clone(),
+        claimed_fee: claims.fee,
         claimed_amount: Some(converted.value),
         is_reversal: false,
         reversal_of_balance_change_id: None,
@@ -502,6 +551,7 @@ fn insert_debit_balance_change(
     account_id: i64,
     converted: &ConvertedOutput,
     input_id: i64,
+    claims: &ClaimedMemoFields,
 ) -> Result<(), anyhow::Error> {
     let change = BalanceChange {
         account_id,
@@ -512,11 +562,11 @@ fn insert_debit_balance_change(
         balance_debit: converted.value,
         effective_date: converted.mined_timestamp,
         effective_height: converted.mined_height,
-        claimed_recipient_address: None,
-        claimed_sender_address: None,
-        memo_parsed: None,
-        memo_hex: None,
-        claimed_fee: None,
+        claimed_recipient_address: claims.recipient_address.clone(),
+        claimed_sender_address: claims.sender_address.clone(),
+        memo_parsed: claims.memo_parsed.clone(),
+        memo_hex: claims.memo_hex.clone(),
+        claimed_fee: claims.fee,
         claimed_amount: Some(converted.value),
         is_reversal: false,
         reversal_of_balance_change_id: None,
@@ -566,5 +616,51 @@ mod deterministic_tx_id_tests {
             a, b,
             "the same output hash under different view keys must produce different tx_ids",
         );
+    }
+}
+
+#[cfg(test)]
+mod claimed_memo_fields_tests {
+    //! Verify the MemoField -> balance_change claim-field extraction is
+    //! covering the variants the migrator actually encounters and zeroing
+    //! the audit fields cleanly on empty memos.
+
+    use super::ClaimedMemoFields;
+    use tari_transaction_components::transaction_components::memo_field::MemoField;
+
+    #[test]
+    fn empty_memo_yields_all_none_claims() {
+        let memo = MemoField::new_empty();
+        let claims = ClaimedMemoFields::extract(&memo);
+        assert!(claims.recipient_address.is_none());
+        assert!(claims.sender_address.is_none());
+        assert!(
+            claims.memo_parsed.is_none(),
+            "empty memo must surface as None, not Some(\"\")"
+        );
+        assert!(
+            claims.memo_hex.is_none(),
+            "empty memo bytes must surface as None, not Some(\"\")"
+        );
+        assert!(claims.fee.is_none());
+    }
+
+    #[test]
+    fn raw_memo_surfaces_in_parsed_and_hex_fields() {
+        // Raw is the most permissive variant; it forces the migrator's
+        // empty-vs-non-empty filtering to do real work.
+        let memo = MemoField::new_raw(b"trade fill 42".to_vec()).expect("memo fits");
+        let claims = ClaimedMemoFields::extract(&memo);
+        assert!(claims.memo_parsed.is_some());
+        assert!(
+            claims.memo_parsed.as_deref().unwrap().contains("trade fill 42")
+                || !claims.memo_parsed.as_deref().unwrap().is_empty(),
+            "raw memo must produce a non-empty parsed string"
+        );
+        assert!(claims.memo_hex.is_some(), "raw memo bytes must produce a hex string");
+        // Raw variant has no address or fee fields.
+        assert!(claims.recipient_address.is_none());
+        assert!(claims.sender_address.is_none());
+        assert!(claims.fee.is_none());
     }
 }
