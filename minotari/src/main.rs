@@ -58,7 +58,7 @@ use minotari::{
     ScanError,
     api::accounts::LockFundsRequest,
     cli::{ApplyArgs, Cli, Commands, DaemonArgs},
-    commands::{burn::handle_burn_funds, validator_nodes},
+    commands::{burn::handle_burn_funds, migrate_console_wallet::handle_migrate_from_console_wallet, validator_nodes},
     config::{defaults::WalletConfig, loader::load_configuration},
     daemon,
     db::{self, WalletDbError, get_accounts, get_balance, init_db},
@@ -563,6 +563,31 @@ async fn main() -> Result<(), anyhow::Error> {
             utils::delete_wallet::delete_wallet(&wallet_config.database_path, name)?;
             println!("Wallet account '{}' deleted successfully.", name);
             Ok(())
+        },
+
+        Commands::MigrateFromConsoleWallet {
+            source_db,
+            source_password,
+            account_name,
+            dry_run,
+            allow_partial_import,
+            security,
+            database,
+        } => {
+            info!(target: "audit", source = source_db.display().to_string().as_str(); "Migrating console wallet...");
+
+            wallet_config.apply_database(&database);
+
+            handle_migrate_from_console_wallet(
+                source_db,
+                source_password,
+                account_name,
+                dry_run,
+                allow_partial_import,
+                security.password,
+                wallet_config.database_path.clone(),
+            )
+            .await
         },
 
         Commands::BurnFunds {

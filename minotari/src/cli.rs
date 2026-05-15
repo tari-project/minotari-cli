@@ -641,6 +641,30 @@ pub enum Commands {
         account: AccountArgs,
     },
 
+    /// Migrate an already-synced legacy console wallet SQLite database into this wallet format.
+    MigrateFromConsoleWallet {
+        /// Path to the source console wallet SQLite file (opened read-only).
+        #[arg(long)]
+        source_db: PathBuf,
+        /// Passphrase for the source console wallet.
+        #[arg(long, default_value = "")]
+        source_password: String,
+        /// Name for the new account in the destination wallet.
+        #[arg(long, default_value = "imported")]
+        account_name: String,
+        /// Preview what would be imported without writing anything.
+        #[arg(long, default_value_t = false)]
+        dry_run: bool,
+        /// Allow partial import when legacy key-format outputs are present.
+        #[arg(long, default_value_t = false)]
+        allow_partial_import: bool,
+
+        #[command(flatten)]
+        security: SecurityArgs,
+        #[command(flatten)]
+        database: DatabaseArgs,
+    },
+
     /// Burn funds and generate an L2 claim proof.
     ///
     /// Creates a burn transaction that destroys L1 funds. After the transaction is
