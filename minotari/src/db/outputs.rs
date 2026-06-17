@@ -355,7 +355,7 @@ pub fn lock_output(
     let locked_status = OutputStatus::Locked.to_string();
     let unspent_status = OutputStatus::Unspent.to_string();
 
-    conn.execute(
+    let updated = conn.execute(
         r#"
         UPDATE outputs
         SET status = :locked_status, locked_by_request_id = :req_id, locked_at = :locked_at
@@ -369,6 +369,12 @@ pub fn lock_output(
             ":unspent_status": unspent_status,
         },
     )?;
+    if updated != 1 {
+        return Err(WalletDbError::Unexpected(format!(
+            "Output {} could not be locked because it is no longer unspent",
+            output_id
+        )));
+    }
 
     Ok(())
 }

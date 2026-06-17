@@ -22,6 +22,7 @@
 
 use chrono::{Duration, Utc};
 use log::info;
+use rusqlite::TransactionBehavior;
 use tari_transaction_components::tari_amount::MicroMinotari;
 use uuid::Uuid;
 
@@ -153,9 +154,13 @@ impl FundLocker {
             "Locking funds"
         );
         let mut conn = self.db_pool.get()?;
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         if let Some(idempotency_key_str) = &idempotency_key
-            && let Some(response) =
-                db::find_pending_transaction_locked_funds_by_idempotency_key(&conn, idempotency_key_str, account_id)?
+            && let Some(response) = db::find_pending_transaction_locked_funds_by_idempotency_key(
+                &transaction,
+                idempotency_key_str,
+                account_id,
+            )?
         {
             info!(
                 target: "audit",
@@ -166,10 +171,14 @@ impl FundLocker {
         }
 
         let input_selector = InputSelector::new(account_id, confirmation_window);
-        let utxo_selection =
-            input_selector.fetch_unspent_outputs(&conn, amount, num_outputs, fee_per_gram, estimated_output_size)?;
+        let utxo_selection = input_selector.fetch_unspent_outputs(
+            &transaction,
+            amount,
+            num_outputs,
+            fee_per_gram,
+            estimated_output_size,
+        )?;
 
-        let transaction = conn.transaction()?;
         #[allow(clippy::cast_possible_wrap)]
         let expires_at = Utc::now() + Duration::seconds(seconds_to_lock_utxos as i64);
         let idempotency_key = idempotency_key.unwrap_or_else(|| Uuid::new_v4().to_string());
@@ -204,5 +213,206 @@ impl FundLocker {
             fee_without_change: utxo_selection.fee_without_change,
             fee_with_change: utxo_selection.fee_with_change,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::cast_possible_wrap)]
+    #![allow(clippy::indexing_slicing)]
+
+    use super::*;
+    use crate::db::{create_account, get_account_by_name, init_db, insert_scanned_tip_block};
+    use rusqlite::{Connection, named_params};
+    use std::{
+        collections::HashSet,
+        sync::{Arc, Barrier},
+        thread,
+    };
+    use tari_common_types::{
+        seeds::cipher_seed::CipherSeed,
+        types::{ComAndPubSignature, CompressedCommitment, CompressedPublicKey, FixedHash},
+    };
+    use tari_script::{ExecutionStack, TariScript};
+    use tari_transaction_components::{
+        key_manager::{
+            TariKeyId,
+            wallet_types::{SeedWordsWallet, WalletType},
+        },
+        transaction_components::{
+            EncryptedData, MemoField, OutputFeatures, TransactionOutputVersion, WalletOutput, covenants::Covenant,
+        },
+    };
+    use tempfile::{TempDir, tempdir};
+
+    fn test_wallet_output(value: u64, output_hash_byte: u8) -> WalletOutput {
+        let mut output_hash = FixedHash::default();
+        output_hash[0] = output_hash_byte;
+        WalletOutput::new_from_parts(
+            TransactionOutputVersion::default(),
+            MicroMinotari::from(value),
+            TariKeyId::default(),
+            OutputFeatures::default(),
+            TariScript::default(),
+            ExecutionStack::default(),
+            TariKeyId::default(),
+            CompressedPublicKey::default(),
+            ComAndPubSignature::default(),
+            0,
+            Covenant::default(),
+            EncryptedData::default(),
+            MicroMinotari::from(0),
+            None,
+            MemoField::new_empty(),
+            output_hash,
+            CompressedCommitment::default(),
+        )
+    }
+
+    fn insert_test_output(conn: &Connection, account_id: i64, output_hash_byte: u8, value: u64, mined_height: u64) {
+        let output = test_wallet_output(value, output_hash_byte);
+        let wallet_output_json = serde_json::to_string(&output).expect("serialize wallet output");
+        conn.execute(
+            r#"
+            INSERT INTO outputs (
+                account_id, tx_id, output_hash, mined_in_block_height, mined_in_block_hash,
+                value, mined_timestamp, wallet_output_json, status, confirmed_height,
+                confirmed_hash, is_burn, maturity
+            ) VALUES (
+                :account_id, :tx_id, :output_hash, :height, :block_hash,
+                :value, :mined_ts, :json, :status, :confirmed_height,
+                :confirmed_hash, 0, :maturity
+            )
+            "#,
+            named_params! {
+                ":account_id": account_id,
+                ":tx_id": output_hash_byte as i64,
+                ":output_hash": vec![output_hash_byte; 32],
+                ":height": mined_height as i64,
+                ":block_hash": vec![output_hash_byte; 32],
+                ":value": value as i64,
+                ":mined_ts": Utc::now(),
+                ":json": wallet_output_json,
+                ":status": "UNSPENT",
+                ":confirmed_height": mined_height as i64,
+                ":confirmed_hash": vec![output_hash_byte; 32],
+                ":maturity": 0,
+            },
+        )
+        .expect("insert test output");
+    }
+
+    fn setup_test_env(output_count: usize, value_per_output: u64) -> (SqlitePool, i64, TempDir) {
+        let temp = tempdir().expect("temp dir");
+        let pool = init_db(temp.path().join("wallet.db")).expect("init db");
+        let conn = pool.get().expect("conn");
+
+        let seeds = CipherSeed::random();
+        let wallet = WalletType::SeedWords(SeedWordsWallet::construct_new(seeds).expect("construct wallet"));
+        create_account(&conn, "default", &wallet, "test-password").expect("create account");
+        let account_id = get_account_by_name(&conn, "default")
+            .expect("get account")
+            .expect("account exists")
+            .id;
+
+        insert_scanned_tip_block(&conn, account_id, 200, &[0u8; 32]).expect("insert tip block");
+        for i in 0..output_count {
+            insert_test_output(&conn, account_id, (i + 1) as u8, value_per_output, 100);
+        }
+        drop(conn);
+
+        (pool, account_id, temp)
+    }
+
+    fn lock_funds(pool: SqlitePool, account_id: i64, idempotency_key: Option<String>) -> LockFundsResult {
+        FundLocker::new(pool)
+            .lock(
+                account_id,
+                MicroMinotari::from(100_000),
+                1,
+                MicroMinotari::from(0),
+                Some(1000),
+                idempotency_key,
+                3600,
+                100,
+            )
+            .expect("lock funds")
+    }
+
+    fn output_hashes(result: &LockFundsResult) -> HashSet<FixedHash> {
+        result.utxos.iter().map(|utxo| utxo.output_hash()).collect()
+    }
+
+    #[test]
+    fn concurrent_lock_calls_select_disjoint_utxos() {
+        let (pool, account_id, _temp) = setup_test_env(4, 500_000);
+        let barrier = Arc::new(Barrier::new(2));
+
+        let pool_a = pool.clone();
+        let barrier_a = barrier.clone();
+        let handle_a = thread::spawn(move || {
+            barrier_a.wait();
+            lock_funds(pool_a, account_id, None)
+        });
+
+        let pool_b = pool.clone();
+        let barrier_b = barrier.clone();
+        let handle_b = thread::spawn(move || {
+            barrier_b.wait();
+            lock_funds(pool_b, account_id, None)
+        });
+
+        let result_a = handle_a.join().expect("thread A panicked");
+        let result_b = handle_b.join().expect("thread B panicked");
+        let hashes_a = output_hashes(&result_a);
+        let hashes_b = output_hashes(&result_b);
+
+        assert!(!hashes_a.is_empty(), "first call selected UTXOs");
+        assert!(!hashes_b.is_empty(), "second call selected UTXOs");
+        assert!(
+            hashes_a.is_disjoint(&hashes_b),
+            "concurrent lock calls must not select overlapping UTXOs"
+        );
+    }
+
+    #[test]
+    fn concurrent_idempotent_lock_returns_existing_request() {
+        let (pool, account_id, _temp) = setup_test_env(4, 500_000);
+        let key = "concurrent-idempotency-key".to_string();
+        let barrier = Arc::new(Barrier::new(2));
+
+        let pool_a = pool.clone();
+        let key_a = key.clone();
+        let barrier_a = barrier.clone();
+        let handle_a = thread::spawn(move || {
+            barrier_a.wait();
+            lock_funds(pool_a, account_id, Some(key_a))
+        });
+
+        let pool_b = pool.clone();
+        let key_b = key.clone();
+        let barrier_b = barrier.clone();
+        let handle_b = thread::spawn(move || {
+            barrier_b.wait();
+            lock_funds(pool_b, account_id, Some(key_b))
+        });
+
+        let result_a = handle_a.join().expect("thread A panicked");
+        let result_b = handle_b.join().expect("thread B panicked");
+
+        assert_eq!(output_hashes(&result_a), output_hashes(&result_b));
+        assert_eq!(result_a.total_value, result_b.total_value);
+        assert_eq!(result_a.fee_without_change, result_b.fee_without_change);
+        assert_eq!(result_a.fee_with_change, result_b.fee_with_change);
+
+        let conn = pool.get().expect("conn");
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM pending_transactions WHERE idempotency_key = :key",
+                named_params! { ":key": key },
+                |row| row.get(0),
+            )
+            .expect("count pending transactions");
+        assert_eq!(count, 1, "same idempotency key must create one pending transaction");
     }
 }
