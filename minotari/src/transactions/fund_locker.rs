@@ -22,6 +22,7 @@
 
 use chrono::{Duration, Utc};
 use log::info;
+use rusqlite::TransactionBehavior;
 use tari_transaction_components::tari_amount::MicroMinotari;
 use uuid::Uuid;
 
@@ -153,9 +154,16 @@ impl FundLocker {
             "Locking funds"
         );
         let mut conn = self.db_pool.get()?;
+
+        // BEGIN IMMEDIATE acquires a write-reservation lock before any reads, ensuring the
+        // idempotency check, UTXO selection, and locking are fully atomic. Without this,
+        // two concurrent calls can both pass the idempotency check, select the same UTXOs as
+        // unspent, and create conflicting pending transactions (TOCTOU race, issue #125).
+        let transaction = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+
         if let Some(idempotency_key_str) = &idempotency_key
             && let Some(response) =
-                db::find_pending_transaction_locked_funds_by_idempotency_key(&conn, idempotency_key_str, account_id)?
+                db::find_pending_transaction_locked_funds_by_idempotency_key(&*transaction, idempotency_key_str, account_id)?
         {
             info!(
                 target: "audit",
@@ -163,13 +171,13 @@ impl FundLocker {
                 "Found existing pending transaction lock"
             );
             return Ok(response);
+            // `transaction` drops here → implicit ROLLBACK (no writes made, safe)
         }
 
         let input_selector = InputSelector::new(account_id, confirmation_window);
         let utxo_selection =
-            input_selector.fetch_unspent_outputs(&conn, amount, num_outputs, fee_per_gram, estimated_output_size)?;
+            input_selector.fetch_unspent_outputs(&*transaction, amount, num_outputs, fee_per_gram, estimated_output_size)?;
 
-        let transaction = conn.transaction()?;
         #[allow(clippy::cast_possible_wrap)]
         let expires_at = Utc::now() + Duration::seconds(seconds_to_lock_utxos as i64);
         let idempotency_key = idempotency_key.unwrap_or_else(|| Uuid::new_v4().to_string());
