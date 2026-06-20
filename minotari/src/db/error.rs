@@ -37,6 +37,9 @@ pub enum WalletDbError {
 
     #[error("Unexpected error: {0}")]
     Unexpected(String),
+
+    #[error("Output {output_id} is already locked and cannot be locked again")]
+    OutputAlreadyLocked { output_id: i64 },
 }
 
 // Convenience alias

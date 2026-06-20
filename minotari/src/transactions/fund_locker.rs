@@ -20,6 +20,8 @@
 //! without accidentally locking additional funds. If a lock request with the same
 //! idempotency key already exists, the original result is returned.
 
+use std::sync::{Arc, Mutex};
+
 use chrono::{Duration, Utc};
 use log::info;
 use tari_transaction_components::tari_amount::MicroMinotari;
@@ -41,8 +43,10 @@ use crate::{
 ///
 /// # Thread Safety
 ///
-/// `FundLocker` uses database-level locking and can be safely shared across
-/// threads via cloning (which clones the underlying connection pool).
+/// `FundLocker` serializes concurrent `lock()` calls with an application-level
+/// `Mutex`. This allows concurrent read-only database operations (balance queries,
+/// idempotency look-ups on other connections) to proceed freely, while ensuring
+/// that only one UTXO-selection + lock-write sequence runs at a time.
 ///
 /// # Example
 ///
@@ -67,6 +71,10 @@ use crate::{
 /// ```
 pub struct FundLocker {
     db_pool: SqlitePool,
+    /// Serializes concurrent `lock()` calls so that UTXO selection and the
+    /// subsequent write are atomic at the application level, without blocking
+    /// read-only database connections.
+    lock_mutex: Arc<Mutex<()>>,
 }
 
 impl FundLocker {
@@ -82,7 +90,10 @@ impl FundLocker {
     /// let locker = FundLocker::new(db_pool);
     /// ```
     pub fn new(db_pool: SqlitePool) -> Self {
-        Self { db_pool }
+        Self {
+            db_pool,
+            lock_mutex: Arc::new(Mutex::new(())),
+        }
     }
 
     /// Locks UTXOs for a pending transaction.
@@ -152,6 +163,15 @@ impl FundLocker {
             amount = &*mask_amount(amount);
             "Locking funds"
         );
+
+        // Serialize concurrent lock() calls at the application level.
+        // Concurrent read-only callers (balance queries, idempotency look-ups on
+        // separate connections) are unaffected — only the write path is gated here.
+        let _guard = self
+            .lock_mutex
+            .lock()
+            .map_err(|_| anyhow::anyhow!("FundLocker mutex was poisoned"))?;
+
         let mut conn = self.db_pool.get()?;
         if let Some(idempotency_key_str) = &idempotency_key
             && let Some(response) =
