@@ -110,8 +110,11 @@ pub fn create_pending_transaction(
     match res {
         Ok(_) => Ok(id),
         Err(e) => {
+            // Match the UNIQUE violation specifically, not every constraint:
+            // reporting a foreign-key failure as a duplicate idempotency key
+            // sends the caller looking for a replay that does not exist.
             if let rusqlite::Error::SqliteFailure(err, _) = &e
-                && err.code == rusqlite::ErrorCode::ConstraintViolation
+                && err.extended_code == rusqlite::ffi::SQLITE_CONSTRAINT_UNIQUE
             {
                 warn!(
                     idempotency_key = idempotency_key;
@@ -125,6 +128,51 @@ pub fn create_pending_transaction(
             Err(WalletDbError::Rusqlite(e))
         },
     }
+}
+
+/// Claims a reservation for broadcast, but only while it is still `PENDING`.
+///
+/// Returns `None` once this caller owns the broadcast, or the status that
+/// blocked the claim. The guard is the `WHERE status = :pending` clause rather
+/// than a preceding read, because a separate read can be overtaken between the
+/// check and the update: two sends holding transactions over one reservation
+/// would then both record a completed transaction and broadcast conflicting
+/// spends of the same inputs.
+pub fn claim_pending_transaction_for_broadcast(
+    conn: &Connection,
+    id: &str,
+) -> WalletDbResult<Option<PendingTransactionStatus>> {
+    let claimed = conn.execute(
+        r#"
+        UPDATE pending_transactions
+        SET status = :completed
+        WHERE id = :id AND status = :pending
+        "#,
+        named_params! {
+            ":completed": PendingTransactionStatus::Completed.to_string(),
+            ":id": id,
+            ":pending": PendingTransactionStatus::Pending.to_string(),
+        },
+    )?;
+    if claimed > 0 {
+        return Ok(None);
+    }
+
+    // Nothing moved: the row is either gone or already past `PENDING`. Read back
+    // which, so the caller can say why it is being refused.
+    let status: Option<String> = conn
+        .query_row(
+            "SELECT status FROM pending_transactions WHERE id = :id",
+            named_params! { ":id": id },
+            |row| row.get(0),
+        )
+        .optional()?;
+    let status =
+        status.ok_or_else(|| WalletDbError::InvalidInput(format!("No pending transaction with id '{}'", id)))?;
+
+    Ok(Some(
+        PendingTransactionStatus::from_str(&status).map_err(WalletDbError::Decoding)?,
+    ))
 }
 
 #[derive(Deserialize, Debug)]

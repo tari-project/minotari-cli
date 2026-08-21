@@ -29,8 +29,16 @@
 //! expired or cancelled, is refused as an
 //! [`IdempotencyConflict`](crate::transactions::idempotency::IdempotencyConflict).
 //! The check runs inside the same `BEGIN IMMEDIATE` transaction that takes the
-//! reservation, so a concurrent retry is served the original rather than losing
-//! a race to the unique-key index.
+//! reservation, so a concurrent retry is served the original *reservation*
+//! rather than losing a race to the unique-key index.
+//!
+//! It is not served the original unsigned transaction. Nothing persists that, so
+//! a replay rebuilds one with a fresh `TxId` over the same inputs, and two
+//! callers can end up holding structurally different transactions spending the
+//! identical UTXOs. Only one of them may broadcast:
+//! [`finalize_transaction_and_broadcast`](TransactionSender::finalize_transaction_and_broadcast)
+//! claims the reservation with a conditional update and refuses whoever did not
+//! win it.
 //!
 //! # Example
 //!
@@ -101,12 +109,28 @@ use crate::{
             TransactionInput, TransactionSource,
         },
         fund_locker::{check_replay_allowed, lock_expiry_at},
-        idempotency::{IdempotencyBinding, IdempotencyOperation, RequestFingerprint},
+        idempotency::{IdempotencyBinding, IdempotencyConflict, IdempotencyOperation, RequestFingerprint},
         input_selector::{InputSelector, UtxoSelection},
         one_sided_transaction::Recipient,
     },
 };
 use zeroize::Zeroizing;
+
+/// Whether this send took the reservation it is working on, or replayed onto one
+/// an earlier request took.
+///
+/// A replay does not own those UTXOs. Expiring the reservation and unlocking
+/// them on failure would free inputs the request that created it is still
+/// holding an unsigned transaction over — and, because the unlocker only ever
+/// revisits `Pending` rows, nothing would put them back.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+enum Reservation {
+    /// This send created the pending transaction and owns its UTXOs.
+    #[default]
+    Created,
+    /// This send replayed an idempotency key onto a reservation someone else took.
+    Replayed,
+}
 
 /// Represents a transaction being processed through the send flow.
 ///
@@ -132,6 +156,8 @@ pub struct ProcessedTransaction {
     seconds_to_lock_utxos: u64,
     /// The UTXOs selected for this transaction.
     selected_utxos: Vec<DbWalletOutput>,
+    /// Whether this send took the reservation or replayed onto an existing one.
+    reservation: Reservation,
 }
 
 impl ProcessedTransaction {
@@ -150,7 +176,16 @@ impl ProcessedTransaction {
             recipient,
             seconds_to_lock_utxos,
             selected_utxos: Vec::new(),
+            reservation: Reservation::Created,
         }
+    }
+
+    /// Whether this send may expire the reservation and release its UTXOs.
+    ///
+    /// Only the request that created a reservation may tear it down; see
+    /// [`Reservation`].
+    fn owns_reservation(&self) -> bool {
+        self.reservation == Reservation::Created
     }
 
     /// Returns the transaction ID, or an empty string if not yet assigned.
@@ -403,6 +438,7 @@ impl TransactionSender {
             db::find_pending_transaction_record_by_idempotency_key(&transaction, &key, self.account.id)?
         {
             check_replay_allowed(&record, &binding, &key)?;
+            processed_transaction.reservation = Reservation::Replayed;
             return Ok(record.id);
         }
 
@@ -428,6 +464,7 @@ impl TransactionSender {
                     db::find_pending_transaction_record_by_idempotency_key(&transaction, &key, self.account.id)?
                         .ok_or_else(|| anyhow!("Idempotency key '{key}' collided with a row that cannot be read"))?;
                 check_replay_allowed(&record, &binding, &key)?;
+                processed_transaction.reservation = Reservation::Replayed;
                 return Ok(record.id);
             },
             Err(e) => return Err(e.into()),
@@ -533,7 +570,7 @@ impl TransactionSender {
 
         let pending_transaction_id =
             self.create_or_find_pending_transaction(&mut connection, &mut processed_transaction)?;
-        processed_transaction.update_id(pending_transaction_id.clone());
+        processed_transaction.update_id(pending_transaction_id);
 
         let result: Result<PrepareOneSidedTransactionForSigningResult, anyhow::Error> = (|| {
             let mut utxo_selection = processed_transaction.selected_utxos.clone();
@@ -578,8 +615,12 @@ impl TransactionSender {
                 Ok(res)
             },
             Err(e) => {
-                warn!(target: "audit", error:% = e; "Transaction creation failed, unlocking funds");
-                self.fail_and_unlock_pending_transaction(&connection, &pending_transaction_id);
+                warn!(target: "audit", error:% = e; "Transaction creation failed");
+                // Only tear down a reservation this send actually took. A replay
+                // was handed someone else's, and that someone may still be
+                // building an unsigned transaction over the very UTXOs this
+                // would release.
+                self.release_unclaimed_reservation(&connection, &processed_transaction);
                 Err(e)
             },
         }
@@ -607,6 +648,9 @@ impl TransactionSender {
     ///
     /// Returns an error if:
     /// - The transaction lock has expired
+    /// - The reservation is no longer this request's to broadcast, because
+    ///   another send already completed or released it
+    ///   ([`IdempotencyConflict`])
     /// - Transaction serialization fails
     /// - The network rejects the transaction
     /// - Database operations fail
@@ -646,7 +690,7 @@ impl TransactionSender {
         self.check_if_transaction_expired(&connection, processed_transaction)
             .inspect_err(|e| {
                 warn!(target: "audit", error:% = e; "Transaction finalization preparation failed");
-                self.fail_and_unlock_pending_transaction(&connection, processed_transaction.id());
+                self.release_unclaimed_reservation(&connection, processed_transaction);
             })?;
 
         // Extract transaction info from the signed result for building DisplayedTransaction
@@ -664,7 +708,7 @@ impl TransactionSender {
         let serialized_transaction = serde_json::to_vec(&signed_transaction_result.signed_transaction.transaction)
             .inspect_err(|e| {
                 warn!(target: "audit", error:% = e; "Transaction finalization preparation failed");
-                self.fail_and_unlock_pending_transaction(&connection, processed_transaction.id());
+                self.release_unclaimed_reservation(&connection, processed_transaction);
             })
             .map_err(|e| anyhow!("Failed to serialize transaction: {}", e))?;
 
@@ -674,15 +718,11 @@ impl TransactionSender {
             .first()
             .map(hex::encode);
 
-        db::update_pending_transaction_status(
-            &connection,
-            processed_transaction.id(),
-            crate::models::PendingTransactionStatus::Completed,
-        )
-        .inspect_err(|e| {
-            warn!(target: "audit", error:% = e; "Transaction finalization preparation failed");
-            self.fail_and_unlock_pending_transaction(&connection, processed_transaction.id());
-        })?;
+        self.claim_for_broadcast(&connection, processed_transaction)
+            .inspect_err(|e| {
+                warn!(target: "audit", error:% = e; "Transaction finalization preparation failed");
+                self.release_unclaimed_reservation(&connection, processed_transaction);
+            })?;
         let completed_tx_id = signed_transaction_result.signed_transaction.tx_id;
         let signed_transaction = signed_transaction_result.signed_transaction.clone();
         db::create_completed_transaction(
@@ -840,15 +880,85 @@ impl TransactionSender {
         Ok(tx)
     }
 
-    fn fail_and_unlock_pending_transaction(&self, connection: &Connection, pending_tx_id: &str) {
-        if let Err(e) =
-            db::update_pending_transaction_status(connection, pending_tx_id, PendingTransactionStatus::Expired)
-        {
-            error!(target: "audit", error:% = e; "Failed to update pending transaction status during cleanup");
-        }
+    /// Takes exclusive ownership of this send's reservation for broadcast.
+    ///
+    /// A replay is handed the original *reservation*, not the original unsigned
+    /// transaction — nothing persists that, so it rebuilds one with a fresh
+    /// `TxId` over the same inputs. Two sends can therefore hold structurally
+    /// different transactions spending the identical UTXOs, and only one may go
+    /// out: the conditional `Pending → Completed` update decides which. Without
+    /// it both recorded a completed transaction and broadcast conflicting
+    /// spends, because the expiry check ignores rows that are no longer
+    /// `Pending` and so reported an already-completed reservation as fine.
+    ///
+    /// The loser gets an [`IdempotencyConflict`] — a 409 — and, crucially, the
+    /// reservation is left untouched: its UTXOs belong to the winner.
+    fn claim_for_broadcast(
+        &self,
+        connection: &Connection,
+        processed_transaction: &ProcessedTransaction,
+    ) -> Result<(), anyhow::Error> {
+        let Some(status) = db::claim_pending_transaction_for_broadcast(connection, processed_transaction.id())? else {
+            return Ok(());
+        };
 
-        if let Err(e) = db::unlock_outputs_for_request(connection, pending_tx_id) {
-            error!(target: "audit", error:% = e; "Failed to unlock outputs during cleanup");
+        let key = processed_transaction.idempotency_key.clone();
+        let operation = IdempotencyOperation::SendTransaction;
+        let conflict = match status {
+            PendingTransactionStatus::Completed => IdempotencyConflict::AlreadyCompleted { key, operation },
+            status => IdempotencyConflict::NoLongerActive {
+                key,
+                operation,
+                status: status.to_string(),
+            },
+        };
+        warn!(
+            target: "audit",
+            id = processed_transaction.id(),
+            error:% = conflict;
+            "Refusing to broadcast a reservation this request does not hold"
+        );
+        Err(conflict.into())
+    }
+
+    /// Cleans up after a failure that happened before this send claimed the
+    /// reservation for broadcast.
+    ///
+    /// Does nothing when this send only replayed onto the reservation: it
+    /// belongs to the request that created it, which may still be in flight.
+    fn release_unclaimed_reservation(&self, connection: &Connection, processed_transaction: &ProcessedTransaction) {
+        if processed_transaction.owns_reservation() {
+            self.fail_and_unlock_pending_transaction(connection, processed_transaction.id());
+        } else {
+            warn!(
+                target: "audit",
+                id = processed_transaction.id();
+                "Leaving a replayed reservation locked for the request that created it"
+            );
+        }
+    }
+
+    /// Expires a reservation and releases the UTXOs it holds.
+    ///
+    /// Both statements go in one write transaction. Run separately, a failure
+    /// between them left the row `Expired` with its outputs still `Locked`, and
+    /// `find_expired_pending_transactions` only ever revisits `Pending` rows —
+    /// so the unlocker would never come back for them.
+    fn fail_and_unlock_pending_transaction(&self, connection: &Connection, pending_tx_id: &str) {
+        // `new_unchecked` because callers reach this from `?`-chains that
+        // already borrow the connection immutably. What it gives up is rusqlite's
+        // detection of a nested transaction, and none is open at any call site.
+        let cleanup = (|| -> Result<(), anyhow::Error> {
+            let transaction =
+                rusqlite::Transaction::new_unchecked(connection, rusqlite::TransactionBehavior::Immediate)?;
+            db::update_pending_transaction_status(&transaction, pending_tx_id, PendingTransactionStatus::Expired)?;
+            db::unlock_outputs_for_request(&transaction, pending_tx_id)?;
+            transaction.commit()?;
+            Ok(())
+        })();
+
+        if let Err(e) = cleanup {
+            error!(target: "audit", error:% = e; "Failed to expire and unlock pending transaction during cleanup");
         }
     }
 }
@@ -861,6 +971,7 @@ mod tests {
     #![allow(clippy::indexing_slicing)]
 
     use std::{
+        str::FromStr,
         sync::{Arc, Barrier},
         time::Duration,
     };
@@ -882,10 +993,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
-    use crate::{
-        db::{create_account, get_account_by_name, init_db, insert_scanned_tip_block},
-        transactions::idempotency::IdempotencyConflict,
-    };
+    use crate::db::{create_account, get_account_by_name, init_db, insert_scanned_tip_block};
 
     /// A send must make do with one database connection.
     ///
@@ -1099,6 +1207,19 @@ mod tests {
         db::update_pending_transaction_status(&conn, &id, status).expect("update status");
     }
 
+    fn status_of(pool: &SqlitePool, key: &str) -> PendingTransactionStatus {
+        let status: String = pool
+            .get()
+            .expect("conn")
+            .query_row(
+                "SELECT status FROM pending_transactions WHERE idempotency_key = :key",
+                named_params! { ":key": key },
+                |row| row.get(0),
+            )
+            .expect("pending transaction exists");
+        PendingTransactionStatus::from_str(&status).expect("known status")
+    }
+
     #[test]
     fn an_exact_retry_replays_the_original_reservation() {
         let (pool, _temp) = setup_funded_wallet(3);
@@ -1216,6 +1337,203 @@ mod tests {
         assert_eq!(
             reserve(&sender, &pool, "k", 1_000).expect("the original client can still retry"),
             original,
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Ownership of a replayed reservation
+    // -----------------------------------------------------------------------
+
+    /// A replay that fails afterwards must not tear down the original reservation.
+    ///
+    /// The failure handler cannot tell the two apart on its own: before the
+    /// reservation was marked, a replay that hit any transient error — a busy
+    /// database, a decode failure — expired the row and unlocked the UTXOs while
+    /// the request that created it was still holding an unsigned transaction
+    /// over them.
+    #[test]
+    fn a_failing_replay_leaves_the_original_reservation_alone() {
+        let (pool, _temp) = setup_funded_wallet(3);
+        let sender = sender_for(&pool);
+
+        let mut owner = request(&sender, "k", 1_000);
+        let reservation_id = sender
+            .create_or_find_pending_transaction(&mut pool.get().expect("conn"), &mut owner)
+            .expect("original reservation");
+        owner.update_id(reservation_id.clone());
+        let locked = locked_output_count(&pool);
+        assert!(locked > 0, "the original reservation must have locked something");
+        assert!(owner.owns_reservation(), "the creator owns its reservation");
+
+        let mut replayer = request(&sender, "k", 1_000);
+        let replayed_id = sender
+            .create_or_find_pending_transaction(&mut pool.get().expect("conn"), &mut replayer)
+            .expect("replay");
+        replayer.update_id(replayed_id.clone());
+        assert_eq!(replayed_id, reservation_id);
+        assert!(!replayer.owns_reservation(), "a replay must not claim ownership");
+
+        sender.release_unclaimed_reservation(&pool.get().expect("conn"), &replayer);
+        assert_eq!(
+            status_of(&pool, "k"),
+            PendingTransactionStatus::Pending,
+            "a replay's failure must leave the reservation live",
+        );
+        assert_eq!(
+            locked_output_count(&pool),
+            locked,
+            "a replay's failure must leave the original UTXOs locked",
+        );
+
+        // The request that created it still can release it, and when it does the
+        // row and the outputs move together.
+        sender.release_unclaimed_reservation(&pool.get().expect("conn"), &owner);
+        assert_eq!(status_of(&pool, "k"), PendingTransactionStatus::Expired);
+        assert_eq!(
+            locked_output_count(&pool),
+            0,
+            "expiring a reservation must release its UTXOs in the same breath",
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Claiming a reservation for broadcast
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn only_one_caller_can_claim_a_reservation_for_broadcast() {
+        let (pool, _temp) = setup_funded_wallet(3);
+        let sender = sender_for(&pool);
+
+        let mut processed_transaction = request(&sender, "k", 1_000);
+        let id = sender
+            .create_or_find_pending_transaction(&mut pool.get().expect("conn"), &mut processed_transaction)
+            .expect("reservation");
+        processed_transaction.update_id(id);
+
+        sender
+            .claim_for_broadcast(&pool.get().expect("conn"), &processed_transaction)
+            .expect("the first caller takes the reservation");
+        assert_eq!(status_of(&pool, "k"), PendingTransactionStatus::Completed);
+
+        let err = sender
+            .claim_for_broadcast(&pool.get().expect("conn"), &processed_transaction)
+            .expect_err("a second broadcast of one reservation must be refused");
+        assert!(
+            matches!(conflict(&err), IdempotencyConflict::AlreadyCompleted { .. }),
+            "expected an already-completed conflict, got: {err}",
+        );
+    }
+
+    /// A reservation that was released cannot be broadcast either.
+    ///
+    /// The expiry check only looks at rows that are still `Pending`, so a
+    /// `Cancelled` or `Expired` row read as "not expired" and sailed through to
+    /// `create_completed_transaction` and the network.
+    #[test]
+    fn a_released_reservation_cannot_be_broadcast() {
+        for status in [PendingTransactionStatus::Expired, PendingTransactionStatus::Cancelled] {
+            let (pool, _temp) = setup_funded_wallet(3);
+            let sender = sender_for(&pool);
+
+            let mut processed_transaction = request(&sender, "k", 1_000);
+            let id = sender
+                .create_or_find_pending_transaction(&mut pool.get().expect("conn"), &mut processed_transaction)
+                .expect("reservation");
+            processed_transaction.update_id(id);
+            set_status(&pool, "k", status.clone());
+
+            let err = sender
+                .claim_for_broadcast(&pool.get().expect("conn"), &processed_transaction)
+                .expect_err("a released reservation cannot be broadcast");
+            assert!(
+                matches!(conflict(&err), IdempotencyConflict::NoLongerActive { .. }),
+                "expected a no-longer-active conflict for {status}, got: {err}",
+            );
+            assert_eq!(
+                status_of(&pool, "k"),
+                status,
+                "a refused claim must not move the reservation on",
+            );
+        }
+    }
+
+    /// The refused caller must get no further than the conflict.
+    ///
+    /// `claim_for_broadcast` runs before `create_completed_transaction` and
+    /// before the network call, so a refusal is what stops the second send from
+    /// recording a duplicate completed transaction over the same inputs — the
+    /// index on `pending_tx_id` is not unique and would happily take it.
+    #[test]
+    fn a_refused_claim_records_no_completed_transaction() {
+        let (pool, _temp) = setup_funded_wallet(3);
+        let sender = sender_for(&pool);
+
+        let mut processed_transaction = request(&sender, "k", 1_000);
+        let id = sender
+            .create_or_find_pending_transaction(&mut pool.get().expect("conn"), &mut processed_transaction)
+            .expect("reservation");
+        processed_transaction.update_id(id);
+
+        sender
+            .claim_for_broadcast(&pool.get().expect("conn"), &processed_transaction)
+            .expect("first claim");
+        let locked = locked_output_count(&pool);
+
+        sender
+            .claim_for_broadcast(&pool.get().expect("conn"), &processed_transaction)
+            .expect_err("second claim");
+
+        assert_eq!(
+            count(&pool, "SELECT COUNT(*) FROM completed_transactions"),
+            0,
+            "a refused claim must not record a completed transaction",
+        );
+        assert_eq!(
+            locked_output_count(&pool),
+            locked,
+            "a refused claim must leave the winner's UTXOs alone",
+        );
+    }
+
+    /// Concurrent claims on one reservation: exactly one wins.
+    #[test]
+    fn concurrent_claims_resolve_to_a_single_broadcast() {
+        let (pool, _temp) = setup_funded_wallet(3);
+
+        let reservation_id = {
+            let sender = sender_for(&pool);
+            let mut processed_transaction = request(&sender, "k", 1_000);
+            sender
+                .create_or_find_pending_transaction(&mut pool.get().expect("conn"), &mut processed_transaction)
+                .expect("reservation")
+        };
+
+        let barrier = Arc::new(Barrier::new(2));
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let pool = pool.clone();
+                let barrier = Arc::clone(&barrier);
+                let reservation_id = reservation_id.clone();
+                std::thread::spawn(move || {
+                    let sender = sender_for(&pool);
+                    let mut processed_transaction = request(&sender, "k", 1_000);
+                    processed_transaction.update_id(reservation_id);
+                    let connection = pool.get().expect("conn");
+                    barrier.wait();
+                    sender.claim_for_broadcast(&connection, &processed_transaction)
+                })
+            })
+            .collect();
+
+        let outcomes: Vec<_> = handles
+            .into_iter()
+            .map(|handle| handle.join().expect("thread"))
+            .collect();
+        assert_eq!(
+            outcomes.iter().filter(|outcome| outcome.is_ok()).count(),
+            1,
+            "exactly one caller may broadcast a reservation",
         );
     }
 }
