@@ -4,10 +4,7 @@ use log::{error, info};
 use rusqlite::Connection;
 use tokio::{sync::broadcast, task::JoinHandle, time::interval};
 
-use crate::{
-    db::{self, SqlitePool},
-    models::PendingTransactionStatus,
-};
+use crate::db::{self, SqlitePool};
 
 pub struct TransactionUnlocker {
     db_pool: SqlitePool,
@@ -18,7 +15,7 @@ impl TransactionUnlocker {
         Self { db_pool }
     }
 
-    pub fn unlock_expired_transactions(conn: &mut Connection) -> Result<(), anyhow::Error> {
+    pub fn unlock_expired_transactions(conn: &Connection) -> Result<(), anyhow::Error> {
         // This listing runs in autocommit, so every row it returns is a decision
         // taken from a stale read: by the time the loop reaches one, a send may
         // have claimed it for broadcast. Each row is re-checked under its own
@@ -47,27 +44,8 @@ impl TransactionUnlocker {
     /// `SELECT` and this write is already `Completed`, and unlocking its outputs
     /// would hand the inputs of a transaction that is on the network back to the
     /// next send to spend again.
-    pub(crate) fn expire_and_unlock(conn: &mut Connection, pending_tx_id: &str) -> Result<bool, anyhow::Error> {
-        // BEGIN IMMEDIATE: acquire the write lock up front. A deferred
-        // transaction that upgrades read->write can dead-lock against another
-        // writer in WAL mode (SQLITE_BUSY_SNAPSHOT, surfaced as "database is
-        // locked"), which busy_timeout does not retry.
-        let transaction = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-
-        let expired = db::update_pending_transaction_status_if(
-            &transaction,
-            pending_tx_id,
-            &PendingTransactionStatus::Pending,
-            PendingTransactionStatus::Expired,
-        )?;
-        if !expired {
-            return Ok(false);
-        }
-
-        db::unlock_outputs_for_request(&transaction, pending_tx_id)?;
-        transaction.commit()?;
-
-        Ok(true)
+    pub(crate) fn expire_and_unlock(conn: &Connection, pending_tx_id: &str) -> Result<bool, anyhow::Error> {
+        Ok(db::expire_and_unlock_pending_transaction(conn, pending_tx_id)?)
     }
 
     pub fn run(self, mut shutdown_rx: broadcast::Receiver<()>) -> JoinHandle<Result<(), anyhow::Error>> {
@@ -78,8 +56,8 @@ impl TransactionUnlocker {
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
-                        let mut conn = self.db_pool.get()?;
-                        if let Err(e) = Self::unlock_expired_transactions(&mut conn) {
+                        let conn = self.db_pool.get()?;
+                        if let Err(e) = Self::unlock_expired_transactions(&conn) {
                             error!(error:% = e; "Error unlocking expired transactions");
                         }
                     }

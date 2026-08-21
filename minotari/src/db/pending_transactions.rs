@@ -4,7 +4,9 @@ use crate::db::error::{WalletDbError, WalletDbResult};
 use crate::log::mask_amount;
 use crate::transactions::idempotency::IdempotencyBinding;
 use crate::{
-    api::types::LockFundsResult, db::outputs::fetch_outputs_by_lock_request_id, models::PendingTransactionStatus,
+    api::types::LockFundsResult,
+    db::outputs::{fetch_outputs_by_lock_request_id, unlock_outputs_for_request},
+    models::PendingTransactionStatus,
 };
 use chrono::{DateTime, Utc};
 use log::{debug, info, warn};
@@ -224,6 +226,41 @@ pub fn update_pending_transaction_status_if(
     )?;
 
     Ok(moved > 0)
+}
+
+/// Expires a reservation and releases its UTXOs, but only while it is still `PENDING`.
+///
+/// Returns whether it acted. Both halves go in one write transaction: run
+/// separately, a failure between them left an `EXPIRED` row over `LOCKED`
+/// outputs, and `find_expired_pending_transactions` only ever revisits `PENDING`
+/// rows, so nothing came back for them.
+///
+/// The `PENDING` guard is what makes this safe to call on a decision taken
+/// earlier. The unlocker lists expired rows in autocommit; a finalizing send
+/// decides to clean up before it knows whether it won the broadcast claim. In
+/// both cases the row may have moved to `COMPLETED` in between, and expiring it
+/// then would hand back the inputs of a transaction that is already on the
+/// network.
+///
+/// `new_unchecked` because callers reach this holding the connection through
+/// `?`-chains that borrow it immutably. What it gives up is rusqlite's detection
+/// of a nested transaction, and no call site has one open.
+pub fn expire_and_unlock_pending_transaction(conn: &Connection, id: &str) -> WalletDbResult<bool> {
+    let transaction = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+
+    if !update_pending_transaction_status_if(
+        &transaction,
+        id,
+        &PendingTransactionStatus::Pending,
+        PendingTransactionStatus::Expired,
+    )? {
+        return Ok(false);
+    }
+
+    unlock_outputs_for_request(&transaction, id)?;
+    transaction.commit()?;
+
+    Ok(true)
 }
 
 pub fn update_pending_transaction_status(

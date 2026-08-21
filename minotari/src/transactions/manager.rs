@@ -932,21 +932,46 @@ impl TransactionSender {
     /// Cleans up after a failure that happened before this send claimed the
     /// reservation for broadcast.
     ///
-    /// Does nothing when this send only replayed onto the reservation: it
-    /// belongs to the request that created it, which may still be in flight.
+    /// Two things must hold before tearing one down, and they are different
+    /// questions:
+    ///
+    /// * this send must have created the reservation rather than replayed onto
+    ///   one that belongs to a request still in flight; and
+    /// * the reservation must still be `Pending`. A *creator* can lose the
+    ///   broadcast claim to a replayer — it is a coin flip, not a narrow race —
+    ///   and the winner's transaction is then on the network over these inputs.
+    ///   Expiring the row on the strength of "I created it" would hand them
+    ///   straight back to the next send.
     fn release_unclaimed_reservation(&self, connection: &Connection, processed_transaction: &ProcessedTransaction) {
-        if processed_transaction.owns_reservation() {
-            self.fail_and_unlock_pending_transaction(connection, processed_transaction.id());
-        } else {
+        if !processed_transaction.owns_reservation() {
             warn!(
                 target: "audit",
                 id = processed_transaction.id();
                 "Leaving a replayed reservation locked for the request that created it"
             );
+            return;
+        }
+
+        match db::expire_and_unlock_pending_transaction(connection, processed_transaction.id()) {
+            Ok(true) => {},
+            Ok(false) => warn!(
+                target: "audit",
+                id = processed_transaction.id();
+                "Leaving a reservation that is no longer pending to whoever claimed it"
+            ),
+            Err(e) => {
+                error!(target: "audit", error:% = e; "Failed to expire and unlock pending transaction during cleanup")
+            },
         }
     }
 
-    /// Expires a reservation and releases the UTXOs it holds.
+    /// Expires a reservation and releases the UTXOs it holds, whatever its status.
+    ///
+    /// For the post-claim failures only — a rejected or unbroadcastable
+    /// transaction. Those callers won the claim, so the row is theirs and is
+    /// already `Completed`; the `Pending` guard in
+    /// [`release_unclaimed_reservation`](Self::release_unclaimed_reservation)
+    /// would refuse exactly the cleanup they need.
     ///
     /// Both statements go in one write transaction. Run separately, a failure
     /// between them left the row `Expired` with its outputs still `Locked`, and
@@ -1646,7 +1671,7 @@ mod tests {
         backdate_expiry(&pool, "k");
 
         // The unlocker lists it while it is still expired and pending.
-        let mut connection = pool.get().expect("conn");
+        let connection = pool.get().expect("conn");
         let listed = db::find_expired_pending_transactions(&connection).expect("scan for expired");
         assert_eq!(listed.len(), 1, "the reservation is due for unlocking");
 
@@ -1657,7 +1682,7 @@ mod tests {
 
         for tx in listed {
             assert!(
-                !TransactionUnlocker::expire_and_unlock(&mut connection, &tx.id).expect("unlock pass"),
+                !TransactionUnlocker::expire_and_unlock(&connection, &tx.id).expect("unlock pass"),
                 "the unlocker must decline a reservation that is no longer pending",
             );
         }
@@ -1666,6 +1691,62 @@ mod tests {
             status_of(&pool, "k"),
             PendingTransactionStatus::Completed,
             "the unlocker must not overwrite a claimed reservation",
+        );
+        assert_eq!(
+            locked_output_count(&pool),
+            locked,
+            "the inputs of a broadcast transaction must stay locked",
+        );
+    }
+
+    /// A creator that loses the broadcast claim must leave the winner alone.
+    ///
+    /// Which of the two sends holding transactions over one reservation returns
+    /// from its signer first is a coin flip, so the creator losing is ordinary,
+    /// not a narrow race. Its cleanup guard used to ask only "did I create
+    /// this?" — still true — and so expired the row and released the inputs of
+    /// the replayer's transaction while that transaction was on the network.
+    #[test]
+    fn a_creator_that_loses_the_claim_leaves_the_winner_alone() {
+        let (pool, _temp) = setup_funded_wallet(3);
+        let sender = sender_for(&pool);
+
+        let mut creator = request(&sender, "k", 1_000);
+        let id = sender
+            .create_or_find_pending_transaction(&mut pool.get().expect("conn"), &mut creator)
+            .expect("reservation");
+        creator.update_id(id);
+        let locked = locked_output_count(&pool);
+        assert!(locked > 0, "the reservation must have locked something");
+
+        let mut replayer = request(&sender, "k", 1_000);
+        let replayed_id = sender
+            .create_or_find_pending_transaction(&mut pool.get().expect("conn"), &mut replayer)
+            .expect("replay");
+        replayer.update_id(replayed_id);
+        assert!(creator.owns_reservation(), "the creator still reads as the owner");
+        assert!(!replayer.owns_reservation());
+
+        // The replayer's signer returns first, so it wins the broadcast.
+        sender
+            .claim_for_broadcast(&pool.get().expect("conn"), &replayer)
+            .expect("the replayer claims the reservation");
+
+        // The creator returns second: refused, and then must not clean up.
+        let connection = pool.get().expect("conn");
+        let err = sender
+            .claim_for_broadcast(&connection, &creator)
+            .expect_err("the creator lost the claim");
+        assert!(
+            matches!(conflict(&err), IdempotencyConflict::AlreadyCompleted { .. }),
+            "expected an already-completed conflict, got: {err}",
+        );
+        sender.release_unclaimed_reservation(&connection, &creator);
+
+        assert_eq!(
+            status_of(&pool, "k"),
+            PendingTransactionStatus::Completed,
+            "the winner's reservation must stand",
         );
         assert_eq!(
             locked_output_count(&pool),

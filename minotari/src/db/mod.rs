@@ -86,9 +86,9 @@ mod pending_transactions;
 pub use pending_transactions::{
     PendingTransaction, PendingTransactionRecord, cancel_pending_transactions_by_ids,
     check_if_transaction_is_expired_by_idempotency_key, claim_pending_transaction_for_broadcast,
-    create_pending_transaction, find_expired_pending_transactions, find_pending_transaction_by_idempotency_key,
-    find_pending_transaction_record_by_idempotency_key, locked_funds_for_pending_transaction,
-    update_pending_transaction_status, update_pending_transaction_status_if,
+    create_pending_transaction, expire_and_unlock_pending_transaction, find_expired_pending_transactions,
+    find_pending_transaction_by_idempotency_key, find_pending_transaction_record_by_idempotency_key,
+    locked_funds_for_pending_transaction, update_pending_transaction_status, update_pending_transaction_status_if,
 };
 
 mod completed_transactions;

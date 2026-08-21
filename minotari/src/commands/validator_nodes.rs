@@ -64,6 +64,53 @@ fn parse_sidechain_deployment_key(key: Option<String>) -> Result<Option<PrivateK
 
 // ── Sign + persist + broadcast ────────────────────────────────────────────────
 
+/// Takes this command's fund reservation, so it cannot be broadcast twice or
+/// over UTXOs the wallet has already released.
+///
+/// The lookup and the status write used to be two autocommit statements. Against
+/// a database a daemon is also serving, its unlocker could expire the
+/// reservation in the gap and release the outputs; the unguarded write then
+/// flipped the row back to `Completed` and the broadcast spent UTXOs the wallet
+/// now recorded as `Unspent`, leaving the next send free to build a conflicting
+/// spend. The conditional update closes that gap.
+///
+/// A missing row is the same failure caught one statement earlier: the caller
+/// locked funds under this key moments ago, so the reservation can only be
+/// absent because it was expired or cancelled. This used to skip the whole block
+/// and broadcast anyway, putting a transaction on the network with nothing
+/// recording it; now it aborts before anything is sent.
+fn claim_reservation_for_broadcast(
+    conn: &Connection,
+    account_id: i64,
+    idempotency_key: &str,
+    tx_kind: &str,
+) -> Result<String, anyhow::Error> {
+    let pending_tx =
+        db::find_pending_transaction_by_idempotency_key(conn, idempotency_key, account_id)?.ok_or_else(|| {
+            anyhow!(
+                "The {} reservation for idempotency key '{}' is no longer active; nothing was broadcast",
+                tx_kind,
+                idempotency_key
+            )
+        })?;
+
+    let pending_tx_id = pending_tx.id.to_string();
+    if !db::update_pending_transaction_status_if(
+        conn,
+        &pending_tx_id,
+        &PendingTransactionStatus::Pending,
+        PendingTransactionStatus::Completed,
+    )? {
+        return Err(anyhow!(
+            "The {} reservation for idempotency key '{}' was released before it could be broadcast; nothing was sent",
+            tx_kind,
+            idempotency_key
+        ));
+    }
+
+    Ok(pending_tx_id)
+}
+
 /// Signs an unsigned VN transaction, saves it to the DB, and broadcasts it.
 ///
 /// This is the common post-processing step shared by all three VN commands.
@@ -97,19 +144,16 @@ async fn sign_save_and_broadcast(
         .map_err(|e| anyhow!("Failed to serialize transaction: {}", e))?;
     let sent_output_hash = signed_result.signed_transaction.sent_hashes.first().map(hex::encode);
 
-    if let Some(pending_tx) = db::find_pending_transaction_by_idempotency_key(conn, idempotency_key, account.id)? {
-        let pending_tx_id = pending_tx.id.to_string();
-        db::update_pending_transaction_status(conn, &pending_tx_id, PendingTransactionStatus::Completed)?;
-        db::create_completed_transaction(
-            conn,
-            account.id,
-            &pending_tx_id,
-            &kernel_excess,
-            &serialized_tx,
-            sent_output_hash,
-            completed_tx_id,
-        )?;
-    }
+    let pending_tx_id = claim_reservation_for_broadcast(conn, account.id, idempotency_key, tx_kind)?;
+    db::create_completed_transaction(
+        conn,
+        account.id,
+        &pending_tx_id,
+        &kernel_excess,
+        &serialized_tx,
+        sent_output_hash,
+        completed_tx_id,
+    )?;
 
     let client = WalletHttpClient::new(base_url.parse()?)?;
     let response = client
@@ -362,4 +406,113 @@ pub async fn handle_submit_validator_eviction_proof(
         },
     )
     .await
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        db::{SqlitePool, create_account, get_account_by_name},
+        transactions::idempotency::{IdempotencyBinding, IdempotencyOperation, RequestFingerprint},
+    };
+    use chrono::{TimeDelta, Utc};
+    use rusqlite::named_params;
+    use tari_common_types::seeds::cipher_seed::CipherSeed;
+    use tari_transaction_components::key_manager::wallet_types::{SeedWordsWallet, WalletType};
+    use tempfile::tempdir;
+
+    const KEY: &str = "vn-key";
+
+    /// A migrated database holding one account and one live VN reservation.
+    fn setup_reservation() -> (SqlitePool, i64, tempfile::TempDir) {
+        let temp = tempdir().expect("temp dir");
+        let pool = init_db(temp.path().join("test.db")).expect("init db");
+        let conn = pool.get().expect("get conn");
+
+        let wallet =
+            WalletType::SeedWords(SeedWordsWallet::construct_new(CipherSeed::random()).expect("construct wallet"));
+        create_account(&conn, "test", &wallet, "pass").expect("create account");
+        let account_id = get_account_by_name(&conn, "test")
+            .expect("get account")
+            .expect("account exists")
+            .id;
+
+        let operation = IdempotencyOperation::ValidatorNodeRegistration;
+        let binding = IdempotencyBinding::new(Some(KEY.to_string()), operation, RequestFingerprint::new(operation));
+        db::create_pending_transaction(
+            &conn,
+            KEY,
+            &binding,
+            account_id,
+            false,
+            MicroMinotari(1_000),
+            MicroMinotari(0),
+            MicroMinotari(0),
+            Utc::now() + TimeDelta::hours(1),
+        )
+        .expect("create reservation");
+
+        drop(conn);
+        (pool, account_id, temp)
+    }
+
+    fn status_of(pool: &SqlitePool) -> String {
+        pool.get()
+            .expect("conn")
+            .query_row(
+                "SELECT status FROM pending_transactions WHERE idempotency_key = :key",
+                named_params! { ":key": KEY },
+                |row| row.get(0),
+            )
+            .expect("reservation exists")
+    }
+
+    #[test]
+    fn a_live_reservation_is_claimed_once() {
+        let (pool, account_id, _temp) = setup_reservation();
+
+        claim_reservation_for_broadcast(&pool.get().expect("conn"), account_id, KEY, "VN registration")
+            .expect("the reservation is live");
+        assert_eq!(status_of(&pool), PendingTransactionStatus::Completed.to_string());
+
+        claim_reservation_for_broadcast(&pool.get().expect("conn"), account_id, KEY, "VN registration")
+            .expect_err("a reservation cannot be claimed twice");
+    }
+
+    /// A reservation the unlocker released must abort the broadcast.
+    ///
+    /// The lookup and the status write were two autocommit statements, so the
+    /// daemon's unlocker could expire the reservation and release its outputs in
+    /// between. The unguarded write then flipped the row back to `Completed` and
+    /// the transaction went to the network over UTXOs the wallet had already
+    /// handed back to the next send.
+    #[test]
+    fn a_reservation_released_before_the_claim_aborts_the_broadcast() {
+        let (pool, account_id, _temp) = setup_reservation();
+
+        // The unlocker gets there first.
+        let conn = pool.get().expect("conn");
+        db::update_pending_transaction_status(&conn, &pending_id(&pool), PendingTransactionStatus::Expired)
+            .expect("expire the reservation");
+        drop(conn);
+
+        claim_reservation_for_broadcast(&pool.get().expect("conn"), account_id, KEY, "VN registration")
+            .expect_err("a released reservation must not be broadcast");
+        assert_eq!(
+            status_of(&pool),
+            PendingTransactionStatus::Expired.to_string(),
+            "the claim must not resurrect a released reservation",
+        );
+    }
+
+    fn pending_id(pool: &SqlitePool) -> String {
+        pool.get()
+            .expect("conn")
+            .query_row(
+                "SELECT id FROM pending_transactions WHERE idempotency_key = :key",
+                named_params! { ":key": KEY },
+                |row| row.get(0),
+            )
+            .expect("reservation exists")
+    }
 }
