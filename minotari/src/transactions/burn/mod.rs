@@ -14,7 +14,7 @@
 //! 6. Return the signed [`Transaction`] and a [`NewBurnProof`] for DB storage
 
 use anyhow::anyhow;
-use log::{info, warn};
+use log::info;
 use rusqlite::Connection;
 use tari_common::configuration::Network;
 use tari_common_types::{
@@ -39,7 +39,7 @@ use crate::{
     models::PendingTransactionStatus,
     transactions::{
         fund_locker::FundLocker,
-        idempotency::{IdempotencyBinding, IdempotencyOperation, RequestFingerprint},
+        idempotency::{IdempotencyBinding, IdempotencyConflict, IdempotencyOperation, RequestFingerprint},
     },
 };
 
@@ -278,8 +278,10 @@ pub fn create_burn_tx(
 
 /// Persists all DB records for a completed burn transaction.
 ///
-/// Inserts the burn proof, then (if a matching pending transaction exists) updates
-/// its status to `Completed` and creates a completed-transaction record.
+/// Inserts the burn proof, then completes the reservation the burn was built
+/// against and creates a completed-transaction record. A reservation that is no
+/// longer live aborts the whole thing, rolling the proof back with it: see
+/// [`claim_burn_reservation`].
 ///
 /// All three writes go in one `IMMEDIATE` transaction and every error is propagated.
 /// They are not independent bookkeeping: the pending transaction is what holds this
@@ -317,34 +319,186 @@ pub fn persist_burn_records(
     crate::db::insert_burn_proof(&tx, &result.new_burn_proof)
         .map_err(|e| anyhow!("Failed to insert burn proof: {}", e))?;
 
-    let pending = crate::db::find_pending_transaction_by_idempotency_key(&tx, idempotency_key, account_id)
-        .map_err(|e| anyhow!("Failed to look up pending transaction for burn: {}", e))?;
+    let pending_tx_id = claim_burn_reservation(&tx, account_id, idempotency_key)?;
 
-    if let Some(pending_tx) = pending {
-        let pending_tx_id = pending_tx.id.to_string();
+    crate::db::update_pending_transaction_status(&tx, &pending_tx_id, PendingTransactionStatus::Completed)
+        .map_err(|e| anyhow!("Failed to complete pending transaction for burn: {}", e))?;
 
-        crate::db::update_pending_transaction_status(&tx, &pending_tx_id, PendingTransactionStatus::Completed)
-            .map_err(|e| anyhow!("Failed to complete pending transaction for burn: {}", e))?;
-
-        crate::db::create_completed_transaction(
-            &tx,
-            account_id,
-            &pending_tx_id,
-            &kernel_excess,
-            &serialized_tx,
-            sent_output_hash,
-            result.tx_id,
-        )
-        .map_err(|e| anyhow!("Failed to record completed transaction for burn: {}", e))?;
-    } else {
-        warn!(
-            target: "audit",
-            idempotency_key = idempotency_key;
-            "Burn has no matching pending transaction; its inputs are not tracked by a lock record"
-        );
-    }
+    crate::db::create_completed_transaction(
+        &tx,
+        account_id,
+        &pending_tx_id,
+        &kernel_excess,
+        &serialized_tx,
+        sent_output_hash,
+        result.tx_id,
+    )
+    .map_err(|e| anyhow!("Failed to record completed transaction for burn: {}", e))?;
 
     tx.commit()?;
 
     Ok(())
+}
+
+/// Finds the reservation this burn was built against, and refuses if it is gone.
+///
+/// A missing reservation used to be a warning: the proof was committed, `Ok(())`
+/// went back, and both callers broadcast regardless. But `create_burn_tx` locks
+/// the deposit under this key, so the row existed moments ago and can only have
+/// moved since — the daemon's unlocker expiring a short lock while the burn was
+/// being signed is enough. Its outputs are then `Unspent` again, and broadcasting
+/// destroys funds the wallet believes it still has, with no completed-transaction
+/// row for the monitor to find and nothing that can be undone.
+///
+/// The status is read without a filter so the caller learns *why* rather than
+/// being told the key does not exist.
+fn claim_burn_reservation(conn: &Connection, account_id: i64, idempotency_key: &str) -> Result<String, anyhow::Error> {
+    let record = crate::db::find_pending_transaction_record_by_idempotency_key(conn, idempotency_key, account_id)
+        .map_err(|e| anyhow!("Failed to look up pending transaction for burn: {}", e))?
+        .ok_or_else(|| {
+            anyhow!(
+                "Burn has no reservation under idempotency key '{}'; nothing was broadcast",
+                idempotency_key
+            )
+        })?;
+
+    if record.status != PendingTransactionStatus::Pending {
+        let key = idempotency_key.to_string();
+        let operation = IdempotencyOperation::BurnFunds;
+        return Err(match record.status {
+            PendingTransactionStatus::Completed => IdempotencyConflict::AlreadyCompleted { key, operation },
+            status => IdempotencyConflict::NoLongerActive {
+                key,
+                operation,
+                status: status.to_string(),
+            },
+        }
+        .into());
+    }
+
+    Ok(record.id)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        db::{SqlitePool, create_account, get_account_by_name, init_db},
+        transactions::idempotency::IdempotencyConflict,
+    };
+    use chrono::{TimeDelta, Utc};
+    use rusqlite::named_params;
+    use tari_common_types::seeds::cipher_seed::CipherSeed;
+    use tari_transaction_components::key_manager::wallet_types::{SeedWordsWallet, WalletType};
+    use tempfile::tempdir;
+
+    const KEY: &str = "burn-key";
+
+    /// A migrated database holding one account and one live burn reservation.
+    fn setup_reservation() -> (SqlitePool, i64, tempfile::TempDir) {
+        let temp = tempdir().expect("temp dir");
+        let pool = init_db(temp.path().join("test.db")).expect("init db");
+        let conn = pool.get().expect("get conn");
+
+        let wallet =
+            WalletType::SeedWords(SeedWordsWallet::construct_new(CipherSeed::random()).expect("construct wallet"));
+        create_account(&conn, "test", &wallet, "pass").expect("create account");
+        let account_id = get_account_by_name(&conn, "test")
+            .expect("get account")
+            .expect("account exists")
+            .id;
+
+        let operation = IdempotencyOperation::BurnFunds;
+        let binding = IdempotencyBinding::new(Some(KEY.to_string()), operation, RequestFingerprint::new(operation));
+        crate::db::create_pending_transaction(
+            &conn,
+            KEY,
+            &binding,
+            account_id,
+            false,
+            MicroMinotari(1_000),
+            MicroMinotari(0),
+            MicroMinotari(0),
+            Utc::now() + TimeDelta::hours(1),
+        )
+        .expect("create reservation");
+
+        drop(conn);
+        (pool, account_id, temp)
+    }
+
+    fn pending_id(pool: &SqlitePool) -> String {
+        pool.get()
+            .expect("conn")
+            .query_row(
+                "SELECT id FROM pending_transactions WHERE idempotency_key = :key",
+                named_params! { ":key": KEY },
+                |row| row.get(0),
+            )
+            .expect("reservation exists")
+    }
+
+    fn conflict(err: &anyhow::Error) -> &IdempotencyConflict {
+        err.downcast_ref::<IdempotencyConflict>()
+            .unwrap_or_else(|| panic!("expected an IdempotencyConflict, got: {err}"))
+    }
+
+    #[test]
+    fn a_live_reservation_is_claimed_for_the_burn() {
+        let (pool, account_id, _temp) = setup_reservation();
+
+        assert_eq!(
+            claim_burn_reservation(&pool.get().expect("conn"), account_id, KEY).expect("the reservation is live"),
+            pending_id(&pool),
+        );
+    }
+
+    /// A reservation released before the burn is persisted must abort it.
+    ///
+    /// The missing-row case used to be a warning: the proof was committed and
+    /// both callers broadcast anyway. With the reservation gone its outputs are
+    /// `Unspent` again, so the burn destroyed funds the wallet still believed it
+    /// held, with no completed-transaction row and nothing to undo.
+    #[test]
+    fn a_reservation_released_before_the_burn_aborts_it() {
+        for status in [PendingTransactionStatus::Expired, PendingTransactionStatus::Cancelled] {
+            let (pool, account_id, _temp) = setup_reservation();
+            let conn = pool.get().expect("conn");
+            crate::db::update_pending_transaction_status(&conn, &pending_id(&pool), status.clone())
+                .expect("release the reservation");
+
+            let err = claim_burn_reservation(&conn, account_id, KEY)
+                .expect_err("a released reservation must not be burned against");
+            assert!(
+                matches!(conflict(&err), IdempotencyConflict::NoLongerActive { .. }),
+                "expected a no-longer-active conflict for {status}, got: {err}",
+            );
+        }
+    }
+
+    #[test]
+    fn an_already_completed_burn_is_not_persisted_twice() {
+        let (pool, account_id, _temp) = setup_reservation();
+        let conn = pool.get().expect("conn");
+        crate::db::update_pending_transaction_status(&conn, &pending_id(&pool), PendingTransactionStatus::Completed)
+            .expect("complete the reservation");
+
+        let err = claim_burn_reservation(&conn, account_id, KEY).expect_err("a completed burn cannot be repeated");
+        assert!(
+            matches!(conflict(&err), IdempotencyConflict::AlreadyCompleted { .. }),
+            "expected an already-completed conflict, got: {err}",
+        );
+    }
+
+    #[test]
+    fn a_burn_without_any_reservation_aborts() {
+        let (pool, account_id, _temp) = setup_reservation();
+        pool.get()
+            .expect("conn")
+            .execute("DELETE FROM pending_transactions", [])
+            .expect("drop the reservation");
+
+        claim_burn_reservation(&pool.get().expect("conn"), account_id, KEY)
+            .expect_err("a burn with no reservation must not be broadcast");
+    }
 }

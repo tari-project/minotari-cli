@@ -190,11 +190,15 @@ pub async fn api_burn_funds(
             confirmation_window,
         };
 
+        // An idempotency key replayed onto a burn that is already completed, or
+        // onto a reservation that has since been released, is a client error:
+        // 409, not a 500 inviting a retry that can never succeed. `DbError` here
+        // reported "your reservation was released" as a server fault.
         let result = create_burn_tx(&account, &mut conn, network, &password, params)
-            .map_err(|e| ApiError::FailedToBurnFunds(e.to_string()))?;
+            .map_err(|e| ApiError::from_transaction_error(e, ApiError::FailedToBurnFunds))?;
 
         persist_burn_records(&mut conn, &result, account.id, &idempotency_key)
-            .map_err(|e| ApiError::DbError(e.to_string()))?;
+            .map_err(|e| ApiError::from_transaction_error(e, ApiError::DbError))?;
 
         let tx_id = result.tx_id;
         let output_hash = result.output_hash;
