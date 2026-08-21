@@ -24,6 +24,14 @@
 //! If a transaction with the same idempotency key exists, the existing
 //! transaction data is returned rather than creating a duplicate.
 //!
+//! A key only earns that replay when it was issued for this same request; a key
+//! replayed with different parameters, or one whose transaction is completed,
+//! expired or cancelled, is refused as an
+//! [`IdempotencyConflict`](crate::transactions::idempotency::IdempotencyConflict).
+//! The check runs inside the same `BEGIN IMMEDIATE` transaction that takes the
+//! reservation, so a concurrent retry is served the original rather than losing
+//! a race to the unique-key index.
+//!
 //! # Example
 //!
 //! ```rust,ignore
@@ -83,7 +91,7 @@ use crate::db::DbWalletOutput;
 use crate::models::OutputStatus;
 use crate::transactions::TransactionOutput;
 use crate::{
-    db::{self, AccountRow, SqlitePool},
+    db::{self, AccountRow, SqlitePool, WalletDbError},
     http::WalletHttpClient,
     log::mask_amount,
     models::PendingTransactionStatus,
@@ -92,7 +100,7 @@ use crate::{
             DisplayedTransaction, DisplayedTransactionBuilder, TransactionDirection, TransactionDisplayStatus,
             TransactionInput, TransactionSource,
         },
-        fund_locker::lock_expiry_at,
+        fund_locker::{check_replay_allowed, lock_expiry_at},
         idempotency::{IdempotencyBinding, IdempotencyOperation, RequestFingerprint},
         input_selector::{InputSelector, UtxoSelection},
         one_sided_transaction::Recipient,
@@ -296,21 +304,13 @@ impl TransactionSender {
             .map_err(|e| anyhow::anyhow!("Failed to acquire database connection: {}", e))
     }
 
-    fn validate_transaction_creation_request(
-        &self,
-        conn: &Connection,
-        processed_transaction: &ProcessedTransaction,
-    ) -> Result<(), anyhow::Error> {
-        if db::check_if_transaction_was_already_completed_by_idempotency_key(
-            conn,
-            &processed_transaction.idempotency_key,
-            self.account.id,
-        )? {
-            return Err(anyhow!(
-                "A pending transaction with the same idempotency key already exists"
-            ));
-        }
-
+    /// Checks what this sender can decide without reading the database.
+    ///
+    /// The idempotency key used to be checked here too, on its own connection.
+    /// That read is now part of `create_or_find_pending_transaction`'s write
+    /// transaction, because a check outside it can be overtaken between the read
+    /// and the insert that acts on it.
+    fn validate_transaction_creation_request(&self) -> Result<(), anyhow::Error> {
         let sender_address = self.account.get_address(self.network, &self.password)?;
         if !sender_address
             .features()
@@ -366,7 +366,16 @@ impl TransactionSender {
         Ok(utxo_selection)
     }
 
-    fn create_pending_transaction(
+    /// Replays this request's idempotency key onto its reservation, or takes a
+    /// fresh one.
+    ///
+    /// Both the idempotency read and the UTXO selection happen inside one
+    /// `BEGIN IMMEDIATE` transaction. Reading the key outside it left a gap in
+    /// which a concurrent request with the same key could commit its own row:
+    /// both callers saw "no record", both fell through, and the loser hit the
+    /// `UNIQUE (account_id, idempotency_key)` index and got a hard "already
+    /// exists" instead of the replay a retry is entitled to.
+    fn create_or_find_pending_transaction(
         &self,
         connection: &mut Connection,
         processed_transaction: &mut ProcessedTransaction,
@@ -375,27 +384,54 @@ impl TransactionSender {
         // the checked helper: `Utc::now() + Duration::seconds(..)` panics on
         // overflow. See `MAX_SECONDS_TO_LOCK_UTXOS`.
         let expires_at = lock_expiry_at(Utc::now(), processed_transaction.seconds_to_lock_utxos)?;
+        let binding = processed_transaction.idempotency_binding(self.account.id);
+        let key = processed_transaction.idempotency_key.clone();
 
         // BEGIN IMMEDIATE takes the database's write lock before we look at any
-        // output, so nothing else — another CLI process, the daemon's scan loop,
-        // the unlocker — can spend or reserve one of the selected UTXOs between
-        // selection and locking. Without it the selection is a stale read and
-        // `lock_output`'s conditional update loses the race.
+        // row, so nothing else — another CLI process, the daemon's scan loop,
+        // the unlocker — can claim this key or spend one of the selected UTXOs
+        // between reading and writing. Without it the selection is a stale read
+        // and `lock_output`'s conditional update loses the race.
         let transaction = connection.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+
+        // The key alone does not entitle this request to an existing
+        // reservation: it must be the same operation with the same recipient and
+        // amount, and the reservation must still be live. A completed or expired
+        // key is refused here rather than surfacing later as a build failure on
+        // a zero-input transaction.
+        if let Some(record) =
+            db::find_pending_transaction_record_by_idempotency_key(&transaction, &key, self.account.id)?
+        {
+            check_replay_allowed(&record, &binding, &key)?;
+            return Ok(record.id);
+        }
 
         let utxo_selection = self.create_utxo_selection(&transaction, processed_transaction)?;
 
-        let pending_tx_id = db::create_pending_transaction(
+        let pending_tx_id = match db::create_pending_transaction(
             &transaction,
-            &processed_transaction.idempotency_key,
-            &processed_transaction.idempotency_binding(self.account.id),
+            &key,
+            &binding,
             self.account.id,
             utxo_selection.requires_change_output,
             utxo_selection.total_value,
             utxo_selection.fee_without_change,
             utxo_selection.fee_with_change,
             expires_at,
-        )?;
+        ) {
+            Ok(pending_tx_id) => pending_tx_id,
+            // The write lock above should have kept anyone else out, but if a
+            // row for this key does exist the caller is still a retry and is
+            // owed its reservation, not a bare "already exists".
+            Err(WalletDbError::DuplicateEntry(_)) => {
+                let record =
+                    db::find_pending_transaction_record_by_idempotency_key(&transaction, &key, self.account.id)?
+                        .ok_or_else(|| anyhow!("Idempotency key '{key}' collided with a row that cannot be read"))?;
+                check_replay_allowed(&record, &binding, &key)?;
+                return Ok(record.id);
+            },
+            Err(e) => return Err(e.into()),
+        };
 
         // A failed lock means the output is no longer ours to reserve; `?` skips
         // the commit below so the pending transaction and every lock taken so
@@ -413,28 +449,6 @@ impl TransactionSender {
         Ok(pending_tx_id)
     }
 
-    fn create_or_find_pending_transaction(
-        &self,
-        connection: &mut Connection,
-        processed_transaction: &mut ProcessedTransaction,
-    ) -> Result<String, anyhow::Error> {
-        let response = db::find_pending_transaction_record_by_idempotency_key(
-            connection,
-            &processed_transaction.idempotency_key,
-            self.account.id,
-        )?;
-        if let Some(record) = response {
-            // The key alone does not entitle this request to that reservation:
-            // it must be the same operation with the same recipient and amount.
-            processed_transaction
-                .idempotency_binding(self.account.id)
-                .check_matches(&record.operation, &record.request_hash)?;
-            Ok(record.id)
-        } else {
-            let pending_tx_id = self.create_pending_transaction(connection, processed_transaction)?;
-            Ok(pending_tx_id)
-        }
-    }
     fn prepare_transaction_builder(
         &self,
         locked_utxos: Vec<WalletOutput>,
@@ -515,7 +529,7 @@ impl TransactionSender {
         let mut processed_transaction =
             ProcessedTransaction::new(None, idempotency_key, recipient.clone(), seconds_to_lock_utxo);
 
-        self.validate_transaction_creation_request(&connection, &processed_transaction)?;
+        self.validate_transaction_creation_request()?;
 
         let pending_transaction_id =
             self.create_or_find_pending_transaction(&mut connection, &mut processed_transaction)?;
@@ -841,15 +855,37 @@ impl TransactionSender {
 
 #[cfg(test)]
 mod tests {
-    use std::time::Duration;
+    #![allow(clippy::cast_possible_wrap)]
+    #![allow(clippy::cast_lossless)]
+    #![allow(clippy::cast_possible_truncation)]
+    #![allow(clippy::indexing_slicing)]
+
+    use std::{
+        sync::{Arc, Barrier},
+        time::Duration,
+    };
 
     use r2d2_sqlite::SqliteConnectionManager;
-    use tari_common_types::seeds::cipher_seed::CipherSeed;
-    use tari_transaction_components::key_manager::wallet_types::{SeedWordsWallet, WalletType};
+    use rusqlite::named_params;
+    use tari_common_types::{
+        seeds::cipher_seed::CipherSeed,
+        types::{ComAndPubSignature, CompressedPublicKey},
+    };
+    use tari_script::{ExecutionStack, TariScript};
+    use tari_transaction_components::{
+        key_manager::{
+            TariKeyId,
+            wallet_types::{SeedWordsWallet, WalletType},
+        },
+        transaction_components::{EncryptedData, TransactionOutputVersion, covenants::Covenant},
+    };
     use tempfile::tempdir;
 
     use super::*;
-    use crate::db::{create_account, get_account_by_name, init_db, insert_scanned_tip_block};
+    use crate::{
+        db::{create_account, get_account_by_name, init_db, insert_scanned_tip_block},
+        transactions::idempotency::IdempotencyConflict,
+    };
 
     /// A send must make do with one database connection.
     ///
@@ -903,5 +939,283 @@ mod tests {
                 "the send wanted a second connection: {message}"
             );
         }
+    }
+
+    // -----------------------------------------------------------------------
+    // Idempotency
+    // -----------------------------------------------------------------------
+
+    const PASSWORD: &str = "pass";
+
+    /// A [`WalletOutput`] worth `value`, distinguished from its siblings by `hash_seed`.
+    fn test_wallet_output(value: u64, hash_seed: u8) -> WalletOutput {
+        let mut hash = FixedHash::default();
+        hash[0] = hash_seed;
+        WalletOutput::new_from_parts(
+            TransactionOutputVersion::default(),
+            MicroMinotari::from(value),
+            TariKeyId::default(),
+            OutputFeatures::default(),
+            TariScript::default(),
+            ExecutionStack::default(),
+            TariKeyId::default(),
+            CompressedPublicKey::default(),
+            ComAndPubSignature::default(),
+            0,
+            Covenant::default(),
+            EncryptedData::default(),
+            MicroMinotari::from(0),
+            None,
+            MemoField::new_empty(),
+            hash,
+            Default::default(),
+        )
+    }
+
+    /// Inserts a spendable output row directly, bypassing the scanner.
+    fn insert_test_output(conn: &Connection, account_id: i64, output_hash_byte: u8, value: u64, mined_height: u64) {
+        let output = test_wallet_output(value, output_hash_byte);
+        let wallet_output_json = serde_json::to_string(&output).expect("serialize WalletOutput");
+        conn.execute(
+            r#"
+            INSERT INTO outputs (
+                account_id, tx_id, output_hash, mined_in_block_height, mined_in_block_hash,
+                value, mined_timestamp, wallet_output_json, status, confirmed_height,
+                confirmed_hash, is_burn, maturity
+            ) VALUES (
+                :account_id, :tx_id, :output_hash, :height, :block_hash,
+                :value, :mined_ts, :json, :status, :confirmed_height,
+                :confirmed_hash, 0, :maturity
+            )
+            "#,
+            named_params! {
+                ":account_id": account_id,
+                ":tx_id": output_hash_byte as i64,
+                ":output_hash": vec![output_hash_byte; 32],
+                ":height": mined_height as i64,
+                ":block_hash": vec![output_hash_byte; 32],
+                ":value": value as i64,
+                ":mined_ts": Utc::now(),
+                ":json": wallet_output_json,
+                ":status": "UNSPENT",
+                ":confirmed_height": mined_height as i64,
+                ":confirmed_hash": vec![output_hash_byte; 32],
+                ":maturity": 0,
+            },
+        )
+        .expect("insert test output");
+    }
+
+    /// A migrated database holding one account with `output_count` spendable UTXOs.
+    fn setup_funded_wallet(output_count: usize) -> (SqlitePool, tempfile::TempDir) {
+        let temp = tempdir().expect("temp dir");
+        let pool = init_db(temp.path().join("test.db")).expect("init db");
+        let conn = pool.get().expect("get conn");
+
+        let wallet =
+            WalletType::SeedWords(SeedWordsWallet::construct_new(CipherSeed::random()).expect("construct wallet"));
+        create_account(&conn, "test", &wallet, PASSWORD).expect("create account");
+        let account = get_account_by_name(&conn, "test")
+            .expect("get account")
+            .expect("account exists");
+        insert_scanned_tip_block(&conn, account.id, 200, &[0u8; 32]).expect("insert tip block");
+
+        // Mined at 100 with tip 200, so a confirmation window of 100 makes them spendable.
+        for i in 0..output_count {
+            insert_test_output(&conn, account.id, (i + 1) as u8, (i as u64 + 1) * 1_000_000, 100);
+        }
+
+        drop(conn);
+        (pool, temp)
+    }
+
+    fn sender_for(pool: &SqlitePool) -> TransactionSender {
+        TransactionSender::new(
+            pool.clone(),
+            "test".to_string(),
+            Zeroizing::new(PASSWORD.to_string()),
+            Network::LocalNet,
+            100,
+        )
+        .expect("build sender")
+    }
+
+    /// A pay-to-self request under `key`. `amount` stands in for the whole body:
+    /// changing it models a client replaying the key with different parameters.
+    fn request(sender: &TransactionSender, key: &str, amount: u64) -> ProcessedTransaction {
+        let address = sender
+            .account
+            .get_address(Network::LocalNet, &sender.password)
+            .expect("account address");
+        ProcessedTransaction::new(
+            None,
+            key.to_string(),
+            Recipient {
+                address,
+                amount: MicroMinotari(amount),
+                payment_id: None,
+            },
+            3600,
+        )
+    }
+
+    /// Runs the reservation step the way `start_new_transaction` does.
+    fn reserve(sender: &TransactionSender, pool: &SqlitePool, key: &str, amount: u64) -> Result<String, anyhow::Error> {
+        let mut processed_transaction = request(sender, key, amount);
+        let mut connection = pool.get().expect("conn");
+        sender.create_or_find_pending_transaction(&mut connection, &mut processed_transaction)
+    }
+
+    fn conflict(err: &anyhow::Error) -> &IdempotencyConflict {
+        err.downcast_ref::<IdempotencyConflict>()
+            .unwrap_or_else(|| panic!("expected an IdempotencyConflict, got: {err}"))
+    }
+
+    fn count(pool: &SqlitePool, sql: &str) -> i64 {
+        pool.get()
+            .expect("conn")
+            .query_row(sql, [], |row| row.get(0))
+            .expect("count query")
+    }
+
+    fn pending_transaction_count(pool: &SqlitePool) -> i64 {
+        count(pool, "SELECT COUNT(*) FROM pending_transactions")
+    }
+
+    fn locked_output_count(pool: &SqlitePool) -> i64 {
+        count(pool, "SELECT COUNT(*) FROM outputs WHERE status = 'LOCKED'")
+    }
+
+    /// Forces the pending transaction under `key` into `status`.
+    fn set_status(pool: &SqlitePool, key: &str, status: PendingTransactionStatus) {
+        let conn = pool.get().expect("conn");
+        let id: String = conn
+            .query_row(
+                "SELECT id FROM pending_transactions WHERE idempotency_key = :key",
+                named_params! { ":key": key },
+                |row| row.get(0),
+            )
+            .expect("pending transaction exists");
+        db::update_pending_transaction_status(&conn, &id, status).expect("update status");
+    }
+
+    #[test]
+    fn an_exact_retry_replays_the_original_reservation() {
+        let (pool, _temp) = setup_funded_wallet(3);
+        let sender = sender_for(&pool);
+
+        let first = reserve(&sender, &pool, "k", 1_000).expect("first reservation");
+        let retry = reserve(&sender, &pool, "k", 1_000).expect("a retry is idempotent");
+
+        assert_eq!(first, retry, "a retry must land on the original reservation");
+        assert_eq!(pending_transaction_count(&pool), 1);
+    }
+
+    /// Two callers presenting one key must both be served the same reservation.
+    ///
+    /// The idempotency read used to happen before the write transaction opened,
+    /// so both callers saw "no record" and both fell through. The loser then hit
+    /// the `UNIQUE (account_id, idempotency_key)` index and was told its key
+    /// already existed — a hard failure for what is by definition a retry.
+    #[test]
+    fn concurrent_requests_with_one_key_share_one_reservation() {
+        let (pool, _temp) = setup_funded_wallet(6);
+        let barrier = Arc::new(Barrier::new(2));
+
+        let handles: Vec<_> = (0..2)
+            .map(|_| {
+                let pool = pool.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    let sender = sender_for(&pool);
+                    let mut processed_transaction = request(&sender, "k", 1_000);
+                    // Hold the connection before lining up, so the race is over the
+                    // database's write lock and not over the pool.
+                    let mut connection = pool.get().expect("conn");
+                    barrier.wait();
+                    sender.create_or_find_pending_transaction(&mut connection, &mut processed_transaction)
+                })
+            })
+            .collect();
+
+        let ids: Vec<String> = handles
+            .into_iter()
+            .map(|handle| {
+                handle
+                    .join()
+                    .expect("thread")
+                    .expect("a concurrent retry must replay, not collide")
+            })
+            .collect();
+
+        assert_eq!(ids[0], ids[1], "both callers must land on one reservation");
+        assert_eq!(pending_transaction_count(&pool), 1, "only one reservation may be taken");
+    }
+
+    #[test]
+    fn a_completed_key_cannot_be_replayed() {
+        // The UTXOs behind the key are already spent by a broadcast transaction,
+        // so handing them back would build something that can never confirm.
+        let (pool, _temp) = setup_funded_wallet(3);
+        let sender = sender_for(&pool);
+
+        reserve(&sender, &pool, "k", 1_000).expect("initial reservation");
+        set_status(&pool, "k", PendingTransactionStatus::Completed);
+
+        let err = reserve(&sender, &pool, "k", 1_000).expect_err("a completed key must not be replayable");
+        assert!(
+            matches!(conflict(&err), IdempotencyConflict::AlreadyCompleted { .. }),
+            "expected an already-completed conflict, got: {err}",
+        );
+    }
+
+    /// A key whose reservation is gone must say so.
+    ///
+    /// The unlocker clears `locked_by_request_id` when it expires a lock, so
+    /// replaying such a key used to sail past the idempotency check, find no
+    /// locked outputs, and fail obscurely while building a zero-input
+    /// transaction.
+    #[test]
+    fn a_key_whose_reservation_is_gone_reports_why() {
+        for status in [PendingTransactionStatus::Expired, PendingTransactionStatus::Cancelled] {
+            let (pool, _temp) = setup_funded_wallet(3);
+            let sender = sender_for(&pool);
+
+            reserve(&sender, &pool, "k", 1_000).expect("initial reservation");
+            set_status(&pool, "k", status.clone());
+
+            let err = reserve(&sender, &pool, "k", 1_000).expect_err("a dead reservation cannot be replayed");
+            assert!(
+                matches!(conflict(&err), IdempotencyConflict::NoLongerActive { .. }),
+                "expected a no-longer-active conflict for {status}, got: {err}",
+            );
+        }
+    }
+
+    #[test]
+    fn replaying_a_key_with_a_different_payment_is_rejected() {
+        // Same key, different amount: serving that replay would build a payment
+        // the original client never asked for out of its reserved UTXOs.
+        let (pool, _temp) = setup_funded_wallet(3);
+        let sender = sender_for(&pool);
+
+        let original = reserve(&sender, &pool, "k", 1_000).expect("original reservation");
+        let reserved = locked_output_count(&pool);
+
+        let err = reserve(&sender, &pool, "k", 2_000).expect_err("a replay with a different request must be refused");
+        assert!(
+            matches!(conflict(&err), IdempotencyConflict::RequestMismatch { .. }),
+            "expected a request mismatch, got: {err}",
+        );
+
+        assert_eq!(
+            locked_output_count(&pool),
+            reserved,
+            "the original reservation must survive the replay"
+        );
+        assert_eq!(
+            reserve(&sender, &pool, "k", 1_000).expect("the original client can still retry"),
+            original,
+        );
     }
 }

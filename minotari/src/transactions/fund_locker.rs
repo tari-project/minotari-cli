@@ -36,7 +36,7 @@ use uuid::Uuid;
 
 use crate::{
     api::types::LockFundsResult,
-    db::{self},
+    db::{self, PendingTransactionRecord},
     log::mask_amount,
     models::PendingTransactionStatus,
     transactions::{
@@ -115,7 +115,7 @@ enum Replay {
     Existing(Box<LockFundsResult>),
 }
 
-/// Decides whether `binding`'s key may short-circuit onto an existing reservation.
+/// Decides whether `binding`'s key may short-circuit onto `record`.
 ///
 /// The key by itself proves nothing: it is a client-chosen string, and the
 /// stored reservation was taken for whatever request first presented it. So the
@@ -124,32 +124,22 @@ enum Replay {
 /// cancelled — is refused outright rather than being quietly treated as a
 /// brand-new request.
 ///
-/// A request without a key is always [`Replay::Fresh`]: nothing to replay onto.
-fn resolve_replay(conn: &Connection, binding: &IdempotencyBinding, account_id: i64) -> Result<Replay, anyhow::Error> {
-    let Some(key) = binding.key() else {
-        return Ok(Replay::Fresh);
-    };
-    let Some(record) = db::find_pending_transaction_record_by_idempotency_key(conn, key, account_id)? else {
-        return Ok(Replay::Fresh);
-    };
-
+/// Lives here rather than inside [`resolve_replay`] because
+/// [`TransactionSender`](crate::transactions::manager::TransactionSender)
+/// replays onto the pending transaction's id instead of its locked funds, and
+/// the two paths must agree on what a key is entitled to.
+pub(crate) fn check_replay_allowed(
+    record: &PendingTransactionRecord,
+    binding: &IdempotencyBinding,
+    key: &str,
+) -> Result<(), anyhow::Error> {
     // Rejects a replay carrying different recipients or amounts, a replay
     // arriving at a different endpoint, and — because their stored scope is the
     // empty string — any row written before scopes were recorded.
     binding.check_matches(&record.operation, &record.request_hash)?;
 
     match record.status {
-        PendingTransactionStatus::Pending => {
-            info!(
-                target: "audit",
-                idempotency_key = key,
-                operation = binding.operation().as_str();
-                "Found existing pending transaction lock"
-            );
-            Ok(Replay::Existing(Box::new(db::locked_funds_for_pending_transaction(
-                conn, &record,
-            )?)))
-        },
+        PendingTransactionStatus::Pending => Ok(()),
         // The UTXOs behind this key are already spent by a broadcast
         // transaction. Re-locking them would build a transaction that can never
         // confirm; handing them back would be worse.
@@ -161,13 +151,38 @@ fn resolve_replay(conn: &Connection, binding: &IdempotencyBinding, account_id: i
         // Expired or cancelled: the reservation is gone. Falling through to a
         // fresh selection would collide with the unique (account, key) index
         // anyway, so say plainly why.
-        status => Err(IdempotencyConflict::NoLongerActive {
+        ref status => Err(IdempotencyConflict::NoLongerActive {
             key: key.to_string(),
             operation: binding.operation(),
             status: status.to_string(),
         }
         .into()),
     }
+}
+
+/// Resolves what `binding`'s key is entitled to, reading the stored reservation
+/// through `conn`.
+///
+/// A request without a key is always [`Replay::Fresh`]: nothing to replay onto.
+fn resolve_replay(conn: &Connection, binding: &IdempotencyBinding, account_id: i64) -> Result<Replay, anyhow::Error> {
+    let Some(key) = binding.key() else {
+        return Ok(Replay::Fresh);
+    };
+    let Some(record) = db::find_pending_transaction_record_by_idempotency_key(conn, key, account_id)? else {
+        return Ok(Replay::Fresh);
+    };
+
+    check_replay_allowed(&record, binding, key)?;
+
+    info!(
+        target: "audit",
+        idempotency_key = key,
+        operation = binding.operation().as_str();
+        "Found existing pending transaction lock"
+    );
+    Ok(Replay::Existing(Box::new(db::locked_funds_for_pending_transaction(
+        conn, &record,
+    )?)))
 }
 
 /// Manages temporary locking of UTXOs during transaction construction.

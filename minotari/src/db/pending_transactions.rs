@@ -337,36 +337,6 @@ pub fn find_pending_transaction_by_idempotency_key(
     Ok(result)
 }
 
-pub fn check_if_transaction_was_already_completed_by_idempotency_key(
-    conn: &Connection,
-    idempotency_key: &str,
-    account_id: i64,
-) -> WalletDbResult<bool> {
-    let status_completed = PendingTransactionStatus::Completed.to_string();
-
-    let mut stmt = conn.prepare_cached(
-        r#"
-        SELECT 1
-        FROM pending_transactions
-        WHERE idempotency_key = :key AND account_id = :acc_id AND status = :status
-        LIMIT 1
-        "#,
-    )?;
-
-    let exists: Option<i32> = stmt
-        .query_row(
-            named_params! {
-                ":key": idempotency_key,
-                ":acc_id": account_id,
-                ":status": status_completed
-            },
-            |row| row.get(0),
-        )
-        .optional()?;
-
-    Ok(exists.is_some())
-}
-
 pub fn check_if_transaction_is_expired_by_idempotency_key(
     conn: &Connection,
     idempotency_key: &str,
