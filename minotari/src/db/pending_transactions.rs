@@ -142,19 +142,12 @@ pub fn claim_pending_transaction_for_broadcast(
     conn: &Connection,
     id: &str,
 ) -> WalletDbResult<Option<PendingTransactionStatus>> {
-    let claimed = conn.execute(
-        r#"
-        UPDATE pending_transactions
-        SET status = :completed
-        WHERE id = :id AND status = :pending
-        "#,
-        named_params! {
-            ":completed": PendingTransactionStatus::Completed.to_string(),
-            ":id": id,
-            ":pending": PendingTransactionStatus::Pending.to_string(),
-        },
-    )?;
-    if claimed > 0 {
+    if update_pending_transaction_status_if(
+        conn,
+        id,
+        &PendingTransactionStatus::Pending,
+        PendingTransactionStatus::Completed,
+    )? {
         return Ok(None);
     }
 
@@ -195,6 +188,42 @@ pub fn find_expired_pending_transactions(conn: &Connection) -> WalletDbResult<Ve
     let results = from_rows::<ExpiredTransaction>(rows).collect::<Result<Vec<_>, _>>()?;
 
     Ok(results)
+}
+
+/// Moves a pending transaction to `status`, but only from `expected`.
+///
+/// Returns whether the row moved. Use this wherever the decision to write was
+/// taken from an earlier, separate read: the unlocker lists expired rows in
+/// autocommit and then acts on them one write transaction at a time, so a
+/// reservation can be claimed for broadcast in the gap. Expiring it then would
+/// release the inputs of a transaction that is already on the network.
+pub fn update_pending_transaction_status_if(
+    conn: &Connection,
+    id: &str,
+    expected: &PendingTransactionStatus,
+    status: PendingTransactionStatus,
+) -> WalletDbResult<bool> {
+    debug!(
+        id = id,
+        expected:% = expected,
+        status:% = status;
+        "DB: Updating pending transaction status if unchanged"
+    );
+
+    let moved = conn.execute(
+        r#"
+        UPDATE pending_transactions
+        SET status = :status
+        WHERE id = :id AND status = :expected
+        "#,
+        named_params! {
+            ":status": status.to_string(),
+            ":id": id,
+            ":expected": expected.to_string(),
+        },
+    )?;
+
+    Ok(moved > 0)
 }
 
 pub fn update_pending_transaction_status(

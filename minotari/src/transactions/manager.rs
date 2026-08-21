@@ -357,6 +357,15 @@ impl TransactionSender {
         Ok(())
     }
 
+    /// Fails when this send's reservation has outlived its lock.
+    ///
+    /// A predicate only: it used to write the row to `Expired` here, before the
+    /// caller's error handler had decided whether this send owns the reservation
+    /// at all. A replay would then mark someone else's row `Expired` and, having
+    /// no right to unlock it, leave it that way — and the unlocker only ever
+    /// revisits `Pending` rows, so those UTXOs stayed locked for good. Leaving
+    /// the write to `fail_and_unlock_pending_transaction` keeps status and unlock
+    /// in one transaction and behind one ownership check.
     fn check_if_transaction_expired(
         &self,
         conn: &Connection,
@@ -369,7 +378,6 @@ impl TransactionSender {
         )?;
 
         if is_expired {
-            db::update_pending_transaction_status(conn, processed_transaction.id(), PendingTransactionStatus::Expired)?;
             return Err(anyhow!("The transaction has expired."));
         }
 
@@ -993,7 +1001,10 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
-    use crate::db::{create_account, get_account_by_name, init_db, insert_scanned_tip_block};
+    use crate::{
+        db::{create_account, get_account_by_name, init_db, insert_scanned_tip_block},
+        tasks::unlocker::TransactionUnlocker,
+    };
 
     /// A send must make do with one database connection.
     ///
@@ -1218,6 +1229,20 @@ mod tests {
             )
             .expect("pending transaction exists");
         PendingTransactionStatus::from_str(&status).expect("known status")
+    }
+
+    /// Pushes a reservation's lock into the past, the way a slow offline signer does.
+    fn backdate_expiry(pool: &SqlitePool, key: &str) {
+        pool.get()
+            .expect("conn")
+            .execute(
+                "UPDATE pending_transactions SET expires_at = :expired WHERE idempotency_key = :key",
+                named_params! {
+                    ":expired": Utc::now() - chrono::TimeDelta::hours(1),
+                    ":key": key,
+                },
+            )
+            .expect("backdate expiry");
     }
 
     #[test]
@@ -1534,6 +1559,118 @@ mod tests {
             outcomes.iter().filter(|outcome| outcome.is_ok()).count(),
             1,
             "exactly one caller may broadcast a reservation",
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Expired reservations
+    // -----------------------------------------------------------------------
+
+    /// A replay must not expire a reservation it does not own.
+    ///
+    /// The expiry check used to write the row to `Expired` itself, before the
+    /// error handler had decided whether this send owns it. A replay therefore
+    /// marked someone else's row `Expired` and then — correctly — declined to
+    /// unlock it. Nothing recovered those UTXOs: the unlocker only revisits
+    /// `Pending` rows, and no completed transaction existed to unlock from.
+    #[test]
+    fn a_replay_must_not_expire_a_reservation_it_does_not_own() {
+        let (pool, _temp) = setup_funded_wallet(3);
+        let sender = sender_for(&pool);
+
+        let mut owner = request(&sender, "k", 1_000);
+        let id = sender
+            .create_or_find_pending_transaction(&mut pool.get().expect("conn"), &mut owner)
+            .expect("reservation");
+        owner.update_id(id);
+        let locked = locked_output_count(&pool);
+        assert!(locked > 0, "the reservation must have locked something");
+
+        // The signer took longer than the lock.
+        backdate_expiry(&pool, "k");
+
+        let mut replayer = request(&sender, "k", 1_000);
+        let replayed_id = sender
+            .create_or_find_pending_transaction(&mut pool.get().expect("conn"), &mut replayer)
+            .expect("replay");
+        replayer.update_id(replayed_id);
+        assert!(!replayer.owns_reservation());
+
+        // The sequence `finalize_transaction_and_broadcast` runs at its head.
+        let connection = pool.get().expect("conn");
+        sender
+            .check_if_transaction_expired(&connection, &replayer)
+            .expect_err("the lock has expired");
+        sender.release_unclaimed_reservation(&connection, &replayer);
+
+        assert_eq!(
+            status_of(&pool, "k"),
+            PendingTransactionStatus::Pending,
+            "a replay must leave the row for its owner and the unlocker",
+        );
+        assert_eq!(locked_output_count(&pool), locked, "the UTXOs must still be reserved");
+        assert_eq!(
+            db::find_expired_pending_transactions(&connection)
+                .expect("scan for expired")
+                .len(),
+            1,
+            "the unlocker must still be able to recover this reservation",
+        );
+
+        // And the request that created it still releases both halves together.
+        sender
+            .check_if_transaction_expired(&connection, &owner)
+            .expect_err("the lock has expired");
+        sender.release_unclaimed_reservation(&connection, &owner);
+        assert_eq!(status_of(&pool, "k"), PendingTransactionStatus::Expired);
+        assert_eq!(locked_output_count(&pool), 0, "the owner's release frees the UTXOs");
+    }
+
+    /// The unlocker must not act on a reservation claimed after it was listed.
+    ///
+    /// Its `SELECT` runs in autocommit and each row is then handled in its own
+    /// write transaction, so a send can claim one in the gap. Expiring it then
+    /// returned the inputs of a broadcast transaction to `Unspent`, free for the
+    /// next send to spend again.
+    #[test]
+    fn the_unlocker_skips_a_reservation_claimed_after_it_was_listed() {
+        let (pool, _temp) = setup_funded_wallet(3);
+        let sender = sender_for(&pool);
+
+        let mut processed_transaction = request(&sender, "k", 1_000);
+        let id = sender
+            .create_or_find_pending_transaction(&mut pool.get().expect("conn"), &mut processed_transaction)
+            .expect("reservation");
+        processed_transaction.update_id(id);
+        let locked = locked_output_count(&pool);
+        backdate_expiry(&pool, "k");
+
+        // The unlocker lists it while it is still expired and pending.
+        let mut connection = pool.get().expect("conn");
+        let listed = db::find_expired_pending_transactions(&connection).expect("scan for expired");
+        assert_eq!(listed.len(), 1, "the reservation is due for unlocking");
+
+        // A send claims it and broadcasts before the loop reaches the row.
+        sender
+            .claim_for_broadcast(&pool.get().expect("conn"), &processed_transaction)
+            .expect("claim");
+
+        for tx in listed {
+            assert!(
+                !TransactionUnlocker::expire_and_unlock(&mut connection, &tx.id).expect("unlock pass"),
+                "the unlocker must decline a reservation that is no longer pending",
+            );
+        }
+
+        assert_eq!(
+            status_of(&pool, "k"),
+            PendingTransactionStatus::Completed,
+            "the unlocker must not overwrite a claimed reservation",
+        );
+        assert_eq!(
+            locked_output_count(&pool),
+            locked,
+            "the inputs of a broadcast transaction must stay locked",
         );
     }
 }

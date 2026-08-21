@@ -19,23 +19,55 @@ impl TransactionUnlocker {
     }
 
     pub fn unlock_expired_transactions(conn: &mut Connection) -> Result<(), anyhow::Error> {
+        // This listing runs in autocommit, so every row it returns is a decision
+        // taken from a stale read: by the time the loop reaches one, a send may
+        // have claimed it for broadcast. Each row is re-checked under its own
+        // write lock rather than trusted from here.
         let expired_txs = db::find_expired_pending_transactions(conn)?;
 
         for tx in expired_txs {
-            info!(target: "audit", id = &*tx.id; "Transaction expired: unlocking funds");
-            // BEGIN IMMEDIATE: acquire the write lock up front. A deferred
-            // transaction that upgrades read->write can dead-lock against another
-            // writer in WAL mode (SQLITE_BUSY_SNAPSHOT, surfaced as "database is
-            // locked"), which busy_timeout does not retry.
-            let transaction = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-
-            db::update_pending_transaction_status(&transaction, &tx.id, PendingTransactionStatus::Expired)?;
-            db::unlock_outputs_for_request(&transaction, &tx.id)?;
-
-            transaction.commit()?;
+            if Self::expire_and_unlock(conn, &tx.id)? {
+                info!(target: "audit", id = &*tx.id; "Transaction expired: unlocked funds");
+            } else {
+                info!(
+                    target: "audit",
+                    id = &*tx.id;
+                    "Transaction was claimed after it was listed as expired; leaving its funds locked"
+                );
+            }
         }
 
         Ok(())
+    }
+
+    /// Expires one reservation and releases its UTXOs, if it is still `Pending`.
+    ///
+    /// Returns whether it acted. The status guard is what makes the stale
+    /// listing above safe: a reservation claimed for broadcast between the
+    /// `SELECT` and this write is already `Completed`, and unlocking its outputs
+    /// would hand the inputs of a transaction that is on the network back to the
+    /// next send to spend again.
+    pub(crate) fn expire_and_unlock(conn: &mut Connection, pending_tx_id: &str) -> Result<bool, anyhow::Error> {
+        // BEGIN IMMEDIATE: acquire the write lock up front. A deferred
+        // transaction that upgrades read->write can dead-lock against another
+        // writer in WAL mode (SQLITE_BUSY_SNAPSHOT, surfaced as "database is
+        // locked"), which busy_timeout does not retry.
+        let transaction = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+
+        let expired = db::update_pending_transaction_status_if(
+            &transaction,
+            pending_tx_id,
+            &PendingTransactionStatus::Pending,
+            PendingTransactionStatus::Expired,
+        )?;
+        if !expired {
+            return Ok(false);
+        }
+
+        db::unlock_outputs_for_request(&transaction, pending_tx_id)?;
+        transaction.commit()?;
+
+        Ok(true)
     }
 
     pub fn run(self, mut shutdown_rx: broadcast::Receiver<()>) -> JoinHandle<Result<(), anyhow::Error>> {
