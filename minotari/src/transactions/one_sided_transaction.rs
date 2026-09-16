@@ -288,6 +288,7 @@ impl OneSidedTransaction {
         let main_payment_id = payment_recipients.first().expect("Already checked").payment_id.clone();
 
         let result = prepare_one_sided_transaction_for_signing(
+            &key_manager,
             tx_id,
             tx_builder,
             &payment_recipients,
