@@ -1,11 +1,15 @@
 use anyhow::{Result, anyhow};
 use log::debug;
-use tari_script::TariScript;
-use tari_transaction_components::helpers::borsh::SerializedSize;
+use tari_common_types::{tari_address::TariAddress, types::FixedHash};
+use tari_script::{TariScript, script};
 use tari_transaction_components::{
-    fee::Fee,
+    fee::{Fee, recipient_output_features_and_scripts_size},
     tari_amount::MicroMinotari,
-    transaction_components::{OutputFeatures, covenants::Covenant},
+    transaction_components::{
+        OutputFeatures,
+        covenants::Covenant,
+        memo_field::{MemoField, TxType},
+    },
     weight::TransactionWeight,
 };
 
@@ -137,15 +141,123 @@ impl FeeEstimator {
     }
 }
 
+/// Measure one output the way the transaction builder charges for it.
+///
+/// Upstream's `recipient_output_features_and_scripts_size` is the authority here: it counts
+/// the features, the script, the covenant **and the memo carried in the output's encrypted
+/// data**, then rounds up to the fee's gram boundary. Summing the first three by hand - which
+/// is what this module used to do - silently drops the memo, which is usually the largest of
+/// the four.
+pub fn measure_output_size(features: &OutputFeatures, script: &TariScript, memo: &MemoField) -> Result<usize> {
+    recipient_output_features_and_scripts_size(
+        &TransactionWeight::latest(),
+        features,
+        script,
+        &Covenant::default(),
+        memo,
+    )
+    .map_err(|e| anyhow!("Failed to measure output size: {e}"))
+}
+
+/// A conservative per-output size for a payment whose memo carries `payment_id_len` bytes.
+///
+/// UTXO selection charges this once per output and once for change, so it must over-estimate
+/// rather than under-estimate: a short answer locks inputs that cannot cover the fee the
+/// builder later computes, and `reserve_sender_offset_keys` then fails the send *after* the
+/// funds are reserved, leaving the user to wait out the lock. Over-estimating only makes the
+/// change output slightly smaller than it needed to be.
+///
+/// The shape measured is the change output, which is the largest the builder emits on its own
+/// account: a `PushPubKey` script and a `TransactionInfo` memo holding the recipient address,
+/// one sent-output hash and the caller's payment id, padded to a 130-byte floor.
+pub fn estimated_output_size_for_payment_id(payment_id_len: usize) -> Result<usize> {
+    // The script the builder derives for a recipient, and for its own change output.
+    let script = script!(PushPubKey(Box::default())).map_err(|e| anyhow!("Failed to build the default script: {e}"))?;
+
+    // A change memo: a dual address, one sent-output hash and the payment id. `TariAddress`
+    // defaults to the dual form, which is the larger of the two it can take.
+    let change_memo = |payment_id: Vec<u8>| {
+        MemoField::new_transaction_info(
+            TariAddress::default(),
+            MicroMinotari::zero(),
+            MicroMinotari::zero(),
+            true,
+            TxType::PaymentToOther,
+            vec![FixedHash::zero()],
+            payment_id,
+        )
+    };
+
+    // A memo has a hard 256-byte ceiling, so a payment id past it cannot go in a change memo
+    // at all - upstream's own `change_features_and_scripts_size` measures such a memo as zero
+    // and the send fails when the builder tries to construct it for real. There is no estimate
+    // that saves that transaction, so fall back to the floor rather than refusing to quote.
+    let memo = change_memo(vec![0u8; payment_id_len])
+        .or_else(|_| change_memo(Vec::new()))
+        .map_err(|e| anyhow!("Failed to build the default change memo: {e}"))?;
+
+    measure_output_size(&OutputFeatures::default(), &script, &memo)
+}
+
+/// The per-output size to assume when even the payment id is unknown.
 pub fn get_default_features_and_scripts_size() -> Result<usize> {
-    let fee_calc = Fee::new(TransactionWeight::latest());
+    estimated_output_size_for_payment_id(0)
+}
 
-    let get_size = |res: Result<usize, _>| res.map_err(|e| anyhow!("Serialization error: {}", e));
-    let output_features_size = get_size(OutputFeatures::default().get_serialized_size())?;
-    let tari_script_size = get_size(TariScript::default().get_serialized_size())?;
-    let covenant_size = get_size(Covenant::default().get_serialized_size())?;
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tari_script::script;
 
-    Ok(fee_calc
-        .weighting()
-        .round_up_features_and_scripts_size(output_features_size + tari_script_size + covenant_size))
+    /// The estimate has to cover what the builder actually charges, or selection locks inputs
+    /// that cannot pay the fee and the send dies after the funds are reserved.
+    #[test]
+    fn the_default_estimate_covers_a_one_sided_recipient_output() {
+        let recipient_memo = MemoField::new_open_from_string("invoice-12345", TxType::PaymentToOther).unwrap();
+        let recipient = measure_output_size(
+            &OutputFeatures::default(),
+            &script!(PushPubKey(Box::default())).unwrap(),
+            &recipient_memo,
+        )
+        .unwrap();
+
+        assert!(
+            get_default_features_and_scripts_size().unwrap() >= recipient,
+            "default estimate must not be smaller than a real recipient output"
+        );
+    }
+
+    /// The old implementation summed features + an *empty* script + covenant and stopped, which
+    /// is where the under-estimate came from. Both missing terms have to be back.
+    #[test]
+    fn the_default_estimate_counts_the_script_and_the_memo() {
+        let bare = measure_output_size(
+            &OutputFeatures::default(),
+            &TariScript::default(),
+            &MemoField::new_empty(),
+        )
+        .unwrap();
+
+        assert!(
+            get_default_features_and_scripts_size().unwrap() > bare,
+            "default estimate must count the script and the memo, not just features and covenant"
+        );
+    }
+
+    /// A longer payment id is a bigger output, and selection has to be told so.
+    #[test]
+    fn a_longer_payment_id_raises_the_estimate() {
+        let short = estimated_output_size_for_payment_id(0).unwrap();
+        let long = estimated_output_size_for_payment_id(100).unwrap();
+        assert!(long > short, "a 100-byte payment id must cost more than an empty one");
+    }
+    /// A payment id too long for a memo cannot be quoted exactly; the estimate falls back to
+    /// the floor instead of failing the caller's request outright.
+    #[test]
+    fn an_oversized_payment_id_falls_back_to_the_floor() {
+        assert_eq!(
+            estimated_output_size_for_payment_id(4096).unwrap(),
+            estimated_output_size_for_payment_id(0).unwrap()
+        );
+    }
 }

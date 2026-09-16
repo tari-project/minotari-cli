@@ -108,6 +108,7 @@ use crate::{
             DisplayedTransaction, DisplayedTransactionBuilder, TransactionDirection, TransactionDisplayStatus,
             TransactionInput, TransactionSource,
         },
+        fee_estimator::estimated_output_size_for_payment_id,
         fund_locker::{check_replay_allowed, lock_expiry_at},
         idempotency::{IdempotencyBinding, IdempotencyConflict, IdempotencyOperation, RequestFingerprint},
         input_selector::{InputSelector, UtxoSelection},
@@ -396,7 +397,16 @@ impl TransactionSender {
     ) -> Result<UtxoSelection, anyhow::Error> {
         let amount = processed_transaction.recipient.amount;
         let num_outputs = 1;
-        let estimated_output_size = None;
+        // Selection has to charge for the memo this send will actually carry. Left at the
+        // default, a long payment id is weight nobody reserved inputs for, and the send fails
+        // at build time with the funds already locked.
+        let estimated_output_size = Some(estimated_output_size_for_payment_id(
+            processed_transaction
+                .recipient
+                .payment_id
+                .as_ref()
+                .map_or(0, String::len),
+        )?);
 
         let input_selector = InputSelector::new(self.account.id, self.confirmation_window);
         let utxo_selection = input_selector.fetch_unspent_outputs(

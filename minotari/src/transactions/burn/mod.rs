@@ -40,6 +40,7 @@ use crate::{
     db::{AccountRow, NewBurnProof},
     models::PendingTransactionStatus,
     transactions::{
+        fee_estimator::{estimated_output_size_for_payment_id, measure_output_size},
         fund_locker::FundLocker,
         idempotency::{IdempotencyBinding, IdempotencyConflict, IdempotencyOperation, RequestFingerprint},
     },
@@ -139,20 +140,6 @@ pub fn create_burn_tx(
     );
 
     let sender_address = account.get_address(network, password)?;
-    let fund_locker = FundLocker::new();
-    let locked_funds = fund_locker.lock(
-        conn,
-        account.id,
-        params.amount,
-        1,
-        params.fee_per_gram,
-        None,
-        params.idempotency_binding(),
-        params.seconds_to_lock,
-        params.confirmation_window,
-    )?;
-
-    let key_manager = account.get_key_manager(password)?;
 
     let output_features = match &params.claim_public_key {
         Some(cpk) => {
@@ -171,6 +158,30 @@ pub fn create_burn_tx(
     // choose; it is needed both to measure the output for the reservation and to build it.
     let burn_script = script!(Nop)?;
     let weight_params = *consensus_constants.transaction_weight_params();
+
+    // Measure before locking, not after. A burn output carries the claim key and the sidechain
+    // key in its features, so it is materially larger than the generic estimate; selection that
+    // charged the generic size would lock inputs that cannot cover the real fee, and the burn
+    // would fail at build time with the funds already reserved. The change output is measured
+    // too, because selection charges one size for every output it plans.
+    let burn_output_size = measure_output_size(&output_features, &burn_script, &memo)?;
+    let change_output_size = estimated_output_size_for_payment_id(params.payment_id.as_deref().map_or(0, str::len))?;
+    let estimated_output_size = burn_output_size.max(change_output_size);
+
+    let fund_locker = FundLocker::new();
+    let locked_funds = fund_locker.lock(
+        conn,
+        account.id,
+        params.amount,
+        1,
+        params.fee_per_gram,
+        Some(estimated_output_size),
+        params.idempotency_binding(),
+        params.seconds_to_lock,
+        params.confirmation_window,
+    )?;
+
+    let key_manager = account.get_key_manager(password)?;
 
     // Assemble the transaction.
     let mut tx_builder = TransactionBuilder::new(consensus_constants, key_manager.clone(), network)?;
