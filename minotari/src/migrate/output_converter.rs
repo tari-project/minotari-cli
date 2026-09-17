@@ -199,6 +199,8 @@ pub fn convert_output(row: &ConsoleOutputRow) -> Result<Option<ConvertedOutput>,
         )
     })?;
 
+    reject_unspendable_script_key(&script_key_id, legacy_status, &row_label(row))?;
+
     let metadata_signature = ComAndPubSignature::new(
         CompressedCommitment::from_canonical_bytes(&row.metadata_signature_ephemeral_commitment)
             .map_err(|e| anyhow!("Output {}: bad metadata ephemeral commitment: {e}", row_label(row)))?,
@@ -273,6 +275,32 @@ pub fn convert_output(row: &ConsoleOutputRow) -> Result<Option<ConvertedOutput>,
         output_type: decode_output_type(row.output_type),
         lock_height,
     }))
+}
+
+/// Refuse a spendable row whose script key is `TariKeyId::Zero`.
+///
+/// `"zero"` parses cleanly to `TariKeyId::Zero`, so such a row would import as an ordinary
+/// spendable UTXO and then poison every transaction that selects it. The key manager refuses to
+/// compute a script offset when any input script key is `Zero` - such a key contributes nothing
+/// to the sum, so honouring it would hand back an offset that unblinds the wallet's root spend
+/// key - and it fails the whole call even when real keys are present alongside. The failure is
+/// therefore permanent, surfaces only once coin selection happens to pick that output, and takes
+/// an entire send down with it, which is far worse than refusing the row here.
+///
+/// A spent row is inert: it is never selected, so it migrates as normal.
+fn reject_unspendable_script_key(
+    script_key_id: &TariKeyId,
+    legacy_status: LegacyOutputStatus,
+    label: &str,
+) -> Result<(), anyhow::Error> {
+    if script_key_id == &TariKeyId::Zero && legacy_status.is_unspent() {
+        return Err(anyhow!(
+            "Output {label} has a zero script key, so this wallet cannot spend it - a zero script \
+             key marks an output the source wallet sent to someone else rather than one it owns. \
+             Re-check the source wallet before migrating, or exclude this output."
+        ));
+    }
+    Ok(())
 }
 
 /// Decode the console wallet's `outputs.output_type` i32 column into a
@@ -366,5 +394,29 @@ mod tests {
         // whole migration on a row we don't recognise.
         assert!(matches!(decode_output_type(99), OutputType::Standard));
         assert!(matches!(decode_output_type(-1), OutputType::Standard));
+    }
+
+    #[test]
+    fn a_zero_script_key_is_refused_only_while_the_output_is_still_spendable() {
+        // 5.7's key manager rejects a script offset computed over any `Zero` key, so importing
+        // such a row as spendable would make every send that selects it fail permanently.
+        for unspent in [
+            LegacyOutputStatus::Unspent,
+            LegacyOutputStatus::UnspentMinedUnconfirmed,
+            LegacyOutputStatus::EncumberedToBeSpent,
+        ] {
+            let err = reject_unspendable_script_key(&TariKeyId::Zero, unspent, "(test)")
+                .expect_err("a spendable zero script key must be refused");
+            assert!(err.to_string().contains("zero script key"), "got: {err}");
+        }
+
+        // A spent row is never selected, so it is harmless and must still migrate.
+        for spent in [LegacyOutputStatus::Spent, LegacyOutputStatus::SpentMinedUnconfirmed] {
+            assert!(reject_unspendable_script_key(&TariKeyId::Zero, spent, "(test)").is_ok());
+        }
+
+        // A real script key is fine in every state.
+        let real = TariKeyId::SpendKey;
+        assert!(reject_unspendable_script_key(&real, LegacyOutputStatus::Unspent, "(test)").is_ok());
     }
 }

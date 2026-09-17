@@ -108,6 +108,7 @@ use crate::{
             DisplayedTransaction, DisplayedTransactionBuilder, TransactionDirection, TransactionDisplayStatus,
             TransactionInput, TransactionSource,
         },
+        fee_estimator::estimated_output_size_for_payment_id,
         fund_locker::{check_replay_allowed, lock_expiry_at},
         idempotency::{IdempotencyBinding, IdempotencyConflict, IdempotencyOperation, RequestFingerprint},
         input_selector::{InputSelector, UtxoSelection},
@@ -396,7 +397,16 @@ impl TransactionSender {
     ) -> Result<UtxoSelection, anyhow::Error> {
         let amount = processed_transaction.recipient.amount;
         let num_outputs = 1;
-        let estimated_output_size = None;
+        // Selection has to charge for the memo this send will actually carry. Left at the
+        // default, a long payment id is weight nobody reserved inputs for, and the send fails
+        // at build time with the funds already locked.
+        let estimated_output_size = Some(estimated_output_size_for_payment_id(
+            processed_transaction
+                .recipient
+                .payment_id
+                .as_ref()
+                .map_or(0, String::len),
+        )?);
 
         let input_selector = InputSelector::new(self.account.id, self.confirmation_window);
         let utxo_selection = input_selector.fetch_unspent_outputs(
@@ -494,10 +504,12 @@ impl TransactionSender {
         Ok(pending_tx_id)
     }
 
+    /// Returns the builder together with the key manager it was built around: the payload the builder is handed to
+    /// is signed with that same key manager, so both halves have to come from one call.
     fn prepare_transaction_builder(
         &self,
         locked_utxos: Vec<WalletOutput>,
-    ) -> Result<TransactionBuilder<KeyManager>, anyhow::Error> {
+    ) -> Result<(TransactionBuilder<KeyManager>, KeyManager), anyhow::Error> {
         let key_manager = self.account.get_key_manager(&self.password)?;
         let consensus_constants = ConsensusConstantsBuilder::new(self.network).build();
         let mut tx_builder = TransactionBuilder::new(consensus_constants, key_manager.clone(), self.network)?;
@@ -508,7 +520,7 @@ impl TransactionSender {
             tx_builder.with_input(utxo.clone())?;
         }
 
-        Ok(tx_builder)
+        Ok((tx_builder, key_manager))
     }
 
     /// Starts a new transaction and returns an unsigned transaction for signing.
@@ -588,7 +600,7 @@ impl TransactionSender {
             }
             let utxos = utxo_selection.into_iter().map(|db_out| db_out.output).collect();
 
-            let tx_builder = self.prepare_transaction_builder(utxos)?;
+            let (tx_builder, key_manager) = self.prepare_transaction_builder(utxos)?;
 
             let sender_address = self.account.get_address(self.network, &self.password)?;
             let tx_id = TxId::new_random();
@@ -607,6 +619,7 @@ impl TransactionSender {
             };
 
             let res = prepare_one_sided_transaction_for_signing(
+                &key_manager,
                 tx_id,
                 tx_builder,
                 &[payment_recipient],

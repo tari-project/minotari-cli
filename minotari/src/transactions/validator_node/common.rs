@@ -93,7 +93,7 @@ pub(crate) fn build_vn_pay_to_self_tx(
     )?;
 
     let key_manager = account.get_key_manager(password)?;
-    let mut tx_builder = TransactionBuilder::new(consensus_constants, key_manager, network)?;
+    let mut tx_builder = TransactionBuilder::new(consensus_constants, key_manager.clone(), network)?;
     tx_builder.with_fee_per_gram(fee_per_gram);
     for utxo in &locked_funds.utxos {
         tx_builder.with_input(utxo.clone())?;
@@ -111,6 +111,13 @@ pub(crate) fn build_vn_pay_to_self_tx(
         payment_id: memo.clone(),
     };
 
-    prepare_one_sided_transaction_for_signing(tx_id, tx_builder, &[payment_recipient], memo, sender_address)
-        .map_err(Into::into)
+    prepare_one_sided_transaction_for_signing(
+        &key_manager,
+        tx_id,
+        tx_builder,
+        &[payment_recipient],
+        memo,
+        sender_address,
+    )
+    .map_err(Into::into)
 }

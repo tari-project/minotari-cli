@@ -27,8 +27,10 @@ use tari_transaction_components::{
     MicroMinotari, TransactionBuilder,
     consensus::ConsensusConstantsBuilder,
     key_manager::{TariKeyId, TransactionKeyManagerInterface},
+    transaction_builder::PendingOutput,
     transaction_components::{
         KernelFeatures, OutputFeatures, WalletOutputBuilder,
+        covenants::Covenant,
         memo_field::{MemoField, TxType},
     },
 };
@@ -38,6 +40,7 @@ use crate::{
     db::{AccountRow, NewBurnProof},
     models::PendingTransactionStatus,
     transactions::{
+        fee_estimator::{estimated_output_size_for_payment_id, measure_output_size},
         fund_locker::FundLocker,
         idempotency::{IdempotencyBinding, IdempotencyConflict, IdempotencyOperation, RequestFingerprint},
     },
@@ -137,20 +140,6 @@ pub fn create_burn_tx(
     );
 
     let sender_address = account.get_address(network, password)?;
-    let fund_locker = FundLocker::new();
-    let locked_funds = fund_locker.lock(
-        conn,
-        account.id,
-        params.amount,
-        1,
-        params.fee_per_gram,
-        None,
-        params.idempotency_binding(),
-        params.seconds_to_lock,
-        params.confirmation_window,
-    )?;
-
-    let key_manager = account.get_key_manager(password)?;
 
     let output_features = match &params.claim_public_key {
         Some(cpk) => {
@@ -159,9 +148,70 @@ pub fn create_burn_tx(
         None => OutputFeatures::create_burn_output(),
     };
 
-    // Derive the commitment mask key and sender offset key for the burn output.
+    let memo = params
+        .payment_id
+        .as_deref()
+        .and_then(|s| MemoField::new_open_from_string(s, TxType::Burn).ok())
+        .unwrap_or_else(|| MemoField::new_open_from_string("", TxType::Burn).unwrap_or_default());
+
+    // The burn output is built by hand rather than from a recipient spec, so the script is ours to
+    // choose; it is needed both to measure the output for the reservation and to build it.
+    let burn_script = script!(Nop)?;
+    let weight_params = *consensus_constants.transaction_weight_params();
+
+    // Measure before locking, not after. A burn output carries the claim key and the sidechain
+    // key in its features, so it is materially larger than the generic estimate; selection that
+    // charged the generic size would lock inputs that cannot cover the real fee, and the burn
+    // would fail at build time with the funds already reserved. The change output is measured
+    // too, because selection charges one size for every output it plans.
+    let burn_output_size = measure_output_size(&output_features, &burn_script, &memo)?;
+    let change_output_size = estimated_output_size_for_payment_id(params.payment_id.as_deref().map_or(0, str::len))?;
+    let estimated_output_size = burn_output_size.max(change_output_size);
+
+    let fund_locker = FundLocker::new();
+    let locked_funds = fund_locker.lock(
+        conn,
+        account.id,
+        params.amount,
+        1,
+        params.fee_per_gram,
+        Some(estimated_output_size),
+        params.idempotency_binding(),
+        params.seconds_to_lock,
+        params.confirmation_window,
+    )?;
+
+    let key_manager = account.get_key_manager(password)?;
+
+    // Assemble the transaction.
+    let mut tx_builder = TransactionBuilder::new(consensus_constants, key_manager.clone(), network)?;
+    tx_builder.with_fee_per_gram(params.fee_per_gram);
+    tx_builder.with_kernel_features(KernelFeatures::create_burn());
+    tx_builder.with_tx_type(TxType::Burn);
+    tx_builder.with_memo(memo.clone());
+
+    for utxo in &locked_funds.utxos {
+        tx_builder.with_input(utxo.clone())?;
+    }
+
+    // Every sender offset key comes from this one reservation, which is also where the fee and the
+    // change decision are made — so the burn output, which is attached afterwards, has to be
+    // declared here by value and weight even though it does not exist yet.
+    let pending_burn_output = PendingOutput::measured(
+        &weight_params,
+        params.amount,
+        &output_features,
+        &burn_script,
+        &Covenant::default(),
+        &memo,
+    )?;
+    let sender_offset_key = tx_builder
+        .reserve_sender_offset_keys(&[pending_burn_output])?
+        .pop()
+        .ok_or_else(|| anyhow!("Transaction builder reserved no sender offset key for the burn output"))?;
+
+    // Derive the commitment mask key for the burn output.
     let (commitment_mask_key, _script_key) = key_manager.get_next_commitment_mask_and_script_key()?;
-    let sender_offset_key = key_manager.get_random_key(None, None)?;
 
     // The encrypted data in the burn output is DH-encrypted to the claim_public_key
     // (so the L2 wallet can decrypt it). Fall back to the wallet's view key if no
@@ -174,16 +224,10 @@ pub fn create_burn_tx(
         None => key_manager.get_view_key().key_id,
     };
 
-    let memo = params
-        .payment_id
-        .as_deref()
-        .and_then(|s| MemoField::new_open_from_string(s, TxType::Burn).ok())
-        .unwrap_or_else(|| MemoField::new_open_from_string("", TxType::Burn).unwrap_or_default());
-
     // Build the burn output with explicit key material (not stealth-address derivation).
     let burn_output = WalletOutputBuilder::new(params.amount, commitment_mask_key.key_id.clone())
         .with_features(output_features)
-        .with_script(script!(Nop)?)
+        .with_script(burn_script)
         .with_input_data(Default::default())
         .with_sender_offset_public_key(sender_offset_key.pub_key.clone())
         .with_script_key(TariKeyId::Zero)
@@ -195,17 +239,6 @@ pub fn create_burn_tx(
     let output_hash = burn_output.output_hash();
     let commitment = burn_output.commitment().clone();
 
-    // Assemble the transaction.
-    let mut tx_builder = TransactionBuilder::new(consensus_constants, key_manager.clone(), network)?;
-    tx_builder.with_fee_per_gram(params.fee_per_gram);
-    tx_builder.with_kernel_features(KernelFeatures::create_burn());
-    tx_builder.with_tx_type(TxType::Burn);
-    tx_builder.with_memo(memo);
-
-    for utxo in &locked_funds.utxos {
-        tx_builder.with_input(utxo.clone())?;
-    }
-
     // Default address used as placeholder — burn outputs have no real "recipient".
     tx_builder.add_recipient(
         TariAddress::new_dual_address(
@@ -216,7 +249,7 @@ pub fn create_burn_tx(
             None,
         )?,
         burn_output,
-        Some(sender_offset_key.key_id),
+        sender_offset_key.key_id,
         Some(recovery_key_id),
     )?;
 
