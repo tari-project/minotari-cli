@@ -54,7 +54,7 @@ pub struct WalletConfig {
     pub account_name: Option<String>,
     pub webhook: WebhookConfig,
     /// Directory where complete burn proof JSON files are written after a burn transaction is confirmed
-    /// and the kernel merkle proof is fetched from the base node.
+    /// and the burn output proof is fetched from the base node.
     /// If not set, defaults to the platform data directory: `<data_dir>/tari/<network>/burn_proofs`.
     pub burn_proofs_dir: Option<PathBuf>,
 }

@@ -1,66 +1,30 @@
-//! Background task that fetches kernel merkle proofs for confirmed burn outputs
+//! Background task that fetches burn output proofs for confirmed burn outputs
 //! and writes complete [`CompleteClaimBurnProof`] JSON files to disk.
 //!
 //! # Flow
 //!
 //! 1. Poll `burn_proofs` table for records with `status = 'pending_merkle'`
-//! 2. For each, call `/generate_kernel_merkle_proof` on the base node
-//! 3. Assemble [`CompleteClaimBurnProof`] from the stored partial proof + merkle response
+//! 2. For each, call `/generate_burn_output_proof` on the base node with the burn commitment
+//! 3. Check the proof is for the expected output, then assemble [`CompleteClaimBurnProof`] from the stored partial
+//!    proof and the burn output proof
 //! 4. Write `{claim_public_key}-{commitment_hex}.json` to `burn_proofs_dir`
 //! 5. Mark the DB record as `complete`
 
 use std::{path::PathBuf, time::Duration};
 
 use log::{error, info, warn};
-use serde::{Deserialize, Serialize};
+use tari_common::configuration::Network;
 use tari_common_types::{
-    burn_proof::EncodedMerkleProof,
-    serializers,
-    types::{CompressedCommitment, CompressedPublicKey},
+    burn_proof::BurnOutputProof,
+    types::{CompressedPublicKey, PrivateKey},
 };
 use tari_crypto::ristretto::CompressedRistrettoSchnorr;
-use tari_transaction_components::rpc::models::GenerateKernelMerkleProofResponse;
+use tari_sidechain::{BurnClaimProof, CompleteClaimBurnProof};
+use tari_transaction_components::{
+    consensus::ConsensusManager, transaction_components::burn_output_proof::OutputHashPreimageExt,
+};
+use tari_utilities::byte_array::ByteArray;
 use tokio::{fs, sync::broadcast, task::JoinHandle, time::interval};
-
-// TODO: Remove these three local type definitions once the `tari` workspace dependency is bumped to a version that
-// includes commit 5a278cb ("fix(wallet): save complete burn proof in file", 2026-03-20).
-// At that point `tari_sidechain` will export `CompleteClaimBurnProof`, `BurnClaimProof`, and
-// `AbridgedTransactionKernel` directly. Replace the three structs below with:
-//
-//   use tari_sidechain::{AbridgedTransactionKernel, BurnClaimProof, CompleteClaimBurnProof};
-//
-// and add `tari_sidechain = { workspace = true }` back to minotari/Cargo.toml and
-// `tari_sidechain = { version = "..." }` to the workspace Cargo.toml.
-
-/// Mirrors `tari_sidechain::CompleteClaimBurnProof`. Matches the exact JSON format the L2 wallet daemon expects.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CompleteClaimBurnProof {
-    pub claim_proof: BurnClaimProof,
-    #[serde(with = "serializers::base64")]
-    pub encrypted_data: Vec<u8>,
-}
-
-/// Mirrors `tari_sidechain::BurnClaimProof`.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct BurnClaimProof {
-    pub burn_public_key: CompressedPublicKey,
-    pub commitment: CompressedCommitment,
-    pub ownership_proof: CompressedRistrettoSchnorr,
-    pub encoded_merkle_proof: EncodedMerkleProof,
-    pub kernel: AbridgedTransactionKernel,
-    pub value: u64,
-    pub sender_offset_public_key: CompressedPublicKey,
-}
-
-/// Mirrors `tari_sidechain::AbridgedTransactionKernel`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct AbridgedTransactionKernel {
-    pub version: u8,
-    pub fee: u64,
-    pub lock_height: u64,
-    pub excess: CompressedCommitment,
-    pub excess_sig: CompressedRistrettoSchnorr,
-}
 
 use crate::{
     db::{DbBurnProof, SqlitePool, get_pending_burn_proofs, mark_burn_proof_complete},
@@ -74,14 +38,16 @@ pub struct BurnProofWorker {
     db_pool: SqlitePool,
     client: WalletHttpClient,
     burn_proofs_dir: PathBuf,
+    consensus_manager: ConsensusManager,
 }
 
 impl BurnProofWorker {
-    pub fn new(db_pool: SqlitePool, client: WalletHttpClient, burn_proofs_dir: PathBuf) -> Self {
+    pub fn new(db_pool: SqlitePool, client: WalletHttpClient, burn_proofs_dir: PathBuf, network: Network) -> Self {
         Self {
             db_pool,
             client,
             burn_proofs_dir,
+            consensus_manager: ConsensusManager::builder(network).build(),
         }
     }
 
@@ -142,13 +108,29 @@ impl BurnProofWorker {
     }
 
     async fn process_single_proof(&self, proof: &DbBurnProof) -> Result<(), anyhow::Error> {
-        // Fetch the merkle proof asynchronously.
-        let merkle_response = self
-            .client
-            .get_kernel_merkle_proof(&proof.kernel_excess_nonce, &proof.kernel_excess_sig)
-            .await?;
+        let output_proof = self.client.get_burn_output_proof(&proof.commitment).await?.proof;
 
-        let complete_proof = assemble_complete_proof(proof, &merkle_response)?;
+        // The claim verifier checks the proof against the block header, but a proof for another output is useless, so
+        // reject it here.
+        let proof_output_hash = output_proof.output.hash()?;
+        if proof_output_hash != proof.output_hash {
+            return Err(anyhow::anyhow!(
+                "Base node returned a burn output proof for output {} instead of {}",
+                proof_output_hash,
+                proof.output_hash
+            ));
+        }
+
+        // Convert the burn's L1 block height to its epoch so an L2 claimant can defer the claim until L2 has synced
+        // past it.
+        let height = output_proof.block_height;
+        let mined_in_epoch = self
+            .consensus_manager
+            .consensus_constants(height)
+            .block_height_to_epoch(height)
+            .as_u64();
+
+        let complete_proof = assemble_complete_proof(proof, output_proof, mined_in_epoch)?;
 
         write_proof_file(
             &self.burn_proofs_dir,
@@ -168,59 +150,29 @@ impl BurnProofWorker {
 
 fn assemble_complete_proof(
     proof: &DbBurnProof,
-    merkle: &GenerateKernelMerkleProofResponse,
+    output_proof: BurnOutputProof,
+    mined_in_epoch: u64,
 ) -> Result<CompleteClaimBurnProof, anyhow::Error> {
-    use tari_common_types::{burn_proof::EncodedMerkleProof, types::PrivateKey};
-    use tari_utilities::byte_array::ByteArray;
-
-    let sender_offset_public_key = CompressedPublicKey::from_canonical_bytes(&proof.sender_offset_public_key)
-        .map_err(|e| anyhow::anyhow!("Invalid sender_offset_public_key: {}", e))?;
-
-    let commitment = CompressedCommitment::from_canonical_bytes(&proof.commitment)
-        .map_err(|e| anyhow::anyhow!("Invalid commitment: {}", e))?;
-
     let nonce = CompressedPublicKey::from_canonical_bytes(&proof.ownership_proof_nonce)
         .map_err(|e| anyhow::anyhow!("Invalid ownership_proof_nonce: {}", e))?;
     let sig_scalar = PrivateKey::from_canonical_bytes(&proof.ownership_proof_sig)
         .map_err(|e| anyhow::anyhow!("Invalid ownership_proof_sig: {}", e))?;
     let ownership_proof = CompressedRistrettoSchnorr::new(nonce, sig_scalar);
 
-    let excess_commitment = CompressedCommitment::from_canonical_bytes(&proof.kernel_excess)
-        .map_err(|e| anyhow::anyhow!("Invalid kernel_excess: {}", e))?;
-    let excess_nonce = CompressedPublicKey::from_canonical_bytes(&proof.kernel_excess_nonce)
-        .map_err(|e| anyhow::anyhow!("Invalid kernel_excess_nonce: {}", e))?;
-    let excess_sig_scalar = PrivateKey::from_canonical_bytes(&proof.kernel_excess_sig)
-        .map_err(|e| anyhow::anyhow!("Invalid kernel_excess_sig: {}", e))?;
-    let excess_sig = CompressedRistrettoSchnorr::new(excess_nonce, excess_sig_scalar);
-
     let burn_public_key = CompressedPublicKey::from_canonical_bytes(
         &hex::decode(&proof.claim_public_key).map_err(|e| anyhow::anyhow!("Invalid claim_public_key hex: {}", e))?,
     )
     .map_err(|e| anyhow::anyhow!("Invalid claim_public_key: {}", e))?;
 
-    let encoded_merkle_proof = EncodedMerkleProof {
-        block_hash: merkle.block_hash,
-        encoded_merkle_proof: merkle.encoded_merkle_proof.clone(),
-        leaf_index: merkle.leaf_index,
-    };
-
     Ok(CompleteClaimBurnProof {
         claim_proof: BurnClaimProof {
             burn_public_key,
-            commitment,
             ownership_proof,
-            encoded_merkle_proof,
-            kernel: AbridgedTransactionKernel {
-                version: 0,
-                fee: proof.kernel_fee as u64,
-                lock_height: proof.kernel_lock_height as u64,
-                excess: excess_commitment,
-                excess_sig,
-            },
+            output_proof,
             value: proof.value as u64,
-            sender_offset_public_key,
         },
         encrypted_data: proof.encrypted_data.clone(),
+        mined_in_epoch,
     })
 }
 
@@ -249,8 +201,11 @@ async fn write_proof_file(
 
 #[cfg(test)]
 mod tests {
-    use tari_common_types::types::FixedHash;
-    use tari_transaction_components::rpc::models::GenerateKernelMerkleProofResponse;
+    use tari_common_types::{
+        burn_proof::{MmrInclusionProof, OutputHashPreimage},
+        types::FixedHash,
+    };
+    use tari_transaction_components::transaction_components::TransactionOutput;
 
     use super::*;
 
@@ -281,34 +236,36 @@ mod tests {
         }
     }
 
-    fn make_test_merkle_response() -> GenerateKernelMerkleProofResponse {
-        GenerateKernelMerkleProofResponse {
+    fn make_test_output_proof() -> BurnOutputProof {
+        let mmr_proof = MmrInclusionProof {
+            leaf_index: 0,
+            mmr_size: 1,
+            path: vec![],
+            peaks: vec![],
+        };
+        BurnOutputProof {
             block_hash: FixedHash::default(),
-            encoded_merkle_proof: vec![1, 2, 3],
-            leaf_index: 42,
-            block_height: Some(1),
+            block_height: 1,
+            output: OutputHashPreimage::from(&TransactionOutput::default()),
+            normal_output_proof: mmr_proof.clone(),
+            normal_output_mr: FixedHash::default(),
+            block_output_proof: mmr_proof,
         }
     }
 
     #[test]
     fn test_assemble_complete_proof_success() {
         let proof = make_test_db_proof();
-        let merkle = make_test_merkle_response();
+        let output_proof = make_test_output_proof();
 
-        let result = assemble_complete_proof(&proof, &merkle);
+        let result = assemble_complete_proof(&proof, output_proof.clone(), 7);
         assert!(result.is_ok(), "Expected Ok but got: {:?}", result.err());
 
         let complete = result.unwrap();
         assert_eq!(complete.claim_proof.value, 1_000_000);
         assert_eq!(complete.encrypted_data, vec![0xAB, 0xCD, 0xEF]);
-        assert_eq!(complete.claim_proof.kernel.version, 0);
-        assert_eq!(complete.claim_proof.kernel.fee, 250);
-        assert_eq!(complete.claim_proof.kernel.lock_height, 0);
-        assert_eq!(complete.claim_proof.encoded_merkle_proof.leaf_index, 42);
-        assert_eq!(
-            complete.claim_proof.encoded_merkle_proof.encoded_merkle_proof,
-            vec![1, 2, 3]
-        );
+        assert_eq!(complete.mined_in_epoch, 7);
+        assert_eq!(complete.claim_proof.output_proof, output_proof);
     }
 
     #[test]
@@ -316,7 +273,7 @@ mod tests {
         let mut proof = make_test_db_proof();
         proof.value = 999_999;
 
-        let result = assemble_complete_proof(&proof, &make_test_merkle_response());
+        let result = assemble_complete_proof(&proof, make_test_output_proof(), 0);
         assert!(result.is_ok());
         assert_eq!(result.unwrap().claim_proof.value, 999_999);
     }
@@ -326,7 +283,7 @@ mod tests {
         let mut proof = make_test_db_proof();
         proof.encrypted_data = vec![0x11, 0x22, 0x33, 0x44];
 
-        let result = assemble_complete_proof(&proof, &make_test_merkle_response());
+        let result = assemble_complete_proof(&proof, make_test_output_proof(), 0);
         assert!(result.is_ok());
         assert_eq!(result.unwrap().encrypted_data, vec![0x11, 0x22, 0x33, 0x44]);
     }
@@ -336,7 +293,7 @@ mod tests {
         let mut proof = make_test_db_proof();
         proof.claim_public_key = "not-valid-hex".to_string();
 
-        let result = assemble_complete_proof(&proof, &make_test_merkle_response());
+        let result = assemble_complete_proof(&proof, make_test_output_proof(), 0);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
@@ -346,30 +303,25 @@ mod tests {
     }
 
     #[test]
-    fn test_assemble_complete_proof_invalid_sender_offset_public_key() {
+    fn test_assemble_complete_proof_invalid_ownership_proof_nonce() {
         let mut proof = make_test_db_proof();
-        proof.sender_offset_public_key = vec![]; // wrong length — definitely invalid
+        proof.ownership_proof_nonce = vec![]; // wrong length — definitely invalid
 
-        let result = assemble_complete_proof(&proof, &make_test_merkle_response());
+        let result = assemble_complete_proof(&proof, make_test_output_proof(), 0);
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(
-            err.contains("sender_offset_public_key"),
-            "Error should mention sender_offset_public_key, got: {err}"
+            err.contains("ownership_proof_nonce"),
+            "Error should mention ownership_proof_nonce, got: {err}"
         );
     }
 
     #[test]
-    fn test_assemble_complete_proof_invalid_commitment() {
-        let mut proof = make_test_db_proof();
-        proof.commitment = vec![]; // wrong length — definitely invalid
-
-        let result = assemble_complete_proof(&proof, &make_test_merkle_response());
-        assert!(result.is_err());
-        let err = result.unwrap_err().to_string();
-        assert!(
-            err.contains("commitment"),
-            "Error should mention commitment, got: {err}"
-        );
+    fn test_complete_proof_json_round_trip() {
+        let complete = assemble_complete_proof(&make_test_db_proof(), make_test_output_proof(), 3).unwrap();
+        let json = serde_json::to_string(&complete).unwrap();
+        let parsed: CompleteClaimBurnProof = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.mined_in_epoch, 3);
+        assert_eq!(parsed.claim_proof.output_proof, complete.claim_proof.output_proof);
     }
 }

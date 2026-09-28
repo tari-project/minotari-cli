@@ -1,7 +1,7 @@
 //! CLI handler for the `burn-funds` command.
 //!
 //! Builds, signs, and broadcasts a burn transaction, then persists the partial
-//! burn proof so the daemon can later fetch the kernel merkle proof and write
+//! burn proof so the daemon can later fetch the burn output proof and write
 //! the complete [`CompleteClaimBurnProof`] JSON file.
 
 use std::path::PathBuf;

@@ -617,14 +617,14 @@ impl<E: EventSender> BlockProcessor<E> {
             )?;
 
             // If this is a burn output, check if we have a matching pending burn proof
-            // and log that the daemon should pick it up for merkle proof fetching.
+            // and log that the daemon should pick it up for burn output proof fetching.
             if unconfirmed_output.is_burn != 0 {
                 match get_burn_proof_by_output_hash(tx, &unconfirmed_output.output_hash) {
                     Ok(Some(_proof)) => {
                         info!(
                             target: "audit",
                             output_hash = &*mask_string(&hex::encode(unconfirmed_output.output_hash));
-                            "Burn output confirmed — daemon will fetch kernel merkle proof"
+                            "Burn output confirmed — daemon will fetch burn output proof"
                         );
                     },
                     Ok(None) => {

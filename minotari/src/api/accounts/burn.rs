@@ -86,8 +86,8 @@ pub struct BurnFundsResponse {
 /// Burns funds from an account and records a partial burn proof for L2 claiming.
 ///
 /// Creates a burn transaction, broadcasts it, and stores the partial proof in the
-/// database. The daemon's `BurnProofWorker` will automatically fetch the kernel
-/// merkle proof once the transaction is confirmed and write the complete
+/// database. The daemon's `BurnProofWorker` will automatically fetch the burn
+/// output proof once the transaction is confirmed and write the complete
 /// `CompleteClaimBurnProof` JSON file to the configured `burn_proofs_dir`.
 ///
 /// # Path Parameters
