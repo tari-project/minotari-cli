@@ -99,7 +99,8 @@ impl BurnProofWorker {
                 if is_pruned_block_error(&e) {
                     error!(
                         target: LOG_TARGET,
-                        burn_proof_id = proof_id;
+                        burn_proof_id = proof_id,
+                        error:% = e;
                         "The base node has pruned the block containing this burn and cannot prove it. Connect to an \
                          archival base node to complete the burn proof — will retry next cycle"
                     );
@@ -124,12 +125,7 @@ impl BurnProofWorker {
 
         // Convert the burn's L1 block height to its epoch so an L2 claimant can defer the claim until L2 has synced
         // past it.
-        let height = output_proof.block_height;
-        let mined_in_epoch = self
-            .consensus_manager
-            .consensus_constants(height)
-            .block_height_to_epoch(height)
-            .as_u64();
+        let mined_in_epoch = height_to_epoch(&self.consensus_manager, output_proof.block_height);
 
         let complete_proof = assemble_complete_proof(proof, output_proof, mined_in_epoch)?;
 
@@ -147,6 +143,14 @@ impl BurnProofWorker {
 
         Ok(())
     }
+}
+
+/// Converts an L1 block height to its VN epoch (`height / vn_epoch_length`).
+fn height_to_epoch(consensus_manager: &ConsensusManager, height: u64) -> u64 {
+    consensus_manager
+        .consensus_constants(height)
+        .block_height_to_epoch(height)
+        .as_u64()
 }
 
 /// Returns true if the base node could not produce the proof because it has pruned the block the burn was mined in.
@@ -350,6 +354,17 @@ mod tests {
 
         let err = check_output_proof(&FixedHash::from([1u8; 32]), &output_proof).unwrap_err();
         assert!(err.to_string().contains("instead of"), "Unexpected error: {err}");
+    }
+
+    #[test]
+    fn test_height_to_epoch() {
+        let consensus_manager = ConsensusManager::builder(Network::LocalNet).build();
+        let epoch_length = consensus_manager.consensus_constants(0).epoch_length();
+
+        assert_eq!(height_to_epoch(&consensus_manager, 0), 0);
+        assert_eq!(height_to_epoch(&consensus_manager, epoch_length - 1), 0);
+        assert_eq!(height_to_epoch(&consensus_manager, epoch_length), 1);
+        assert_eq!(height_to_epoch(&consensus_manager, 5 * epoch_length + 1), 5);
     }
 
     #[test]
