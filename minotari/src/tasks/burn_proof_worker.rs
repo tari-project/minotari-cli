@@ -13,10 +13,11 @@
 use std::{path::PathBuf, time::Duration};
 
 use log::{error, info, warn};
+use reqwest::StatusCode;
 use tari_common::configuration::Network;
 use tari_common_types::{
     burn_proof::BurnOutputProof,
-    types::{CompressedPublicKey, PrivateKey},
+    types::{CompressedPublicKey, FixedHash, PrivateKey},
 };
 use tari_crypto::ristretto::CompressedRistrettoSchnorr;
 use tari_sidechain::{BurnClaimProof, CompleteClaimBurnProof};
@@ -28,7 +29,7 @@ use tokio::{fs, sync::broadcast, task::JoinHandle, time::interval};
 
 use crate::{
     db::{DbBurnProof, SqlitePool, get_pending_burn_proofs, mark_burn_proof_complete},
-    http::WalletHttpClient,
+    http::{HttpError, WalletHttpClient},
 };
 
 const LOG_TARGET: &str = "wallet::tasks::burn_proof_worker";
@@ -95,6 +96,15 @@ impl BurnProofWorker {
         for proof in pending {
             let proof_id = proof.id;
             if let Err(e) = self.process_single_proof(&proof).await {
+                if is_pruned_block_error(&e) {
+                    error!(
+                        target: LOG_TARGET,
+                        burn_proof_id = proof_id;
+                        "The base node has pruned the block containing this burn and cannot prove it. Connect to an \
+                         archival base node to complete the burn proof — will retry next cycle"
+                    );
+                    continue;
+                }
                 warn!(
                     target: LOG_TARGET,
                     burn_proof_id = proof_id,
@@ -110,16 +120,7 @@ impl BurnProofWorker {
     async fn process_single_proof(&self, proof: &DbBurnProof) -> Result<(), anyhow::Error> {
         let output_proof = self.client.get_burn_output_proof(&proof.commitment).await?.proof;
 
-        // The claim verifier checks the proof against the block header, but a proof for another output is useless, so
-        // reject it here.
-        let proof_output_hash = output_proof.output.hash()?;
-        if proof_output_hash != proof.output_hash {
-            return Err(anyhow::anyhow!(
-                "Base node returned a burn output proof for output {} instead of {}",
-                proof_output_hash,
-                proof.output_hash
-            ));
-        }
+        check_output_proof(&proof.output_hash, &output_proof)?;
 
         // Convert the burn's L1 block height to its epoch so an L2 claimant can defer the claim until L2 has synced
         // past it.
@@ -146,6 +147,28 @@ impl BurnProofWorker {
 
         Ok(())
     }
+}
+
+/// Returns true if the base node could not produce the proof because it has pruned the block the burn was mined in.
+fn is_pruned_block_error(err: &anyhow::Error) -> bool {
+    matches!(
+        err.downcast_ref::<HttpError>(),
+        Some(HttpError::ServerError { status, .. }) if *status == StatusCode::GONE
+    )
+}
+
+/// Checks that the proof is for the expected burn output. The claim verifier checks the proof against the block
+/// header, but a proof for another output is useless, so reject it here.
+fn check_output_proof(expected_output_hash: &FixedHash, output_proof: &BurnOutputProof) -> Result<(), anyhow::Error> {
+    let proof_output_hash = output_proof.output.hash()?;
+    if proof_output_hash != *expected_output_hash {
+        return Err(anyhow::anyhow!(
+            "Base node returned a burn output proof for output {} instead of {}",
+            proof_output_hash,
+            expected_output_hash
+        ));
+    }
+    Ok(())
 }
 
 fn assemble_complete_proof(
@@ -201,10 +224,7 @@ async fn write_proof_file(
 
 #[cfg(test)]
 mod tests {
-    use tari_common_types::{
-        burn_proof::{MmrInclusionProof, OutputHashPreimage},
-        types::FixedHash,
-    };
+    use tari_common_types::burn_proof::{MmrInclusionProof, OutputHashPreimage};
     use tari_transaction_components::transaction_components::TransactionOutput;
 
     use super::*;
@@ -314,6 +334,38 @@ mod tests {
             err.contains("ownership_proof_nonce"),
             "Error should mention ownership_proof_nonce, got: {err}"
         );
+    }
+
+    #[test]
+    fn test_check_output_proof_accepts_matching_output() {
+        let output_proof = make_test_output_proof();
+        let expected = output_proof.output.hash().unwrap();
+
+        assert!(check_output_proof(&expected, &output_proof).is_ok());
+    }
+
+    #[test]
+    fn test_check_output_proof_rejects_other_output() {
+        let output_proof = make_test_output_proof();
+
+        let err = check_output_proof(&FixedHash::from([1u8; 32]), &output_proof).unwrap_err();
+        assert!(err.to_string().contains("instead of"), "Unexpected error: {err}");
+    }
+
+    #[test]
+    fn test_is_pruned_block_error() {
+        let gone = anyhow::Error::from(HttpError::ServerError {
+            status: StatusCode::GONE,
+            body: String::new(),
+        });
+        let not_found = anyhow::Error::from(HttpError::ServerError {
+            status: StatusCode::NOT_FOUND,
+            body: String::new(),
+        });
+
+        assert!(is_pruned_block_error(&gone));
+        assert!(!is_pruned_block_error(&not_found));
+        assert!(!is_pruned_block_error(&anyhow::anyhow!("other")));
     }
 
     #[test]

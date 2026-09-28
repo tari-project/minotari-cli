@@ -54,7 +54,8 @@ pub struct WalletConfig {
     pub account_name: Option<String>,
     pub webhook: WebhookConfig,
     /// Directory where complete burn proof JSON files are written after a burn transaction is confirmed
-    /// and the burn output proof is fetched from the base node.
+    /// and the burn output proof is fetched from the base node. A pruned base node can only prove burns within its
+    /// pruning horizon; use an archival base node for older burns.
     /// If not set, defaults to the platform data directory: `<data_dir>/tari/<network>/burn_proofs`.
     pub burn_proofs_dir: Option<PathBuf>,
 }
