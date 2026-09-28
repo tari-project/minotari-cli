@@ -635,7 +635,7 @@ mod tests {
             named_params! {
                 ":account_id": account.id,
                 ":hash": output.output_hash().to_vec(),
-                ":value": value as i64,
+                ":value": i64::try_from(value).expect("value fits i64"),
                 ":mined_ts": Utc::now(),
                 ":json": serde_json::to_string(&output).expect("serialize output"),
             },
