@@ -15,16 +15,15 @@ repository = "https://github.com/tari-project/minotari-cli"
 
 
 [workspace.dependencies]
-# TODO: switch back to a crates.io release once tari#8054 is published
-tari_common = { path = "../tari/common"}
-tari_common_types = { path = "../tari/base_layer/common_types" }
+tari_common = { version = "6.0.1-pre.1"}
+tari_common_types = { version = "6.0.1-pre.1" }
 tari_crypto = { version = "0.23", features = ["borsh"] }
 tari_utilities = { version = "0.10", features = ["std"] }
-tari_script = { path = "../tari/infrastructure/tari_script" }
-tari_sidechain = { path = "../tari/base_layer/sidechain" }
-tari_transaction_components = { path = "../tari/base_layer/transaction_components" }
-minotari_app_grpc = { path = "../tari/applications/minotari_app_grpc", default-features = false }
-tari_node_components = { path = "../tari/base_layer/node_components" }
+tari_script = { version = "6.0.1-pre.1" }
+tari_sidechain = { version = "6.0.1-pre.1" }
+tari_transaction_components = { version = "6.0.1-pre.1" }
+minotari_app_grpc = { version = "6.0.1-pre.1", default-features = false }
+tari_node_components = { version = "6.0.1-pre.1" }
 minotari-scanning = { path = "minotari-scanning", version = "0.2.0" }
 
 [profile.release]
