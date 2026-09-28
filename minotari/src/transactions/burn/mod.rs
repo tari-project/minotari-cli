@@ -188,6 +188,19 @@ pub fn create_burn_tx(
         params.confirmation_window,
     )?;
 
+    // The burn output brings its own sender offset key (below), so the change output's key is
+    // the only one the reservation mints, and the key manager refuses to blind the input script
+    // keys with none at all. A burn that leaves no change therefore cannot be built: say so now
+    // and hand the inputs back, rather than fail on an opaque key manager error with the funds
+    // locked until the reservation expires.
+    if !locked_funds.requires_change_output {
+        release_reservation(conn, account.id, params.idempotency_key.as_deref())?;
+        return Err(anyhow!(
+            "Burning {} leaves no change output, and an L2 burn needs one; adjust the amount",
+            params.amount
+        ));
+    }
+
     let key_manager = account.get_key_manager(password)?;
 
     // Assemble the transaction.
@@ -345,6 +358,20 @@ fn burn_claim_material(
         sidechain_id,
     )?;
     Ok((stealth_claim_public_key, ownership_proof))
+}
+
+/// Gives back the inputs a burn reserved but will not spend.
+///
+/// The reservation is found by its idempotency key, which both callers supply. Without one the
+/// lock simply runs out on its own.
+fn release_reservation(conn: &Connection, account_id: i64, idempotency_key: Option<&str>) -> Result<(), anyhow::Error> {
+    let Some(key) = idempotency_key else {
+        return Ok(());
+    };
+    if let Some(record) = crate::db::find_pending_transaction_record_by_idempotency_key(conn, key, account_id)? {
+        crate::db::expire_and_unlock_pending_transaction(conn, &record.id)?;
+    }
+    Ok(())
 }
 
 /// Persists all DB records for a completed burn transaction.
@@ -571,6 +598,119 @@ mod tests {
 
         claim_burn_reservation(&pool.get().expect("conn"), account_id, KEY)
             .expect_err("a burn with no reservation must not be broadcast");
+    }
+
+    /// A funded account whose one UTXO is real: its keys live in the account's key manager, so
+    /// the builder can sign it and the finished transaction can be checked the way a node would.
+    fn setup_funded_account(value: u64) -> (SqlitePool, AccountRow, tempfile::TempDir) {
+        use tari_transaction_components::test_helpers::{TestParams, create_wallet_output_with_data};
+
+        let temp = tempdir().expect("temp dir");
+        let pool = init_db(temp.path().join("test.db")).expect("init db");
+        let conn = pool.get().expect("get conn");
+        let wallet =
+            WalletType::SeedWords(SeedWordsWallet::construct_new(CipherSeed::random()).expect("construct wallet"));
+        create_account(&conn, "test", &wallet, "pass").expect("create account");
+        let account = get_account_by_name(&conn, "test")
+            .expect("get account")
+            .expect("account exists");
+        crate::db::insert_scanned_tip_block(&conn, account.id, 200, &[0u8; 32]).expect("tip block");
+
+        let key_manager = account.get_key_manager("pass").expect("key manager");
+        let output = create_wallet_output_with_data(
+            script!(Nop).expect("script"),
+            OutputFeatures::default(),
+            &TestParams::new(&key_manager),
+            MicroMinotari(value),
+            &key_manager,
+        )
+        .expect("output");
+        conn.execute(
+            r#"
+            INSERT INTO outputs (
+                account_id, tx_id, output_hash, mined_in_block_height, mined_in_block_hash, value,
+                mined_timestamp, wallet_output_json, status, confirmed_height, confirmed_hash, is_burn, maturity
+            ) VALUES (:account_id, 1, :hash, 100, :hash, :value, :mined_ts, :json, 'UNSPENT', 100, :hash, 0, 0)
+            "#,
+            named_params! {
+                ":account_id": account.id,
+                ":hash": output.output_hash().to_vec(),
+                ":value": value as i64,
+                ":mined_ts": Utc::now(),
+                ":json": serde_json::to_string(&output).expect("serialize output"),
+            },
+        )
+        .expect("insert output");
+        drop(conn);
+        (pool, account, temp)
+    }
+
+    /// The whole burn, checked as a node would: with `r` registered by hand, the inputs' script
+    /// keys and the outputs' sender offset keys must still balance against the script offset.
+    #[test]
+    fn a_built_burn_balances_its_script_offset_with_the_host_derived_sender_offset() {
+        use tari_common_types::types::UncompressedPublicKey as PublicKey;
+        use tari_crypto::keys::PublicKey as _;
+        use tari_transaction_components::transaction_components::OutputType;
+
+        let (pool, account, _temp) = setup_funded_account(1_000_000);
+        let mut conn = pool.get().expect("conn");
+        let claim_public_key = KeyManager::new_random()
+            .expect("l2 wallet")
+            .get_random_key(None, None)
+            .expect("account key")
+            .pub_key;
+        let params = BurnTxParams {
+            account_id: account.id,
+            amount: MicroMinotari(10_000),
+            claim_public_key: Some(claim_public_key.clone()),
+            sidechain_deployment_key: None,
+            fee_per_gram: MicroMinotari(5),
+            payment_id: None,
+            idempotency_key: Some(KEY.to_string()),
+            seconds_to_lock: 3600,
+            confirmation_window: 100,
+        };
+
+        let result = create_burn_tx(&account, &mut conn, Network::LocalNet, "pass", params).expect("burn builds");
+
+        let tx = &result.transaction;
+        let sum = |keys: Vec<CompressedPublicKey>| {
+            keys.iter()
+                .map(|k| k.to_public_key().expect("point"))
+                .fold(PublicKey::default(), |acc, k| &acc + &k)
+        };
+        let inputs = sum(tx
+            .body
+            .inputs()
+            .iter()
+            .map(|i| i.run_script(None).expect("script key"))
+            .collect());
+        let outputs = sum(tx
+            .body
+            .outputs()
+            .iter()
+            .map(|o| o.sender_offset_public_key.clone())
+            .collect());
+        assert_eq!(
+            &inputs - &outputs,
+            PublicKey::from_secret_key(&tx.script_offset),
+            "script offset does not balance: the host-derived r is missing or counted twice"
+        );
+
+        let burn = tx
+            .body
+            .outputs()
+            .iter()
+            .find(|o| o.features.output_type == OutputType::Burn)
+            .expect("burn output");
+        assert_eq!(
+            result.new_burn_proof.sender_offset_public_key,
+            burn.sender_offset_public_key.as_bytes().to_vec(),
+            "the proof's R must be the burn output's"
+        );
+        assert_eq!(result.new_burn_proof.claim_public_key, claim_public_key.to_hex());
+        assert_eq!(tx.body.outputs().len(), 2, "an L2 burn relies on its change output");
     }
 
     /// What an L2 validator checks: the commitment mask signed the commitment together with the
