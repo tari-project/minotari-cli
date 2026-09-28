@@ -7,11 +7,12 @@
 //! # Flow
 //!
 //! 1. Lock UTXOs via [`FundLocker`]
-//! 2. Build a burn output with [`OutputFeatures::create_burn_confidential_output`]
-//! 3. Set burn kernel features on the transaction
-//! 4. Build + sign the transaction using the wallet key manager
-//! 5. Generate the ownership proof (Schnorr signature over the commitment)
-//! 6. Return the signed [`Transaction`] and a [`NewBurnProof`] for DB storage
+//! 2. Derive the stealth claim key `C` for the recipient (see [`burn_claim_material`])
+//! 3. Build a burn output with [`OutputFeatures::create_burn_confidential_output`] carrying `C`
+//! 4. Set burn kernel features on the transaction
+//! 5. Build + sign the transaction using the wallet key manager
+//! 6. Generate the ownership proof (Schnorr signature over the commitment and `C`)
+//! 7. Return the signed [`Transaction`] and a [`NewBurnProof`] for DB storage
 
 use anyhow::anyhow;
 use log::info;
@@ -20,13 +21,13 @@ use tari_common::configuration::Network;
 use tari_common_types::{
     tari_address::{TariAddress, TariAddressFeatures},
     transaction::TxId,
-    types::{CompressedPublicKey, PrivateKey},
+    types::{CompressedPublicKey, CompressedSignature, PrivateKey},
 };
 use tari_script::script;
 use tari_transaction_components::{
     MicroMinotari, TransactionBuilder,
     consensus::ConsensusConstantsBuilder,
-    key_manager::{TariKeyId, TransactionKeyManagerInterface},
+    key_manager::{KeyManager, TariKeyId, TransactionKeyManagerInterface},
     transaction_builder::PendingOutput,
     transaction_components::{
         KernelFeatures, OutputFeatures, WalletOutputBuilder,
@@ -213,6 +214,35 @@ pub fn create_burn_tx(
     // Derive the commitment mask key for the burn output.
     let (commitment_mask_key, _script_key) = key_manager.get_next_commitment_mask_and_script_key()?;
 
+    let sidechain_id = params
+        .sidechain_deployment_key
+        .as_ref()
+        .map(CompressedPublicKey::from_secret_key);
+    let claim = params
+        .claim_public_key
+        .as_ref()
+        .map(|cpk| {
+            burn_claim_material(
+                &key_manager,
+                &sender_offset_key.key_id,
+                &commitment_mask_key.key_id,
+                params.amount.as_u64(),
+                cpk,
+                sidechain_id.as_ref(),
+            )
+        })
+        .transpose()?;
+
+    // The on-chain claim key is the stealth key C, never the recipient's P. Same size as the
+    // features measured above, so the reservation still covers it.
+    let output_features = match &claim {
+        Some((stealth_claim_public_key, _)) => OutputFeatures::create_burn_confidential_output(
+            stealth_claim_public_key.clone(),
+            params.sidechain_deployment_key.as_ref(),
+        ),
+        None => OutputFeatures::create_burn_output(),
+    };
+
     // The encrypted data in the burn output is DH-encrypted to the claim_public_key
     // (so the L2 wallet can decrypt it). Fall back to the wallet's view key if no
     // claim_public_key is provided.
@@ -255,20 +285,9 @@ pub fn create_burn_tx(
 
     let finalized = tx_builder.build()?;
 
-    // Generate the ownership proof: a Schnorr signature binding the commitment to
-    // the claim public key. Needed by L2 to verify the burn.
-    let new_burn_proof = if let Some(cpk) = params.claim_public_key {
-        let sidechain_id = params
-            .sidechain_deployment_key
-            .as_ref()
-            .map(CompressedPublicKey::from_secret_key);
-        let ownership_proof = key_manager.generate_burn_claim_signature(
-            &commitment_mask_key.key_id,
-            params.amount.as_u64(),
-            &cpk,
-            sidechain_id.as_ref(),
-        )?;
-
+    // The proof records the recipient's P (the L2 wallet finds its account by it) alongside the
+    // ownership proof, which is over C.
+    let new_burn_proof = if let Some((cpk, (_, ownership_proof))) = params.claim_public_key.as_ref().zip(claim) {
         let kernel = finalized
             .transaction
             .body
@@ -307,6 +326,33 @@ pub fn create_burn_tx(
         new_burn_proof,
         tx_id: finalized.tx_id,
     })
+}
+
+/// The claim material for a burn to the L2 account key `P`: the on-wire claim key
+/// `C = H(r·P)·G + P`, where `r` is the burn output's sender offset secret, and the ownership
+/// proof, a Schnorr signature by the commitment mask over the commitment and `C`.
+///
+/// The L2 wallet claims with `s = H(R·p) + p`, so the signer of its claim transaction is `C`,
+/// and L2 validators bind the ownership proof to that signer. A proof over the raw `P` fails
+/// verification on every L2 node, and since a burn cannot be undone the funds would be gone,
+/// so `P` itself never goes on the wire.
+fn burn_claim_material(
+    key_manager: &KeyManager,
+    sender_offset_key_id: &TariKeyId,
+    commitment_mask_key_id: &TariKeyId,
+    amount: u64,
+    claim_public_key: &CompressedPublicKey,
+    sidechain_id: Option<&CompressedPublicKey>,
+) -> Result<(CompressedPublicKey, CompressedSignature), anyhow::Error> {
+    let stealth_claim_public_key =
+        key_manager.compute_stealth_claim_public_key(sender_offset_key_id, claim_public_key)?;
+    let ownership_proof = key_manager.generate_burn_claim_signature(
+        commitment_mask_key_id,
+        amount,
+        &stealth_claim_public_key,
+        sidechain_id,
+    )?;
+    Ok((stealth_claim_public_key, ownership_proof))
 }
 
 /// Persists all DB records for a completed burn transaction.
@@ -533,5 +579,57 @@ mod tests {
 
         claim_burn_reservation(&pool.get().expect("conn"), account_id, KEY)
             .expect_err("a burn with no reservation must not be broadcast");
+    }
+
+    /// What an L2 validator checks: the commitment mask signed the commitment together with the
+    /// claim transaction's signer, which is the stealth key `C`, not the recipient's `P`.
+    #[test]
+    fn the_ownership_proof_binds_the_stealth_claim_key_not_the_recipient_key() {
+        use tari_common_types::types::{CommitmentFactory, CompressedCommitment};
+        use tari_crypto::commitment::HomomorphicCommitmentFactory;
+        use tari_transaction_components::key_manager::{
+            ConfidentialOutputHasher, SecretTransactionKeyManagerInterface,
+        };
+
+        let key_manager = KeyManager::new_random().expect("key manager");
+        let (mask, sender_offset) = key_manager.get_next_commitment_mask_and_script_key().expect("keys");
+        let recipient = key_manager.get_random_key(None, None).expect("recipient").pub_key;
+        let amount = 1_000u64;
+
+        let (stealth_claim_public_key, ownership_proof) = burn_claim_material(
+            &key_manager,
+            &sender_offset.key_id,
+            &mask.key_id,
+            amount,
+            &recipient,
+            None,
+        )
+        .expect("claim material");
+        assert_ne!(
+            stealth_claim_public_key, recipient,
+            "the recipient's key must never go on the wire"
+        );
+
+        let mask_secret = key_manager.get_private_key(&mask.key_id).expect("mask secret");
+        let commitment =
+            CompressedCommitment::from_commitment(CommitmentFactory::default().commit_value(&mask_secret, amount));
+        let mask_public_key = CompressedPublicKey::from_secret_key(&mask_secret)
+            .to_public_key()
+            .expect("mask pk");
+        let sidechain_id: Option<&CompressedPublicKey> = None;
+        let message_over = |claimant: &CompressedPublicKey| {
+            ConfidentialOutputHasher::new("commitment_signature")
+                .chain(&commitment)
+                .chain(claimant)
+                .chain(&sidechain_id)
+                .finalize()
+        };
+        let signature = ownership_proof.to_schnorr_signature().expect("decompress signature");
+
+        assert!(signature.verify(&mask_public_key, message_over(&stealth_claim_public_key)));
+        assert!(
+            !signature.verify(&mask_public_key, message_over(&recipient)),
+            "a proof over the raw recipient key is exactly what L2 rejects"
+        );
     }
 }
