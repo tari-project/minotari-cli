@@ -1,7 +1,7 @@
 //! Burn transaction construction.
 //!
 //! Creates a burn transaction that destroys L1 funds and produces a
-//! [`NewBurnProof`] that can later be combined with a kernel merkle proof
+//! [`NewBurnProof`] that can later be combined with a burn output proof
 //! to form a complete L2 claim proof.
 //!
 //! # Flow

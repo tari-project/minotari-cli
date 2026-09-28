@@ -233,7 +233,8 @@ impl Daemon {
                 .parse()
                 .map_err(|e| ScanError::Fatal(anyhow!("Invalid base URL '{}': {}", self.base_url, e)))?,
         )?;
-        let burn_proof_worker = BurnProofWorker::new(db_pool.clone(), http_client, self.burn_proofs_dir.clone());
+        let burn_proof_worker =
+            BurnProofWorker::new(db_pool.clone(), http_client, self.burn_proofs_dir.clone(), self.network);
         let burn_proof_handle = burn_proof_worker.run(shutdown_tx.subscribe());
 
         let webhook_worker = std::sync::Arc::new(WebhookWorker::new(db_pool.clone(), self.webhook_config.clone()));

@@ -6,7 +6,8 @@ use tari_common_types::types::FixedHash;
 
 use crate::db::error::{WalletDbError, WalletDbResult};
 
-/// Status values for a burn proof record.
+/// Status values for a burn proof record. `pending_merkle` predates the burn output proof and now means the record is
+/// waiting for its burn output proof.
 pub const BURN_PROOF_STATUS_PENDING_MERKLE: &str = "pending_merkle";
 pub const BURN_PROOF_STATUS_COMPLETE: &str = "complete";
 
@@ -29,6 +30,9 @@ pub struct NewBurnProof {
 }
 
 /// A burn proof record fetched from the database.
+///
+/// The `kernel_*` fields and `sender_offset_public_key` are vestigial: the claim proof is now built from the burn
+/// output proof, which carries the output. They are kept to avoid a migration.
 #[derive(Debug, Deserialize)]
 pub struct DbBurnProof {
     pub id: i64,

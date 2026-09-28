@@ -685,7 +685,7 @@ pub enum Commands {
     /// Burn funds and generate an L2 claim proof.
     ///
     /// Creates a burn transaction that destroys L1 funds. After the transaction is
-    /// confirmed on-chain, the daemon automatically fetches the kernel merkle proof
+    /// confirmed on-chain, the daemon automatically fetches the burn output proof
     /// from the base node and writes a complete `CompleteClaimBurnProof` JSON file
     /// to the configured `burn_proofs_dir` directory.
     ///

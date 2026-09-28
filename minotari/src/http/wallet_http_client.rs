@@ -468,21 +468,16 @@ impl WalletHttpClient {
         Ok(response)
     }
 
-    /// Fetches the kernel merkle proof for a burn transaction kernel.
+    /// Fetches the proof that a burn output was mined, by the burn output's commitment.
     ///
     /// Called after a burn transaction reaches sufficient confirmations to produce
-    /// the [`EncodedMerkleProof`] needed for the complete burn claim proof.
-    pub async fn get_kernel_merkle_proof(
+    /// the [`BurnOutputProof`](tari_common_types::burn_proof::BurnOutputProof) needed for the complete burn claim
+    /// proof. A pruned base node can only produce the proof within its pruning horizon.
+    pub async fn get_burn_output_proof(
         &self,
-        excess_sig_nonce: &[u8],
-        excess_sig: &[u8],
-    ) -> Result<tari_transaction_components::rpc::models::GenerateKernelMerkleProofResponse, anyhow::Error> {
-        let nonce_hex = to_hex(excess_sig_nonce);
-        let sig_hex = to_hex(excess_sig);
-        let path = format!(
-            "/generate_kernel_merkle_proof?excess_sig_public_nonce={}&excess_sig_signature={}",
-            nonce_hex, sig_hex,
-        );
+        commitment: &[u8],
+    ) -> Result<tari_transaction_components::rpc::models::GenerateBurnOutputProofResponse, anyhow::Error> {
+        let path = format!("/generate_burn_output_proof?commitment={}", to_hex(commitment));
         let response = self.http_client.send_request(Method::GET, &path, None).await?;
         Ok(response)
     }
