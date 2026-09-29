@@ -1,0 +1,285 @@
+---
+name: Build Matrix of Binaries
+
+'on':
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]*"
+  workflow_dispatch:
+
+env:
+  TS_FILENAME: "minotari"
+  TS_BIN: "minotari"
+  TS_BUNDLE_ID_BASE: "com.tarilabs"
+  TS_SIG_FN: "sha256-unsigned.txt"
+  TS_DESCRIPTION: "Minotari Wallet CLI"
+  TS_URL: "https://tari.com"
+  CARGO_TERM_COLOR: always
+
+concurrency:
+  group: '${{ github.workflow }} @ ${{ github.ref }}'
+  cancel-in-progress: ${{ !startsWith(github.ref, 'refs/tags/v') }}
+
+permissions: {}
+
+jobs:
+  builds:
+    name: ${{ matrix.platform.name }} for ${{ matrix.network.name }}
+    runs-on: ${{ matrix.platform.runs-on }}
+
+    permissions:
+      contents: read
+
+    outputs:
+      TARI_VERSION: ${{ steps.set-vars.outputs.TARI_VERSION }}
+
+    strategy:
+      fail-fast: false
+      matrix:
+        platform:
+          - name: linux-x86_64
+            runs-on: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+          - name: macos-x86_64
+            runs-on: macos-15-intel
+            target: x86_64-apple-darwin
+          - name: macos-arm64
+            runs-on: macos-14
+            target: aarch64-apple-darwin
+          - name: windows-x64
+            runs-on: windows-2022
+            target: x86_64-pc-windows-msvc
+            ts_ext: ".exe"
+        network:
+          - name: mainnet
+            target_network: mainnet
+          - name: esme
+            target_network: testnet
+
+    env:
+      # Selects the network baked in by tari_common / tari_features at compile time
+      TARI_NETWORK: ${{ matrix.network.name }}
+      TARI_TARGET_NETWORK: ${{ matrix.network.target_network }}
+      TS_EXT: ${{ matrix.platform.ts_ext }}
+      HAS_MACOS_SIGNING: ${{ secrets.MACOS_NOTARY_ISSUER != '' }}
+      HAS_WINDOWS_SIGNING: ${{ secrets.AZURE_TENANT_ID != '' }}
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v7
+
+      - name: Declare global variables
+        id: set-vars
+        shell: bash
+        run: |
+          VSHA_SHORT=$(git rev-parse --short=7 HEAD)
+          TARI_VERSION=$(awk -F ' = ' '$1 ~ /^version/ \
+            { gsub(/["]/, "", $2); printf("%s",$2); exit }' \
+            "${GITHUB_WORKSPACE}/Cargo.toml")
+          BINFILE="${TS_FILENAME}-${TARI_VERSION}-${{ matrix.network.name }}-${VSHA_SHORT}-${{ matrix.platform.name }}"
+          echo "TARI_VERSION=${TARI_VERSION}" >> "$GITHUB_ENV"
+          echo "TARI_VERSION=${TARI_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "BINFILE=${BINFILE}" >> "$GITHUB_ENV"
+          echo "DIST=${GITHUB_WORKSPACE}/dist" >> "$GITHUB_ENV"
+          if [[ "${{ runner.os }}" == "macOS" ]]; then
+            echo "SHARUN=shasum --algorithm 256" >> "$GITHUB_ENV"
+          else
+            echo "SHARUN=sha256sum" >> "$GITHUB_ENV"
+          fi
+          echo "Building ${BINFILE} (TARI_NETWORK=${TARI_NETWORK}, TARI_TARGET_NETWORK=${TARI_TARGET_NETWORK})"
+
+      - name: Setup Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.platform.target }}
+
+      - name: Install Linux dependencies - Ubuntu
+        if: startsWith(runner.os,'Linux')
+        run: |
+          sudo apt-get update
+          sudo bash scripts/install_ubuntu_dependencies.sh
+
+      - name: Cache cargo files and outputs
+        if: ${{ ! startsWith(github.ref, 'refs/tags/v') }}
+        uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.platform.target }}-${{ matrix.network.name }}
+
+      - name: Install cargo-auditable and cargo-audit
+        shell: bash
+        run: |
+          cargo install --locked cargo-auditable cargo-audit
+
+      - name: Build release binary
+        shell: bash
+        run: |
+          cargo auditable build --locked --release \
+            --target ${{ matrix.platform.target }} \
+            --package minotari \
+            --bin "${TS_BIN}"
+
+      - name: Copy binary to folder for archiving
+        shell: bash
+        run: |
+          mkdir -p "${DIST}"
+          cp -vf "${GITHUB_WORKSPACE}/target/${{ matrix.platform.target }}/release/${TS_BIN}${TS_EXT}" "${DIST}/"
+          ls -alh "${DIST}"
+
+      - name: Audit binary
+        shell: bash
+        working-directory: dist
+        run: |
+          cargo audit bin "${TS_BIN}${TS_EXT}"
+
+      - name: Sign macOS binary
+        if: ${{ startsWith(runner.os,'macOS') && env.HAS_MACOS_SIGNING == 'true' }}
+        env:
+          MACOS_KEYCHAIN_PASS: ${{ secrets.MACOS_KEYCHAIN_PASS }}
+          MACOS_APPLICATION_ID: ${{ secrets.MACOS_APPLICATION_ID }}
+          MACOS_APPLICATION_CERT: ${{ secrets.MACOS_APPLICATION_CERT }}
+          MACOS_APPLICATION_PASS: ${{ secrets.MACOS_APPLICATION_PASS }}
+        run: |
+          set -eo pipefail
+          echo "${MACOS_APPLICATION_CERT}" | base64 --decode > "${RUNNER_TEMP}/application.p12"
+          security create-keychain -p "${MACOS_KEYCHAIN_PASS}" build.keychain
+          security default-keychain -s build.keychain
+          security unlock-keychain -p "${MACOS_KEYCHAIN_PASS}" build.keychain
+          security import "${RUNNER_TEMP}/application.p12" -k build.keychain \
+            -t cert -f pkcs12 \
+            -P "${MACOS_APPLICATION_PASS}" \
+            -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "${MACOS_KEYCHAIN_PASS}" build.keychain
+          rm -f "${RUNNER_TEMP}/application.p12"
+
+          codesign --options runtime --force --verify --verbose --timestamp \
+            --prefix "${TS_BUNDLE_ID_BASE}.${TS_FILENAME}." \
+            --sign "Developer ID Application: ${MACOS_APPLICATION_ID}" \
+            "${DIST}/${TS_BIN}"
+
+          codesign --verify --deep --display --verbose=4 "${DIST}/${TS_BIN}"
+
+      - name: Sign Windows binary with Trusted Signing
+        if: ${{ startsWith(runner.os,'Windows') && env.HAS_WINDOWS_SIGNING == 'true' }}
+        uses: azure/trusted-signing-action@v2.0.0
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: https://eus.codesigning.azure.net/
+          trusted-signing-account-name: Tari
+          certificate-profile-name: Tarilabs
+          files-folder: ${{ github.workspace }}/dist/
+          files-folder-filter: exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+          description: ${{ env.TS_DESCRIPTION }}
+          description-url: ${{ env.TS_URL }}
+
+      - name: Verify Windows signature
+        if: ${{ startsWith(runner.os,'Windows') && env.HAS_WINDOWS_SIGNING == 'true' }}
+        shell: pwsh
+        run: |
+          $sig = Get-AuthenticodeSignature -FilePath "dist\${{ env.TS_BIN }}.exe"
+          $sig | Format-List
+          if ($sig.Status -ne 'Valid') { throw "Signature status is $($sig.Status)" }
+
+      - name: Archive and checksum binary
+        shell: bash
+        working-directory: dist
+        run: |
+          echo "Compute files shasum"
+          ${SHARUN} "${TS_BIN}${TS_EXT}" >> "${BINFILE}.sha256"
+          cat "${BINFILE}.sha256"
+          ${SHARUN} --check "${BINFILE}.sha256"
+          7z a "${BINFILE}.zip" "${TS_BIN}${TS_EXT}" "${BINFILE}.sha256"
+          echo "Compute archive shasum"
+          ${SHARUN} "${BINFILE}.zip" >> "${BINFILE}.zip.sha256"
+          cat "${BINFILE}.zip.sha256"
+          ${SHARUN} --check "${BINFILE}.zip.sha256"
+
+      - name: Notarize macOS archive
+        if: ${{ startsWith(runner.os,'macOS') && env.HAS_MACOS_SIGNING == 'true' }}
+        working-directory: dist
+        env:
+          MACOS_NOTARY_KEY: ${{ secrets.MACOS_NOTARY_KEY }}
+          MACOS_NOTARY_KEY_ID: ${{ secrets.MACOS_NOTARY_KEY_ID }}
+          MACOS_NOTARY_ISSUER: ${{ secrets.MACOS_NOTARY_ISSUER }}
+        run: |
+          set -eo pipefail
+          printf '%s' "${MACOS_NOTARY_KEY}" > "${RUNNER_TEMP}/notary_key.p8"
+          echo "Submitting ${BINFILE}.zip to Apple..."
+          xcrun notarytool submit "${BINFILE}.zip" \
+            --key "${RUNNER_TEMP}/notary_key.p8" \
+            --key-id "${MACOS_NOTARY_KEY_ID}" \
+            --issuer "${MACOS_NOTARY_ISSUER}" \
+            --output-format json \
+            --wait | tee notarisation.json
+          rm -f "${RUNNER_TEMP}/notary_key.p8"
+          requestUUID=$(jq -r '.id // empty' notarisation.json)
+          requestSTATUS=$(jq -r '.status // empty' notarisation.json)
+          rm -f notarisation.json
+          if [[ -z "${requestUUID}" ]] || [[ "${requestSTATUS}" != "Accepted" ]]; then
+            echo "## status: ${requestSTATUS} - could not notarize - ${requestUUID} - ${BINFILE}.zip"
+            exit 1
+          fi
+          # Stapling is not possible for zip archives; Gatekeeper checks the ticket online
+          echo "Notarization RequestUUID: ${requestUUID}"
+
+      - name: Artifact upload for archive
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.TS_FILENAME }}-${{ matrix.network.name }}_archive-${{ matrix.platform.name }}
+          path: "${{ github.workspace }}/dist/${{ env.BINFILE }}.zip*"
+          if-no-files-found: error
+
+  create-release:
+    if: ${{ startsWith(github.ref, 'refs/tags/v') }}
+
+    runs-on: ubuntu-latest
+    needs: [ builds ]
+
+    env:
+      TARI_VERSION: ${{ needs.builds.outputs.TARI_VERSION }}
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download binaries
+        uses: actions/download-artifact@v8
+        with:
+          path: ${{ env.TS_FILENAME }}
+          pattern: "${{ env.TS_FILENAME }}-*"
+          merge-multiple: true
+
+      - name: Verify checksums and prep uploads
+        shell: bash
+        working-directory: ${{ env.TS_FILENAME }}
+        run: |
+          set -eo pipefail
+          sudo apt-get update
+          sudo apt-get --no-install-recommends --assume-yes install dos2unix
+          SUMS="${TS_FILENAME}-${TARI_VERSION}.${TS_SIG_FN}"
+          rm -fv "${SUMS}"
+          # Merge all archive sha256 files into one
+          find . -name "*.zip.sha256" -type f -print | sort | xargs cat >> "${SUMS}"
+          dos2unix --quiet "${SUMS}"
+          # Windows sha256sum writes binary-mode markers ("*file"); normalise to text mode
+          sed -i 's/ \*/  /' "${SUMS}"
+          cat "${SUMS}"
+          sha256sum --check "${SUMS}"
+          ls -alhR
+
+      - name: Create release
+        uses: ncipollo/release-action@v1
+        with:
+          artifacts: "${{ env.TS_FILENAME }}/*"
+          token: ${{ secrets.GITHUB_TOKEN }}
+          prerelease: true
+          draft: true
+          allowUpdates: true
+          updateOnlyUnreleased: true
+          replacesArtifacts: true
+          generateReleaseNotes: true
+          omitBodyDuringUpdate: true
