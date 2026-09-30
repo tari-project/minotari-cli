@@ -1,6 +1,6 @@
 //! Shared helpers for validator node pay-to-self transaction construction.
 //!
-//! All three VN operations (registration, exit, eviction) lock the consensus-required
+//! Both VN operations (registration and exit) lock the consensus-required
 //! minimum deposit and build a single pay-to-self output with operation-specific
 //! [`OutputFeatures`]. This module extracts that common pattern.
 
@@ -30,7 +30,7 @@ use crate::{
 
 /// Locks the VN registration deposit and prepares a pay-to-self transaction for signing.
 ///
-/// Used by all three VN operations (registration, exit, eviction) which share the same
+/// Used by both VN operations (registration and exit) which share the same
 /// transaction shape: one output sent back to the sender, carrying operation-specific
 /// `output_features`.
 ///
@@ -61,7 +61,7 @@ pub(crate) fn build_vn_pay_to_self_tx(
 
     // `output_features` carries everything that distinguishes one VN operation
     // from another — the node public key, its signature, the claim key, the max
-    // epoch, the eviction proof — so hashing its canonical encoding binds the
+    // epoch — so hashing its canonical encoding binds the
     // key to the specific node action being requested.
     let encoded_features = serde_json::to_vec(&output_features)
         .map_err(|e| anyhow!("Failed to encode validator node output features: {}", e))?;
