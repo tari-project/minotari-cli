@@ -7,7 +7,7 @@ members = [
 ]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 authors = ["The Tari Development Community"]
 license = "BSD-3-Clause"
@@ -24,7 +24,7 @@ tari_sidechain = { version = "6.0.1-pre.2" }
 tari_transaction_components = { version = "6.0.1-pre.2" }
 minotari_app_grpc = { version = "6.0.1-pre.2", default-features = false }
 tari_node_components = { version = "6.0.1-pre.2" }
-minotari-scanning = { path = "minotari-scanning", version = "0.2.0" }
+minotari-scanning = { path = "minotari-scanning", version = "0.3.0" }
 
 [profile.release]
 # By default, Rust will wrap an integer in release mode instead of throwing the overflow error
