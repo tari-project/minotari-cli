@@ -91,8 +91,6 @@ pub enum IdempotencyOperation {
     ValidatorNodeRegistration,
     /// Validator node exit.
     ValidatorNodeExit,
-    /// Validator node eviction proof submission.
-    ValidatorNodeEviction,
 }
 
 impl IdempotencyOperation {
@@ -105,7 +103,6 @@ impl IdempotencyOperation {
             IdempotencyOperation::BurnFunds => "burn_funds",
             IdempotencyOperation::ValidatorNodeRegistration => "validator_node_registration",
             IdempotencyOperation::ValidatorNodeExit => "validator_node_exit",
-            IdempotencyOperation::ValidatorNodeEviction => "validator_node_eviction",
         }
     }
 
@@ -118,7 +115,6 @@ impl IdempotencyOperation {
             IdempotencyOperation::BurnFunds => "burn",
             IdempotencyOperation::ValidatorNodeRegistration => "validator node registration",
             IdempotencyOperation::ValidatorNodeExit => "validator node exit",
-            IdempotencyOperation::ValidatorNodeEviction => "validator node eviction proof",
         }
     }
 }

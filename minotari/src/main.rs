@@ -560,40 +560,6 @@ async fn main() -> Result<(), anyhow::Error> {
             )
             .await
         },
-        Commands::SubmitValidatorEvictionProof {
-            security,
-            node,
-            db,
-            tx,
-            account_name,
-            proof_file,
-            fee_per_gram,
-            payment_id,
-            sidechain_deployment_key,
-            seconds_to_lock,
-        } => {
-            info!(target: "audit", account = account_name.as_str(); "Submitting validator node eviction proof...");
-
-            wallet_config.apply_node(&node);
-            wallet_config.apply_database(&db);
-            wallet_config.apply_transaction(&tx);
-
-            validator_nodes::handle_submit_validator_eviction_proof(
-                proof_file,
-                fee_per_gram,
-                payment_id,
-                sidechain_deployment_key,
-                wallet_config.database_path.clone(),
-                account_name,
-                wallet_config.network,
-                security.password,
-                tx.idempotency_key,
-                seconds_to_lock,
-                wallet_config.confirmation_window,
-                wallet_config.base_url,
-            )
-            .await
-        },
         Commands::Delete { db, account } => {
             let name = account.account_name.as_deref().unwrap_or("default");
             info!(target: "audit", account = name; "Deleting wallet...");

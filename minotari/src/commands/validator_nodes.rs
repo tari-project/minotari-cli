@@ -3,14 +3,13 @@
 //! Each handler parses its CLI inputs, builds the appropriate params struct,
 //! calls the transaction constructor, then signs, persists, and broadcasts the result.
 
-use std::{fs, path::PathBuf};
+use std::path::PathBuf;
 
 use crate::{
     db::{self, AccountRow, init_db},
     http::WalletHttpClient,
     models::PendingTransactionStatus,
     transactions::validator_node::{
-        eviction::{ValidatorNodeEvictionParams, create_validator_node_eviction_tx},
         exit::{ValidatorNodeExitParams, create_validator_node_exit_tx},
         registration::{ValidatorNodeRegistrationParams, create_validator_node_registration_tx},
     },
@@ -339,61 +338,6 @@ pub async fn handle_submit_validator_node_exit(
         "VN exit",
         |account, conn, network, password, idempotency_key, seconds_to_lock, confirmation_window| {
             create_validator_node_exit_tx(
-                account,
-                params,
-                conn,
-                network,
-                password,
-                idempotency_key,
-                seconds_to_lock,
-                confirmation_window,
-            )
-        },
-    )
-    .await
-}
-
-#[allow(clippy::too_many_arguments)]
-pub async fn handle_submit_validator_eviction_proof(
-    proof_file: PathBuf,
-    fee_per_gram: u64,
-    payment_id: Option<String>,
-    sidechain_deployment_key: Option<String>,
-    database_file: PathBuf,
-    account_name: String,
-    network: Network,
-    password: String,
-    idempotency_key: Option<String>,
-    seconds_to_lock: u64,
-    confirmation_window: u64,
-    base_url: String,
-) -> Result<(), anyhow::Error> {
-    let proof_json = fs::read_to_string(&proof_file)
-        .map_err(|e| anyhow!("Failed to read proof file '{}': {}", proof_file.display(), e))?;
-    let eviction_proof: tari_sidechain::EvictionProof =
-        serde_json::from_str(&proof_json).map_err(|e| anyhow!("Failed to parse eviction proof JSON: {}", e))?;
-
-    let sidechain_deployment_key = parse_sidechain_deployment_key(sidechain_deployment_key)?;
-
-    let params = ValidatorNodeEvictionParams {
-        eviction_proof,
-        fee_per_gram: MicroMinotari(fee_per_gram),
-        payment_id,
-        sidechain_deployment_key,
-    };
-
-    run_vn_command(
-        database_file,
-        &account_name,
-        network,
-        &password,
-        idempotency_key,
-        seconds_to_lock,
-        confirmation_window,
-        &base_url,
-        "VN eviction proof",
-        |account, conn, network, password, idempotency_key, seconds_to_lock, confirmation_window| {
-            create_validator_node_eviction_tx(
                 account,
                 params,
                 conn,
