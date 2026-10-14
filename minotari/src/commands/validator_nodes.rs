@@ -9,9 +9,12 @@ use crate::{
     db::{self, AccountRow, init_db},
     http::WalletHttpClient,
     models::PendingTransactionStatus,
-    transactions::validator_node::{
-        exit::{ValidatorNodeExitParams, create_validator_node_exit_tx},
-        registration::{ValidatorNodeRegistrationParams, create_validator_node_registration_tx},
+    transactions::{
+        input_selector::map_change_required_error,
+        validator_node::{
+            exit::{ValidatorNodeExitParams, create_validator_node_exit_tx},
+            registration::{ValidatorNodeRegistrationParams, create_validator_node_registration_tx},
+        },
     },
 };
 use anyhow::anyhow;
@@ -128,6 +131,7 @@ async fn sign_save_and_broadcast(
     let key_manager = account.get_key_manager(password)?;
     let consensus_constants = ConsensusConstantsBuilder::new(network).build();
     let signed_result = sign_locked_transaction(&key_manager, consensus_constants, network, unsigned_result)
+        .map_err(map_change_required_error)
         .map_err(|e| anyhow!("Failed to sign {} transaction: {}", tx_kind, e))?;
 
     let completed_tx_id = signed_result.signed_transaction.tx_id;

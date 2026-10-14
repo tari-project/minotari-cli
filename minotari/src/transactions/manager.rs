@@ -515,6 +515,8 @@ impl TransactionSender {
         let mut tx_builder = TransactionBuilder::new(consensus_constants, key_manager.clone(), self.network)?;
 
         tx_builder.with_fee_per_gram(self.fee_per_gram);
+        // Every send carries a change output, so the wallet's scan can see it land.
+        tx_builder.with_change_required();
 
         for utxo in &locked_utxos {
             tx_builder.with_input(utxo.clone())?;

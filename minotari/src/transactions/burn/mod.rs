@@ -44,6 +44,7 @@ use crate::{
         fee_estimator::{estimated_output_size_for_payment_id, measure_output_size},
         fund_locker::FundLocker,
         idempotency::{IdempotencyBinding, IdempotencyConflict, IdempotencyOperation, RequestFingerprint},
+        input_selector::map_change_required_error,
     },
 };
 
@@ -206,6 +207,8 @@ pub fn create_burn_tx(
     // Assemble the transaction.
     let mut tx_builder = TransactionBuilder::new(consensus_constants, key_manager.clone(), network)?;
     tx_builder.with_fee_per_gram(params.fee_per_gram);
+    // Every send carries a change output, so the wallet's scan can see it land.
+    tx_builder.with_change_required();
     tx_builder.with_kernel_features(KernelFeatures::create_burn());
     tx_builder.with_tx_type(TxType::Burn);
     tx_builder.with_memo(memo.clone());
@@ -276,7 +279,9 @@ pub fn create_burn_tx(
             &memo,
         )?,
     );
-    tx_builder.reserve_sender_offset_keys(&[pending_burn_output])?;
+    tx_builder
+        .reserve_sender_offset_keys(&[pending_burn_output])
+        .map_err(map_change_required_error)?;
 
     // Default address used as placeholder — burn outputs have no real "recipient".
     tx_builder.add_recipient(

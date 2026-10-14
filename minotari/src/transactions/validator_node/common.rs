@@ -95,6 +95,8 @@ pub(crate) fn build_vn_pay_to_self_tx(
     let key_manager = account.get_key_manager(password)?;
     let mut tx_builder = TransactionBuilder::new(consensus_constants, key_manager.clone(), network)?;
     tx_builder.with_fee_per_gram(fee_per_gram);
+    // Every send carries a change output, so the wallet's scan can see it land.
+    tx_builder.with_change_required();
     for utxo in &locked_funds.utxos {
         tx_builder.with_input(utxo.clone())?;
     }

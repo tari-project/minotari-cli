@@ -44,7 +44,9 @@
 
 use log::{debug, warn};
 use rusqlite::Connection;
-use tari_transaction_components::{fee::Fee, tari_amount::MicroMinotari, weight::TransactionWeight};
+use tari_transaction_components::{
+    TransactionBuilderError, fee::Fee, tari_amount::MicroMinotari, weight::TransactionWeight,
+};
 use thiserror::Error;
 
 use crate::{
@@ -83,6 +85,17 @@ pub enum UtxoSelectionError {
         required: MicroMinotari,
     },
 
+    /// The funds cover the amount and fee, but not a change output as well.
+    ///
+    /// Every send must carry a change output: the wallet's block scan can only
+    /// see a send land through an output the wallet owns. Sending the whole
+    /// balance (or an amount that leaves nothing over) is therefore refused.
+    #[error("Not enough funds for a change output: needs {shortfall} more to create a change output")]
+    ChangeNotAffordable {
+        /// How much more is needed, on top of what was available, to create a change output.
+        shortfall: MicroMinotari,
+    },
+
     /// DB execution failed
     #[error("Database execution error: {0}")]
     DbError(#[from] WalletDbError),
@@ -110,8 +123,8 @@ pub struct UtxoSelection {
 
     /// Whether the selection requires a change output.
     ///
-    /// `true` if the total value exceeds amount + fee, requiring change.
-    /// `false` if the total exactly matches amount + fee.
+    /// Always `true`: every send carries a change output, and selection
+    /// leaves at least 1 µT for it after all fees.
     pub requires_change_output: bool,
 
     /// Total value of all selected UTXOs.
@@ -316,24 +329,51 @@ impl InputSelector {
             .fee_calc
             .calculate(fee_per_gram, 0, 0, num_outputs, features_and_scripts_byte_size);
         let input_fee = self.fee_calc.calculate(fee_per_gram, 0, 1, 0, 0);
-        // An amount so large that adding the kernel fee overflows can never be funded.
+
+        // Every send must carry a change output, so the change output's fee is
+        // charged as one of the outputs, and the target is one µT more than the
+        // amount: whatever the selector picks then leaves at least 1 µT of change
+        // after every fee. The builder refuses (`with_change_required`) a
+        // transaction without change, so the two must agree. An amount so large
+        // that the target overflows can never be funded.
         let target_amount = amount
             .checked_add(kernel_fee)
+            .and_then(|target| target.checked_add(MicroMinotari(1)))
             .ok_or(UtxoSelectionError::InsufficientFunds {
                 available: available_balance,
                 required: amount.saturating_add(kernel_fee),
             })?;
-        let bnb = BranchAndBoundUtxoSelectionBuilder::new(uo)
+        let bnb = BranchAndBoundUtxoSelectionBuilder::new(uo.clone())
             .with_target_amount(target_amount)
             .with_fee_per_input(input_fee)
-            .with_total_output_fee(output_fee)
-            .with_change_fee(default_output_fee)
+            .with_total_output_fee(output_fee + default_output_fee)
+            .with_change_fee(MicroMinotari(0))
             .build()
             .map_err(|e| UtxoSelectionError::ServiceError(e.to_string()))?;
 
-        let selection_result = bnb.search();
+        let Some(selection) = bnb.search() else {
+            // Tell "cannot afford the change output" apart from plain
+            // insufficient funds: search again without the change requirement.
+            let without_change = BranchAndBoundUtxoSelectionBuilder::new(uo)
+                .with_target_amount(amount + kernel_fee)
+                .with_fee_per_input(input_fee)
+                .with_total_output_fee(output_fee)
+                .with_change_fee(default_output_fee)
+                .build()
+                .map_err(|e| UtxoSelectionError::ServiceError(e.to_string()))?;
+            if let Some(selection) = without_change.search() {
+                let needed = selection.final_target + default_output_fee + MicroMinotari(1);
+                let shortfall = needed.saturating_sub(selection.current_value);
+                warn!(
+                    target: "audit",
+                    available = &*mask_amount(available_balance),
+                    required = &*mask_amount(amount),
+                    shortfall = &*mask_amount(shortfall);
+                    "Insufficient funds for a change output"
+                );
+                return Err(UtxoSelectionError::ChangeNotAffordable { shortfall });
+            }
 
-        if selection_result.is_none() {
             warn!(
                 target: "audit",
                 available = &*mask_amount(available_balance),
@@ -345,22 +385,15 @@ impl InputSelector {
                 available: available_balance,
                 required: amount.saturating_add(MicroMinotari(1)),
             });
-        }
-        let selection = selection_result.expect("Selection should be valid here");
-        let selected_amount = selection.current_value;
-        let requires_change_output = selection.has_change;
-        let final_fee = selection
-            .final_fee
-            .checked_add(kernel_fee)
-            .ok_or_else(|| UtxoSelectionError::ServiceError("Selection fee plus kernel fee overflows".to_string()))?;
-        let (fee_with_change, fee_without_change) = if requires_change_output {
-            (final_fee, final_fee.saturating_sub(default_output_fee))
-        } else {
-            let fee_with_change = final_fee
-                .checked_add(default_output_fee)
-                .ok_or_else(|| UtxoSelectionError::ServiceError("Fee plus change output fee overflows".to_string()))?;
-            (fee_with_change, final_fee)
         };
+        let selected_amount = selection.current_value;
+        let requires_change_output = true;
+        #[allow(clippy::cast_possible_truncation)]
+        let inputs_fee = input_fee * (selection.selected_utxos.len() as u64);
+        // Computed rather than taken from `selection.final_fee`, which also
+        // counts any dust the selector chose to burn; that dust becomes change.
+        let fee_with_change = kernel_fee + output_fee + default_output_fee + inputs_fee;
+        let fee_without_change = fee_with_change.saturating_sub(default_output_fee);
         let utxos = selection.selected_utxos;
 
         debug!(
@@ -380,9 +413,108 @@ impl InputSelector {
     }
 }
 
+/// Turns the transaction builder's refusal to build a transaction without a
+/// change output into [`UtxoSelectionError::ChangeNotAffordable`].
+///
+/// Input selection already makes room for a change output, so this is a
+/// backstop for when the builder's fee estimate comes out higher than the
+/// selector's. Any other builder error is passed through unchanged.
+pub fn map_change_required_error(error: TransactionBuilderError) -> anyhow::Error {
+    match error {
+        TransactionBuilderError::OfflineTransactionRequiresChange { remainder, change_fee } => {
+            // The builder creates change only when `remainder - change_fee >= 1`.
+            let shortfall = (change_fee + MicroMinotari(1)).saturating_sub(remainder);
+            UtxoSelectionError::ChangeNotAffordable { shortfall }.into()
+        },
+        other => other.into(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #![allow(clippy::cast_possible_wrap)]
+
     use super::*;
+    use crate::db::{SqlitePool, create_account, get_account_by_name, init_db, insert_scanned_tip_block};
+    use chrono::Utc;
+    use rusqlite::named_params;
+    use tari_common_types::seeds::cipher_seed::CipherSeed;
+    use tari_common_types::types::{ComAndPubSignature, CompressedPublicKey, FixedHash};
+    use tari_script::{ExecutionStack, TariScript};
+    use tari_transaction_components::key_manager::TariKeyId;
+    use tari_transaction_components::key_manager::wallet_types::{SeedWordsWallet, WalletType};
+    use tari_transaction_components::transaction_components::{
+        EncryptedData, MemoField, OutputFeatures, TransactionOutputVersion, WalletOutput, covenants::Covenant,
+    };
+    use tempfile::TempDir;
+
+    fn test_wallet_output(value: u64, hash_seed: u8) -> WalletOutput {
+        let hash = FixedHash::from([hash_seed; 32]);
+        WalletOutput::new_from_parts(
+            TransactionOutputVersion::default(),
+            MicroMinotari::from(value),
+            TariKeyId::default(),
+            OutputFeatures::default(),
+            TariScript::default(),
+            ExecutionStack::default(),
+            TariKeyId::default(),
+            CompressedPublicKey::default(),
+            ComAndPubSignature::default(),
+            0,
+            Covenant::default(),
+            EncryptedData::default(),
+            MicroMinotari::from(0),
+            None,
+            MemoField::new_empty(),
+            hash,
+            Default::default(),
+        )
+    }
+
+    /// An account holding one confirmed, spendable output of `value`.
+    fn account_with_one_output(value: u64) -> (SqlitePool, i64, TempDir) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let pool = init_db(dir.path().join("selector.db")).expect("init db");
+        let conn = pool.get().expect("conn");
+        let wallet = WalletType::SeedWords(SeedWordsWallet::construct_new(CipherSeed::random()).unwrap());
+        create_account(&conn, "default", &wallet, "password").unwrap();
+        let account_id = get_account_by_name(&conn, "default").unwrap().unwrap().id;
+        insert_scanned_tip_block(&conn, account_id, 200, &[0u8; 32]).expect("tip");
+
+        let output = test_wallet_output(value, 1);
+        conn.execute(
+            r#"
+            INSERT INTO outputs (
+                account_id, tx_id, output_hash, mined_in_block_height, mined_in_block_hash,
+                value, mined_timestamp, wallet_output_json, status, confirmed_height,
+                confirmed_hash, is_burn, maturity
+            ) VALUES (
+                :account_id, 1, :hash, 100, :hash, :value, :ts, :json, 'UNSPENT', 100, :hash, 0, 0
+            )
+            "#,
+            named_params! {
+                ":account_id": account_id,
+                ":hash": vec![1u8; 32],
+                ":value": value as i64,
+                ":ts": Utc::now(),
+                ":json": serde_json::to_string(&output).unwrap(),
+            },
+        )
+        .expect("insert output");
+        drop(conn);
+        (pool, account_id, dir)
+    }
+
+    fn select(pool: &SqlitePool, account_id: i64, amount: u64) -> Result<UtxoSelection, UtxoSelectionError> {
+        let conn = pool.get().expect("conn");
+        InputSelector::new(account_id, 100).fetch_unspent_outputs(
+            &conn,
+            MicroMinotari(amount),
+            1,
+            MicroMinotari(5),
+            Some(1000),
+        )
+    }
 
     #[test]
     fn an_amount_that_overflows_with_the_kernel_fee_is_insufficient_funds() {
@@ -400,5 +532,95 @@ mod tests {
             },
             other => panic!("expected InsufficientFunds, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn a_send_that_leaves_no_room_for_change_fails_with_a_typed_error() {
+        let value = 1_000_000;
+        let (pool, account_id, _dir) = account_with_one_output(value);
+
+        // Walk the amount down from the whole balance. The first amount that
+        // covers the fee must be refused because it cannot also pay for a
+        // change output, not accepted without one.
+        let mut amount = value - 1;
+        let shortfall = loop {
+            match select(&pool, account_id, amount) {
+                Err(UtxoSelectionError::InsufficientFunds { .. }) => amount -= 1,
+                Err(UtxoSelectionError::ChangeNotAffordable { shortfall }) => break shortfall,
+                Err(e) => panic!("unexpected error: {e}"),
+                Ok(selection) => panic!("selected without room for change: {selection:?}"),
+            }
+        };
+        assert!(
+            shortfall > MicroMinotari(0),
+            "the shortfall must say how much more is needed"
+        );
+        let message = UtxoSelectionError::ChangeNotAffordable { shortfall }.to_string();
+        assert!(message.contains("change output"), "got: {message}");
+
+        // Sending `shortfall` less leaves exactly enough for a change output.
+        let selection = select(&pool, account_id, amount - shortfall.as_u64()).expect("affordable with change");
+        assert!(selection.requires_change_output);
+        let change = selection.total_value - MicroMinotari(amount - shortfall.as_u64()) - selection.fee_with_change;
+        assert!(change >= MicroMinotari(1), "change must be at least 1 µT, got {change}");
+    }
+
+    #[test]
+    fn every_selection_requires_a_change_output() {
+        let (pool, account_id, _dir) = account_with_one_output(1_000_000);
+        let selection = select(&pool, account_id, 10_000).expect("selection");
+        assert!(selection.requires_change_output);
+        assert_eq!(selection.fee(), selection.fee_with_change);
+    }
+
+    #[test]
+    fn the_builder_refusing_to_build_without_change_maps_to_the_typed_error() {
+        let error = map_change_required_error(TransactionBuilderError::OfflineTransactionRequiresChange {
+            remainder: MicroMinotari(40),
+            change_fee: MicroMinotari(100),
+        });
+        match error.downcast_ref::<UtxoSelectionError>() {
+            Some(UtxoSelectionError::ChangeNotAffordable { shortfall }) => assert_eq!(*shortfall, MicroMinotari(61)),
+            other => panic!("expected ChangeNotAffordable, got {other:?}"),
+        }
+
+        let other = map_change_required_error(TransactionBuilderError::MultipleBurnCommitments);
+        assert!(other.downcast_ref::<UtxoSelectionError>().is_none());
+    }
+
+    /// Every place that builds a transaction must require a change output. A
+    /// new builder site that forgets to is caught here.
+    #[test]
+    fn every_transaction_builder_site_requires_change() {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut dirs = vec![src];
+        let mut builder_sites = 0;
+        while let Some(dir) = dirs.pop() {
+            for entry in std::fs::read_dir(&dir).expect("read dir") {
+                let path = entry.expect("entry").path();
+                if path.is_dir() {
+                    dirs.push(path);
+                    continue;
+                }
+                if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                    continue;
+                }
+                let source = std::fs::read_to_string(&path).expect("read source");
+                let new_count = source.matches(" TransactionBuilder::new(").count();
+                let required_count = source.matches(".with_change_required()").count();
+                assert!(
+                    required_count >= new_count,
+                    "{} creates {} TransactionBuilder(s) but calls with_change_required {} time(s)",
+                    path.display(),
+                    new_count,
+                    required_count
+                );
+                builder_sites += new_count;
+            }
+        }
+        assert!(
+            builder_sites >= 4,
+            "expected at least the four known builder sites, found {builder_sites}"
+        );
     }
 }
