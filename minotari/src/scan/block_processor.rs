@@ -2266,4 +2266,71 @@ mod tests {
             vec!["LOCKED".to_string(), "LOCKED".to_string()]
         );
     }
+
+    #[test]
+    fn a_reorg_keeps_a_scan_rejected_send_rejected_if_another_send_spent_its_input() {
+        // X is rejected by the scan at 50 and its unspent input released; send Z
+        // then locks and spends that input at 52. A reorg back to 50 removes both
+        // blocks: the input is Z's, so X must stay rejected.
+        let wallet = test_wallet();
+        let mut conn = wallet.pool.get().expect("conn");
+        let x = record_send(&wallet, &conn, 1, &[1, 2], Some(3));
+
+        let mut first = processor(&wallet, true);
+        let other_block = block(50, Vec::new(), vec![x.input_hashes[0]]);
+        process(
+            &mut first,
+            &conn,
+            wallet.account_id,
+            &[other_block, block(51, Vec::new(), Vec::new())],
+        );
+        assert_eq!(
+            completed(&conn, x.tx_id).status,
+            db::CompletedTransactionStatus::Rejected
+        );
+
+        let z = record_send(&wallet, &conn, 2, &[2], Some(9));
+        assert_eq!(z.input_hashes, vec![x.input_hashes[1]]);
+        let mut second = processor(&wallet, true);
+        let z_block = block(52, vec![z.change.clone().unwrap()], z.input_hashes.clone());
+        process(
+            &mut second,
+            &conn,
+            wallet.account_id,
+            &[z_block, block(53, Vec::new(), Vec::new())],
+        );
+        assert_eq!(
+            completed(&conn, z.tx_id).status,
+            db::CompletedTransactionStatus::MinedUnconfirmed
+        );
+
+        let tx = conn.transaction().expect("tx");
+        crate::scan::reorg::rollback_from_height(&tx, wallet.account_id, 50, None).expect("rollback");
+        tx.commit().expect("commit");
+
+        let x_completed = completed(&conn, x.tx_id);
+        assert_eq!(x_completed.status, db::CompletedTransactionStatus::Rejected);
+        assert_eq!(x_completed.mined_height, None);
+        let reorged: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE event_type = 'TransactionReorged'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count");
+        assert_eq!(reorged, 0, "X is not announced as revived");
+
+        let lock: Option<String> = conn
+            .query_row(
+                "SELECT locked_by_request_id FROM outputs WHERE output_hash = :hash AND deleted_at IS NULL",
+                named_params! { ":hash": x.input_hashes[1].as_slice() },
+                |row| row.get(0),
+            )
+            .expect("input");
+        assert_eq!(lock.as_deref(), Some(z.request_id.as_str()), "the input stays Z's");
+        assert_eq!(
+            completed(&conn, z.tx_id).status,
+            db::CompletedTransactionStatus::Completed
+        );
+    }
 }

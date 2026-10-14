@@ -565,7 +565,11 @@ pub fn relock_inputs_for_revived_send(
 
         let free = status == unspent && locked_by.is_none();
         let ours = locked_by.as_deref() == Some(pending_tx_id) && (status == locked || status == spent);
-        let spent_in_removed_block = status == spent && {
+        // Spent only in the rolled-back blocks, and not by another send: an input
+        // another send had locked and spent belongs to that send, which the reorg
+        // resets to be rebroadcast with it.
+        let locked_by_us_or_nobody = locked_by.is_none() || locked_by.as_deref() == Some(pending_tx_id);
+        let spent_in_removed_block = status == spent && locked_by_us_or_nobody && {
             let active_spends: i64 = conn.query_row(
                 "SELECT COUNT(*) FROM inputs WHERE output_id = :id AND deleted_at IS NULL",
                 named_params! { ":id": output_id },
