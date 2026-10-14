@@ -149,8 +149,13 @@ async fn sign_save_and_broadcast(
     let sent_output_hash = signed_result.signed_transaction.sent_hashes.first().map(hex::encode);
 
     let pending_tx_id = claim_reservation_for_broadcast(conn, account.id, idempotency_key, tx_kind)?;
+    // The completed transaction and its change output go in together: the
+    // wallet's scan recognises the send by that change output. `new_unchecked`
+    // because only a shared connection is available here, and no transaction is
+    // open on it.
+    let transaction = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
     db::create_completed_transaction(
-        conn,
+        &transaction,
         account.id,
         &pending_tx_id,
         &kernel_excess,
@@ -158,16 +163,16 @@ async fn sign_save_and_broadcast(
         sent_output_hash,
         completed_tx_id,
     )?;
-    // The wallet's scan recognises the send by its change output.
     if let Some(change_output) = &signed_result.signed_transaction.change_output {
         db::insert_unconfirmed_change_output(
-            conn,
+            &transaction,
             account.id,
             &key_manager.get_private_view_key(),
             &pending_tx_id,
             change_output,
         )?;
     }
+    transaction.commit()?;
 
     let client = WalletHttpClient::new(base_url.parse()?)?;
     let response = client
