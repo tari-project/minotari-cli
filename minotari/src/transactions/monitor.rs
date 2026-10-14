@@ -79,6 +79,7 @@ use crate::db::{
     mark_completed_transaction_as_mined_unconfirmed, mark_completed_transaction_as_rejected,
 };
 use crate::http::{HttpError, WalletHttpClient};
+use crate::log::sanitize_node_text;
 use crate::models::{WalletEvent, WalletEventType};
 use crate::transactions::{DisplayedTransaction, TransactionDisplayStatus};
 use crate::webhooks::{WebhookTriggerConfig, utils::trigger_webhook_with_balance};
@@ -738,6 +739,7 @@ impl TransactionMonitor {
                 Ok(())
             },
             Some(reason) => {
+                let reason = sanitize_node_text(&reason);
                 warn!(
                     target: "audit",
                     id = tx.id.to_string().as_str(),
@@ -765,6 +767,8 @@ impl TransactionMonitor {
         description: String,
         result: &mut MonitoringResult,
     ) -> Result<()> {
+        // The reason can carry text from the node; it is stored and sent in webhooks.
+        let reason = sanitize_node_text(&reason);
         mark_completed_transaction_as_rejected(conn, tx.id, &reason)?;
         db::unlock_outputs_for_pending_transaction(conn, &tx.pending_tx_id)?;
 
@@ -876,7 +880,7 @@ impl TransactionMonitor {
         let response = match wallet_client.submit_transaction(transaction).await {
             Ok(response) => response,
             Err(e) if e.downcast_ref::<HttpError>().is_some() => {
-                return Err(NodeRequestError(format!("Broadcast failed: {}", e)).into());
+                return Err(NodeRequestError(sanitize_node_text(&format!("Broadcast failed: {}", e))).into());
             },
             // The node answered with an error, or the transaction is too large to send.
             Err(e) => return Ok(Some(format!("Broadcast failed: {}", e))),
@@ -913,7 +917,7 @@ impl TransactionMonitor {
         let response = wallet_client
             .transaction_query(excess_sig_nonce, excess_sig)
             .await
-            .map_err(|e| NodeRequestError(format!("Transaction query failed: {}", e)))?;
+            .map_err(|e| NodeRequestError(sanitize_node_text(&format!("Transaction query failed: {}", e))))?;
 
         Ok(Some(response))
     }

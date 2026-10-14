@@ -789,6 +789,8 @@ impl TransactionSender {
             .await;
 
         if let Err(e) = response {
+            // The error can carry text from the node; it is logged and stored.
+            let e = crate::log::sanitize_node_text(&e.to_string());
             warn!(
                 target: "audit",
                 id = processed_transaction.id(),
