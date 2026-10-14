@@ -1142,6 +1142,22 @@ pub fn unlock_outputs_for_request(conn: &Connection, locked_by_request_id: &str)
         },
     )?;
 
+    // An input of this request can be another send's change output that a reorg
+    // turned back into `UNCONFIRMED` (see `revert_change_outputs_from_height`).
+    // Release that lock too, or the change would come back `LOCKED` for a request
+    // that no longer exists when it is mined again.
+    conn.execute(
+        r#"
+        UPDATE outputs
+        SET locked_at = NULL, locked_by_request_id = NULL
+        WHERE locked_by_request_id = :req_id AND status = :unconfirmed
+        "#,
+        named_params! {
+            ":req_id": locked_by_request_id,
+            ":unconfirmed": OutputStatus::Unconfirmed.to_string(),
+        },
+    )?;
+
     // A send whose inputs are handed back will not land, so neither will its
     // change output.
     soft_delete_unconfirmed_change_output(conn, locked_by_request_id)?;
@@ -1719,5 +1735,57 @@ mod tests {
             })
             .expect("count");
         assert_eq!(active, 0, "the change of a send that will not land is soft-deleted");
+    }
+
+    #[test]
+    fn unlocking_a_request_releases_a_reverted_change_output_it_had_locked() {
+        // Send A's change C was mined, locked as an input by send B, then turned
+        // back into `UNCONFIRMED` by a reorg. If B is then released, C must not
+        // come back `LOCKED` for B when it is mined again.
+        let temp = tempdir().expect("temp dir");
+        let pool = init_db(temp.path().join("reverted_change_lock.db")).expect("init db");
+        let conn = pool.get().expect("conn");
+        let account_id = create_test_account(&conn);
+
+        insert_synthetic_output(&conn, account_id, 2, 300, 0, false, OutputStatus::Unconfirmed, 0);
+        conn.execute(
+            "UPDATE outputs SET created_by_request_id = 'send-a', locked_by_request_id = 'send-b', locked_at = :now",
+            named_params! { ":now": Utc::now() },
+        )
+        .expect("lock reverted change to B");
+
+        unlock_outputs_for_request(&conn, "send-b").expect("release B");
+
+        let (status, lock): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, locked_by_request_id FROM outputs WHERE deleted_at IS NULL",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("change row is still active");
+        assert_eq!(status, "UNCONFIRMED");
+        assert_eq!(lock, None, "B's lock is released");
+
+        let found = confirm_unconfirmed_change_output(
+            &conn,
+            account_id,
+            &FixedHash::from([2u8; 32]),
+            60,
+            &FixedHash::from([60u8; 32]),
+            1_700_000_000,
+            None,
+            None,
+            FixedHash::zero(),
+            OutputStatus::Unspent,
+        )
+        .expect("confirm");
+        assert!(found.is_some());
+        let status: String = conn
+            .query_row("SELECT status FROM outputs", [], |row| row.get(0))
+            .expect("status");
+        assert_eq!(
+            status, "UNSPENT",
+            "re-mined change is spendable, not locked to a dead request"
+        );
     }
 }
