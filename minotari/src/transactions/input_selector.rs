@@ -588,13 +588,75 @@ mod tests {
         assert!(other.downcast_ref::<UtxoSelectionError>().is_none());
     }
 
-    /// Every place that builds a transaction must require a change output. A
-    /// new builder site that forgets to is caught here.
     #[test]
-    fn every_transaction_builder_site_requires_change() {
+    fn a_builder_refusing_a_send_without_change_surfaces_as_change_not_affordable() {
+        use tari_common::configuration::Network;
+        use tari_common_types::tari_address::{TariAddress, TariAddressFeatures};
+        use tari_common_types::types::PrivateKey;
+        use tari_transaction_components::TransactionBuilder;
+        use tari_transaction_components::consensus::ConsensusConstantsBuilder;
+        use tari_transaction_components::key_manager::KeyManager;
+
+        let value = 1_000_000;
+        let recipient = TariAddress::new_dual_address(
+            CompressedPublicKey::from_secret_key(&PrivateKey::from(7u64)),
+            CompressedPublicKey::from_secret_key(&PrivateKey::from(9u64)),
+            Network::LocalNet,
+            TariAddressFeatures::create_one_sided_only(),
+            None,
+        )
+        .expect("address");
+
+        // Walk the amount down from the whole input, 100 µT at a time (well under
+        // the fee of a change output), until the builder no longer says it is
+        // spending more than it has: that amount leaves no room for change, and
+        // with change required the builder refuses it.
+        let key_manager = KeyManager::new_random().expect("key manager");
+        let mut amount = value;
+        let error = loop {
+            let consensus_constants = ConsensusConstantsBuilder::new(Network::LocalNet).build();
+            let mut builder =
+                TransactionBuilder::new(consensus_constants, key_manager.clone(), Network::LocalNet).expect("builder");
+            builder.with_fee_per_gram(MicroMinotari(5));
+            builder.with_change_required();
+            builder.with_input(test_wallet_output(value, 1)).expect("input");
+            builder
+                .add_stealth_recipient(
+                    recipient.clone(),
+                    MicroMinotari(amount),
+                    OutputFeatures::default(),
+                    MemoField::new_empty(),
+                )
+                .expect("recipient");
+            match builder.reserve_sender_offset_keys(&[]) {
+                Err(TransactionBuilderError::SpendingMoreThanAvailable { .. }) => amount -= 100,
+                Err(e) => break e,
+                Ok(_) => panic!("the builder accepted a send without change at {amount}"),
+            }
+        };
+        assert!(
+            matches!(error, TransactionBuilderError::OfflineTransactionRequiresChange { .. }),
+            "got: {error}"
+        );
+
+        let mapped = map_change_required_error(error);
+        match mapped.downcast_ref::<UtxoSelectionError>() {
+            Some(UtxoSelectionError::ChangeNotAffordable { shortfall }) => assert!(*shortfall > MicroMinotari(0)),
+            other => panic!("expected ChangeNotAffordable, got {other:?}"),
+        }
+    }
+
+    /// Every place that builds a transaction must require a change output, and
+    /// every builder call that can refuse a transaction for lack of change must
+    /// map that refusal to `ChangeNotAffordable`. A new site that forgets either
+    /// is caught here.
+    #[test]
+    fn every_transaction_builder_site_requires_change_and_maps_the_refusal() {
         let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let this_file = src.join("transactions").join("input_selector.rs");
         let mut dirs = vec![src];
         let mut builder_sites = 0;
+        let mut refusing_calls = 0;
         while let Some(dir) = dirs.pop() {
             for entry in std::fs::read_dir(&dir).expect("read dir") {
                 let path = entry.expect("entry").path();
@@ -602,7 +664,8 @@ mod tests {
                     dirs.push(path);
                     continue;
                 }
-                if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+                // This file names the patterns below in its own test.
+                if path.extension().and_then(|e| e.to_str()) != Some("rs") || path == this_file {
                     continue;
                 }
                 let source = std::fs::read_to_string(&path).expect("read source");
@@ -616,11 +679,28 @@ mod tests {
                     required_count
                 );
                 builder_sites += new_count;
+
+                let calls = source.matches("prepare_one_sided_transaction_for_signing(").count()
+                    + source.matches("sign_locked_transaction(").count()
+                    + source.matches(".reserve_sender_offset_keys(").count();
+                let mapped = source.matches(".map_err(map_change_required_error)").count();
+                assert!(
+                    mapped >= calls,
+                    "{} has {} prepare/sign/reserve call(s) but maps {} with map_change_required_error",
+                    path.display(),
+                    calls,
+                    mapped
+                );
+                refusing_calls += calls;
             }
         }
         assert!(
             builder_sites >= 4,
             "expected at least the four known builder sites, found {builder_sites}"
+        );
+        assert!(
+            refusing_calls >= 5,
+            "expected the three prepare, one sign and one reserve call, found {refusing_calls}"
         );
     }
 }

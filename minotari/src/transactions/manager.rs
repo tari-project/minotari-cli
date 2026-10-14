@@ -111,7 +111,7 @@ use crate::{
         fee_estimator::estimated_output_size_for_payment_id,
         fund_locker::{check_replay_allowed, lock_expiry_at},
         idempotency::{IdempotencyBinding, IdempotencyConflict, IdempotencyOperation, RequestFingerprint},
-        input_selector::{InputSelector, UtxoSelection},
+        input_selector::{InputSelector, UtxoSelection, map_change_required_error},
         one_sided_transaction::Recipient,
     },
 };
@@ -627,7 +627,8 @@ impl TransactionSender {
                 &[payment_recipient],
                 payment_id,
                 sender_address,
-            )?;
+            )
+            .map_err(map_change_required_error)?;
 
             Ok(res)
         })();

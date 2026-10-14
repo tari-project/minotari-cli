@@ -42,6 +42,7 @@
 
 use crate::db::SqlitePool;
 use crate::transactions::idempotency::{IdempotencyBinding, IdempotencyOperation, RequestFingerprint};
+use crate::transactions::input_selector::map_change_required_error;
 use crate::{api::types::LockFundsResult, db::AccountRow};
 use anyhow::anyhow;
 use log::info;
@@ -296,7 +297,8 @@ impl OneSidedTransaction {
             &payment_recipients,
             main_payment_id,
             sender_address,
-        )?;
+        )
+        .map_err(map_change_required_error)?;
 
         Ok(result)
     }

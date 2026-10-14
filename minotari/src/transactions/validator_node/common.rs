@@ -25,6 +25,7 @@ use crate::{
     transactions::{
         fund_locker::FundLocker,
         idempotency::{IdempotencyBinding, IdempotencyOperation, RequestFingerprint},
+        input_selector::map_change_required_error,
     },
 };
 
@@ -121,5 +122,5 @@ pub(crate) fn build_vn_pay_to_self_tx(
         memo,
         sender_address,
     )
-    .map_err(Into::into)
+    .map_err(map_change_required_error)
 }
