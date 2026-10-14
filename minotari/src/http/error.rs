@@ -47,14 +47,16 @@ pub enum HttpError {
     /// - Connection timeout
     /// - DNS resolution failure
     /// - TLS/SSL handshake errors
-    #[error("Request failed: {0}")]
+    // The underlying errors can quote what the node sent (a response body, a
+    // fragment of malformed JSON), so their text is sanitised when shown.
+    #[error("Request failed: {}", crate::log::sanitize_node_text(&.0.to_string()))]
     RequestFailed(#[from] reqwest::Error),
 
     /// An error occurred in the HTTP middleware layer.
     ///
     /// The middleware handles retry logic and other cross-cutting concerns.
     /// This error may indicate that all retry attempts have been exhausted.
-    #[error("Middleware error: {0}")]
+    #[error("Middleware error: {}", crate::log::sanitize_node_text(&.0.to_string()))]
     MiddlewareError(#[from] reqwest_middleware::Error),
 
     /// The server returned a non-success HTTP status code.
@@ -64,7 +66,7 @@ pub enum HttpError {
     /// - `400 Bad Request`: Malformed request or invalid parameters
     /// - `404 Not Found`: Unknown RPC method or endpoint
     /// - `500 Internal Server Error`: Server-side processing error
-    #[error("Server error {status}: {body}")]
+    #[error("Server error {status}: {}", crate::log::sanitize_node_text(body))]
     ServerError {
         /// The HTTP status code returned by the server.
         status: reqwest::StatusCode,
@@ -95,6 +97,6 @@ pub enum HttpError {
     ///
     /// Common causes include schema mismatches between the client
     /// and server or malformed JSON in the response.
-    #[error("JSON serialization error: {0}")]
+    #[error("JSON serialization error: {}", crate::log::sanitize_node_text(&.0.to_string()))]
     JsonError(#[from] serde_json::Error),
 }
