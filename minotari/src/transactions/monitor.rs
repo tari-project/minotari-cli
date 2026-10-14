@@ -4,9 +4,14 @@
 //! through their lifecycle from broadcast to final confirmation. It handles:
 //!
 //! - Rebroadcasting transactions that haven't been picked up
-//! - Detecting when transactions are mined
+//! - Asking the node whether broadcast transactions are still in its mempool
 //! - Tracking confirmation progress
 //! - Updating transaction display status for UI
+//!
+//! The monitor does not detect that a transaction was mined: the wallet's own
+//! block scan does that (see `BlockProcessor::match_sends`), so the node is
+//! never asked twice. The scan coordinator runs the monitor once a scan pass
+//! is caught up or has reached its block limit.
 //!
 //! # Transaction States
 //!
@@ -71,7 +76,7 @@ use tari_transaction_components::rpc::models::{TxLocation, TxSubmissionRejection
 use crate::db::{
     self, CompletedTransaction, CompletedTransactionStatus, SqlitePool, get_pending_completed_transactions,
     mark_completed_transaction_as_broadcasted, mark_completed_transaction_as_confirmed,
-    mark_completed_transaction_as_mined_unconfirmed, mark_completed_transaction_as_rejected,
+    mark_completed_transaction_as_rejected,
 };
 use crate::http::WalletHttpClient;
 use crate::models::{WalletEvent, WalletEventType};
@@ -82,6 +87,14 @@ use tari_utilities::ByteArray;
 
 /// Maximum number of times to attempt broadcasting a transaction before giving up.
 const MAX_BROADCAST_ATTEMPTS: i32 = 10;
+
+/// A request to the base node failed (as opposed to the database).
+///
+/// The scan coordinator reports it as [`crate::ScanError::Intermittent`]: the
+/// scan's progress is already committed, and the next cycle tries again.
+#[derive(Debug, thiserror::Error)]
+#[error("Base node request failed: {0}")]
+pub struct NodeRequestError(pub String);
 
 /// Results from a monitoring cycle.
 ///
@@ -200,8 +213,8 @@ impl MonitoringState {
 /// Groups pending transactions by their current status.
 ///
 /// Used internally to process transactions in the appropriate order:
-/// completed transactions need broadcasting, broadcast transactions need
-/// mining detection, and mined transactions need confirmation tracking.
+/// completed transactions need broadcasting, broadcast transactions need a
+/// mempool check, and mined transactions need confirmation tracking.
 struct PendingTransactionsByStatus {
     /// Transactions that are signed but not yet broadcast.
     completed: Vec<CompletedTransaction>,
@@ -252,8 +265,8 @@ impl PendingTransactionsByStatus {
 /// and updating their status as they progress through the blockchain.
 /// It coordinates with the network to:
 ///
-/// - Rebroadcast transactions that haven't been picked up by miners
-/// - Detect when transactions appear in blocks
+/// - Rebroadcast transactions that haven't been picked up by miners, or that
+///   dropped out of the node's mempool
 /// - Track confirmation depth until transactions are considered final
 /// - Handle rejections and update displayed transactions
 ///
@@ -350,18 +363,22 @@ impl TransactionMonitor {
     ///
     /// This is the main entry point for transaction monitoring. It performs:
     ///
-    /// 1. Updates confirmation counts for displayed transactions
+    /// 1. Updates confirmation counts for mined displayed transactions (DB only)
     /// 2. If pending outbound transactions exist:
-    ///    - Rebroadcasts completed transactions
-    ///    - Checks broadcast transactions for mining
-    ///    - Checks mined transactions for confirmation
+    ///    - Moves `MinedUnconfirmed` transactions to `MinedConfirmed` at depth (DB only)
+    ///    - Rebroadcasts `Completed` transactions
+    ///    - Asks the node whether each `Broadcast` transaction is still in its
+    ///      mempool, and rebroadcasts it if the node no longer has it. A
+    ///      transaction the node reports as mined is left to the block scan.
+    ///
+    /// When nothing is pending, no request is made to the node.
     ///
     /// # Arguments
     ///
     /// * `wallet_client` - HTTP client for network queries
     /// * `db_pool` - Database pool
     /// * `account_id` - The account to monitor
-    /// * `current_chain_height` - Current blockchain height for confirmation calculations
+    /// * `current_chain_height` - The height the account has been scanned to
     ///
     /// # Returns
     ///
@@ -371,7 +388,8 @@ impl TransactionMonitor {
     ///
     /// # Errors
     ///
-    /// Returns an error if database or network operations fail.
+    /// Returns an error if database or network operations fail. A failed
+    /// mempool query is a [`NodeRequestError`].
     ///
     /// # Example
     ///
@@ -406,7 +424,7 @@ impl TransactionMonitor {
             }
         };
 
-        if self.state.has_pending_outbound() {
+        if self.refresh_pending_outbound(db_pool, account_id)? {
             let pending_transactions = {
                 let conn = Self::get_connection(db_pool)?;
                 get_pending_completed_transactions(&conn, account_id)?
@@ -418,11 +436,23 @@ impl TransactionMonitor {
                 let by_status = PendingTransactionsByStatus::from_transactions(pending_transactions);
                 let initial_count = by_status.remaining_count();
 
-                let pending_result = self
-                    .process_pending_transactions(wallet_client, db_pool, account_id, current_chain_height, by_status)
-                    .await?;
+                let confirmation_events = self.check_confirmation_status(
+                    db_pool,
+                    account_id,
+                    current_chain_height,
+                    by_status.mined_unconfirmed,
+                )?;
+                result.wallet_events.extend(confirmation_events);
 
-                result.extend(pending_result);
+                result.extend(
+                    self.rebroadcast_completed_transactions(wallet_client, db_pool, account_id, by_status.completed)
+                        .await?,
+                );
+
+                result.extend(
+                    self.check_broadcast_in_mempool(wallet_client, db_pool, account_id, by_status.broadcast)
+                        .await?,
+                );
 
                 let terminal_transitions = result
                     .wallet_events
@@ -509,39 +539,7 @@ impl TransactionMonitor {
         }
     }
 
-    /// Processes all pending transactions grouped by status.
-    ///
-    /// Handles each category appropriately:
-    /// - Completed: Attempt to broadcast
-    /// - Broadcast: Check if mined
-    /// - MinedUnconfirmed: Check confirmation depth
-    async fn process_pending_transactions(
-        &self,
-        wallet_client: &WalletHttpClient,
-        db_pool: &SqlitePool,
-        account_id: i64,
-        current_chain_height: u64,
-        by_status: PendingTransactionsByStatus,
-    ) -> Result<MonitoringResult> {
-        let mut result = MonitoringResult::default();
-
-        result.extend(
-            self.rebroadcast_completed_transactions(wallet_client, db_pool, account_id, by_status.completed)
-                .await?,
-        );
-
-        let broadcast_events = self
-            .check_broadcast_for_mining(wallet_client, db_pool, account_id, by_status.broadcast)
-            .await?;
-        result.wallet_events.extend(broadcast_events);
-
-        let confirmation_events =
-            self.check_confirmation_status(db_pool, account_id, current_chain_height, by_status.mined_unconfirmed)?;
-        result.wallet_events.extend(confirmation_events);
-
-        Ok(result)
-    }
-
+    /// Rebroadcasts `Completed` transactions (signed but not yet accepted by the node).
     async fn rebroadcast_completed_transactions(
         &self,
         wallet_client: &WalletHttpClient,
@@ -550,77 +548,40 @@ impl TransactionMonitor {
         transactions: Vec<CompletedTransaction>,
     ) -> Result<MonitoringResult> {
         let mut result = MonitoringResult::default();
+        for tx in transactions {
+            self.rebroadcast_or_reject(wallet_client, db_pool, account_id, &tx, &mut result)
+                .await?;
+        }
+        Ok(result)
+    }
+
+    /// Asks the node about every `Broadcast` transaction.
+    ///
+    /// - In the mempool: nothing to do yet.
+    /// - Not stored (dropped from the mempool, or never seen): rebroadcast it, or
+    ///   reject it once it has used up its broadcast attempts.
+    /// - Mined: ignored. The block scan marks it mined when it scans that block.
+    async fn check_broadcast_in_mempool(
+        &self,
+        wallet_client: &WalletHttpClient,
+        db_pool: &SqlitePool,
+        account_id: i64,
+        transactions: Vec<CompletedTransaction>,
+    ) -> Result<MonitoringResult> {
+        let mut result = MonitoringResult::default();
 
         for tx in transactions {
-            let conn = Self::get_connection(db_pool)?;
-            if tx.broadcast_attempts >= MAX_BROADCAST_ATTEMPTS {
-                warn!(
-                    target: "audit",
-                    id = tx.id.to_string().as_str();
-                    "Transaction exceeded max broadcast attempts"
-                );
-                let reason = format!("Exceeded {} broadcast attempts", MAX_BROADCAST_ATTEMPTS);
-                mark_completed_transaction_as_rejected(&conn, tx.id, &reason)?;
-                db::unlock_outputs_for_pending_transaction(&conn, &tx.pending_tx_id)?;
-
-                if let Some(rejected_displayed_tx) = db::mark_displayed_transaction_rejected(&conn, tx.id)? {
-                    result.updated_displayed_transactions.push(rejected_displayed_tx);
-                }
-
-                let event = WalletEvent {
-                    id: 0,
-                    account_id,
-                    event_type: WalletEventType::TransactionRejected { tx_id: tx.id, reason },
-                    description: format!("Transaction {} exceeded broadcast attempts", tx.id),
-                };
-                self.persist_event(&conn, account_id, &event)?;
-                result.wallet_events.push(event);
-                continue;
-            }
-
-            match Self::broadcast_transaction(wallet_client, &tx).await {
-                Ok(()) => {
+            let location = Self::query_transaction_location(wallet_client, &tx).await?;
+            match location {
+                TxLocation::InMempool | TxLocation::Mined => {},
+                TxLocation::NotStored | TxLocation::None => {
                     info!(
                         target: "audit",
                         id = tx.id.to_string().as_str();
-                        "Rebroadcasting transaction"
+                        "Broadcast transaction is not in the mempool"
                     );
-                    mark_completed_transaction_as_broadcasted(&conn, tx.id, tx.broadcast_attempts.saturating_add(1))?;
-
-                    let event = WalletEvent {
-                        id: 0,
-                        account_id,
-                        event_type: WalletEventType::TransactionBroadcast {
-                            tx_id: tx.id,
-                            kernel_excess: tx.kernel_excess.clone(),
-                        },
-                        description: format!("Transaction {} broadcast", tx.id),
-                    };
-                    self.persist_event(&conn, account_id, &event)?;
-                    result.wallet_events.push(event);
-                },
-                Err(reason) => {
-                    warn!(
-                        target: "audit",
-                        id = tx.id.to_string().as_str(),
-                        reason:% = reason;
-                        "Transaction rejected on rebroadcast"
-                    );
-                    mark_completed_transaction_as_rejected(&conn, tx.id, &reason)?;
-                    db::unlock_outputs_for_pending_transaction(&conn, &tx.pending_tx_id)?;
-
-                    if let Some(rejected_displayed_tx) = db::mark_displayed_transaction_rejected(&conn, tx.id)? {
-                        result.updated_displayed_transactions.push(rejected_displayed_tx);
-                    }
-
-                    let event = WalletEvent {
-                        id: 0,
-                        account_id,
-                        event_type: WalletEventType::TransactionRejected { tx_id: tx.id, reason },
-                        description: format!("Transaction {} rejected", tx.id),
-                    };
-                    self.persist_event(&conn, account_id, &event)?;
-                    result.wallet_events.push(event);
+                    self.rebroadcast_or_reject(wallet_client, db_pool, account_id, &tx, &mut result)
+                        .await?;
                 },
             }
         }
@@ -628,43 +589,97 @@ impl TransactionMonitor {
         Ok(result)
     }
 
-    async fn check_broadcast_for_mining(
+    /// Submits `tx` to the node again, counting the attempt.
+    ///
+    /// Once `tx` has used up [`MAX_BROADCAST_ATTEMPTS`], or if the node refuses
+    /// it, it is rejected instead (see [`Self::reject_and_release`]).
+    async fn rebroadcast_or_reject(
         &self,
         wallet_client: &WalletHttpClient,
         db_pool: &SqlitePool,
         account_id: i64,
-        transactions: Vec<CompletedTransaction>,
-    ) -> Result<Vec<WalletEvent>> {
-        let mut events = Vec::new();
+        tx: &CompletedTransaction,
+        result: &mut MonitoringResult,
+    ) -> Result<()> {
+        if tx.broadcast_attempts >= MAX_BROADCAST_ATTEMPTS {
+            warn!(
+                target: "audit",
+                id = tx.id.to_string().as_str();
+                "Transaction exceeded max broadcast attempts"
+            );
+            let conn = Self::get_connection(db_pool)?;
+            let reason = format!("Exceeded {} broadcast attempts", MAX_BROADCAST_ATTEMPTS);
+            let description = format!("Transaction {} exceeded broadcast attempts", tx.id);
+            return self.reject_and_release(&conn, account_id, tx, reason, description, result);
+        }
 
-        for tx in transactions {
-            if let Some((block_height, block_hash)) = Self::find_kernel_on_chain(wallet_client, &tx).await? {
+        match Self::broadcast_transaction(wallet_client, tx).await {
+            Ok(()) => {
                 info!(
                     target: "audit",
-                    id = tx.id.to_string().as_str(),
-                    height = block_height;
-                    "Transaction mined (unconfirmed)"
+                    id = tx.id.to_string().as_str();
+                    "Rebroadcasting transaction"
                 );
                 let conn = Self::get_connection(db_pool)?;
-                #[allow(clippy::cast_possible_wrap)]
-                mark_completed_transaction_as_mined_unconfirmed(&conn, tx.id, block_height as i64, &block_hash)?;
+                mark_completed_transaction_as_broadcasted(&conn, tx.id, tx.broadcast_attempts + 1)?;
 
                 let event = WalletEvent {
                     id: 0,
                     account_id,
-                    event_type: WalletEventType::TransactionUnconfirmed {
+                    event_type: WalletEventType::TransactionBroadcast {
                         tx_id: tx.id,
-                        mined_height: block_height,
-                        confirmations: 0,
+                        kernel_excess: tx.kernel_excess.clone(),
                     },
-                    description: format!("Transaction {} mined at height {}", tx.id, block_height),
+                    description: format!("Transaction {} broadcast", tx.id),
                 };
                 self.persist_event(&conn, account_id, &event)?;
-                events.push(event);
-            }
+                result.wallet_events.push(event);
+                Ok(())
+            },
+            Err(reason) => {
+                warn!(
+                    target: "audit",
+                    id = tx.id.to_string().as_str(),
+                    reason:% = reason;
+                    "Transaction rejected on rebroadcast"
+                );
+                let conn = Self::get_connection(db_pool)?;
+                let description = format!("Transaction {} rejected", tx.id);
+                self.reject_and_release(&conn, account_id, tx, reason, description, result)
+            },
+        }
+    }
+
+    /// Marks `tx` rejected and hands its inputs back.
+    ///
+    /// Unlocking the inputs also soft-deletes the send's `UNCONFIRMED` change
+    /// output. The displayed transaction is rejected and a
+    /// `TransactionRejected` event is persisted.
+    fn reject_and_release(
+        &self,
+        conn: &Connection,
+        account_id: i64,
+        tx: &CompletedTransaction,
+        reason: String,
+        description: String,
+        result: &mut MonitoringResult,
+    ) -> Result<()> {
+        mark_completed_transaction_as_rejected(conn, tx.id, &reason)?;
+        db::unlock_outputs_for_pending_transaction(conn, &tx.pending_tx_id)?;
+
+        if let Some(rejected_displayed_tx) = db::mark_displayed_transaction_rejected(conn, tx.id)? {
+            result.updated_displayed_transactions.push(rejected_displayed_tx);
         }
 
-        Ok(events)
+        let event = WalletEvent {
+            id: 0,
+            account_id,
+            event_type: WalletEventType::TransactionRejected { tx_id: tx.id, reason },
+            description,
+        };
+        self.persist_event(conn, account_id, &event)?;
+        result.wallet_events.push(event);
+        Ok(())
     }
 
     fn check_confirmation_status(
@@ -742,10 +757,13 @@ impl TransactionMonitor {
         }
     }
 
-    async fn find_kernel_on_chain(
+    /// Asks the node where `tx` is, by its kernel signature.
+    ///
+    /// A failed request is a [`NodeRequestError`].
+    async fn query_transaction_location(
         wallet_client: &WalletHttpClient,
         tx: &CompletedTransaction,
-    ) -> Result<Option<(u64, Vec<u8>)>> {
+    ) -> Result<TxLocation> {
         let transaction: Transaction =
             serde_json::from_slice(&tx.serialized_transaction).map_err(|e| anyhow!("Deserialization failed: {}", e))?;
 
@@ -761,20 +779,9 @@ impl TransactionMonitor {
         let response = wallet_client
             .transaction_query(excess_sig_nonce, excess_sig)
             .await
-            .map_err(|e| anyhow!("Transaction query failed: {}", e))?;
+            .map_err(|e| NodeRequestError(format!("Transaction query failed: {}", e)))?;
 
-        match response.location {
-            TxLocation::Mined => {
-                let height = response
-                    .mined_height
-                    .ok_or_else(|| anyhow!("Mined transaction missing height"))?;
-                let hash = response
-                    .mined_header_hash
-                    .ok_or_else(|| anyhow!("Mined transaction missing block hash"))?;
-                Ok(Some((height, hash)))
-            },
-            _ => Ok(None),
-        }
+        Ok(response.location)
     }
 }
 
@@ -782,12 +789,24 @@ impl TransactionMonitor {
 mod tests {
     use super::*;
     use crate::db::{create_account, get_account_by_name, get_displayed_transaction_by_id, init_db};
+    use crate::transactions::idempotency::{IdempotencyBinding, IdempotencyOperation, RequestFingerprint};
     use crate::transactions::{BlockchainInfo, TransactionDetails, TransactionDirection, TransactionSource};
+    use chrono::Utc;
+    use rusqlite::named_params;
     use tari_common_types::seeds::cipher_seed::CipherSeed;
     use tari_common_types::transaction::TxId;
+    use tari_common_types::types::{ComAndPubSignature, CompressedPublicKey, PrivateKey};
+    use tari_script::{ExecutionStack, TariScript};
     use tari_transaction_components::MicroMinotari;
     use tari_transaction_components::key_manager::wallet_types::{SeedWordsWallet, WalletType};
+    use tari_transaction_components::key_manager::{KeyManager, TariKeyId, TransactionKeyManagerInterface};
+    use tari_transaction_components::transaction_components::{
+        EncryptedData, MemoField, OutputFeatures, TransactionKernel, TransactionOutputVersion, WalletOutput,
+        covenants::Covenant,
+    };
     use tempfile::TempDir;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn test_pool(name: &str) -> (SqlitePool, i64, TempDir) {
         let dir = tempfile::tempdir().expect("temp dir");
@@ -878,5 +897,326 @@ mod tests {
             .update_displayed_transaction_confirmations(&conn, account_id, 103)
             .expect("update");
         assert_eq!(status_of(&conn, 2), TransactionDisplayStatus::Confirmed);
+    }
+
+    fn test_wallet_output(value: u64, hash_byte: u8) -> WalletOutput {
+        WalletOutput::new_from_parts(
+            TransactionOutputVersion::default(),
+            MicroMinotari::from(value),
+            TariKeyId::default(),
+            OutputFeatures::default(),
+            TariScript::default(),
+            ExecutionStack::default(),
+            TariKeyId::default(),
+            CompressedPublicKey::default(),
+            ComAndPubSignature::default(),
+            0,
+            Covenant::default(),
+            EncryptedData::default(),
+            MicroMinotari::from(0),
+            None,
+            MemoField::new_empty(),
+            FixedHash::from([hash_byte; 32]),
+            Default::default(),
+        )
+    }
+
+    /// A wallet with one recorded send: an input locked to it, a completed
+    /// transaction in `status` after `broadcast_attempts`, an `UNCONFIRMED`
+    /// change row and a pending displayed transaction.
+    struct SendFixture {
+        pool: SqlitePool,
+        account_id: i64,
+        tx_id: TxId,
+        request_id: String,
+        input_output_id: i64,
+        _dir: TempDir,
+    }
+
+    fn send_fixture(name: &str, broadcast_attempts: i32) -> SendFixture {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let pool = init_db(dir.path().join(name)).expect("init db");
+        let conn = pool.get().expect("conn");
+        let wallet = WalletType::SeedWords(SeedWordsWallet::construct_new(CipherSeed::random()).unwrap());
+        create_account(&conn, "default", &wallet, "password").unwrap();
+        let account_id = get_account_by_name(&conn, "default").unwrap().unwrap().id;
+        let view_key = KeyManager::new(wallet).unwrap().get_private_view_key();
+
+        let binding = IdempotencyBinding::new(
+            Some("send".to_string()),
+            IdempotencyOperation::SendTransaction,
+            RequestFingerprint::new(IdempotencyOperation::SendTransaction),
+        );
+        let request_id = db::create_pending_transaction(
+            &conn,
+            "send",
+            &binding,
+            account_id,
+            true,
+            MicroMinotari(0),
+            MicroMinotari(0),
+            MicroMinotari(0),
+            Utc::now() + chrono::Duration::hours(1),
+        )
+        .expect("pending transaction");
+
+        let input = test_wallet_output(10_000, 1);
+        let input_output_id = db::insert_output(
+            &conn,
+            account_id,
+            &view_key,
+            input.output_hash().to_vec(),
+            &input,
+            10,
+            &FixedHash::from([10u8; 32]),
+            1_700_000_000,
+            None,
+            None,
+            FixedHash::zero(),
+            false,
+        )
+        .expect("input");
+        db::lock_output(&conn, input_output_id, &request_id, Utc::now()).expect("lock");
+
+        let transaction = Transaction::new(
+            Vec::new(),
+            Vec::new(),
+            vec![TransactionKernel::default()],
+            PrivateKey::default(),
+            PrivateKey::default(),
+        );
+        let tx_id = TxId::from(1u64);
+        db::create_completed_transaction(
+            &conn,
+            account_id,
+            &request_id,
+            &[],
+            &serde_json::to_vec(&transaction).expect("serialize"),
+            Some(hex::encode([9u8; 32])),
+            tx_id,
+        )
+        .expect("completed");
+        mark_completed_transaction_as_broadcasted(&conn, tx_id, broadcast_attempts).expect("broadcast");
+
+        db::insert_unconfirmed_change_output(&conn, account_id, &view_key, &request_id, &test_wallet_output(3_000, 3))
+            .expect("change");
+        db::insert_displayed_transaction(&conn, &pending_send(account_id, 1, 0)).expect("displayed");
+
+        drop(conn);
+        SendFixture {
+            pool,
+            account_id,
+            tx_id,
+            request_id,
+            input_output_id,
+            _dir: dir,
+        }
+    }
+
+    fn monitor_for(fixture: &SendFixture) -> TransactionMonitor {
+        let state = MonitoringState::new();
+        let conn = fixture.pool.get().expect("conn");
+        state.initialize(&conn, fixture.account_id).expect("initialize");
+        TransactionMonitor::new(state, 3, None)
+    }
+
+    async fn node_reporting(location: &str) -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/transactions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "location": location,
+                "mined_height": null,
+                "mined_header_hash": null,
+                "mined_timestamp": null,
+            })))
+            .mount(&server)
+            .await;
+        server
+    }
+
+    async fn expect_submissions(server: &MockServer, count: u64) {
+        Mock::given(method("POST"))
+            .and(path("/json_rpc"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "result": { "accepted": true, "rejection_reason": "None", "is_synced": true },
+                "error": null,
+                "id": "1",
+            })))
+            .expect(count)
+            .mount(server)
+            .await;
+    }
+
+    fn client(server: &MockServer) -> WalletHttpClient {
+        WalletHttpClient::new(server.uri().parse().expect("url")).expect("client")
+    }
+
+    fn completed(fixture: &SendFixture) -> CompletedTransaction {
+        let conn = fixture.pool.get().expect("conn");
+        db::get_completed_transaction_by_id(&conn, fixture.tx_id)
+            .expect("query")
+            .expect("exists")
+    }
+
+    /// The input's status and whether it is still locked to a request.
+    fn input_state(fixture: &SendFixture) -> (String, bool) {
+        let conn = fixture.pool.get().expect("conn");
+        conn.query_row(
+            "SELECT status, locked_by_request_id FROM outputs WHERE id = :id",
+            named_params! { ":id": fixture.input_output_id },
+            |row| Ok((row.get(0)?, row.get::<_, Option<String>>(1)?.is_some())),
+        )
+        .expect("input")
+    }
+
+    /// The change row's status and whether it is soft-deleted.
+    fn change_state(fixture: &SendFixture) -> (String, bool) {
+        let conn = fixture.pool.get().expect("conn");
+        conn.query_row(
+            "SELECT status, deleted_at FROM outputs WHERE created_by_request_id = :req",
+            named_params! { ":req": fixture.request_id },
+            |row| Ok((row.get(0)?, row.get::<_, Option<String>>(1)?.is_some())),
+        )
+        .expect("change")
+    }
+
+    #[tokio::test]
+    async fn a_broadcast_transaction_in_the_mempool_is_left_alone() {
+        let fixture = send_fixture("in_mempool.db", 1);
+        let server = node_reporting("InMempool").await;
+        expect_submissions(&server, 0).await;
+
+        let result = monitor_for(&fixture)
+            .monitor_if_needed(&client(&server), &fixture.pool, fixture.account_id, 100)
+            .await
+            .expect("monitor");
+
+        let completed = completed(&fixture);
+        assert_eq!(completed.status, CompletedTransactionStatus::Broadcast);
+        assert_eq!(completed.broadcast_attempts, 1);
+        assert!(result.wallet_events.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_broadcast_transaction_dropped_from_the_mempool_is_rebroadcast() {
+        let fixture = send_fixture("not_stored.db", 1);
+        let server = node_reporting("NotStored").await;
+        expect_submissions(&server, 1).await;
+
+        let result = monitor_for(&fixture)
+            .monitor_if_needed(&client(&server), &fixture.pool, fixture.account_id, 100)
+            .await
+            .expect("monitor");
+
+        let completed = completed(&fixture);
+        assert_eq!(completed.status, CompletedTransactionStatus::Broadcast);
+        assert_eq!(completed.broadcast_attempts, 2);
+        assert!(
+            result
+                .wallet_events
+                .iter()
+                .any(|e| matches!(e.event_type, WalletEventType::TransactionBroadcast { .. }))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_dropped_transaction_out_of_attempts_is_rejected_and_released() {
+        let fixture = send_fixture("max_attempts.db", MAX_BROADCAST_ATTEMPTS);
+        let server = node_reporting("NotStored").await;
+        expect_submissions(&server, 0).await;
+
+        let result = monitor_for(&fixture)
+            .monitor_if_needed(&client(&server), &fixture.pool, fixture.account_id, 100)
+            .await
+            .expect("monitor");
+
+        assert_eq!(completed(&fixture).status, CompletedTransactionStatus::Rejected);
+
+        let (input_status, input_locked) = input_state(&fixture);
+        assert_eq!(input_status, "UNSPENT", "the input is unlocked");
+        assert!(!input_locked);
+
+        let (change_status, change_deleted) = change_state(&fixture);
+        assert_eq!(change_status, "UNCONFIRMED");
+        assert!(change_deleted, "the change row is soft-deleted");
+
+        let conn = fixture.pool.get().expect("conn");
+        let displayed = get_displayed_transaction_by_id(&conn, &fixture.tx_id.to_string())
+            .expect("query")
+            .expect("displayed");
+        assert_eq!(displayed.status, TransactionDisplayStatus::Rejected);
+        assert!(
+            result
+                .wallet_events
+                .iter()
+                .any(|e| matches!(e.event_type, WalletEventType::TransactionRejected { .. }))
+        );
+    }
+
+    #[tokio::test]
+    async fn a_transaction_the_node_reports_mined_is_left_to_the_scan() {
+        let fixture = send_fixture("mined.db", 1);
+        let server = node_reporting("Mined").await;
+        expect_submissions(&server, 0).await;
+
+        monitor_for(&fixture)
+            .monitor_if_needed(&client(&server), &fixture.pool, fixture.account_id, 100)
+            .await
+            .expect("monitor");
+
+        let completed = completed(&fixture);
+        assert_eq!(completed.status, CompletedTransactionStatus::Broadcast);
+        assert_eq!(completed.mined_height, None);
+    }
+
+    #[tokio::test]
+    async fn a_mined_transaction_is_confirmed_at_depth_without_asking_the_node() {
+        let fixture = send_fixture("confirm.db", 1);
+        {
+            let conn = fixture.pool.get().expect("conn");
+            db::mark_completed_transaction_as_mined_unconfirmed(&conn, fixture.tx_id, 100, &[7u8; 32]).expect("mined");
+        }
+        // No mocks: any request to the node fails the test.
+        let server = MockServer::start().await;
+        let monitor = monitor_for(&fixture);
+
+        monitor
+            .monitor_if_needed(&client(&server), &fixture.pool, fixture.account_id, 102)
+            .await
+            .expect("monitor");
+        assert_eq!(completed(&fixture).status, CompletedTransactionStatus::MinedUnconfirmed);
+
+        let result = monitor
+            .monitor_if_needed(&client(&server), &fixture.pool, fixture.account_id, 103)
+            .await
+            .expect("monitor");
+        let completed = completed(&fixture);
+        assert_eq!(completed.status, CompletedTransactionStatus::MinedConfirmed);
+        assert!(completed.sent_payref.is_some());
+        assert!(
+            result
+                .wallet_events
+                .iter()
+                .any(|e| matches!(e.event_type, WalletEventType::TransactionConfirmed { .. }))
+        );
+        assert!(server.received_requests().await.unwrap_or_default().is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_failed_mempool_query_is_a_node_request_error() {
+        let fixture = send_fixture("node_down.db", 1);
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/transactions"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        let error = monitor_for(&fixture)
+            .monitor_if_needed(&client(&server), &fixture.pool, fixture.account_id, 100)
+            .await
+            .expect_err("the node failed");
+        assert!(error.downcast_ref::<NodeRequestError>().is_some(), "got: {error}");
     }
 }
