@@ -526,6 +526,36 @@ pub fn restore_change_of_rejected_send(
     Ok(Some((request_id, TxId::from(completed_id as u64))))
 }
 
+/// Records `pending_tx_id` as the holder of the wallet's outputs it spent in a
+/// block (`locked_by_request_id` on the `SPENT` rows for `input_hashes`).
+///
+/// An input released by one send and locked by another can be spent by the
+/// first after all; the lock then names the wrong send. Reading it back (the
+/// scan matching a re-mine, a reorg reviving a send) must find the real spender.
+pub fn record_spender_of_inputs(
+    conn: &Connection,
+    account_id: i64,
+    pending_tx_id: &str,
+    input_hashes: &[FixedHash],
+) -> WalletDbResult<()> {
+    for input_hash in input_hashes {
+        conn.execute(
+            r#"
+            UPDATE outputs
+            SET locked_by_request_id = :req_id
+            WHERE account_id = :account_id AND output_hash = :hash AND status = :spent AND deleted_at IS NULL
+            "#,
+            named_params! {
+                ":req_id": pending_tx_id,
+                ":account_id": account_id,
+                ":hash": input_hash.as_slice(),
+                ":spent": OutputStatus::Spent.to_string(),
+            },
+        )?;
+    }
+    Ok(())
+}
+
 /// Locks a send's inputs to it again, for a reorg that undid the scan's
 /// rejection of the send.
 ///

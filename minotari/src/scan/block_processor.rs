@@ -763,10 +763,12 @@ impl<E: EventSender> BlockProcessor<E> {
             };
 
             let mut all_inputs_in_block = true;
+            let mut input_hashes = Vec::new();
             for input in transaction.body().inputs() {
                 if !send_block.inputs.contains(&input.output_hash()) {
                     all_inputs_in_block = false;
                 }
+                input_hashes.push(input.output_hash());
             }
 
             let change_in_block = match db::get_change_output_hash_for_request(tx, request_id)? {
@@ -793,6 +795,10 @@ impl<E: EventSender> BlockProcessor<E> {
                     block_height,
                     send_block.block_hash.as_slice(),
                 )?;
+                // The inputs are spent by this send: record it as their holder.
+                // One may still be locked to another send that tried to spend it
+                // (and is rejected for it); a reorg must not hand it to that one.
+                db::record_spender_of_inputs(tx, send_block.account_id, request_id, &input_hashes)?;
 
                 let event = WalletEvent {
                     id: 0,
@@ -2330,6 +2336,72 @@ mod tests {
         assert_eq!(lock.as_deref(), Some(z.request_id.as_str()), "the input stays Z's");
         assert_eq!(
             completed(&conn, z.tx_id).status,
+            db::CompletedTransactionStatus::Completed
+        );
+    }
+
+    #[test]
+    fn a_reorg_does_not_revive_a_send_that_lost_its_input_to_a_reconciled_send() {
+        // W was rejected by the monitor and its input A released; X locked A.
+        // Then W landed: W is reconciled and matched, X is rejected by the scan.
+        // A reorg removing that block must not revive X: A was W's.
+        let wallet = test_wallet();
+        let mut conn = wallet.pool.get().expect("conn");
+        let w = record_send(&wallet, &conn, 1, &[1, 2], Some(3));
+        reject_as_the_monitor_does(&conn, &w);
+        let x = record_send(&wallet, &conn, 2, &[1], Some(9));
+        let input_a = w.input_hashes[0];
+        assert_eq!(x.input_hashes, vec![input_a]);
+
+        let mut processor = processor(&wallet, true);
+        let w_block = block(50, vec![w.change.clone().unwrap()], w.input_hashes.clone());
+        process(
+            &mut processor,
+            &conn,
+            wallet.account_id,
+            &[w_block, block(51, Vec::new(), Vec::new())],
+        );
+        assert_eq!(
+            completed(&conn, w.tx_id).status,
+            db::CompletedTransactionStatus::MinedUnconfirmed
+        );
+        assert_eq!(
+            completed(&conn, x.tx_id).status,
+            db::CompletedTransactionStatus::Rejected
+        );
+
+        let lock_of_a = |conn: &Connection| -> Option<String> {
+            conn.query_row(
+                "SELECT locked_by_request_id FROM outputs WHERE output_hash = :hash AND deleted_at IS NULL",
+                named_params! { ":hash": input_a.as_slice() },
+                |row| row.get(0),
+            )
+            .expect("input A")
+        };
+        assert_eq!(
+            lock_of_a(&conn).as_deref(),
+            Some(w.request_id.as_str()),
+            "A records W as its spender"
+        );
+
+        let tx = conn.transaction().expect("tx");
+        crate::scan::reorg::rollback_from_height(&tx, wallet.account_id, 50, None).expect("rollback");
+        tx.commit().expect("commit");
+
+        let x_completed = completed(&conn, x.tx_id);
+        assert_eq!(x_completed.status, db::CompletedTransactionStatus::Rejected);
+        assert_eq!(x_completed.mined_height, None);
+        let reorged: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE event_type = 'TransactionReorged'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("count");
+        assert_eq!(reorged, 0, "X is not revived");
+        assert_eq!(lock_of_a(&conn).as_deref(), Some(w.request_id.as_str()));
+        assert_eq!(
+            completed(&conn, w.tx_id).status,
             db::CompletedTransactionStatus::Completed
         );
     }

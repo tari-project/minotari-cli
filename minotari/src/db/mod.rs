@@ -79,9 +79,9 @@ pub use outputs::{
     get_output_lock_request_id, get_output_totals_for_account, get_total_unspent_balance, get_unconfirmed_outputs,
     get_unresolved_spent_unconfirmed_outputs, insert_output, insert_spent_output_if_not_exists,
     insert_unconfirmed_change_output, lock_output, mark_change_output_rejected, mark_output_confirmed,
-    relock_inputs_for_revived_send, resolve_spent_unconfirmed_with_inputs, restore_change_of_rejected_send,
-    revert_change_outputs_from_height, revert_rejected_change_output, soft_delete_outputs_from_height,
-    soft_delete_unconfirmed_change_output, unlock_outputs_for_request,
+    record_spender_of_inputs, relock_inputs_for_revived_send, resolve_spent_unconfirmed_with_inputs,
+    restore_change_of_rejected_send, revert_change_outputs_from_height, revert_rejected_change_output,
+    soft_delete_outputs_from_height, soft_delete_unconfirmed_change_output, unlock_outputs_for_request,
     unlock_outputs_for_request as unlock_outputs_for_pending_transaction, update_output_status,
 };
 
