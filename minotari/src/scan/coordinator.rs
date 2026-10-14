@@ -1,4 +1,4 @@
-use log::{debug, info};
+use log::{debug, info, warn};
 use minotari_scanning::{HttpBlockchainScanner, scanning::BlockchainScanner};
 use std::{collections::VecDeque, sync::Arc};
 use tari_common_types::{seeds::cipher_seed::BIRTHDAY_GENESIS_FROM_UNIX_EPOCH, types::PrivateKey};
@@ -519,24 +519,32 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
     /// status of `Broadcast` ones. Its events are emitted (see
     /// [`Self::emit_monitor_events`]) and its wallet events returned.
     ///
-    /// A failed node request is [`ScanError::Intermittent`]: the scan's progress
-    /// is already committed and the next cycle tries again. Anything else (a
-    /// database failure) is [`ScanError::Fatal`].
+    /// A failed node request does not fail the pass: the monitor logs it and
+    /// leaves that transaction for the next cycle, and every other transaction
+    /// and account is still monitored, so the scan still reports `Completed` or
+    /// pauses normally and a Continuous scan keeps running. Should a node error
+    /// still reach this point, it is logged and the next account is monitored.
+    /// A database failure is [`ScanError::Fatal`].
     async fn run_post_scan(&self, targets: &[AccountSyncTarget]) -> Result<Vec<WalletEvent>, ScanError> {
         let mut wallet_events = Vec::new();
         for target in targets {
             let scanned_height = target.next_block_to_scan.saturating_sub(1);
-            let monitor_res = target
+            let monitor_res = match target
                 .transaction_monitor
                 .monitor_if_needed(&self.client, &self.pool, target.account.id, scanned_height)
                 .await
-                .map_err(|e| {
-                    if e.downcast_ref::<NodeRequestError>().is_some() {
-                        ScanError::Intermittent(e.to_string())
-                    } else {
-                        ScanError::Fatal(e)
-                    }
-                })?;
+            {
+                Ok(monitor_res) => monitor_res,
+                Err(e) if e.downcast_ref::<NodeRequestError>().is_some() => {
+                    warn!(
+                        account_id = target.account.id,
+                        error:% = e;
+                        "Base node request failed while monitoring transactions; retrying next cycle"
+                    );
+                    continue;
+                },
+                Err(e) => return Err(ScanError::Fatal(e)),
+            };
 
             wallet_events.extend(monitor_res.wallet_events.clone());
             self.emit_monitor_events(target.account.id, scanned_height, monitor_res);
@@ -1268,6 +1276,7 @@ mod tests {
         init_db, insert_displayed_transaction, insert_scanned_tip_block,
     };
     use crate::scan::events::ChannelEventSender;
+    use crate::transactions::idempotency::{IdempotencyBinding, IdempotencyOperation, RequestFingerprint};
     use crate::transactions::{
         BlockchainInfo, DisplayedTransaction, TransactionDetails, TransactionDirection, TransactionDisplayStatus,
         TransactionSource,
@@ -1280,6 +1289,7 @@ mod tests {
     use tari_transaction_components::rpc::models::{
         BlockUtxoInfo, SyncUtxosByBlockResponseV0, SyncUtxosByBlockResponseV1,
     };
+    use tari_transaction_components::transaction_components::{Transaction, TransactionKernel};
     use tempfile::TempDir;
     use tokio::sync::mpsc::UnboundedReceiver;
     use wiremock::{MockServer, Request, Respond, ResponseTemplate};
@@ -1591,5 +1601,104 @@ mod tests {
         })
         .expect("paused");
         assert!(updated < paused, "monitor events come before the pause");
+    }
+
+    /// Records a send for `account_id`, in `Broadcast` with a kernel the node can
+    /// be asked about, and returns its id.
+    fn record_broadcast_send(conn: &rusqlite::Connection, account_id: i64, id: u64) -> TxId {
+        let key = format!("send-{id}");
+        let binding = IdempotencyBinding::new(
+            Some(key.clone()),
+            IdempotencyOperation::SendTransaction,
+            RequestFingerprint::new(IdempotencyOperation::SendTransaction),
+        );
+        let request_id = crate::db::create_pending_transaction(
+            conn,
+            &key,
+            &binding,
+            account_id,
+            true,
+            MicroMinotari(0),
+            MicroMinotari(0),
+            MicroMinotari(0),
+            chrono::Utc::now() + chrono::Duration::hours(1),
+        )
+        .expect("pending transaction");
+        let transaction = Transaction::new(
+            Vec::new(),
+            Vec::new(),
+            vec![TransactionKernel::default()],
+            PrivateKey::default(),
+            PrivateKey::default(),
+        );
+        let tx_id = TxId::from(id);
+        crate::db::create_completed_transaction(
+            conn,
+            account_id,
+            &request_id,
+            &[],
+            &serde_json::to_vec(&transaction).expect("serialize"),
+            Some(hex::encode([9u8; 32])),
+            tx_id,
+        )
+        .expect("completed");
+        crate::db::mark_completed_transaction_as_broadcasted(conn, tx_id, 1).expect("broadcast");
+        tx_id
+    }
+
+    #[tokio::test]
+    async fn a_node_error_for_one_account_does_not_stop_the_others_or_the_scan() {
+        // The mock chain does not answer `/transactions`, so asking about the
+        // first account's broadcast send fails. The second account's mined send
+        // must still be confirmed, and the scan must still complete.
+        let mut setup = setup(1500, 1505).await;
+        let (first_send, second_send, second_id) = {
+            let conn = setup.pool.get().expect("conn");
+            let wallet = WalletType::SeedWords(SeedWordsWallet::construct_new(CipherSeed::random()).unwrap());
+            create_account(&conn, "second", &wallet, "password").unwrap();
+            let second = get_account_by_name(&conn, "second").unwrap().unwrap();
+            insert_scanned_tip_block(&conn, second.id, 1500, &block_hash(1500)).expect("tip");
+
+            let first_send = record_broadcast_send(&conn, setup.account_id, 1);
+            let second_send = record_broadcast_send(&conn, second.id, 2);
+            crate::db::mark_completed_transaction_as_mined_unconfirmed(&conn, second_send, 1400, &[7u8; 32])
+                .expect("mined");
+            (first_send, second_send, second.id)
+        };
+
+        let accounts = {
+            let conn = setup.pool.get().expect("conn");
+            vec![
+                get_account_by_name(&conn, "default").unwrap().unwrap(),
+                get_account_by_name(&conn, "second").unwrap().unwrap(),
+            ]
+        };
+        setup
+            .coordinator
+            .run(accounts, "password", ScanMode::Full, 0, None)
+            .await
+            .expect("a node error does not fail the scan");
+        let events = drain(&mut setup.events);
+
+        let conn = setup.pool.get().expect("conn");
+        let first = crate::db::get_completed_transaction_by_id(&conn, first_send)
+            .expect("query")
+            .expect("first");
+        assert_eq!(first.status, crate::db::CompletedTransactionStatus::Broadcast);
+        let second = crate::db::get_completed_transaction_by_id(&conn, second_send)
+            .expect("query")
+            .expect("second");
+        assert_eq!(
+            second.status,
+            crate::db::CompletedTransactionStatus::MinedConfirmed,
+            "the second account is still monitored"
+        );
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                ProcessingEvent::ScanStatus(ScanStatusEvent::Completed { account_id, .. }) if *account_id == second_id
+            )),
+            "the scan still reports Completed"
+        );
     }
 }

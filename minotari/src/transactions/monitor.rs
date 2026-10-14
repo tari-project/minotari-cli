@@ -90,8 +90,8 @@ const MAX_BROADCAST_ATTEMPTS: i32 = 10;
 
 /// A request to the base node failed (as opposed to the database).
 ///
-/// The scan coordinator reports it as [`crate::ScanError::Intermittent`]: the
-/// scan's progress is already committed, and the next cycle tries again.
+/// The monitor logs it, leaves that transaction as it is and carries on with
+/// the others; the next pass asks the node again.
 #[derive(Debug, thiserror::Error)]
 #[error("Base node request failed: {0}")]
 pub struct NodeRequestError(pub String);
@@ -388,8 +388,9 @@ impl TransactionMonitor {
     ///
     /// # Errors
     ///
-    /// Returns an error if database or network operations fail. A failed
-    /// mempool query is a [`NodeRequestError`].
+    /// Returns an error if a database operation fails. A failed request to the
+    /// node is logged and leaves that transaction for the next pass; it does not
+    /// stop the other transactions from being monitored.
     ///
     /// # Example
     ///
@@ -555,10 +556,34 @@ impl TransactionMonitor {
     ) -> Result<MonitoringResult> {
         let mut result = MonitoringResult::default();
         for tx in transactions {
-            self.rebroadcast_or_reject(wallet_client, db_pool, account_id, &tx, &mut result)
-                .await?;
+            let outcome = self
+                .rebroadcast_or_reject(wallet_client, db_pool, account_id, &tx, &mut result)
+                .await;
+            Self::skip_on_node_error(outcome, &tx)?;
         }
         Ok(result)
+    }
+
+    /// Lets the monitor carry on with the next transaction after a failed node
+    /// request for `tx`.
+    ///
+    /// The failure is logged and `tx` is left as it is; the next pass asks the
+    /// node again. One transaction the node cannot answer for must not stop every
+    /// other transaction and account from being monitored. Any other error (a
+    /// database failure) is returned.
+    fn skip_on_node_error(outcome: Result<()>, tx: &CompletedTransaction) -> Result<()> {
+        match outcome {
+            Err(e) if e.downcast_ref::<NodeRequestError>().is_some() => {
+                warn!(
+                    target: "audit",
+                    id = tx.id.to_string().as_str(),
+                    error:% = e;
+                    "Base node request failed; leaving the transaction for the next pass"
+                );
+                Ok(())
+            },
+            other => other,
+        }
     }
 
     /// Asks the node about every `Broadcast` transaction.
@@ -588,8 +613,13 @@ impl TransactionMonitor {
             let Some(transaction) = Self::decode_transaction(&tx) else {
                 continue;
             };
-            let Some(response) = Self::query_transaction(wallet_client, &tx, &transaction).await? else {
-                continue;
+            let response = match Self::query_transaction(wallet_client, &tx, &transaction).await {
+                Ok(Some(response)) => response,
+                Ok(None) => continue,
+                Err(e) => {
+                    Self::skip_on_node_error(Err(e), &tx)?;
+                    continue;
+                },
             };
             match response.location {
                 TxLocation::InMempool => {},
@@ -635,8 +665,10 @@ impl TransactionMonitor {
                         id = tx.id.to_string().as_str();
                         "Broadcast transaction is not in the mempool"
                     );
-                    self.rebroadcast_or_reject(wallet_client, db_pool, account_id, &tx, &mut result)
-                        .await?;
+                    let outcome = self
+                        .rebroadcast_or_reject(wallet_client, db_pool, account_id, &tx, &mut result)
+                        .await;
+                    Self::skip_on_node_error(outcome, &tx)?;
                 },
             }
         }
@@ -884,7 +916,7 @@ mod tests {
     use rusqlite::named_params;
     use tari_common_types::seeds::cipher_seed::CipherSeed;
     use tari_common_types::transaction::TxId;
-    use tari_common_types::types::{ComAndPubSignature, CompressedPublicKey, PrivateKey};
+    use tari_common_types::types::{ComAndPubSignature, CompressedPublicKey, CompressedSignature, PrivateKey};
     use tari_script::{ExecutionStack, TariScript};
     use tari_transaction_components::MicroMinotari;
     use tari_transaction_components::key_manager::wallet_types::{SeedWordsWallet, WalletType};
@@ -894,7 +926,7 @@ mod tests {
         covenants::Covenant,
     };
     use tempfile::TempDir;
-    use wiremock::matchers::{method, path};
+    use wiremock::matchers::{method, path, query_param};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn test_pool(name: &str) -> (SqlitePool, i64, TempDir) {
@@ -1332,11 +1364,10 @@ mod tests {
         let server = node_reporting("NotStored").await;
         failing_submissions(&server).await;
 
-        let error = monitor_for(&fixture)
+        monitor_for(&fixture)
             .monitor_if_needed(&client(&server), &fixture.pool, fixture.account_id, 100)
             .await
-            .expect_err("the node failed");
-        assert!(error.downcast_ref::<NodeRequestError>().is_some(), "got: {error}");
+            .expect("a node failure does not fail the pass");
 
         let completed = completed(&fixture);
         assert_eq!(completed.status, CompletedTransactionStatus::Broadcast);
@@ -1352,11 +1383,10 @@ mod tests {
         let server = MockServer::start().await;
         failing_submissions(&server).await;
 
-        let error = monitor_for(&fixture)
+        monitor_for(&fixture)
             .monitor_if_needed(&client(&server), &fixture.pool, fixture.account_id, 100)
             .await
-            .expect_err("the node failed");
-        assert!(error.downcast_ref::<NodeRequestError>().is_some(), "got: {error}");
+            .expect("a node failure does not fail the pass");
 
         let completed = completed(&fixture);
         assert_eq!(completed.status, CompletedTransactionStatus::Completed);
@@ -1445,7 +1475,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_failed_mempool_query_is_a_node_request_error() {
+    async fn a_failed_mempool_query_leaves_the_transaction_unchanged() {
         let fixture = send_fixture("node_down.db", 1);
         let server = MockServer::start().await;
         Mock::given(method("GET"))
@@ -1454,10 +1484,126 @@ mod tests {
             .mount(&server)
             .await;
 
-        let error = monitor_for(&fixture)
+        monitor_for(&fixture)
             .monitor_if_needed(&client(&server), &fixture.pool, fixture.account_id, 100)
             .await
-            .expect_err("the node failed");
-        assert!(error.downcast_ref::<NodeRequestError>().is_some(), "got: {error}");
+            .expect("a node failure does not fail the pass");
+        let completed = completed(&fixture);
+        assert_eq!(completed.status, CompletedTransactionStatus::Broadcast);
+        assert_eq!(completed.broadcast_attempts, 1);
+    }
+
+    /// Records a second `Broadcast` send on the fixture's account whose kernel
+    /// signature is `[sig_byte; 32]`, so the node can answer for it separately.
+    fn record_second_send(fixture: &SendFixture, sig_byte: u8) -> TxId {
+        let conn = fixture.pool.get().expect("conn");
+        let binding = IdempotencyBinding::new(
+            Some("second".to_string()),
+            IdempotencyOperation::SendTransaction,
+            RequestFingerprint::new(IdempotencyOperation::SendTransaction),
+        );
+        let request_id = db::create_pending_transaction(
+            &conn,
+            "second",
+            &binding,
+            fixture.account_id,
+            true,
+            MicroMinotari(0),
+            MicroMinotari(0),
+            MicroMinotari(0),
+            Utc::now() + chrono::Duration::hours(1),
+        )
+        .expect("pending transaction");
+
+        let input = test_wallet_output(10_000, 20);
+        let input_id = db::insert_output(
+            &conn,
+            fixture.account_id,
+            &PrivateKey::default(),
+            input.output_hash().to_vec(),
+            &input,
+            10,
+            &FixedHash::from([10u8; 32]),
+            1_700_000_000,
+            None,
+            None,
+            FixedHash::zero(),
+            false,
+        )
+        .expect("input");
+        db::lock_output(&conn, input_id, &request_id, Utc::now()).expect("lock");
+
+        let kernel = TransactionKernel {
+            excess_sig: CompressedSignature::new(
+                CompressedPublicKey::new(&[sig_byte; 32]),
+                PrivateKey::from_canonical_bytes(&[sig_byte; 32]).expect("canonical scalar"),
+            ),
+            ..Default::default()
+        };
+        let transaction = Transaction::new(
+            Vec::new(),
+            Vec::new(),
+            vec![kernel],
+            PrivateKey::default(),
+            PrivateKey::default(),
+        );
+        let tx_id = TxId::from(2u64);
+        db::create_completed_transaction(
+            &conn,
+            fixture.account_id,
+            &request_id,
+            &[],
+            &serde_json::to_vec(&transaction).expect("serialize"),
+            None,
+            tx_id,
+        )
+        .expect("completed");
+        mark_completed_transaction_as_broadcasted(&conn, tx_id, 1).expect("broadcast");
+        tx_id
+    }
+
+    #[tokio::test]
+    async fn a_node_error_for_one_transaction_does_not_stop_the_others() {
+        let fixture = send_fixture("two_sends.db", 1);
+        let second = record_second_send(&fixture, 2);
+
+        let server = MockServer::start().await;
+        // The node answers for the second send: it is no longer in the mempool.
+        Mock::given(method("GET"))
+            .and(path("/transactions"))
+            .and(query_param("excess_sig_sig", hex::encode([2u8; 32])))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "location": "NotStored",
+                "mined_height": null,
+                "mined_header_hash": null,
+                "mined_timestamp": null,
+            })))
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        // Every other query (the first send) fails.
+        Mock::given(method("GET"))
+            .and(path("/transactions"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        expect_submissions(&server, 1).await;
+
+        monitor_for(&fixture)
+            .monitor_if_needed(&client(&server), &fixture.pool, fixture.account_id, 100)
+            .await
+            .expect("a node failure does not fail the pass");
+
+        assert_eq!(
+            completed(&fixture).broadcast_attempts,
+            1,
+            "the failed one is left as it was"
+        );
+        let conn = fixture.pool.get().expect("conn");
+        let second = db::get_completed_transaction_by_id(&conn, second)
+            .expect("query")
+            .expect("exists");
+        assert_eq!(second.status, CompletedTransactionStatus::Broadcast);
+        assert_eq!(second.broadcast_attempts, 2, "the other one is still rebroadcast");
     }
 }
