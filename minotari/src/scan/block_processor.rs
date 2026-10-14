@@ -251,7 +251,7 @@ impl<E: EventSender> BlockProcessor<E> {
             None => false,
         };
         if starts_new_block {
-            self.match_sends(tx)?;
+            self.match_sends(tx, true)?;
         }
 
         self.current_tip_height = block.height;
@@ -607,24 +607,35 @@ impl<E: EventSender> BlockProcessor<E> {
     }
 
     /// Matches the wallet's own sends against the last block collected by
-    /// [`Self::collect_send_block`]. Call after the last block of a batch;
-    /// earlier blocks are matched when the next one starts.
+    /// [`Self::collect_send_block`]. Call after the last block of a batch with
+    /// `block_is_complete = false`; earlier blocks are matched, complete, when
+    /// a result with another hash starts.
     ///
     /// A send whose locked input was spent in the block is looked up (only
     /// `Completed` or `Broadcast` sends), once per block. It counts as mined
     /// in this block when every one of its inputs is spent in the block and
-    /// its change output appears in the block. A send without a change row
-    /// (made before change was required, or assembled outside this crate) is
-    /// matched on its inputs alone.
+    /// its change output appears in the block. Only the change output is
+    /// checked among the send's own outputs: other outputs the wallet owns
+    /// (self-sends) cannot be told apart before the scan finds them. A send
+    /// without a change row (made before change was required, or assembled
+    /// outside this crate) is matched on its inputs alone.
     ///
     /// A mined send is marked `MinedUnconfirmed`. Otherwise its inputs were
     /// spent by a different transaction: it is marked `Rejected` (recording the
     /// block so a reorg can revert it), its change `REJECTED` and its displayed
     /// transaction rejected. Its inputs are not unlocked: they really are spent.
     ///
+    /// The last block of a batch may be incomplete: the node can split a large
+    /// block over several results, and the batch can end between them. So when
+    /// `block_is_complete` is false a mismatch is only logged and the send is
+    /// left as it is. If it was mined, the post-scan monitor settles it (the
+    /// node reports it mined at or below the scanned height); if its inputs
+    /// were spent by another transaction, rebroadcasting it is refused and it is
+    /// rejected that way.
+    ///
     /// This relies on the wallet seeing the whole block. A mismatch is logged at
     /// `warn` on the audit target.
-    pub fn match_sends(&mut self, tx: &Connection) -> Result<(), BlockProcessorError> {
+    pub fn match_sends(&mut self, tx: &Connection, block_is_complete: bool) -> Result<(), BlockProcessorError> {
         let Some(send_block) = self.send_block.take() else {
             return Ok(());
         };
@@ -701,6 +712,18 @@ impl<E: EventSender> BlockProcessor<E> {
                 let event_id = db::insert_wallet_event(tx, send_block.account_id, &event)?;
                 self.wallet_events.push(event.clone());
                 generated_events.push((event_id, event));
+                continue;
+            }
+
+            if !block_is_complete {
+                warn!(
+                    target: "audit",
+                    id = completed.id.to_string().as_str(),
+                    height = send_block.height,
+                    all_inputs_in_block = all_inputs_in_block,
+                    change_in_block = change_in_block;
+                    "Transaction not matched in the last block of a batch, which may be incomplete; leaving it"
+                );
                 continue;
             }
 
@@ -1312,7 +1335,36 @@ mod tests {
         for block in blocks {
             processor.process_block(conn, block, account_id).expect("process block");
         }
-        processor.match_sends(conn).expect("match sends");
+        processor.match_sends(conn, false).expect("match sends");
+    }
+
+    #[test]
+    fn a_send_in_a_block_split_across_two_batches_is_not_rejected() {
+        // The node split block 50 into two results and the batch ended between
+        // them. The first batch sees one input and the change but not the other
+        // input; that is not a different transaction spending the inputs.
+        let wallet = test_wallet();
+        let conn = wallet.pool.get().expect("conn");
+        let send = record_send(&wallet, &conn, 1, &[1, 2], Some(3));
+
+        let first_part = block(50, vec![send.change.clone().unwrap()], vec![send.input_hashes[0]]);
+        let mut processor = processor(&wallet, true);
+        process(
+            &mut processor,
+            &conn,
+            wallet.account_id,
+            std::slice::from_ref(&first_part),
+        );
+
+        assert_eq!(
+            completed(&conn, send.tx_id).status,
+            db::CompletedTransactionStatus::Broadcast
+        );
+        assert_eq!(change_row(&conn, &send).1, "UNSPENT", "the change is not rejected");
+        let displayed = db::get_displayed_transaction_by_id(&conn, &send.tx_id.to_string())
+            .expect("query")
+            .expect("displayed");
+        assert_ne!(displayed.status, TransactionDisplayStatus::Rejected);
     }
 
     #[test]
@@ -1397,11 +1449,13 @@ mod tests {
         // Only one of the inputs is spent, and the change is not in the block.
         let other_block = block(50, Vec::new(), vec![send.input_hashes[0]]);
         let mut processor = processor(&wallet, true);
+        // The next block closes block 50, so it is known to be complete.
+        let next_block = block(51, Vec::new(), Vec::new());
         process(
             &mut processor,
             &conn,
             wallet.account_id,
-            std::slice::from_ref(&other_block),
+            &[other_block.clone(), next_block],
         );
 
         let completed = completed(&conn, send.tx_id);
@@ -1549,11 +1603,13 @@ mod tests {
 
         let other_block = block(50, Vec::new(), vec![send.input_hashes[0]]);
         let mut processor = processor(&wallet, true);
+        // The next block closes block 50, so it is known to be complete.
+        let next_block = block(51, Vec::new(), Vec::new());
         process(
             &mut processor,
             &conn,
             wallet.account_id,
-            std::slice::from_ref(&other_block),
+            &[other_block.clone(), next_block],
         );
         assert_eq!(
             completed(&conn, send.tx_id).status,

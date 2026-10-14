@@ -111,9 +111,11 @@ impl<E: EventSender + Clone + Send + 'static> ScanDbHandler<E> {
                     .map_err(|e| WalletDbError::Unexpected(e.to_string()))?;
             }
 
-            // The last block of the batch is complete: match the wallet's sends in it.
+            // Match the wallet's sends in the last block of the batch. It may be
+            // incomplete (a large block split over two batches), so a mismatch
+            // there does not reject a send.
             processor
-                .match_sends(&tx)
+                .match_sends(&tx, false)
                 .map_err(|e| WalletDbError::Unexpected(e.to_string()))?;
 
             let events = processor.take_wallet_events();
