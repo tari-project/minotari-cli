@@ -42,7 +42,7 @@ use crate::transactions::idempotency::IdempotencyOperation;
 pub struct ValidatorNodeRegistrationParams {
     /// The validator node's public key (the signing key used to create `validator_node_signature`).
     pub validator_node_public_key: CompressedPublicKey,
-    /// Pre-computed Schnorr signature over `(vn_pk | nonce | sidechain_pk? | claim_pk | epoch)`.
+    /// Pre-computed Schnorr signature over `(network | vn_pk | nonce | sidechain_pk? | claim_pk | max_epoch)`.
     pub validator_node_signature: CompressedSignature,
     /// Public key used to claim validator node rewards.
     pub claim_public_key: CompressedPublicKey,
@@ -92,7 +92,12 @@ pub fn create_validator_node_registration_tx(
         .sidechain_deployment_key
         .as_ref()
         .map(CompressedPublicKey::from_secret_key);
-    if !vn_sig.is_valid_registration_signature_for(sidechain_pk.as_ref(), &params.claim_public_key, params.max_epoch) {
+    if !vn_sig.is_valid_registration_signature_for(
+        network.as_byte(),
+        sidechain_pk.as_ref(),
+        &params.claim_public_key,
+        params.max_epoch,
+    ) {
         return Err(anyhow!("Invalid validator node registration signature"));
     }
 

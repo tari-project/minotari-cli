@@ -301,6 +301,7 @@ pub async fn handle_submit_validator_node_exit(
     vn_public_key: String,
     vn_sig_nonce: String,
     vn_sig: String,
+    activation_epoch: u64,
     max_epoch: u64,
     fee_per_gram: u64,
     payment_id: Option<String>,
@@ -320,6 +321,7 @@ pub async fn handle_submit_validator_node_exit(
     let params = ValidatorNodeExitParams {
         validator_node_public_key: vn_public_key,
         validator_node_signature: vn_signature,
+        activation_epoch: VnEpoch(activation_epoch),
         max_epoch: VnEpoch(max_epoch),
         fee_per_gram: MicroMinotari(fee_per_gram),
         payment_id,

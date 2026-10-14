@@ -599,6 +599,10 @@ pub enum Commands {
         #[arg(long, help = "Validator node signature scalar (hex)")]
         vn_sig: String,
 
+        /// Activation epoch of the registration being exited (part of the signed exit message).
+        #[arg(long, help = "Activation epoch of the registration being exited")]
+        activation_epoch: u64,
+
         /// Maximum epoch for replay protection.
         #[arg(long, help = "Max epoch for replay protection")]
         max_epoch: u64,

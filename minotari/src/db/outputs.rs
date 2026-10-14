@@ -899,7 +899,7 @@ pub fn get_total_unspent_balance(conn: &Connection, account_id: i64, tip_height:
         "#,
     )?;
 
-    let total = stmt.query_row(
+    let total: i64 = stmt.query_row(
         named_params! {
             ":account_id": account_id,
             ":unspent_status": unspent_status,
@@ -908,7 +908,8 @@ pub fn get_total_unspent_balance(conn: &Connection, account_id: i64, tip_height:
         |row| row.get(0),
     )?;
 
-    Ok(total)
+    // Output values are never negative, so a negative sum cannot happen.
+    Ok(u64::try_from(total).unwrap_or(0))
 }
 
 #[cfg(test)]

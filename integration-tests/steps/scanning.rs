@@ -28,13 +28,14 @@ async fn wallet_scanned_to_height(world: &mut MinotariWorld, height: String) {
     let db_path = world.database_path.as_ref().expect("Database not set up");
     let conn = Connection::open(db_path).expect("Failed to open wallet database");
 
-    let scanned_height: Option<u64> = conn
+    let scanned_height: Option<i64> = conn
         .query_row("SELECT MAX(height) FROM scanned_tip_blocks", [], |row| row.get(0))
         .optional()
         .expect("scanned_tip_blocks query failed")
         .flatten();
 
     let scanned_height = scanned_height.unwrap_or_else(|| panic!("No scanned blocks found in wallet database"));
+    let scanned_height = u64::try_from(scanned_height).expect("Scanned height must not be negative");
 
     assert!(
         scanned_height >= target_height,

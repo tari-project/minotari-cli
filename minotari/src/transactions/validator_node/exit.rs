@@ -42,8 +42,12 @@ use crate::transactions::idempotency::IdempotencyOperation;
 pub struct ValidatorNodeExitParams {
     /// The validator node's public key (the signing key used to create `validator_node_signature`).
     pub validator_node_public_key: CompressedPublicKey,
-    /// Pre-computed Schnorr signature over `(vn_pk | nonce | sidechain_pk? | epoch)`.
+    /// Pre-computed Schnorr signature over
+    /// `(network | vn_pk | nonce | sidechain_pk? | activation_epoch | max_epoch)`.
     pub validator_node_signature: CompressedSignature,
+    /// Activation epoch of the registration being exited. Binds the exit to that registration so it
+    /// cannot be replayed against a later re-registration of the same validator node.
+    pub activation_epoch: VnEpoch,
     /// Maximum epoch for replay protection.
     pub max_epoch: VnEpoch,
     /// Fee rate in MicroMinotari per gram.
@@ -90,12 +94,21 @@ pub fn create_validator_node_exit_tx(
         .sidechain_deployment_key
         .as_ref()
         .map(CompressedPublicKey::from_secret_key);
-    if !vn_sig.is_valid_exit_signature_for(sidechain_pk.as_ref(), params.max_epoch) {
+    if !vn_sig.is_valid_exit_signature_for(
+        network.as_byte(),
+        sidechain_pk.as_ref(),
+        params.activation_epoch,
+        params.max_epoch,
+    ) {
         return Err(anyhow!("Invalid validator node exit signature"));
     }
 
-    let output_features =
-        OutputFeatures::for_validator_node_exit(vn_sig, params.sidechain_deployment_key.as_ref(), params.max_epoch);
+    let output_features = OutputFeatures::for_validator_node_exit(
+        vn_sig,
+        params.sidechain_deployment_key.as_ref(),
+        params.activation_epoch,
+        params.max_epoch,
+    );
 
     build_vn_pay_to_self_tx(
         account,
