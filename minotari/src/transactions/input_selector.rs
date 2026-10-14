@@ -85,7 +85,8 @@ pub enum UtxoSelectionError {
         required: MicroMinotari,
     },
 
-    /// The funds cover the amount and fee, but not a change output as well.
+    /// The funds cover the amount and fee, but not a change output as well (a
+    /// change output must be worth at least what spending it would cost).
     ///
     /// Every send must carry a change output: the wallet's block scan can only
     /// see a send land through an output the wallet owns. Sending the whole
@@ -124,7 +125,7 @@ pub struct UtxoSelection {
     /// Whether the selection requires a change output.
     ///
     /// Always `true`: every send carries a change output, and selection
-    /// leaves at least 1 µT for it after all fees.
+    /// leaves change worth at least the fee to spend it as an input.
     pub requires_change_output: bool,
 
     /// Total value of all selected UTXOs.
@@ -331,14 +332,17 @@ impl InputSelector {
         let input_fee = self.fee_calc.calculate(fee_per_gram, 0, 1, 0, 0);
 
         // Every send must carry a change output, so the change output's fee is
-        // charged as one of the outputs, and the target is one µT more than the
-        // amount: whatever the selector picks then leaves at least 1 µT of change
-        // after every fee. The builder refuses (`with_change_required`) a
-        // transaction without change, so the two must agree. An amount so large
-        // that the target overflows can never be funded.
+        // charged as one of the outputs, and the target is the amount plus the
+        // smallest change worth keeping: what it costs to spend that change as an
+        // input later (at least 1 µT), so the change is never dust. Whatever the
+        // selector picks then leaves at least that much change after every fee.
+        // The builder refuses (`with_change_required`) a transaction without
+        // change, which it only does with less than 1 µT left, so it agrees. An
+        // amount so large that the target overflows can never be funded.
+        let min_change = input_fee.max(MicroMinotari(1));
         let target_amount = amount
             .checked_add(kernel_fee)
-            .and_then(|target| target.checked_add(MicroMinotari(1)))
+            .and_then(|target| target.checked_add(min_change))
             .ok_or(UtxoSelectionError::InsufficientFunds {
                 available: available_balance,
                 required: amount.saturating_add(kernel_fee),
@@ -362,7 +366,7 @@ impl InputSelector {
                 .build()
                 .map_err(|e| UtxoSelectionError::ServiceError(e.to_string()))?;
             if let Some(selection) = without_change.search() {
-                let needed = selection.final_target + default_output_fee + MicroMinotari(1);
+                let needed = selection.final_target + default_output_fee + min_change;
                 let shortfall = needed.saturating_sub(selection.current_value);
                 warn!(
                     target: "audit",
@@ -562,7 +566,12 @@ mod tests {
         let selection = select(&pool, account_id, amount - shortfall.as_u64()).expect("affordable with change");
         assert!(selection.requires_change_output);
         let change = selection.total_value - MicroMinotari(amount - shortfall.as_u64()) - selection.fee_with_change;
-        assert!(change >= MicroMinotari(1), "change must be at least 1 µT, got {change}");
+        let input_fee = Fee::new(TransactionWeight::latest()).calculate(MicroMinotari(5), 0, 1, 0, 0);
+        assert!(input_fee > MicroMinotari(1));
+        assert!(
+            change >= input_fee,
+            "change must be worth at least the {input_fee} it costs to spend, got {change}"
+        );
     }
 
     #[test]
