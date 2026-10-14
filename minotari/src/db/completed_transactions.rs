@@ -515,18 +515,19 @@ pub fn mark_completed_transaction_as_rejected_in_block(
     Ok(())
 }
 
-/// Pending transaction ids of the sends the block scan rejected in a block at
-/// or above `height` (see [`mark_completed_transaction_as_rejected_in_block`]).
+/// `(pending transaction id, transaction id)` of the sends the block scan
+/// rejected in a block at or above `height` (see
+/// [`mark_completed_transaction_as_rejected_in_block`]).
 pub fn get_scan_rejected_pending_tx_ids_from_height(
     conn: &Connection,
     account_id: i64,
     height: u64,
-) -> WalletDbResult<Vec<String>> {
+) -> WalletDbResult<Vec<(String, TxId)>> {
     #[allow(clippy::cast_possible_wrap)]
     let height = height as i64;
     let mut stmt = conn.prepare_cached(
         r#"
-        SELECT pending_tx_id
+        SELECT pending_tx_id, id
         FROM completed_transactions
         WHERE account_id = :account_id
           AND status = :status_rejected
@@ -540,10 +541,14 @@ pub fn get_scan_rejected_pending_tx_ids_from_height(
             ":status_rejected": CompletedTransactionStatus::Rejected.to_string(),
             ":height": height,
         },
-        |row| row.get(0),
+        |row| {
+            let pending_tx_id: String = row.get(0)?;
+            let id: i64 = row.get(1)?;
+            Ok((pending_tx_id, TxId::from(id as u64)))
+        },
     )?;
 
-    Ok(rows.collect::<Result<Vec<String>, _>>()?)
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
 }
 
 pub fn get_pending_completed_transactions(

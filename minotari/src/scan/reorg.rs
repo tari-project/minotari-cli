@@ -225,7 +225,7 @@ pub fn rollback_from_height(
         );
     }
 
-    let reorganized_displayed_transactions =
+    let mut reorganized_displayed_transactions =
         db::mark_displayed_transactions_reorganized_and_return(tx, account_id, reorg_start_height)?;
 
     // Save old payrefs to history before they are cleared by the reset
@@ -239,10 +239,18 @@ pub fn rollback_from_height(
     }
 
     // Sends the scan rejected (inputs spent by a different transaction) in a
-    // rolled-back block are reverted too, and their change goes back to `UNCONFIRMED`.
+    // rolled-back block are reverted too: their change goes back to
+    // `UNCONFIRMED` and their displayed transaction to an unmined `Pending`, so
+    // the scan matches it again when the send is mined rather than adding a
+    // second entry. The updated displayed transaction replaces any copy already
+    // reported as reorganized.
     let scan_rejected = db::get_scan_rejected_pending_tx_ids_from_height(tx, account_id, reorg_start_height)?;
-    for pending_tx_id in &scan_rejected {
+    for (pending_tx_id, completed_tx_id) in &scan_rejected {
         db::revert_rejected_change_output(tx, pending_tx_id)?;
+        if let Some(displayed) = db::reset_displayed_transaction_to_pending(tx, *completed_tx_id)? {
+            reorganized_displayed_transactions.retain(|d| d.id != displayed.id);
+            reorganized_displayed_transactions.push(displayed);
+        }
     }
 
     let affected_count = db::reset_mined_completed_transactions_from_height(tx, account_id, reorg_start_height)?;

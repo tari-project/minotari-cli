@@ -623,7 +623,8 @@ impl<E: EventSender> BlockProcessor<E> {
     /// A mined send is marked `MinedUnconfirmed`. Otherwise its inputs were
     /// spent by a different transaction: it is marked `Rejected` (recording the
     /// block so a reorg can revert it), its change `REJECTED` and its displayed
-    /// transaction rejected. Its inputs are not unlocked: they really are spent.
+    /// transaction rejected. Its inputs that were spent in the block stay
+    /// `SPENT`; any it still had locked are released.
     ///
     /// The last block of a batch may be incomplete: the node can split a large
     /// block over several results, and the batch can end between them. So when
@@ -744,6 +745,10 @@ impl<E: EventSender> BlockProcessor<E> {
                 send_block.block_hash.as_slice(),
             )?;
             db::mark_change_output_rejected(tx, request_id)?;
+            // Inputs of the send that were not spent in this block are still
+            // locked to it; hand them back. Inputs spent here are already
+            // `SPENT` and the change is already `REJECTED`, so neither is touched.
+            db::unlock_outputs_for_request(tx, request_id)?;
             if let Some(displayed) = db::mark_displayed_transaction_rejected(tx, completed.id)? {
                 rejected_displayed_transactions.push(displayed);
             }
@@ -1441,7 +1446,7 @@ mod tests {
     }
 
     #[test]
-    fn a_send_whose_inputs_were_spent_by_another_transaction_is_rejected_without_unlocking() {
+    fn a_send_whose_inputs_were_spent_by_another_transaction_is_rejected_and_its_unspent_inputs_released() {
         let wallet = test_wallet();
         let conn = wallet.pool.get().expect("conn");
         let send = record_send(&wallet, &conn, 1, &[1, 2], Some(3));
@@ -1478,11 +1483,21 @@ mod tests {
             .expect("displayed");
         assert_eq!(displayed.status, TransactionDisplayStatus::Rejected);
 
-        // Nothing is unlocked: the spent input is spent, the other stays locked.
+        // The input spent in the block stays spent; the other is handed back.
         assert_eq!(
             input_statuses(&conn, &send),
-            vec!["SPENT".to_string(), "LOCKED".to_string()]
+            vec!["SPENT".to_string(), "UNSPENT".to_string()]
         );
+        let released_lock: Option<String> = conn
+            .query_row(
+                "SELECT locked_by_request_id FROM outputs WHERE output_hash = :hash",
+                named_params! { ":hash": send.input_hashes[1].as_slice() },
+                |row| row.get(0),
+            )
+            .expect("input");
+        assert_eq!(released_lock, None, "the released input is no longer locked");
+        // The release does not touch the rejected change.
+        assert_eq!(change_row(&conn, &send).1, "REJECTED");
 
         let events = processor.take_wallet_events();
         assert!(events.iter().any(|e| matches!(
@@ -1617,7 +1632,7 @@ mod tests {
         );
 
         let tx = conn.transaction().expect("tx");
-        crate::scan::reorg::rollback_from_height(&tx, wallet.account_id, 50, None).expect("rollback");
+        let info = crate::scan::reorg::rollback_from_height(&tx, wallet.account_id, 50, None).expect("rollback");
         tx.commit().expect("commit");
 
         let completed = completed(&conn, send.tx_id);
@@ -1626,5 +1641,22 @@ mod tests {
         assert_eq!(completed.last_rejected_reason, None);
         assert_eq!(completed.broadcast_attempts, 0);
         assert_eq!(change_row(&conn, &send).1, "UNCONFIRMED");
+
+        // The displayed transaction is unmined and pending again, so the scan
+        // matches it when the send is mined instead of adding a second entry.
+        let displayed = db::get_displayed_transaction_by_id(&conn, &send.tx_id.to_string())
+            .expect("query")
+            .expect("displayed");
+        assert_eq!(displayed.status, TransactionDisplayStatus::Pending);
+        assert_eq!(displayed.blockchain.block_height, 0);
+        assert!(
+            info.reorganized_displayed_transactions
+                .iter()
+                .any(|d| d.id == send.tx_id && d.status == TransactionDisplayStatus::Pending),
+            "consumers are told about the update"
+        );
+
+        // The released input was not relocked; the send is simply rebroadcast.
+        assert_eq!(input_statuses(&conn, &send)[1], "UNSPENT");
     }
 }
