@@ -68,7 +68,7 @@ use anyhow::{Result, anyhow};
 use log::{info, warn};
 use r2d2::PooledConnection;
 use r2d2_sqlite::SqliteConnectionManager;
-use rusqlite::Connection;
+use rusqlite::{Connection, TransactionBehavior};
 use tari_common_types::payment_reference::generate_payment_reference;
 use tari_common_types::types::FixedHash;
 use tari_transaction_components::rpc::models::{TxLocation, TxQueryResponse, TxSubmissionRejectionReason};
@@ -643,7 +643,7 @@ impl TransactionMonitor {
                     };
                     // The wallet recorded the block it scanned at that height (unless
                     // it has been pruned since): the node's block must be the same one.
-                    let conn = Self::get_connection(db_pool)?;
+                    let mut conn = Self::get_connection(db_pool)?;
                     if let Some(scanned_hash) =
                         db::get_scanned_tip_block_hash_at_height(&conn, account_id, mined_height)?
                         && scanned_hash != mined_block_hash.to_vec()
@@ -662,13 +662,6 @@ impl TransactionMonitor {
                         height = mined_height;
                         "Transaction mined in a block the scan has already passed (unconfirmed)"
                     );
-                    #[allow(clippy::cast_possible_wrap)]
-                    mark_completed_transaction_as_mined_unconfirmed(
-                        &conn,
-                        tx.id,
-                        mined_height as i64,
-                        mined_block_hash.as_slice(),
-                    )?;
                     let event = WalletEvent {
                         id: 0,
                         account_id,
@@ -679,7 +672,17 @@ impl TransactionMonitor {
                         },
                         description: format!("Transaction {} mined at height {}", tx.id, mined_height),
                     };
-                    self.persist_event(&conn, account_id, &event)?;
+                    // The status and its event go in together.
+                    let db_tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                    #[allow(clippy::cast_possible_wrap)]
+                    mark_completed_transaction_as_mined_unconfirmed(
+                        &db_tx,
+                        tx.id,
+                        mined_height as i64,
+                        mined_block_hash.as_slice(),
+                    )?;
+                    self.persist_event(&db_tx, account_id, &event)?;
+                    db_tx.commit()?;
                     result.wallet_events.push(event);
                 },
                 TxLocation::NotStored | TxLocation::None => {
@@ -717,10 +720,9 @@ impl TransactionMonitor {
                 id = tx.id.to_string().as_str();
                 "Transaction exceeded max broadcast attempts"
             );
-            let conn = Self::get_connection(db_pool)?;
             let reason = format!("Exceeded {} broadcast attempts", MAX_BROADCAST_ATTEMPTS);
             let description = format!("Transaction {} exceeded broadcast attempts", tx.id);
-            return self.reject_and_release(&conn, account_id, tx, reason, description, result);
+            return self.reject_and_release(db_pool, account_id, tx, reason, description, result);
         }
 
         let Some(transaction) = Self::decode_transaction(tx) else {
@@ -736,9 +738,6 @@ impl TransactionMonitor {
                     id = tx.id.to_string().as_str();
                     "Rebroadcasting transaction"
                 );
-                let conn = Self::get_connection(db_pool)?;
-                mark_completed_transaction_as_broadcasted(&conn, tx.id, tx.broadcast_attempts + 1)?;
-
                 let event = WalletEvent {
                     id: 0,
                     account_id,
@@ -748,7 +747,12 @@ impl TransactionMonitor {
                     },
                     description: format!("Transaction {} broadcast", tx.id),
                 };
-                self.persist_event(&conn, account_id, &event)?;
+                // The status and its event go in together.
+                let mut conn = Self::get_connection(db_pool)?;
+                let db_tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                mark_completed_transaction_as_broadcasted(&db_tx, tx.id, tx.broadcast_attempts + 1)?;
+                self.persist_event(&db_tx, account_id, &event)?;
+                db_tx.commit()?;
                 result.wallet_events.push(event);
                 Ok(())
             },
@@ -760,9 +764,8 @@ impl TransactionMonitor {
                     reason:% = reason;
                     "Transaction rejected on rebroadcast"
                 );
-                let conn = Self::get_connection(db_pool)?;
                 let description = format!("Transaction {} rejected", tx.id);
-                self.reject_and_release(&conn, account_id, tx, reason, description, result)
+                self.reject_and_release(db_pool, account_id, tx, reason, description, result)
             },
         }
     }
@@ -771,10 +774,13 @@ impl TransactionMonitor {
     ///
     /// Unlocking the inputs also soft-deletes the send's `UNCONFIRMED` change
     /// output. The displayed transaction is rejected and a
-    /// `TransactionRejected` event is persisted.
+    /// `TransactionRejected` event is persisted (and its webhook queued).
+    ///
+    /// All of it is one write transaction: a crash part-way must not leave a
+    /// rejected send whose inputs stay locked for ever.
     fn reject_and_release(
         &self,
-        conn: &Connection,
+        db_pool: &SqlitePool,
         account_id: i64,
         tx: &CompletedTransaction,
         reason: String,
@@ -783,20 +789,27 @@ impl TransactionMonitor {
     ) -> Result<()> {
         // The reason can carry text from the node; it is stored and sent in webhooks.
         let reason = sanitize_node_text(&reason);
-        mark_completed_transaction_as_rejected(conn, tx.id, &reason)?;
-        db::unlock_outputs_for_pending_transaction(conn, &tx.pending_tx_id)?;
-
-        if let Some(rejected_displayed_tx) = db::mark_displayed_transaction_rejected(conn, tx.id)? {
-            result.updated_displayed_transactions.push(rejected_displayed_tx);
-        }
-
         let event = WalletEvent {
             id: 0,
             account_id,
-            event_type: WalletEventType::TransactionRejected { tx_id: tx.id, reason },
+            event_type: WalletEventType::TransactionRejected {
+                tx_id: tx.id,
+                reason: reason.clone(),
+            },
             description,
         };
-        self.persist_event(conn, account_id, &event)?;
+
+        let mut conn = Self::get_connection(db_pool)?;
+        let db_tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        mark_completed_transaction_as_rejected(&db_tx, tx.id, &reason)?;
+        db::unlock_outputs_for_pending_transaction(&db_tx, &tx.pending_tx_id)?;
+        let rejected_displayed_tx = db::mark_displayed_transaction_rejected(&db_tx, tx.id)?;
+        self.persist_event(&db_tx, account_id, &event)?;
+        db_tx.commit()?;
+
+        if let Some(rejected_displayed_tx) = rejected_displayed_tx {
+            result.updated_displayed_transactions.push(rejected_displayed_tx);
+        }
         result.wallet_events.push(event);
         Ok(())
     }
@@ -843,10 +856,6 @@ impl TransactionMonitor {
 
                 let payref = hex::encode(generate_payment_reference(&mined_block_hash, &sent_output_hash));
 
-                let conn = Self::get_connection(db_pool)?;
-                #[allow(clippy::cast_possible_wrap)]
-                mark_completed_transaction_as_confirmed(&conn, tx.id, current_height as i64, payref)?;
-
                 let event = WalletEvent {
                     id: 0,
                     account_id,
@@ -857,7 +866,13 @@ impl TransactionMonitor {
                     },
                     description: format!("Transaction {} confirmed", tx.id),
                 };
-                self.persist_event(&conn, account_id, &event)?;
+                // The status and its event go in together.
+                let mut conn = Self::get_connection(db_pool)?;
+                let db_tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                #[allow(clippy::cast_possible_wrap)]
+                mark_completed_transaction_as_confirmed(&db_tx, tx.id, current_height as i64, payref)?;
+                self.persist_event(&db_tx, account_id, &event)?;
+                db_tx.commit()?;
                 events.push(event);
             }
         }
@@ -1720,5 +1735,30 @@ mod tests {
         let completed = completed(&fixture);
         assert_eq!(completed.status, CompletedTransactionStatus::Broadcast);
         assert_eq!(completed.mined_height, None);
+    }
+
+    #[tokio::test]
+    async fn a_rejection_that_fails_part_way_leaves_nothing_half_done() {
+        // Make the last write of the rejection (its event) fail. The rejection
+        // must roll back as a whole: the send must not end up rejected with its
+        // inputs still locked.
+        let fixture = send_fixture("reject_atomic.db", MAX_BROADCAST_ATTEMPTS);
+        {
+            let conn = fixture.pool.get().expect("conn");
+            conn.execute_batch(
+                "CREATE TRIGGER fail_events BEFORE INSERT ON events BEGIN SELECT RAISE(ABORT, 'disk full'); END;",
+            )
+            .expect("trigger");
+        }
+        let server = node_reporting("NotStored").await;
+
+        let error = monitor_for(&fixture)
+            .monitor_if_needed(&client(&server), &fixture.pool, fixture.account_id, 100)
+            .await;
+        assert!(error.is_err(), "a database failure fails the pass");
+
+        assert_eq!(completed(&fixture).status, CompletedTransactionStatus::Broadcast);
+        assert_eq!(input_state(&fixture), ("LOCKED".to_string(), true));
+        assert_eq!(change_state(&fixture), ("UNCONFIRMED".to_string(), false));
     }
 }
