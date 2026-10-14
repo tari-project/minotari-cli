@@ -641,13 +641,27 @@ impl TransactionMonitor {
                         );
                         continue;
                     };
+                    // The wallet recorded the block it scanned at that height (unless
+                    // it has been pruned since): the node's block must be the same one.
+                    let conn = Self::get_connection(db_pool)?;
+                    if let Some(scanned_hash) =
+                        db::get_scanned_tip_block_hash_at_height(&conn, account_id, mined_height)?
+                        && scanned_hash != mined_block_hash.to_vec()
+                    {
+                        warn!(
+                            target: "audit",
+                            id = tx.id.to_string().as_str(),
+                            height = mined_height;
+                            "Node reports the transaction mined in a block the wallet did not scan; leaving it to the scan"
+                        );
+                        continue;
+                    }
                     info!(
                         target: "audit",
                         id = tx.id.to_string().as_str(),
                         height = mined_height;
                         "Transaction mined in a block the scan has already passed (unconfirmed)"
                     );
-                    let conn = Self::get_connection(db_pool)?;
                     #[allow(clippy::cast_possible_wrap)]
                     mark_completed_transaction_as_mined_unconfirmed(
                         &conn,
@@ -1670,5 +1684,41 @@ mod tests {
             .expect("query")
             .expect("exists");
         assert_eq!(second.status, CompletedTransactionStatus::MinedUnconfirmed);
+    }
+
+    fn record_scanned_block(fixture: &SendFixture, height: i64, hash: [u8; 32]) {
+        let conn = fixture.pool.get().expect("conn");
+        db::insert_scanned_tip_block(&conn, fixture.account_id, height, &hash).expect("tip");
+    }
+
+    #[tokio::test]
+    async fn a_mined_report_matching_the_scanned_block_is_accepted() {
+        let fixture = send_fixture("mined_matching_tip.db", 1);
+        record_scanned_block(&fixture, 100, [8u8; 32]);
+        let server = node_reporting_mined_at(100).await;
+
+        monitor_for(&fixture)
+            .monitor_if_needed(&client(&server), &fixture.pool, fixture.account_id, 100)
+            .await
+            .expect("monitor");
+
+        assert_eq!(completed(&fixture).status, CompletedTransactionStatus::MinedUnconfirmed);
+    }
+
+    #[tokio::test]
+    async fn a_mined_report_for_a_block_the_wallet_did_not_scan_is_left_to_the_scan() {
+        let fixture = send_fixture("mined_other_block.db", 1);
+        // The wallet scanned a different block at that height.
+        record_scanned_block(&fixture, 100, [5u8; 32]);
+        let server = node_reporting_mined_at(100).await;
+
+        monitor_for(&fixture)
+            .monitor_if_needed(&client(&server), &fixture.pool, fixture.account_id, 100)
+            .await
+            .expect("monitor");
+
+        let completed = completed(&fixture);
+        assert_eq!(completed.status, CompletedTransactionStatus::Broadcast);
+        assert_eq!(completed.mined_height, None);
     }
 }
