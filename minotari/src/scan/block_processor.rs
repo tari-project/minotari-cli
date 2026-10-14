@@ -1725,8 +1725,64 @@ mod tests {
             "consumers are told about the update"
         );
 
-        // The released input was not relocked; the send is simply rebroadcast.
-        assert_eq!(input_statuses(&conn, &send)[1], "UNSPENT");
+        // Both inputs are the send's again: the one the rejection released, and
+        // the one the rolled-back block had spent.
+        assert_eq!(
+            input_statuses(&conn, &send),
+            vec!["LOCKED".to_string(), "LOCKED".to_string()]
+        );
+        for input_hash in &send.input_hashes {
+            let lock: Option<String> = conn
+                .query_row(
+                    "SELECT locked_by_request_id FROM outputs WHERE output_hash = :hash",
+                    named_params! { ":hash": input_hash.as_slice() },
+                    |row| row.get(0),
+                )
+                .expect("input");
+            assert_eq!(lock.as_deref(), Some(send.request_id.as_str()));
+        }
+        assert!(stored_event_types(&conn, wallet.account_id).contains(&"TransactionReorged".to_string()));
+    }
+
+    #[test]
+    fn a_reorg_keeps_a_scan_rejected_send_rejected_if_its_inputs_went_elsewhere() {
+        let wallet = test_wallet();
+        let mut conn = wallet.pool.get().expect("conn");
+        let send = record_send(&wallet, &conn, 1, &[1, 2], Some(3));
+
+        let other_block = block(50, Vec::new(), vec![send.input_hashes[0]]);
+        let next_block = block(51, Vec::new(), Vec::new());
+        let mut processor = processor(&wallet, true);
+        process(&mut processor, &conn, wallet.account_id, &[other_block, next_block]);
+        assert_eq!(
+            completed(&conn, send.tx_id).status,
+            db::CompletedTransactionStatus::Rejected
+        );
+
+        // The released input is now locked by another send.
+        let (other_id, ..) = output_row(&conn, &send.input_hashes[1]);
+        db::lock_output(&conn, other_id, "another-send", Utc::now()).expect("lock");
+
+        let tx = conn.transaction().expect("tx");
+        crate::scan::reorg::rollback_from_height(&tx, wallet.account_id, 50, None).expect("rollback");
+        tx.commit().expect("commit");
+
+        let completed = completed(&conn, send.tx_id);
+        assert_eq!(completed.status, db::CompletedTransactionStatus::Rejected);
+        assert_eq!(completed.mined_height, None);
+        assert_eq!(change_row(&conn, &send).1, "REJECTED");
+        let displayed = db::get_displayed_transaction_by_id(&conn, &send.tx_id.to_string())
+            .expect("query")
+            .expect("displayed");
+        assert_eq!(displayed.status, TransactionDisplayStatus::Rejected);
+        let lock: Option<String> = conn
+            .query_row(
+                "SELECT locked_by_request_id FROM outputs WHERE id = :id",
+                named_params! { ":id": other_id },
+                |row| row.get(0),
+            )
+            .expect("input");
+        assert_eq!(lock.as_deref(), Some("another-send"), "the other send keeps its input");
     }
 
     /// What the monitor does when it gives up on a send: rejected, inputs

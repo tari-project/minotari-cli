@@ -537,6 +537,28 @@ pub fn mark_completed_transaction_as_rejected_in_block(
     Ok(())
 }
 
+/// Keeps a send the scan rejected `Rejected` after a reorg removed the block
+/// it was rejected in, because its inputs are now spent or locked elsewhere.
+///
+/// The block is forgotten (`mined_height`/`mined_block_hash` cleared) so the
+/// reorg's reset leaves the send alone; like a send the monitor rejected, the
+/// scan can still find it mined later.
+pub fn keep_rejected_after_reorg(conn: &Connection, tx_id: TxId, reason: &str) -> WalletDbResult<()> {
+    conn.execute(
+        r#"
+        UPDATE completed_transactions
+        SET mined_height = NULL, mined_block_hash = NULL, last_rejected_reason = :reason, updated_at = :now
+        WHERE id = :id
+        "#,
+        named_params! {
+            ":reason": reason,
+            ":now": Utc::now(),
+            ":id": tx_id.as_i64_wrapped()
+        },
+    )?;
+    Ok(())
+}
+
 /// `(pending transaction id, transaction id)` of the sends the block scan
 /// rejected in a block at or above `height` (see
 /// [`mark_completed_transaction_as_rejected_in_block`]).

@@ -459,6 +459,78 @@ pub fn get_output_request_ids(conn: &Connection, output_id: i64) -> WalletDbResu
     Ok(request_ids.unwrap_or((None, None)))
 }
 
+/// Locks a send's inputs to it again, for a reorg that undid the scan's
+/// rejection of the send.
+///
+/// The rejection released the inputs it still had locked, and the reorg undid
+/// the spend of the others. Each input must now be either free (`UNSPENT`, not
+/// locked), still locked to this send, or `SPENT` only by an input record the
+/// reorg removed. Then all are locked to the send and `true` is returned. If any
+/// input is locked by another request, spent in a block that is still on the
+/// chain, or unknown, nothing is changed and `false` is returned: the send
+/// cannot be revived.
+pub fn relock_inputs_for_revived_send(
+    conn: &Connection,
+    account_id: i64,
+    pending_tx_id: &str,
+    input_hashes: &[FixedHash],
+) -> WalletDbResult<bool> {
+    let unspent = OutputStatus::Unspent.to_string();
+    let locked = OutputStatus::Locked.to_string();
+    let spent = OutputStatus::Spent.to_string();
+
+    let mut output_ids = Vec::new();
+    for input_hash in input_hashes {
+        let row: Option<(i64, String, Option<String>)> = conn
+            .query_row(
+                r#"
+                SELECT id, status, locked_by_request_id
+                FROM outputs
+                WHERE account_id = :account_id AND output_hash = :hash AND deleted_at IS NULL
+                "#,
+                named_params! { ":account_id": account_id, ":hash": input_hash.as_slice() },
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        let Some((output_id, status, locked_by)) = row else {
+            return Ok(false);
+        };
+
+        let free = status == unspent && locked_by.is_none();
+        let ours = locked_by.as_deref() == Some(pending_tx_id) && (status == locked || status == spent);
+        let spent_in_removed_block = status == spent && {
+            let active_spends: i64 = conn.query_row(
+                "SELECT COUNT(*) FROM inputs WHERE output_id = :id AND deleted_at IS NULL",
+                named_params! { ":id": output_id },
+                |row| row.get(0),
+            )?;
+            active_spends == 0
+        };
+        let still_spent_on_chain = status == spent && !spent_in_removed_block;
+        if still_spent_on_chain || !(free || ours || spent_in_removed_block) {
+            return Ok(false);
+        }
+        output_ids.push(output_id);
+    }
+
+    for output_id in output_ids {
+        conn.execute(
+            r#"
+            UPDATE outputs
+            SET status = :locked, locked_by_request_id = :req_id, locked_at = :now
+            WHERE id = :id
+            "#,
+            named_params! {
+                ":locked": locked.as_str(),
+                ":req_id": pending_tx_id,
+                ":now": Utc::now(),
+                ":id": output_id,
+            },
+        )?;
+    }
+    Ok(true)
+}
+
 /// Links the send's change output found in a block back to the send.
 ///
 /// A send the monitor rejected had its change row soft-deleted; when the send
