@@ -632,6 +632,14 @@ impl TransactionMonitor {
                     if mined_height > scanned_height {
                         continue;
                     }
+                    let Ok(mined_block_hash) = FixedHash::try_from(mined_block_hash) else {
+                        warn!(
+                            target: "audit",
+                            id = tx.id.to_string().as_str();
+                            "Node reported a malformed block hash for a mined transaction; leaving it to the scan"
+                        );
+                        continue;
+                    };
                     info!(
                         target: "audit",
                         id = tx.id.to_string().as_str(),
@@ -644,7 +652,7 @@ impl TransactionMonitor {
                         &conn,
                         tx.id,
                         mined_height as i64,
-                        &mined_block_hash,
+                        mined_block_hash.as_slice(),
                     )?;
                     let event = WalletEvent {
                         id: 0,
@@ -792,23 +800,28 @@ impl TransactionMonitor {
 
             let confirmations = current_height.saturating_sub(mined_height);
             if confirmations >= self.required_confirmations {
+                // A row whose hashes cannot be decoded is logged and skipped: an
+                // error here would fail every pass, for every account.
+                let mined_block_hash = tx.mined_block_hash.clone().and_then(|b| FixedHash::try_from(b).ok());
+                let sent_output_hash = tx
+                    .sent_output_hash
+                    .as_ref()
+                    .and_then(|h| hex::decode(h).ok())
+                    .and_then(|b| FixedHash::try_from(b).ok());
+                let (Some(mined_block_hash), Some(sent_output_hash)) = (mined_block_hash, sent_output_hash) else {
+                    warn!(
+                        target: "audit",
+                        id = tx.id.to_string().as_str();
+                        "Mined transaction has a missing or malformed block or sent output hash; cannot confirm it"
+                    );
+                    continue;
+                };
                 info!(
                     target: "audit",
                     id = tx.id.to_string().as_str(),
                     confirmations = confirmations;
                     "Transaction confirmed"
                 );
-                let mined_block_hash = tx
-                    .mined_block_hash
-                    .ok_or_else(|| anyhow!("Block hash missing for a mined tx: {}", tx.id))
-                    .and_then(|b| FixedHash::try_from(b).map_err(|e| e.into()))?;
-
-                let sent_output_hash = tx
-                    .sent_output_hash
-                    .as_ref()
-                    .ok_or_else(|| anyhow!("Sent output hash missing for a mined tx: {}", tx.id))
-                    .and_then(|h| hex::decode(h).map_err(|e| e.into()))
-                    .and_then(|b| FixedHash::try_from(b).map_err(|e| e.into()))?;
 
                 let payref = hex::encode(generate_payment_reference(&mined_block_hash, &sent_output_hash));
 
@@ -1605,5 +1618,53 @@ mod tests {
             .expect("exists");
         assert_eq!(second.status, CompletedTransactionStatus::Broadcast);
         assert_eq!(second.broadcast_attempts, 2, "the other one is still rebroadcast");
+    }
+
+    #[tokio::test]
+    async fn a_malformed_block_hash_from_the_node_leaves_the_transaction_to_the_scan() {
+        let fixture = send_fixture("bad_node_hash.db", 1);
+        let server = node_answering(serde_json::json!({
+            "location": "Mined",
+            "mined_height": 100,
+            "mined_header_hash": [1, 2, 3, 4, 5],
+            "mined_timestamp": 1_700_000_000u64,
+        }))
+        .await;
+        expect_submissions(&server, 0).await;
+
+        monitor_for(&fixture)
+            .monitor_if_needed(&client(&server), &fixture.pool, fixture.account_id, 100)
+            .await
+            .expect("monitor");
+
+        let completed = completed(&fixture);
+        assert_eq!(completed.status, CompletedTransactionStatus::Broadcast);
+        assert_eq!(completed.mined_block_hash, None);
+    }
+
+    #[tokio::test]
+    async fn a_mined_row_with_a_malformed_block_hash_is_skipped_and_others_still_confirm() {
+        let fixture = send_fixture("bad_row_hash.db", 1);
+        let second = record_second_send(&fixture, 2);
+        {
+            let conn = fixture.pool.get().expect("conn");
+            db::mark_completed_transaction_as_mined_unconfirmed(&conn, fixture.tx_id, 100, &[7u8; 32]).expect("mined");
+            db::mark_completed_transaction_as_mined_unconfirmed(&conn, second, 100, &[1, 2, 3, 4, 5])
+                .expect("mined with a bad hash");
+        }
+        // No mocks: both rows are mined, so the node must not be asked.
+        let server = MockServer::start().await;
+
+        monitor_for(&fixture)
+            .monitor_if_needed(&client(&server), &fixture.pool, fixture.account_id, 103)
+            .await
+            .expect("a malformed row does not fail the pass");
+
+        assert_eq!(completed(&fixture).status, CompletedTransactionStatus::MinedConfirmed);
+        let conn = fixture.pool.get().expect("conn");
+        let second = db::get_completed_transaction_by_id(&conn, second)
+            .expect("query")
+            .expect("exists");
+        assert_eq!(second.status, CompletedTransactionStatus::MinedUnconfirmed);
     }
 }
