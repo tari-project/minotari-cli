@@ -418,7 +418,8 @@ pub fn soft_delete_unconfirmed_change_output(conn: &Connection, created_by_reque
     Ok(())
 }
 
-/// The change output of the send with `created_by_request_id`, if it has one.
+/// The change output of the send with `created_by_request_id`, if it has one,
+/// including one soft-deleted when the send was rejected.
 pub fn get_change_output_hash_for_request(
     conn: &Connection,
     created_by_request_id: &str,
@@ -428,7 +429,7 @@ pub fn get_change_output_hash_for_request(
             r#"
             SELECT output_hash
             FROM outputs
-            WHERE created_by_request_id = :req_id AND deleted_at IS NULL
+            WHERE created_by_request_id = :req_id
             ORDER BY id DESC
             LIMIT 1
             "#,
@@ -445,16 +446,39 @@ pub fn get_change_output_hash_for_request(
     }
 }
 
-/// The request (`pending_transactions.id`) that locked this output, if any.
-pub fn get_output_lock_request_id(conn: &Connection, output_id: i64) -> WalletDbResult<Option<String>> {
-    let request_id: Option<Option<String>> = conn
+/// The request (`pending_transactions.id`) that has this output locked, and
+/// the one it was last released from, if any.
+pub fn get_output_request_ids(conn: &Connection, output_id: i64) -> WalletDbResult<(Option<String>, Option<String>)> {
+    let request_ids: Option<(Option<String>, Option<String>)> = conn
         .query_row(
-            "SELECT locked_by_request_id FROM outputs WHERE id = :id",
+            "SELECT locked_by_request_id, released_from_request_id FROM outputs WHERE id = :id",
             named_params! { ":id": output_id },
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
-    Ok(request_id.flatten())
+    Ok(request_ids.unwrap_or((None, None)))
+}
+
+/// Links the send's change output found in a block back to the send.
+///
+/// A send the monitor rejected had its change row soft-deleted; when the send
+/// is mined after all, the scan inserts the change as a new row. This marks that
+/// row as the send's change again (by the hash of the send's last change row),
+/// so a reorg treats it as such.
+pub fn relink_change_output(conn: &Connection, created_by_request_id: &str) -> WalletDbResult<()> {
+    conn.execute(
+        r#"
+        UPDATE outputs
+        SET created_by_request_id = :req_id
+        WHERE deleted_at IS NULL
+          AND created_by_request_id IS NULL
+          AND output_hash = (
+              SELECT output_hash FROM outputs WHERE created_by_request_id = :req_id ORDER BY id DESC LIMIT 1
+          )
+        "#,
+        named_params! { ":req_id": created_by_request_id },
+    )?;
+    Ok(())
 }
 
 /// Marks the `UNCONFIRMED` change output of a send `REJECTED`: the send's
@@ -1132,7 +1156,8 @@ pub fn unlock_outputs_for_request(conn: &Connection, locked_by_request_id: &str)
     conn.execute(
         r#"
         UPDATE outputs
-        SET status = :unspent, locked_at = NULL, locked_by_request_id = NULL
+        SET status = :unspent, locked_at = NULL, released_from_request_id = locked_by_request_id,
+            locked_by_request_id = NULL
         WHERE locked_by_request_id = :req_id AND status = :locked
         "#,
         named_params! {

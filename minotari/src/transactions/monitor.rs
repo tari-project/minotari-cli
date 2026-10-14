@@ -89,6 +89,18 @@ use tari_utilities::ByteArray;
 /// Maximum number of times to attempt broadcasting a transaction before giving up.
 const MAX_BROADCAST_ATTEMPTS: i32 = 10;
 
+/// What the node answered when a transaction was submitted to it.
+enum SubmitOutcome {
+    /// Accepted into the mempool, or already mined.
+    Accepted,
+    /// Refused for good: the transaction can never be valid (a double spend,
+    /// or it failed validation).
+    Refused(String),
+    /// Not accepted this time, for a reason that can pass (fee too low, orphan,
+    /// time-locked, validator node slot taken, an error answer): try again.
+    NotAccepted(String),
+}
+
 /// A request to the base node failed (as opposed to the database).
 ///
 /// The monitor logs it, leaves that transaction as it is and carries on with
@@ -704,8 +716,13 @@ impl TransactionMonitor {
 
     /// Submits `tx` to the node again, counting the attempt.
     ///
-    /// Once `tx` has used up [`MAX_BROADCAST_ATTEMPTS`], or if the node refuses
-    /// it, it is rejected instead (see [`Self::reject_and_release`]).
+    /// - Accepted: the send is `Broadcast`.
+    /// - Refused for good (double spend, failed validation): it is rejected and
+    ///   its inputs released (see [`Self::reject_and_release`]).
+    /// - Not accepted this time: the attempt is counted and the send is left as
+    ///   it is, inputs still locked.
+    ///
+    /// Once `tx` has used up [`MAX_BROADCAST_ATTEMPTS`] it is rejected instead.
     async fn rebroadcast_or_reject(
         &self,
         wallet_client: &WalletHttpClient,
@@ -730,9 +747,9 @@ impl TransactionMonitor {
         };
 
         // A failed request (node unreachable, HTTP error) is a `NodeRequestError`
-        // and leaves the transaction as it is; only a refusal by the node rejects it.
+        // and leaves the transaction as it is; only a refusal for good rejects it.
         match Self::broadcast_transaction(wallet_client, transaction).await? {
-            None => {
+            SubmitOutcome::Accepted => {
                 info!(
                     target: "audit",
                     id = tx.id.to_string().as_str();
@@ -756,13 +773,26 @@ impl TransactionMonitor {
                 result.wallet_events.push(event);
                 Ok(())
             },
-            Some(reason) => {
+            SubmitOutcome::NotAccepted(reason) => {
+                let reason = sanitize_node_text(&reason);
+                warn!(
+                    target: "audit",
+                    id = tx.id.to_string().as_str(),
+                    attempts = tx.broadcast_attempts + 1,
+                    reason:% = reason;
+                    "Transaction not accepted on rebroadcast; will try again"
+                );
+                let conn = Self::get_connection(db_pool)?;
+                db::record_failed_broadcast_attempt(&conn, tx.id, tx.broadcast_attempts + 1)?;
+                Ok(())
+            },
+            SubmitOutcome::Refused(reason) => {
                 let reason = sanitize_node_text(&reason);
                 warn!(
                     target: "audit",
                     id = tx.id.to_string().as_str(),
                     reason:% = reason;
-                    "Transaction rejected on rebroadcast"
+                    "Transaction refused on rebroadcast"
                 );
                 let description = format!("Transaction {} rejected", tx.id);
                 self.reject_and_release(db_pool, account_id, tx, reason, description, result)
@@ -897,28 +927,34 @@ impl TransactionMonitor {
         }
     }
 
-    /// Submits `transaction` to the node.
+    /// Submits `transaction` to the node and says what it answered.
     ///
-    /// Returns `None` if the node accepted it (or already has it mined), and the
-    /// reason if the node refused it. A request that did not get an answer from
-    /// the node (unreachable, HTTP error) is a [`NodeRequestError`].
+    /// Only `DoubleSpend` and `ValidationFailed` are a refusal for good; every
+    /// other reason, and an error answer, is "not this time". A request that did
+    /// not get an answer from the node (unreachable, HTTP error) is a
+    /// [`NodeRequestError`].
     async fn broadcast_transaction(
         wallet_client: &WalletHttpClient,
         transaction: Transaction,
-    ) -> Result<Option<String>> {
+    ) -> Result<SubmitOutcome> {
         let response = match wallet_client.submit_transaction(transaction).await {
             Ok(response) => response,
             Err(e) if e.downcast_ref::<HttpError>().is_some() => {
                 return Err(NodeRequestError(sanitize_node_text(&format!("Broadcast failed: {}", e))).into());
             },
             // The node answered with an error, or the transaction is too large to send.
-            Err(e) => return Ok(Some(format!("Broadcast failed: {}", e))),
+            Err(e) => return Ok(SubmitOutcome::NotAccepted(format!("Broadcast failed: {}", e))),
         };
 
         if response.accepted || response.rejection_reason == TxSubmissionRejectionReason::AlreadyMined {
-            Ok(None)
-        } else {
-            Ok(Some(format!("Transaction rejected: {}", response.rejection_reason)))
+            return Ok(SubmitOutcome::Accepted);
+        }
+        let reason = format!("Transaction rejected: {}", response.rejection_reason);
+        match response.rejection_reason {
+            TxSubmissionRejectionReason::DoubleSpend | TxSubmissionRejectionReason::ValidationFailed => {
+                Ok(SubmitOutcome::Refused(reason))
+            },
+            _ => Ok(SubmitOutcome::NotAccepted(reason)),
         }
     }
 
@@ -1760,5 +1796,95 @@ mod tests {
         assert_eq!(completed(&fixture).status, CompletedTransactionStatus::Broadcast);
         assert_eq!(input_state(&fixture), ("LOCKED".to_string(), true));
         assert_eq!(change_state(&fixture), ("UNCONFIRMED".to_string(), false));
+    }
+
+    async fn submissions_answered(server: &MockServer, body: serde_json::Value) {
+        Mock::given(method("POST"))
+            .and(path("/json_rpc"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body))
+            .expect(1)
+            .mount(server)
+            .await;
+    }
+
+    fn refused_with(reason: &str) -> serde_json::Value {
+        serde_json::json!({
+            "result": { "accepted": false, "rejection_reason": reason, "is_synced": true },
+            "error": null,
+            "id": "1",
+        })
+    }
+
+    #[tokio::test]
+    async fn a_transient_refusal_counts_an_attempt_and_keeps_the_send() {
+        for reason in ["FeeTooLow", "Orphan", "TimeLocked", "ValidatorNodeSlotTaken"] {
+            let fixture = send_fixture(&format!("transient_{reason}.db"), 1);
+            let server = node_reporting("NotStored").await;
+            submissions_answered(&server, refused_with(reason)).await;
+
+            monitor_for(&fixture)
+                .monitor_if_needed(&client(&server), &fixture.pool, fixture.account_id, 100)
+                .await
+                .expect("monitor");
+
+            let completed = completed(&fixture);
+            assert_eq!(completed.status, CompletedTransactionStatus::Broadcast, "{reason}");
+            assert_eq!(completed.broadcast_attempts, 2, "{reason}");
+            assert_eq!(input_state(&fixture), ("LOCKED".to_string(), true), "{reason}");
+            assert_eq!(change_state(&fixture), ("UNCONFIRMED".to_string(), false), "{reason}");
+        }
+    }
+
+    #[tokio::test]
+    async fn an_error_answer_to_a_completed_rebroadcast_counts_an_attempt_and_keeps_the_send() {
+        let fixture = send_fixture("error_answer.db", 1);
+        set_status(&fixture, CompletedTransactionStatus::Completed);
+        let server = MockServer::start().await;
+        submissions_answered(
+            &server,
+            serde_json::json!({ "result": null, "error": "mempool full", "id": "1" }),
+        )
+        .await;
+
+        monitor_for(&fixture)
+            .monitor_if_needed(&client(&server), &fixture.pool, fixture.account_id, 100)
+            .await
+            .expect("monitor");
+
+        let completed = completed(&fixture);
+        assert_eq!(completed.status, CompletedTransactionStatus::Completed);
+        assert_eq!(completed.broadcast_attempts, 2);
+        assert_eq!(input_state(&fixture), ("LOCKED".to_string(), true));
+    }
+
+    #[tokio::test]
+    async fn a_refusal_for_good_rejects_the_send_and_releases_its_inputs() {
+        for reason in ["DoubleSpend", "ValidationFailed"] {
+            let fixture = send_fixture(&format!("refused_{reason}.db"), 1);
+            let server = node_reporting("NotStored").await;
+            submissions_answered(&server, refused_with(reason)).await;
+
+            monitor_for(&fixture)
+                .monitor_if_needed(&client(&server), &fixture.pool, fixture.account_id, 100)
+                .await
+                .expect("monitor");
+
+            let completed = completed(&fixture);
+            assert_eq!(completed.status, CompletedTransactionStatus::Rejected, "{reason}");
+            assert_eq!(completed.mined_height, None);
+            assert_eq!(input_state(&fixture), ("UNSPENT".to_string(), false), "{reason}");
+            assert_eq!(change_state(&fixture), ("UNCONFIRMED".to_string(), true), "{reason}");
+
+            // The released input still leads back to the send, for the scan.
+            let conn = fixture.pool.get().expect("conn");
+            let released_from: Option<String> = conn
+                .query_row(
+                    "SELECT released_from_request_id FROM outputs WHERE id = :id",
+                    named_params! { ":id": fixture.input_output_id },
+                    |row| row.get(0),
+                )
+                .expect("input");
+            assert_eq!(released_from.as_deref(), Some(fixture.request_id.as_str()));
+        }
     }
 }

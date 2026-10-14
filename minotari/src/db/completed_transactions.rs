@@ -168,12 +168,14 @@ pub fn get_completed_transaction_by_id(conn: &Connection, tx_id: TxId) -> Wallet
     Ok(result)
 }
 
-/// The send recorded for `pending_tx_id` that the chain has not confirmed yet
-/// (`Completed` or `Broadcast`), if any.
+/// The send recorded for `pending_tx_id` that the block scan may still find
+/// mined, if any: `Completed`, `Broadcast`, or `Rejected` by the monitor (no
+/// `mined_height`; the node may still have mined it).
 ///
 /// Used by the block scan to recognise one of the wallet's own sends when its
-/// inputs are spent in a block.
-pub fn get_unmined_completed_transaction_by_pending_tx_id(
+/// inputs are spent in a block. A send the scan itself rejected has a
+/// `mined_height` and is not returned.
+pub fn get_completed_transaction_to_match(
     conn: &Connection,
     account_id: i64,
     pending_tx_id: &str,
@@ -186,7 +188,7 @@ pub fn get_unmined_completed_transaction_by_pending_tx_id(
         FROM completed_transactions
         WHERE account_id = :account_id
           AND pending_tx_id = :pending_tx_id
-          AND status IN (:completed, :broadcast)
+          AND (status IN (:completed, :broadcast) OR (status = :rejected AND mined_height IS NULL))
         ORDER BY created_at DESC
         LIMIT 1
         "#,
@@ -199,6 +201,7 @@ pub fn get_unmined_completed_transaction_by_pending_tx_id(
                 ":pending_tx_id": pending_tx_id,
                 ":completed": CompletedTransactionStatus::Completed.to_string(),
                 ":broadcast": CompletedTransactionStatus::Broadcast.to_string(),
+                ":rejected": CompletedTransactionStatus::Rejected.to_string(),
             },
             map_row,
         )
@@ -314,7 +317,8 @@ pub fn mark_completed_transaction_as_mined_unconfirmed(
     conn.execute(
         r#"
         UPDATE completed_transactions
-        SET status = :status, mined_height = :height, mined_block_hash = :hash, updated_at = :now
+        SET status = :status, mined_height = :height, mined_block_hash = :hash, last_rejected_reason = NULL,
+            updated_at = :now
         WHERE id = :id
         "#,
         named_params! {
@@ -326,6 +330,24 @@ pub fn mark_completed_transaction_as_mined_unconfirmed(
         },
     )?;
 
+    Ok(())
+}
+
+/// Counts a broadcast attempt the node did not accept this time (fee too low,
+/// orphan, time-locked, ...), leaving the send's status as it is.
+pub fn record_failed_broadcast_attempt(conn: &Connection, tx_id: TxId, attempts: i32) -> WalletDbResult<()> {
+    conn.execute(
+        r#"
+        UPDATE completed_transactions
+        SET broadcast_attempts = :attempts, updated_at = :now
+        WHERE id = :id
+        "#,
+        named_params! {
+            ":attempts": attempts,
+            ":now": Utc::now(),
+            ":id": tx_id.as_i64_wrapped()
+        },
+    )?;
     Ok(())
 }
 
