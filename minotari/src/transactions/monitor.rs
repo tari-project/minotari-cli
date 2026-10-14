@@ -330,6 +330,22 @@ impl TransactionMonitor {
         self.state.has_pending_outbound()
     }
 
+    /// Returns whether there are pending outbound transactions, re-reading the
+    /// database when the flag is clear.
+    ///
+    /// Sends can be made while a scan runs (by the API, the CLI, or an
+    /// embedding application), and nothing signals them to this monitor. The
+    /// scan only recognises a send in a block while this flag is set, so it is
+    /// refreshed before each batch is processed; a send already in a fetched
+    /// block was recorded before it was broadcast, so it is seen here.
+    pub fn refresh_pending_outbound(&self, db_pool: &SqlitePool, account_id: i64) -> Result<bool> {
+        if !self.state.has_pending_outbound() {
+            let conn = Self::get_connection(db_pool)?;
+            self.state.initialize(&conn, account_id)?;
+        }
+        Ok(self.state.has_pending_outbound())
+    }
+
     /// Monitors pending transactions and returns status updates.
     ///
     /// This is the main entry point for transaction monitoring. It performs:

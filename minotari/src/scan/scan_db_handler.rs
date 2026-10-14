@@ -111,6 +111,11 @@ impl<E: EventSender + Clone + Send + 'static> ScanDbHandler<E> {
                     .map_err(|e| WalletDbError::Unexpected(e.to_string()))?;
             }
 
+            // The last block of the batch is complete: match the wallet's sends in it.
+            processor
+                .match_sends(&tx)
+                .map_err(|e| WalletDbError::Unexpected(e.to_string()))?;
+
             let events = processor.take_wallet_events();
             tx.commit().map_err(WalletDbError::from)?;
 

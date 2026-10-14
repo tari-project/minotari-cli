@@ -164,6 +164,31 @@ pub fn rollback_from_height(
         }
     }
 
+    // A send's change output is not soft-deleted with the other outputs: it goes
+    // back to `UNCONFIRMED`, because the send is reverted and rebroadcast below
+    // and the scan recognises it by this row. It is still reported as rolled back.
+    let reverted_change_outputs = db::revert_change_outputs_from_height(tx, account_id, reorg_start_height)?;
+    for output_row in &reverted_change_outputs {
+        let output_hash = FixedHash::try_from(output_row.output_hash.as_slice())?;
+        invalidated_output_hashes.push(output_hash);
+
+        let event = WalletEvent {
+            id: 0,
+            account_id,
+            event_type: WalletEventType::OutputRolledBack {
+                hash: output_hash,
+                original_block_height: output_row.mined_in_block_height as u64,
+                rolled_back_at_height: reorg_start_height,
+            },
+            description: format!(
+                "Output {:x?} at height {} was rolled back due to reorg",
+                output_row.output_hash, output_row.mined_in_block_height
+            ),
+        };
+        let event_id = db::insert_wallet_event(tx, account_id, &event)?;
+        generated_events.push((event_id, event));
+    }
+
     // 3. Cancel pending transactions linked to reorged outputs
     let cancelled_transaction_ids: Vec<String> = cancelled_pending_tx_ids.into_iter().collect();
     if !cancelled_transaction_ids.is_empty() {
@@ -211,6 +236,13 @@ pub fn rollback_from_height(
             count = saved_payrefs;
             "Saved payref(s) to history before reorg reset"
         );
+    }
+
+    // Sends the scan rejected (inputs spent by a different transaction) in a
+    // rolled-back block are reverted too, and their change goes back to `UNCONFIRMED`.
+    let scan_rejected = db::get_scan_rejected_pending_tx_ids_from_height(tx, account_id, reorg_start_height)?;
+    for pending_tx_id in &scan_rejected {
+        db::revert_rejected_change_output(tx, pending_tx_id)?;
     }
 
     let affected_count = db::reset_mined_completed_transactions_from_height(tx, account_id, reorg_start_height)?;

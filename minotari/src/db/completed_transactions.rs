@@ -168,6 +168,45 @@ pub fn get_completed_transaction_by_id(conn: &Connection, tx_id: TxId) -> Wallet
     Ok(result)
 }
 
+/// The send recorded for `pending_tx_id` that the chain has not confirmed yet
+/// (`Completed` or `Broadcast`), if any.
+///
+/// Used by the block scan to recognise one of the wallet's own sends when its
+/// inputs are spent in a block.
+pub fn get_unmined_completed_transaction_by_pending_tx_id(
+    conn: &Connection,
+    account_id: i64,
+    pending_tx_id: &str,
+) -> WalletDbResult<Option<CompletedTransaction>> {
+    let mut stmt = conn.prepare_cached(
+        r#"
+        SELECT id, account_id, pending_tx_id, status, last_rejected_reason, kernel_excess,
+               sent_payref, sent_output_hash, mined_height, mined_block_hash, confirmation_height,
+               broadcast_attempts, serialized_transaction, created_at, updated_at
+        FROM completed_transactions
+        WHERE account_id = :account_id
+          AND pending_tx_id = :pending_tx_id
+          AND status IN (:completed, :broadcast)
+        ORDER BY created_at DESC
+        LIMIT 1
+        "#,
+    )?;
+
+    let result = stmt
+        .query_row(
+            named_params! {
+                ":account_id": account_id,
+                ":pending_tx_id": pending_tx_id,
+                ":completed": CompletedTransactionStatus::Completed.to_string(),
+                ":broadcast": CompletedTransactionStatus::Broadcast.to_string(),
+            },
+            map_row,
+        )
+        .optional()?;
+
+    Ok(result)
+}
+
 pub fn get_completed_transactions_by_status(
     conn: &Connection,
     account_id: i64,
@@ -352,6 +391,14 @@ pub fn revert_completed_transaction_to_completed(conn: &Connection, tx_id: TxId)
     Ok(())
 }
 
+/// Resets every transaction the block scan settled at or above `reorg_height`
+/// back to `Completed`, so the monitor rebroadcasts it.
+///
+/// That covers mined transactions (`MinedUnconfirmed`/`MinedConfirmed`) and
+/// transactions the scan rejected because their inputs were spent by a
+/// different transaction (`Rejected` with a `mined_height`; see
+/// [`mark_completed_transaction_as_rejected_in_block`]). A `Rejected` row
+/// without a `mined_height` was rejected by the node and is left alone.
 pub fn reset_mined_completed_transactions_from_height(
     conn: &Connection,
     account_id: i64,
@@ -366,6 +413,7 @@ pub fn reset_mined_completed_transactions_from_height(
     let status_completed = CompletedTransactionStatus::Completed.to_string();
     let status_unconfirmed = CompletedTransactionStatus::MinedUnconfirmed.to_string();
     let status_confirmed = CompletedTransactionStatus::MinedConfirmed.to_string();
+    let status_rejected = CompletedTransactionStatus::Rejected.to_string();
     #[allow(clippy::cast_possible_wrap)]
     let height = reorg_height as i64;
     let now = Utc::now();
@@ -373,10 +421,11 @@ pub fn reset_mined_completed_transactions_from_height(
     let rows_affected = conn.execute(
         r#"
         UPDATE completed_transactions
-        SET status = :status_completed, mined_height = NULL, mined_block_hash = NULL, 
-            confirmation_height = NULL, sent_payref = NULL, broadcast_attempts = 0, updated_at = :now
+        SET status = :status_completed, mined_height = NULL, mined_block_hash = NULL,
+            confirmation_height = NULL, sent_payref = NULL, last_rejected_reason = NULL,
+            broadcast_attempts = 0, updated_at = :now
         WHERE account_id = :account_id
-          AND (status = :status_unconfirmed OR status = :status_confirmed) 
+          AND status IN (:status_unconfirmed, :status_confirmed, :status_rejected)
           AND mined_height >= :height
         "#,
         named_params! {
@@ -385,6 +434,7 @@ pub fn reset_mined_completed_transactions_from_height(
             ":account_id": account_id,
             ":status_unconfirmed": status_unconfirmed,
             ":status_confirmed": status_confirmed,
+            ":status_rejected": status_rejected,
             ":height": height
         },
     )?;
@@ -422,6 +472,78 @@ pub fn mark_completed_transaction_as_rejected(
     )?;
 
     Ok(())
+}
+
+/// Marks a send `Rejected` because the block scan saw its inputs spent by a
+/// different transaction in the block at `block_height`.
+///
+/// The block is recorded in `mined_height`/`mined_block_hash` so that a reorg
+/// past that block can revert the rejection (see
+/// [`reset_mined_completed_transactions_from_height`]).
+pub fn mark_completed_transaction_as_rejected_in_block(
+    conn: &Connection,
+    tx_id: TxId,
+    reject_reason: &str,
+    block_height: i64,
+    block_hash: &[u8],
+) -> WalletDbResult<()> {
+    warn!(
+        target: "audit",
+        id = tx_id.to_string().as_str(),
+        height = block_height,
+        reason = reject_reason;
+        "DB: Transaction Rejected (inputs spent in a block)"
+    );
+
+    conn.execute(
+        r#"
+        UPDATE completed_transactions
+        SET status = :status, last_rejected_reason = :reason, mined_height = :height,
+            mined_block_hash = :hash, updated_at = :now
+        WHERE id = :id
+        "#,
+        named_params! {
+            ":status": CompletedTransactionStatus::Rejected.to_string(),
+            ":reason": reject_reason,
+            ":height": block_height,
+            ":hash": block_hash,
+            ":now": Utc::now(),
+            ":id": tx_id.as_i64_wrapped()
+        },
+    )?;
+
+    Ok(())
+}
+
+/// Pending transaction ids of the sends the block scan rejected in a block at
+/// or above `height` (see [`mark_completed_transaction_as_rejected_in_block`]).
+pub fn get_scan_rejected_pending_tx_ids_from_height(
+    conn: &Connection,
+    account_id: i64,
+    height: u64,
+) -> WalletDbResult<Vec<String>> {
+    #[allow(clippy::cast_possible_wrap)]
+    let height = height as i64;
+    let mut stmt = conn.prepare_cached(
+        r#"
+        SELECT pending_tx_id
+        FROM completed_transactions
+        WHERE account_id = :account_id
+          AND status = :status_rejected
+          AND mined_height >= :height
+        "#,
+    )?;
+
+    let rows = stmt.query_map(
+        named_params! {
+            ":account_id": account_id,
+            ":status_rejected": CompletedTransactionStatus::Rejected.to_string(),
+            ":height": height,
+        },
+        |row| row.get(0),
+    )?;
+
+    Ok(rows.collect::<Result<Vec<String>, _>>()?)
 }
 
 pub fn get_pending_completed_transactions(

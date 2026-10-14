@@ -293,11 +293,15 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
                         )));
                     };
 
+                    let has_pending_outbound = target
+                        .transaction_monitor
+                        .refresh_pending_outbound(&self.pool, target.account.id)
+                        .map_err(ScanError::Fatal)?;
                     let events = db_handler
                         .process_blocks(
                             shared_blocks.clone(),
                             *account_id,
-                            target.transaction_monitor.has_pending_outbound(),
+                            has_pending_outbound,
                             self.webhook_config.clone(),
                             target.next_block_to_scan,
                         )
@@ -860,11 +864,15 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
                     continue;
                 };
 
+                let has_pending_outbound = target
+                    .transaction_monitor
+                    .refresh_pending_outbound(&self.pool, target.account.id)
+                    .map_err(ScanError::Fatal)?;
                 let events = db_handler
                     .process_blocks(
                         shared_blocks.clone(),
                         *account_id,
-                        target.transaction_monitor.has_pending_outbound(),
+                        has_pending_outbound,
                         self.webhook_config.clone(),
                         target.next_block_to_scan,
                     )

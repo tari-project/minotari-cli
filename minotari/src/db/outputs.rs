@@ -317,6 +317,9 @@ pub fn insert_unconfirmed_change_output(
 /// on `output_hash`. A `REJECTED` row is updated too: the output exists on
 /// chain, so it is real whatever the wallet concluded before.
 ///
+/// A change output that a reorg reverted to `UNCONFIRMED` while a later send
+/// had it locked as an input goes back to `LOCKED`, not `new_status`.
+///
 /// Returns the row id, or `None` when there was no such row and the caller
 /// should insert the output as usual.
 #[allow(clippy::too_many_arguments)]
@@ -348,7 +351,7 @@ pub fn confirm_unconfirmed_change_output(
                 memo_parsed = :memo_parsed,
                 memo_hex = :memo_hex,
                 payment_reference = :payment_reference,
-                status = :new_status
+                status = CASE WHEN locked_by_request_id IS NOT NULL THEN :locked ELSE :new_status END
             WHERE account_id = :account_id
               AND output_hash = :output_hash
               AND status IN (:unconfirmed, :rejected)
@@ -363,6 +366,7 @@ pub fn confirm_unconfirmed_change_output(
                 ":memo_hex": memo_hex,
                 ":payment_reference": hex::encode(payment_reference.as_slice()),
                 ":new_status": new_status.to_string(),
+                ":locked": OutputStatus::Locked.to_string(),
                 ":account_id": account_id,
                 ":output_hash": output_hash.as_slice(),
                 ":unconfirmed": OutputStatus::Unconfirmed.to_string(),
@@ -412,6 +416,199 @@ pub fn soft_delete_unconfirmed_change_output(conn: &Connection, created_by_reque
     }
 
     Ok(())
+}
+
+/// The change output of the send with `created_by_request_id`, if it has one.
+pub fn get_change_output_hash_for_request(
+    conn: &Connection,
+    created_by_request_id: &str,
+) -> WalletDbResult<Option<FixedHash>> {
+    let hash: Option<Vec<u8>> = conn
+        .query_row(
+            r#"
+            SELECT output_hash
+            FROM outputs
+            WHERE created_by_request_id = :req_id AND deleted_at IS NULL
+            ORDER BY id DESC
+            LIMIT 1
+            "#,
+            named_params! { ":req_id": created_by_request_id },
+            |row| row.get(0),
+        )
+        .optional()?;
+
+    match hash {
+        Some(bytes) => Ok(Some(
+            FixedHash::try_from(bytes).map_err(|e| WalletDbError::Decoding(e.to_string()))?,
+        )),
+        None => Ok(None),
+    }
+}
+
+/// The request (`pending_transactions.id`) that locked this output, if any.
+pub fn get_output_lock_request_id(conn: &Connection, output_id: i64) -> WalletDbResult<Option<String>> {
+    let request_id: Option<Option<String>> = conn
+        .query_row(
+            "SELECT locked_by_request_id FROM outputs WHERE id = :id",
+            named_params! { ":id": output_id },
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(request_id.flatten())
+}
+
+/// Marks the `UNCONFIRMED` change output of a send `REJECTED`: the send's
+/// inputs were spent by a different transaction, so the change will never exist.
+pub fn mark_change_output_rejected(conn: &Connection, created_by_request_id: &str) -> WalletDbResult<()> {
+    warn!(
+        target: "audit",
+        request_id = created_by_request_id;
+        "DB: Marking unconfirmed change output rejected"
+    );
+    conn.execute(
+        r#"
+        UPDATE outputs
+        SET status = :rejected
+        WHERE created_by_request_id = :req_id AND status = :unconfirmed AND deleted_at IS NULL
+        "#,
+        named_params! {
+            ":rejected": OutputStatus::Rejected.to_string(),
+            ":req_id": created_by_request_id,
+            ":unconfirmed": OutputStatus::Unconfirmed.to_string(),
+        },
+    )?;
+    Ok(())
+}
+
+/// Turns a `REJECTED` change output back into `UNCONFIRMED`, for a send whose
+/// rejection a reorg undid.
+pub fn revert_rejected_change_output(conn: &Connection, created_by_request_id: &str) -> WalletDbResult<()> {
+    conn.execute(
+        r#"
+        UPDATE outputs
+        SET status = :unconfirmed
+        WHERE created_by_request_id = :req_id AND status = :rejected AND deleted_at IS NULL
+        "#,
+        named_params! {
+            ":unconfirmed": OutputStatus::Unconfirmed.to_string(),
+            ":req_id": created_by_request_id,
+            ":rejected": OutputStatus::Rejected.to_string(),
+        },
+    )?;
+    Ok(())
+}
+
+#[derive(Deserialize)]
+pub struct ChangeOutputToRevert {
+    pub id: i64,
+    pub output_hash: Vec<u8>,
+    pub mined_in_block_height: i64,
+    pub value: i64,
+}
+
+/// Turns the change outputs of sends mined at or above `height` back into
+/// `UNCONFIRMED`, for a reorg.
+///
+/// A send's change output must survive a reorg: the send itself is reverted to
+/// `Completed` and rebroadcast, and the scan recognises it again by this row.
+/// So instead of being soft-deleted like other outputs (see
+/// [`soft_delete_outputs_from_height`]), it gets its sentinel `mined_*` values
+/// back and loses its payment reference and confirmation. Its credit is
+/// reversed exactly as a soft-deleted output's would be.
+///
+/// Returns the reverted rows so the caller can report them as rolled back.
+pub fn revert_change_outputs_from_height(
+    conn: &Connection,
+    account_id: i64,
+    height: u64,
+) -> WalletDbResult<Vec<ChangeOutputToRevert>> {
+    warn!(
+        target: "audit",
+        account_id = account_id,
+        height = height;
+        "DB: Reverting mined change outputs to unconfirmed (Reorg)"
+    );
+    #[allow(clippy::cast_possible_wrap)]
+    let height_i64 = height as i64;
+    let now = Utc::now();
+
+    let outputs_to_revert = {
+        let mut stmt = conn.prepare_cached(
+            r#"
+            SELECT id, output_hash, mined_in_block_height, value
+            FROM outputs
+            WHERE account_id = :account_id
+              AND created_by_request_id IS NOT NULL
+              AND mined_in_block_height >= :height
+              AND deleted_at IS NULL
+              AND status NOT IN (:unconfirmed, :rejected)
+            "#,
+        )?;
+        let rows = stmt.query(named_params! {
+            ":account_id": account_id,
+            ":height": height_i64,
+            ":unconfirmed": OutputStatus::Unconfirmed.to_string(),
+            ":rejected": OutputStatus::Rejected.to_string(),
+        })?;
+        from_rows::<ChangeOutputToRevert>(rows).collect::<Result<Vec<_>, _>>()?
+    };
+
+    let epoch = DateTime::<Utc>::from_timestamp(0, 0)
+        .ok_or_else(|| WalletDbError::Unexpected("Epoch timestamp is out of range".to_string()))?;
+    let empty_block_hash: Vec<u8> = Vec::new();
+
+    for output_row in &outputs_to_revert {
+        let original_balance_change_id = get_balance_change_id_by_output(conn, output_row.id)?;
+        if let Some(original_id) = original_balance_change_id {
+            mark_balance_change_as_reversed(conn, original_id)?;
+        }
+
+        let balance_change = BalanceChange {
+            account_id,
+            caused_by_output_id: Some(output_row.id),
+            caused_by_input_id: None,
+            description: format!(
+                "Reversal: Change output found in blockchain scan (reorg at height {})",
+                height
+            ),
+            balance_credit: 0.into(),
+            balance_debit: (output_row.value as u64).into(),
+            effective_date: now.naive_utc(),
+            effective_height: height,
+            claimed_recipient_address: None,
+            claimed_sender_address: None,
+            memo_parsed: None,
+            memo_hex: None,
+            claimed_fee: None,
+            claimed_amount: None,
+            is_reversal: true,
+            reversal_of_balance_change_id: original_balance_change_id,
+            is_reversed: false,
+        };
+        insert_balance_change(conn, &balance_change)?;
+
+        conn.execute(
+            r#"
+            UPDATE outputs
+            SET status = :unconfirmed,
+                mined_in_block_height = 0,
+                mined_in_block_hash = :block_hash,
+                mined_timestamp = :epoch,
+                payment_reference = NULL,
+                confirmed_height = NULL,
+                confirmed_hash = NULL
+            WHERE id = :id
+            "#,
+            named_params! {
+                ":unconfirmed": OutputStatus::Unconfirmed.to_string(),
+                ":block_hash": empty_block_hash,
+                ":epoch": epoch,
+                ":id": output_row.id,
+            },
+        )?;
+    }
+
+    Ok(outputs_to_revert)
 }
 
 pub fn get_output_info_by_hash(
@@ -551,6 +748,10 @@ struct OutputToDelete {
     value: i64,
 }
 
+/// Soft-deletes the outputs mined at or above `height` and reverses their credits, for a reorg.
+///
+/// A send's change output (`created_by_request_id` set) is not deleted; see
+/// [`revert_change_outputs_from_height`].
 pub fn soft_delete_outputs_from_height(conn: &Connection, account_id: i64, height: u64) -> WalletDbResult<()> {
     warn!(
         target: "audit",
@@ -569,6 +770,7 @@ pub fn soft_delete_outputs_from_height(conn: &Connection, account_id: i64, heigh
             FROM outputs
             WHERE account_id = :account_id AND mined_in_block_height >= :height AND deleted_at IS NULL
               AND status NOT IN (:unconfirmed, :rejected)
+              AND created_by_request_id IS NULL
             "#,
         )?;
 
@@ -617,6 +819,7 @@ pub fn soft_delete_outputs_from_height(conn: &Connection, account_id: i64, heigh
         SET deleted_at = :now, deleted_in_block_height = :height, payment_reference = NULL
         WHERE account_id = :account_id AND mined_in_block_height >= :height AND deleted_at IS NULL
           AND status NOT IN (:unconfirmed, :rejected)
+          AND created_by_request_id IS NULL
         "#,
         named_params! {
             ":now": now,
@@ -1093,6 +1296,10 @@ pub struct ReorgOutputInfo {
     pub locked_by_request_id: Option<String>,
 }
 
+/// Active outputs mined at or above `height`, which a reorg soft-deletes.
+///
+/// A send's change output (`created_by_request_id` set) is left out: a reorg
+/// reverts it instead (see [`revert_change_outputs_from_height`]).
 pub fn get_active_outputs_from_height(
     conn: &Connection,
     account_id: i64,
@@ -1109,6 +1316,7 @@ pub fn get_active_outputs_from_height(
           AND mined_in_block_height >= :height
           AND deleted_at IS NULL
           AND status NOT IN (:unconfirmed, :rejected)
+          AND created_by_request_id IS NULL
         "#,
     )?;
 
