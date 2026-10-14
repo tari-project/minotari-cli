@@ -382,7 +382,12 @@ pub fn get_displayed_transactions_paginated(
     process_json_rows(from_rows::<TransactionJsonRow>(rows))
 }
 
-/// Returns transactions where current_tip_height - block_height < required_confirmations.
+/// Returns mined transactions that are still pending, unconfirmed or locked.
+///
+/// Rows with `block_height = 0` are unmined (a send that has not been seen in a
+/// block yet). Counting their confirmations as `tip - 0` would mark them Confirmed
+/// at once, so they are left to the scan, which sets `block_height` when the
+/// transaction is mined.
 pub fn get_displayed_transactions_needing_confirmation_update(
     conn: &Connection,
     account_id: Id,
@@ -397,6 +402,7 @@ pub fn get_displayed_transactions_needing_confirmation_update(
         FROM displayed_transactions
         WHERE account_id = :account_id
           AND status IN (:s1, :s2, :s3)
+          AND block_height > 0
         "#,
     )?;
 

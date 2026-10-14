@@ -761,3 +761,106 @@ impl TransactionMonitor {
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::{create_account, get_account_by_name, get_displayed_transaction_by_id, init_db};
+    use crate::transactions::{BlockchainInfo, TransactionDetails, TransactionDirection, TransactionSource};
+    use tari_common_types::seeds::cipher_seed::CipherSeed;
+    use tari_common_types::transaction::TxId;
+    use tari_transaction_components::MicroMinotari;
+    use tari_transaction_components::key_manager::wallet_types::{SeedWordsWallet, WalletType};
+    use tempfile::TempDir;
+
+    fn test_pool(name: &str) -> (SqlitePool, i64, TempDir) {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let pool = init_db(dir.path().join(name)).expect("init db");
+        let conn = pool.get().expect("conn");
+        let seeds = CipherSeed::random();
+        let wallet = WalletType::SeedWords(SeedWordsWallet::construct_new(seeds).unwrap());
+        create_account(&conn, "default", &wallet, "password").unwrap();
+        let account_id = get_account_by_name(&conn, "default").unwrap().unwrap().id;
+        (pool, account_id, dir)
+    }
+
+    fn pending_send(account_id: i64, id: u64, block_height: u64) -> DisplayedTransaction {
+        DisplayedTransaction {
+            id: TxId::from(id),
+            direction: TransactionDirection::Outgoing,
+            source: TransactionSource::Transfer,
+            status: TransactionDisplayStatus::Pending,
+            amount: MicroMinotari::from(1_000),
+            message: None,
+            counterparty: None,
+            blockchain: BlockchainInfo {
+                block_height,
+                timestamp: chrono::Utc::now().naive_utc(),
+                confirmations: 0,
+                block_hash: FixedHash::zero(),
+            },
+            fee: None,
+            details: TransactionDetails {
+                account_id,
+                total_credit: MicroMinotari::from(0),
+                total_debit: MicroMinotari::from(1_000),
+                inputs: Vec::new(),
+                outputs: Vec::new(),
+                output_type: None,
+                coinbase_extra: None,
+                memo_hex: None,
+                sent_output_hashes: Vec::new(),
+                sent_payrefs: Vec::new(),
+            },
+            lock_height: 0,
+        }
+    }
+
+    fn status_of(conn: &Connection, id: u64) -> TransactionDisplayStatus {
+        get_displayed_transaction_by_id(conn, &TxId::from(id).to_string())
+            .expect("query")
+            .expect("row exists")
+            .status
+    }
+
+    #[test]
+    fn an_unmined_displayed_send_stays_pending_at_any_chain_height() {
+        // An unmined send has block_height 0, so `tip - 0` would count it as deeply
+        // confirmed. It must stay Pending until the scan sees it in a block.
+        let (pool, account_id, _dir) = test_pool("unmined.db");
+        let conn = pool.get().expect("conn");
+        db::insert_displayed_transaction(&conn, &pending_send(account_id, 1, 0)).expect("insert");
+        let monitor = TransactionMonitor::new(MonitoringState::new(), 3, None);
+
+        for height in [1, 3, 10, 1_000_000] {
+            let updated = monitor
+                .update_displayed_transaction_confirmations(&conn, account_id, height)
+                .expect("update");
+            assert!(updated.is_empty(), "nothing may change at height {height}");
+            assert_eq!(status_of(&conn, 1), TransactionDisplayStatus::Pending);
+        }
+    }
+
+    #[test]
+    fn a_mined_displayed_send_moves_to_confirmed_as_the_scanned_height_rises() {
+        let (pool, account_id, _dir) = test_pool("mined.db");
+        let conn = pool.get().expect("conn");
+        db::insert_displayed_transaction(&conn, &pending_send(account_id, 2, 100)).expect("insert");
+        let monitor = TransactionMonitor::new(MonitoringState::new(), 3, None);
+
+        monitor
+            .update_displayed_transaction_confirmations(&conn, account_id, 100)
+            .expect("update");
+        assert_eq!(status_of(&conn, 2), TransactionDisplayStatus::Pending);
+
+        monitor
+            .update_displayed_transaction_confirmations(&conn, account_id, 101)
+            .expect("update");
+        assert_eq!(status_of(&conn, 2), TransactionDisplayStatus::Unconfirmed);
+
+        monitor
+            .update_displayed_transaction_confirmations(&conn, account_id, 103)
+            .expect("update");
+        assert_eq!(status_of(&conn, 2), TransactionDisplayStatus::Confirmed);
+    }
+}
