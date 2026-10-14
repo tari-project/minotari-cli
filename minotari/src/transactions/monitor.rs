@@ -1874,17 +1874,6 @@ mod tests {
             assert_eq!(completed.mined_height, None);
             assert_eq!(input_state(&fixture), ("UNSPENT".to_string(), false), "{reason}");
             assert_eq!(change_state(&fixture), ("UNCONFIRMED".to_string(), true), "{reason}");
-
-            // The released input still leads back to the send, for the scan.
-            let conn = fixture.pool.get().expect("conn");
-            let released_from: Option<String> = conn
-                .query_row(
-                    "SELECT released_from_request_id FROM outputs WHERE id = :id",
-                    named_params! { ":id": fixture.input_output_id },
-                    |row| row.get(0),
-                )
-                .expect("input");
-            assert_eq!(released_from.as_deref(), Some(fixture.request_id.as_str()));
         }
     }
 }

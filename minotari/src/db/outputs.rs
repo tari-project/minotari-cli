@@ -446,17 +446,84 @@ pub fn get_change_output_hash_for_request(
     }
 }
 
-/// The request (`pending_transactions.id`) that has this output locked, and
-/// the one it was last released from, if any.
-pub fn get_output_request_ids(conn: &Connection, output_id: i64) -> WalletDbResult<(Option<String>, Option<String>)> {
-    let request_ids: Option<(Option<String>, Option<String>)> = conn
+/// The request (`pending_transactions.id`) that has this output locked, if any.
+pub fn get_output_lock_request_id(conn: &Connection, output_id: i64) -> WalletDbResult<Option<String>> {
+    let request_id: Option<Option<String>> = conn
         .query_row(
-            "SELECT locked_by_request_id, released_from_request_id FROM outputs WHERE id = :id",
+            "SELECT locked_by_request_id FROM outputs WHERE id = :id",
             named_params! { ":id": output_id },
-            |row| Ok((row.get(0)?, row.get(1)?)),
+            |row| row.get(0),
         )
         .optional()?;
-    Ok(request_ids.unwrap_or((None, None)))
+    Ok(request_id.flatten())
+}
+
+/// If `output_hash` is the change output of a send the monitor rejected (no
+/// `mined_height`), gets its change row ready to be found by the scan and
+/// returns the send's `(pending transaction id, transaction id)`.
+///
+/// The change output appearing in a block is proof the send landed after all:
+/// its hash is unique to the send. Rejecting the send soft-deleted the change
+/// row (or, for a send kept rejected after a reorg, left it `REJECTED`). A
+/// soft-deleted row is restored as `UNCONFIRMED`, so the scan updates it in
+/// place and the change stays the send's change (`created_by_request_id`),
+/// which a reorg then reverts rather than deletes. Nothing is restored if an
+/// active row with that hash already exists.
+pub fn restore_change_of_rejected_send(
+    conn: &Connection,
+    account_id: i64,
+    output_hash: &FixedHash,
+) -> WalletDbResult<Option<(String, TxId)>> {
+    let row: Option<(i64, String, i64, bool)> = conn
+        .query_row(
+            r#"
+            SELECT o.id, o.created_by_request_id, c.id, o.deleted_at IS NOT NULL
+            FROM outputs o
+            JOIN completed_transactions c ON c.pending_tx_id = o.created_by_request_id
+            WHERE o.account_id = :account_id
+              AND o.output_hash = :hash
+              AND o.created_by_request_id IS NOT NULL
+              AND (o.deleted_at IS NOT NULL OR o.status = :rejected_output)
+              AND c.status = :rejected_tx
+              AND c.mined_height IS NULL
+            ORDER BY o.deleted_at IS NULL DESC, o.id DESC
+            LIMIT 1
+            "#,
+            named_params! {
+                ":account_id": account_id,
+                ":hash": output_hash.as_slice(),
+                ":rejected_output": OutputStatus::Rejected.to_string(),
+                ":rejected_tx": crate::db::CompletedTransactionStatus::Rejected.to_string(),
+            },
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()?;
+    let Some((output_id, request_id, completed_id, is_deleted)) = row else {
+        return Ok(None);
+    };
+
+    if is_deleted {
+        let active: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM outputs WHERE output_hash = :hash AND deleted_at IS NULL",
+            named_params! { ":hash": output_hash.as_slice() },
+            |row| row.get(0),
+        )?;
+        if active > 0 {
+            return Ok(None);
+        }
+        conn.execute(
+            "UPDATE outputs SET deleted_at = NULL, status = :unconfirmed WHERE id = :id",
+            named_params! { ":unconfirmed": OutputStatus::Unconfirmed.to_string(), ":id": output_id },
+        )?;
+    }
+
+    info!(
+        target: "audit",
+        request_id = request_id.as_str();
+        "DB: Change output of a rejected send found in a block"
+    );
+    #[allow(clippy::cast_sign_loss)]
+    Ok(Some((request_id, TxId::from(completed_id as u64))))
 }
 
 /// Locks a send's inputs to it again, for a reorg that undid the scan's
@@ -529,28 +596,6 @@ pub fn relock_inputs_for_revived_send(
         )?;
     }
     Ok(true)
-}
-
-/// Links the send's change output found in a block back to the send.
-///
-/// A send the monitor rejected had its change row soft-deleted; when the send
-/// is mined after all, the scan inserts the change as a new row. This marks that
-/// row as the send's change again (by the hash of the send's last change row),
-/// so a reorg treats it as such.
-pub fn relink_change_output(conn: &Connection, created_by_request_id: &str) -> WalletDbResult<()> {
-    conn.execute(
-        r#"
-        UPDATE outputs
-        SET created_by_request_id = :req_id
-        WHERE deleted_at IS NULL
-          AND created_by_request_id IS NULL
-          AND output_hash = (
-              SELECT output_hash FROM outputs WHERE created_by_request_id = :req_id ORDER BY id DESC LIMIT 1
-          )
-        "#,
-        named_params! { ":req_id": created_by_request_id },
-    )?;
-    Ok(())
 }
 
 /// Marks the `UNCONFIRMED` change output of a send `REJECTED`: the send's
@@ -1228,8 +1273,7 @@ pub fn unlock_outputs_for_request(conn: &Connection, locked_by_request_id: &str)
     conn.execute(
         r#"
         UPDATE outputs
-        SET status = :unspent, locked_at = NULL, released_from_request_id = locked_by_request_id,
-            locked_by_request_id = NULL
+        SET status = :unspent, locked_at = NULL, locked_by_request_id = NULL
         WHERE locked_by_request_id = :req_id AND status = :locked
         "#,
         named_params! {
