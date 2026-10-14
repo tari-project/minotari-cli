@@ -1809,7 +1809,9 @@
           "Unspent",
           "Locked",
           "Spent",
-          "SpentUnconfirmed"
+          "SpentUnconfirmed",
+          "Unconfirmed",
+          "Rejected"
         ]
       },
       "RecipientRequest": {

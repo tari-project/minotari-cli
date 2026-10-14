@@ -31,7 +31,7 @@ use tari_transaction_components::{
     key_manager::{KeyManager, SecretTransactionKeyManagerInterface, TariKeyId, TransactionKeyManagerInterface},
     transaction_builder::PendingOutput,
     transaction_components::{
-        KernelFeatures, OutputFeatures, WalletOutputBuilder,
+        KernelFeatures, OutputFeatures, WalletOutput, WalletOutputBuilder,
         memo_field::{MemoField, TxType},
     },
 };
@@ -58,6 +58,11 @@ pub struct BurnTxResult {
     pub new_burn_proof: NewBurnProof,
     /// The generated tx_id.
     pub tx_id: TxId,
+    /// The burn's change output. Written to `outputs` as `UNCONFIRMED` by
+    /// [`persist_burn_records`] so the wallet's scan can see the burn land.
+    pub change_output: Option<WalletOutput>,
+    /// The account's private view key, needed to derive the change output's `tx_id`.
+    pub view_key: PrivateKey,
 }
 
 /// Parameters for a burn transaction.
@@ -335,6 +340,8 @@ pub fn create_burn_tx(
         output_hash,
         new_burn_proof,
         tx_id: finalized.tx_id,
+        change_output: finalized.change,
+        view_key: key_manager.get_private_view_key(),
     })
 }
 
@@ -437,6 +444,11 @@ pub fn persist_burn_records(
         result.tx_id,
     )
     .map_err(|e| anyhow!("Failed to record completed transaction for burn: {}", e))?;
+
+    if let Some(change_output) = &result.change_output {
+        crate::db::insert_unconfirmed_change_output(&tx, account_id, &result.view_key, &pending_tx_id, change_output)
+            .map_err(|e| anyhow!("Failed to record the change output for burn: {}", e))?;
+    }
 
     tx.commit()?;
 

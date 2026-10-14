@@ -27,6 +27,7 @@ use tari_common_types::{
 };
 use tari_transaction_components::{
     consensus::ConsensusConstantsBuilder,
+    key_manager::TransactionKeyManagerInterface,
     offline_signing::{models::PrepareOneSidedTransactionForSigningResult, sign_locked_transaction},
     tari_amount::MicroMinotari,
 };
@@ -157,6 +158,16 @@ async fn sign_save_and_broadcast(
         sent_output_hash,
         completed_tx_id,
     )?;
+    // The wallet's scan recognises the send by its change output.
+    if let Some(change_output) = &signed_result.signed_transaction.change_output {
+        db::insert_unconfirmed_change_output(
+            conn,
+            account.id,
+            &key_manager.get_private_view_key(),
+            &pending_tx_id,
+            change_output,
+        )?;
+    }
 
     let client = WalletHttpClient::new(base_url.parse()?)?;
     let response = client

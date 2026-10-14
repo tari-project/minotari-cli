@@ -7,7 +7,7 @@ use crate::models::BalanceChange;
 use crate::models::OutputStatus;
 use chrono::{DateTime, Utc};
 use log::{debug, info, warn};
-use rusqlite::{Connection, named_params};
+use rusqlite::{Connection, OptionalExtension, named_params};
 use serde::Deserialize;
 use serde_rusqlite::from_rows;
 use tari_common_types::payment_reference::PaymentReference;
@@ -200,6 +200,220 @@ pub fn insert_spent_output_if_not_exists(
     }
 }
 
+/// Writes the change output of a send at send time, with status `UNCONFIRMED`.
+///
+/// The wallet's own block scan recognises a send by its change output (see
+/// [`confirm_unconfirmed_change_output`]), so the row has to exist before the
+/// send lands. It is linked to the send through `created_by_request_id`
+/// (`pending_transactions.id`, the value the send's inputs carry in
+/// `locked_by_request_id`).
+///
+/// The output has not been mined, so the NOT NULL `mined_*` columns hold
+/// sentinel values: height 0, an empty block hash and the epoch as timestamp.
+/// `tx_id` uses the same deterministic formula as [`insert_output`], so the scan
+/// finds the same row. Senders that assemble a transaction outside
+/// `TransactionManager` should call this after recording the completed
+/// transaction.
+pub fn insert_unconfirmed_change_output(
+    conn: &Connection,
+    account_id: i64,
+    account_view_key: &PrivateKey,
+    pending_tx_id: &str,
+    output: &WalletOutput,
+) -> WalletDbResult<i64> {
+    info!(
+        target: "audit",
+        account_id = account_id,
+        request_id = pending_tx_id,
+        value = &*mask_amount(output.value());
+        "DB: Inserting unconfirmed change output"
+    );
+
+    let output_hash = output.output_hash();
+    let tx_id = TxId::new_deterministic(account_view_key.as_bytes(), &output_hash).as_i64_wrapped();
+    let output_json = serde_json::to_string(&output)?;
+    let mined_timestamp = DateTime::<Utc>::from_timestamp(0, 0)
+        .ok_or_else(|| WalletDbError::Unexpected("Epoch timestamp is out of range".to_string()))?;
+
+    let memo_bytes = output.payment_id().get_payment_id();
+    let (memo_parsed, memo_hex) = if memo_bytes.is_empty() {
+        (None, None)
+    } else {
+        (
+            Some(String::from_utf8_lossy(&memo_bytes).to_string()),
+            Some(hex::encode(&memo_bytes)),
+        )
+    };
+
+    #[allow(clippy::cast_possible_wrap)]
+    let value = output.value().as_u64() as i64;
+    #[allow(clippy::cast_possible_wrap)]
+    let maturity = output.features().maturity as i64;
+    let status = OutputStatus::Unconfirmed.to_string();
+    let empty_block_hash: Vec<u8> = Vec::new();
+
+    conn.execute(
+        r#"
+       INSERT INTO outputs (
+            account_id,
+            tx_id,
+            output_hash,
+            mined_in_block_height,
+            mined_in_block_hash,
+            value,
+            mined_timestamp,
+            wallet_output_json,
+            memo_parsed,
+            memo_hex,
+            payment_reference,
+            is_burn,
+            maturity,
+            status,
+            created_by_request_id
+       )
+       VALUES (
+            :account_id,
+            :tx_id,
+            :output_hash,
+            0,
+            :block_hash,
+            :value,
+            :mined_timestamp,
+            :output_json,
+            :memo_parsed,
+            :memo_hex,
+            NULL,
+            0,
+            :maturity,
+            :status,
+            :request_id
+       )
+        "#,
+        named_params! {
+            ":account_id": account_id,
+            ":tx_id": tx_id,
+            ":output_hash": output_hash.to_vec(),
+            ":block_hash": empty_block_hash,
+            ":value": value,
+            ":mined_timestamp": mined_timestamp,
+            ":output_json": output_json,
+            ":memo_parsed": memo_parsed,
+            ":memo_hex": memo_hex,
+            ":maturity": maturity,
+            ":status": status,
+            ":request_id": pending_tx_id,
+        },
+    )?;
+
+    Ok(conn.last_insert_rowid())
+}
+
+/// Turns a send's change output, written at send time, into a mined output.
+///
+/// When the scan finds an output that already has an active `UNCONFIRMED` (or
+/// `REJECTED`) row with the same hash, the row is updated in place: its mined
+/// fields, payment reference and memo are set and its status becomes
+/// `new_status`. Inserting a second row would violate the active unique index
+/// on `output_hash`. A `REJECTED` row is updated too: the output exists on
+/// chain, so it is real whatever the wallet concluded before.
+///
+/// Returns the row id, or `None` when there was no such row and the caller
+/// should insert the output as usual.
+#[allow(clippy::too_many_arguments)]
+pub fn confirm_unconfirmed_change_output(
+    conn: &Connection,
+    account_id: i64,
+    output_hash: &FixedHash,
+    block_height: u64,
+    block_hash: &FixedHash,
+    mined_timestamp: u64,
+    memo_parsed: Option<String>,
+    memo_hex: Option<String>,
+    payment_reference: PaymentReference,
+    new_status: OutputStatus,
+) -> WalletDbResult<Option<i64>> {
+    #[allow(clippy::cast_possible_wrap)]
+    let mined_timestamp_dt = DateTime::<Utc>::from_timestamp(mined_timestamp as i64, 0)
+        .ok_or_else(|| WalletDbError::Decoding(format!("Invalid mined timestamp: {}", mined_timestamp)))?;
+    #[allow(clippy::cast_possible_wrap)]
+    let block_height = block_height as i64;
+
+    let output_id: Option<i64> = conn
+        .query_row(
+            r#"
+            UPDATE outputs
+            SET mined_in_block_height = :block_height,
+                mined_in_block_hash = :block_hash,
+                mined_timestamp = :mined_timestamp,
+                memo_parsed = :memo_parsed,
+                memo_hex = :memo_hex,
+                payment_reference = :payment_reference,
+                status = :new_status
+            WHERE account_id = :account_id
+              AND output_hash = :output_hash
+              AND status IN (:unconfirmed, :rejected)
+              AND deleted_at IS NULL
+            RETURNING id
+            "#,
+            named_params! {
+                ":block_height": block_height,
+                ":block_hash": block_hash.as_slice(),
+                ":mined_timestamp": mined_timestamp_dt,
+                ":memo_parsed": memo_parsed,
+                ":memo_hex": memo_hex,
+                ":payment_reference": hex::encode(payment_reference.as_slice()),
+                ":new_status": new_status.to_string(),
+                ":account_id": account_id,
+                ":output_hash": output_hash.as_slice(),
+                ":unconfirmed": OutputStatus::Unconfirmed.to_string(),
+                ":rejected": OutputStatus::Rejected.to_string(),
+            },
+            |row| row.get(0),
+        )
+        .optional()?;
+
+    if let Some(id) = output_id {
+        info!(
+            target: "audit",
+            account_id = account_id,
+            output_id = id,
+            height = block_height;
+            "DB: Unconfirmed change output found in a block"
+        );
+    }
+
+    Ok(output_id)
+}
+
+/// Soft-deletes the `UNCONFIRMED` change output of a send that will not be
+/// broadcast (failed, cancelled or expired before it went out, or rejected).
+pub fn soft_delete_unconfirmed_change_output(conn: &Connection, created_by_request_id: &str) -> WalletDbResult<()> {
+    let deleted = conn.execute(
+        r#"
+        UPDATE outputs
+        SET deleted_at = :now
+        WHERE created_by_request_id = :req_id
+          AND status = :unconfirmed
+          AND deleted_at IS NULL
+        "#,
+        named_params! {
+            ":now": Utc::now(),
+            ":req_id": created_by_request_id,
+            ":unconfirmed": OutputStatus::Unconfirmed.to_string(),
+        },
+    )?;
+
+    if deleted > 0 {
+        info!(
+            target: "audit",
+            request_id = created_by_request_id;
+            "DB: Soft deleted unconfirmed change output"
+        );
+    }
+
+    Ok(())
+}
+
 pub fn get_output_info_by_hash(
     conn: &Connection,
     output_hash: &FixedHash,
@@ -284,12 +498,17 @@ pub fn get_unconfirmed_outputs(
           AND o.mined_in_block_height <= :min_height
           AND o.confirmed_height IS NULL
           AND o.deleted_at IS NULL
+          AND o.status NOT IN (:unconfirmed, :rejected)
         "#,
     )?;
 
+    // `UNCONFIRMED` and `REJECTED` change outputs were never mined; their
+    // height 0 is a sentinel, not a depth to confirm.
     let rows = stmt.query(named_params! {
         ":account_id": account_id,
-        ":min_height": min_height
+        ":min_height": min_height,
+        ":unconfirmed": OutputStatus::Unconfirmed.to_string(),
+        ":rejected": OutputStatus::Rejected.to_string(),
     })?;
 
     let result_rows: Vec<UnconfirmedOutputRow> = from_rows(rows).collect::<Result<Vec<_>, _>>()?;
@@ -349,12 +568,15 @@ pub fn soft_delete_outputs_from_height(conn: &Connection, account_id: i64, heigh
             SELECT id, value
             FROM outputs
             WHERE account_id = :account_id AND mined_in_block_height >= :height AND deleted_at IS NULL
+              AND status NOT IN (:unconfirmed, :rejected)
             "#,
         )?;
 
         let rows = stmt.query(named_params! {
             ":account_id": account_id,
-            ":height": height_i64
+            ":height": height_i64,
+            ":unconfirmed": OutputStatus::Unconfirmed.to_string(),
+            ":rejected": OutputStatus::Rejected.to_string(),
         })?;
 
         from_rows::<OutputToDelete>(rows).collect::<Result<Vec<_>, _>>()?
@@ -394,11 +616,14 @@ pub fn soft_delete_outputs_from_height(conn: &Connection, account_id: i64, heigh
         UPDATE outputs
         SET deleted_at = :now, deleted_in_block_height = :height, payment_reference = NULL
         WHERE account_id = :account_id AND mined_in_block_height >= :height AND deleted_at IS NULL
+          AND status NOT IN (:unconfirmed, :rejected)
         "#,
         named_params! {
             ":now": now,
             ":height": height_i64,
-            ":account_id": account_id
+            ":account_id": account_id,
+            ":unconfirmed": OutputStatus::Unconfirmed.to_string(),
+            ":rejected": OutputStatus::Rejected.to_string(),
         },
     )?;
 
@@ -714,6 +939,10 @@ pub fn unlock_outputs_for_request(conn: &Connection, locked_by_request_id: &str)
         },
     )?;
 
+    // A send whose inputs are handed back will not land, so neither will its
+    // change output.
+    soft_delete_unconfirmed_change_output(conn, locked_by_request_id)?;
+
     Ok(())
 }
 
@@ -743,22 +972,28 @@ pub fn fetch_outputs_by_lock_request_id(
 struct OutputTotalsRow {
     locked_val: i64,
     unconfirmed_val: i64,
+    pending_change_val: i64,
     immature_val: i64,
     available_val: i64,
 }
 
 /// Disjoint UTXO total breakdown for an account, in MicroMinotari.
 ///
-/// Every non-spent, non-burn, non-deleted output is counted in exactly one of
-/// `locked`, `unconfirmed`, `immature` or `available`. Precedence (matching the
-/// SQL CASE order):
+/// Every non-spent, non-burn, non-deleted, non-rejected output is counted in
+/// exactly one of `locked`, `unconfirmed`, `immature` or `available`.
+/// Precedence (matching the SQL CASE order):
 /// 1. `status = LOCKED`                                              → `locked`
-/// 2. else `confirmed_height IS NULL`                                → `unconfirmed`
-/// 3. else `maturity > tip_height` (or wrapped negative)             → `immature`
-/// 4. else                                                           → `available`
+/// 2. else `status = UNCONFIRMED` (a send's change, not yet mined)   → `unconfirmed`
+/// 3. else `confirmed_height IS NULL`                                → `unconfirmed`
+/// 4. else `maturity > tip_height` (or wrapped negative)             → `immature`
+/// 5. else                                                           → `available`
+///
+/// `REJECTED` change outputs are never counted.
 ///
 /// `unavailable = locked + unconfirmed + immature` (the funds the user has but
-/// cannot spend right now).
+/// cannot spend right now), except that an `UNCONFIRMED` change output is left
+/// out of `unavailable`: it is pending-incoming only, and is not yet part of
+/// the balance-change ledger that `unavailable` is subtracted from.
 #[derive(Debug, Clone, Copy)]
 pub struct OutputTotals {
     pub available: MicroMinotari,
@@ -793,11 +1028,17 @@ pub fn get_output_totals_for_account(
             END), 0) as locked_val,
             COALESCE(SUM(CASE
                 WHEN status = :locked THEN 0
+                WHEN status = :unconfirmed_change THEN 0
                 WHEN confirmed_height IS NULL THEN value
                 ELSE 0
             END), 0) as unconfirmed_val,
             COALESCE(SUM(CASE
+                WHEN status = :unconfirmed_change THEN value
+                ELSE 0
+            END), 0) as pending_change_val,
+            COALESCE(SUM(CASE
                 WHEN status = :locked THEN 0
+                WHEN status = :unconfirmed_change THEN 0
                 WHEN confirmed_height IS NULL THEN 0
                 WHEN maturity < 0 OR maturity > :tip_height THEN value
                 ELSE 0
@@ -811,13 +1052,15 @@ pub fn get_output_totals_for_account(
                 ELSE 0
             END), 0) as available_val
         FROM outputs
-        WHERE account_id = :account_id AND deleted_at IS NULL AND is_burn = 0
+        WHERE account_id = :account_id AND deleted_at IS NULL AND is_burn = 0 AND status != :rejected
         "#,
     )?;
 
     let rows = stmt.query(named_params! {
         ":locked": locked_status,
         ":unspent": unspent_status,
+        ":unconfirmed_change": OutputStatus::Unconfirmed.to_string(),
+        ":rejected": OutputStatus::Rejected.to_string(),
         ":account_id": account_id,
         ":tip_height": tip_height_i64,
     })?;
@@ -827,10 +1070,12 @@ pub fn get_output_totals_for_account(
         .ok_or_else(|| WalletDbError::Unexpected("Aggregate query returned no rows".to_string()))??;
 
     let locked: MicroMinotari = (result.locked_val as u64).into();
-    let unconfirmed: MicroMinotari = (result.unconfirmed_val as u64).into();
+    let mined_unconfirmed: MicroMinotari = (result.unconfirmed_val as u64).into();
+    let pending_change: MicroMinotari = (result.pending_change_val as u64).into();
     let immature: MicroMinotari = (result.immature_val as u64).into();
     let available: MicroMinotari = (result.available_val as u64).into();
-    let unavailable = locked.saturating_add(unconfirmed).saturating_add(immature);
+    let unconfirmed = mined_unconfirmed.saturating_add(pending_change);
+    let unavailable = locked.saturating_add(mined_unconfirmed).saturating_add(immature);
 
     Ok(OutputTotals {
         available,
@@ -860,15 +1105,18 @@ pub fn get_active_outputs_from_height(
         r#"
         SELECT output_hash, mined_in_block_height, locked_by_request_id
         FROM outputs
-        WHERE account_id = :account_id 
-          AND mined_in_block_height >= :height 
+        WHERE account_id = :account_id
+          AND mined_in_block_height >= :height
           AND deleted_at IS NULL
+          AND status NOT IN (:unconfirmed, :rejected)
         "#,
     )?;
 
     let rows = stmt.query(named_params! {
         ":account_id": account_id,
-        ":height": height_i64
+        ":height": height_i64,
+        ":unconfirmed": OutputStatus::Unconfirmed.to_string(),
+        ":rejected": OutputStatus::Rejected.to_string(),
     })?;
 
     let results = from_rows::<ReorgOutputInfo>(rows).collect::<Result<Vec<_>, _>>()?;
@@ -1174,5 +1422,94 @@ mod tests {
             "the successful lock must roll back with the failed one"
         );
         assert_eq!(locked_by, None);
+    }
+
+    #[test]
+    fn rejected_change_is_never_counted_and_unconfirmed_change_is_only_pending_incoming() {
+        let temp = tempdir().expect("temp dir");
+        let pool = init_db(temp.path().join("change_totals.db")).expect("init db");
+        let conn = pool.get().expect("conn");
+        let account_id = create_test_account(&conn);
+
+        // A spendable output, plus a send's change in each of the two new states.
+        insert_synthetic_output(&conn, account_id, 1, 1_000, 50, true, OutputStatus::Unspent, 0);
+        insert_synthetic_output(&conn, account_id, 2, 300, 0, false, OutputStatus::Unconfirmed, 0);
+        insert_synthetic_output(&conn, account_id, 3, 7_000, 0, false, OutputStatus::Rejected, 0);
+
+        let totals = get_output_totals_for_account(&conn, account_id, 100).expect("totals");
+        assert_eq!(totals.available, MicroMinotari::from(1_000));
+        assert_eq!(totals.locked, MicroMinotari::from(0));
+        assert_eq!(totals.immature, MicroMinotari::from(0));
+        // The unconfirmed change shows as pending-incoming...
+        assert_eq!(totals.unconfirmed, MicroMinotari::from(300));
+        // ...but is not in the ledger yet, so it must not reduce `available`.
+        assert_eq!(totals.unavailable, MicroMinotari::from(0));
+
+        assert_eq!(get_total_unspent_balance(&conn, account_id, 100).expect("total"), 1_000);
+
+        // Neither state is ever confirmed by the scan's depth check: height 0 is a sentinel.
+        let to_confirm = get_unconfirmed_outputs(&conn, account_id, 1_000, 3).expect("unconfirmed outputs");
+        assert!(to_confirm.is_empty(), "sentinel rows must not be confirmed");
+    }
+
+    #[test]
+    fn unconfirmed_and_rejected_change_is_never_selected_or_locked() {
+        let temp = tempdir().expect("temp dir");
+        let pool = init_db(temp.path().join("change_select.db")).expect("init db");
+        let conn = pool.get().expect("conn");
+        let account_id = create_test_account(&conn);
+
+        insert_synthetic_output(&conn, account_id, 2, 300, 0, false, OutputStatus::Unconfirmed, 0);
+        insert_synthetic_output(&conn, account_id, 3, 7_000, 0, false, OutputStatus::Rejected, 0);
+
+        let selectable = fetch_unspent_outputs(&conn, account_id, 1_000, 1_000).expect("fetch");
+        assert!(selectable.is_empty(), "change rows must never be selectable");
+
+        let ids: Vec<i64> = conn
+            .prepare("SELECT id FROM outputs WHERE account_id = :account_id")
+            .expect("prepare")
+            .query_map(named_params! { ":account_id": account_id }, |row| row.get(0))
+            .expect("query")
+            .collect::<Result<_, _>>()
+            .expect("ids");
+        assert_eq!(ids.len(), 2);
+        for id in ids {
+            let result = lock_output(&conn, id, "request", Utc::now());
+            assert!(
+                matches!(result, Err(WalletDbError::OutputLockConflict { .. })),
+                "output {id} must not be lockable"
+            );
+        }
+    }
+
+    #[test]
+    fn unlocking_a_request_soft_deletes_its_unconfirmed_change() {
+        let temp = tempdir().expect("temp dir");
+        let pool = init_db(temp.path().join("change_cleanup.db")).expect("init db");
+        let conn = pool.get().expect("conn");
+        let account_id = create_test_account(&conn);
+
+        insert_synthetic_output(&conn, account_id, 2, 300, 0, false, OutputStatus::Unconfirmed, 0);
+        conn.execute(
+            "UPDATE outputs SET created_by_request_id = 'request-1' WHERE account_id = :account_id",
+            named_params! { ":account_id": account_id },
+        )
+        .expect("link change to request");
+
+        unlock_outputs_for_request(&conn, "other-request").expect("unlock other");
+        let active: i64 = conn
+            .query_row("SELECT COUNT(*) FROM outputs WHERE deleted_at IS NULL", [], |row| {
+                row.get(0)
+            })
+            .expect("count");
+        assert_eq!(active, 1, "another request's cleanup must not touch this change");
+
+        unlock_outputs_for_request(&conn, "request-1").expect("unlock");
+        let active: i64 = conn
+            .query_row("SELECT COUNT(*) FROM outputs WHERE deleted_at IS NULL", [], |row| {
+                row.get(0)
+            })
+            .expect("count");
+        assert_eq!(active, 0, "the change of a send that will not land is soft-deleted");
     }
 }

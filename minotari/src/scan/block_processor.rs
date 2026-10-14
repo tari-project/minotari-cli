@@ -343,7 +343,31 @@ impl<E: EventSender> BlockProcessor<E> {
 
             let is_burn = output.is_burned();
 
-            let output_id = if self.backfill_mode {
+            // A send's change output was written at send time as `UNCONFIRMED`.
+            // Update that row in place rather than inserting a second one (which
+            // the active unique index on `output_hash` forbids); the credit,
+            // event and accumulator entry below are recorded as for a new output.
+            let status_when_found = if self.backfill_mode {
+                OutputStatus::SpentUnconfirmed
+            } else {
+                OutputStatus::Unspent
+            };
+            let change_output_id = db::confirm_unconfirmed_change_output(
+                tx,
+                account_id,
+                hash,
+                block.height,
+                &block.block_hash,
+                block.mined_timestamp,
+                memo.parsed.clone(),
+                memo.hex.clone(),
+                payment_reference,
+                status_when_found,
+            )?;
+
+            let output_id = if let Some(id) = change_output_id {
+                id
+            } else if self.backfill_mode {
                 match db::insert_spent_output_if_not_exists(
                     tx,
                     account_id,
@@ -766,5 +790,128 @@ fn make_balance_change_for_output(
         is_reversal: false,
         reversal_of_balance_change_id: None,
         is_reversed: false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::cast_possible_wrap)]
+
+    use super::*;
+    use crate::db::{SqlitePool, create_account, get_account_by_name, init_db};
+    use rusqlite::named_params;
+    use tari_common_types::seeds::cipher_seed::CipherSeed;
+    use tari_common_types::types::{ComAndPubSignature, CompressedPublicKey};
+    use tari_script::{ExecutionStack, TariScript};
+    use tari_transaction_components::key_manager::wallet_types::{SeedWordsWallet, WalletType};
+    use tari_transaction_components::key_manager::{KeyManager, TariKeyId, TransactionKeyManagerInterface};
+    use tari_transaction_components::transaction_components::{
+        EncryptedData, MemoField, OutputFeatures, TransactionOutputVersion, covenants::Covenant,
+    };
+    use tempfile::TempDir;
+
+    struct TestWallet {
+        pool: SqlitePool,
+        account_id: i64,
+        view_key: PrivateKey,
+        _dir: TempDir,
+    }
+
+    fn test_wallet() -> TestWallet {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let pool = init_db(dir.path().join("processor.db")).expect("init db");
+        let conn = pool.get().expect("conn");
+        let wallet = WalletType::SeedWords(SeedWordsWallet::construct_new(CipherSeed::random()).unwrap());
+        create_account(&conn, "default", &wallet, "password").unwrap();
+        let account_id = get_account_by_name(&conn, "default").unwrap().unwrap().id;
+        let view_key = KeyManager::new(wallet).unwrap().get_private_view_key();
+        TestWallet {
+            pool,
+            account_id,
+            view_key,
+            _dir: dir,
+        }
+    }
+
+    fn processor(wallet: &TestWallet, has_pending_outbound: bool) -> BlockProcessor {
+        let mut processor = BlockProcessor::new(vec![(wallet.account_id, wallet.view_key.clone())], 3);
+        processor.set_has_pending_outbound(has_pending_outbound);
+        processor
+    }
+
+    fn hash(byte: u8) -> FixedHash {
+        FixedHash::from([byte; 32])
+    }
+
+    fn test_wallet_output(value: u64, hash_byte: u8) -> WalletOutput {
+        WalletOutput::new_from_parts(
+            TransactionOutputVersion::default(),
+            MicroMinotari::from(value),
+            TariKeyId::default(),
+            OutputFeatures::default(),
+            TariScript::default(),
+            ExecutionStack::default(),
+            TariKeyId::default(),
+            CompressedPublicKey::default(),
+            ComAndPubSignature::default(),
+            0,
+            Covenant::default(),
+            EncryptedData::default(),
+            MicroMinotari::from(0),
+            None,
+            MemoField::new_empty(),
+            hash(hash_byte),
+            Default::default(),
+        )
+    }
+
+    fn block(height: u64, wallet_outputs: Vec<WalletOutput>, inputs: Vec<FixedHash>) -> BlockScanResult {
+        BlockScanResult {
+            height,
+            #[allow(clippy::cast_possible_truncation)]
+            block_hash: FixedHash::from([200u8.wrapping_add(height as u8); 32]),
+            wallet_outputs: wallet_outputs.into_iter().map(|o| (o.output_hash(), o, 0)).collect(),
+            inputs,
+            mined_timestamp: 1_700_000_000,
+        }
+    }
+
+    fn output_row(conn: &Connection, output_hash: &FixedHash) -> (i64, String, i64, Vec<u8>, Option<String>) {
+        conn.query_row(
+            "SELECT id, status, mined_in_block_height, mined_in_block_hash, payment_reference
+             FROM outputs WHERE output_hash = :hash AND deleted_at IS NULL",
+            named_params! { ":hash": output_hash.as_slice() },
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?)),
+        )
+        .expect("output row")
+    }
+
+    #[test]
+    fn the_change_row_is_updated_in_place_when_the_scan_finds_it() {
+        let wallet = test_wallet();
+        let conn = wallet.pool.get().expect("conn");
+        let change = test_wallet_output(5_000, 7);
+        let change_id =
+            db::insert_unconfirmed_change_output(&conn, wallet.account_id, &wallet.view_key, "request-1", &change)
+                .expect("insert change");
+        let (_, status, height, _, payref) = output_row(&conn, &change.output_hash());
+        assert_eq!(status, "UNCONFIRMED");
+        assert_eq!(height, 0, "sentinel height until mined");
+        assert!(payref.is_none());
+
+        let mined_block = block(50, vec![change.clone()], Vec::new());
+        processor(&wallet, false)
+            .process_block(&conn, &mined_block, wallet.account_id)
+            .expect("process block");
+
+        let (id, status, height, block_hash, payref) = output_row(&conn, &change.output_hash());
+        assert_eq!(id, change_id, "the same row is updated, not a second one inserted");
+        assert_eq!(status, "UNSPENT");
+        assert_eq!(height, 50);
+        assert_eq!(block_hash, mined_block.block_hash.to_vec());
+        assert!(payref.is_some(), "the payment reference is set when mined");
+
+        let credit_id = db::get_balance_change_id_by_output(&conn, change_id).expect("query");
+        assert!(credit_id.is_some(), "the credit balance change is recorded");
     }
 }

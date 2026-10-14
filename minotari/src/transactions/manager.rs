@@ -85,7 +85,7 @@ use tari_transaction_components::transaction_components::OutputType;
 use tari_transaction_components::{
     MicroMinotari, TransactionBuilder,
     consensus::ConsensusConstantsBuilder,
-    key_manager::KeyManager,
+    key_manager::{KeyManager, TransactionKeyManagerInterface},
     offline_signing::{
         PaymentRecipient,
         models::{PrepareOneSidedTransactionForSigningResult, SignedOneSidedTransactionResult},
@@ -748,16 +748,36 @@ impl TransactionSender {
             })?;
         let completed_tx_id = signed_transaction_result.signed_transaction.tx_id;
         let signed_transaction = signed_transaction_result.signed_transaction.clone();
-        db::create_completed_transaction(
-            &connection,
-            account_id,
-            processed_transaction.id(),
-            &kernel_excess,
-            &serialized_transaction,
-            sent_output_hash,
-            completed_tx_id,
-        )
-        .inspect_err(|e| {
+        // The completed transaction and its change output go in together: the
+        // wallet's scan recognises the send by that change output (status
+        // `UNCONFIRMED` until it is seen in a block).
+        let record_result = (|| -> Result<(), anyhow::Error> {
+            // `new_unchecked` for the same reason as in `fail_and_unlock_pending_transaction`.
+            let transaction =
+                rusqlite::Transaction::new_unchecked(&connection, rusqlite::TransactionBehavior::Immediate)?;
+            db::create_completed_transaction(
+                &transaction,
+                account_id,
+                processed_transaction.id(),
+                &kernel_excess,
+                &serialized_transaction,
+                sent_output_hash,
+                completed_tx_id,
+            )?;
+            if let Some(change_output) = &signed_transaction.change_output {
+                let view_key = self.account.get_key_manager(&self.password)?.get_private_view_key();
+                db::insert_unconfirmed_change_output(
+                    &transaction,
+                    account_id,
+                    &view_key,
+                    processed_transaction.id(),
+                    change_output,
+                )?;
+            }
+            transaction.commit()?;
+            Ok(())
+        })();
+        record_result.inspect_err(|e| {
             warn!(target: "audit", error:% = e; "Transaction finalization preparation failed");
             self.fail_and_unlock_pending_transaction(&connection, processed_transaction.id());
         })?;

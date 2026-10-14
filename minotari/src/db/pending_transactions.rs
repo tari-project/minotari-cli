@@ -5,7 +5,9 @@ use crate::log::mask_amount;
 use crate::transactions::idempotency::IdempotencyBinding;
 use crate::{
     api::types::LockFundsResult,
-    db::outputs::{fetch_outputs_by_lock_request_id, unlock_outputs_for_request},
+    db::outputs::{
+        fetch_outputs_by_lock_request_id, soft_delete_unconfirmed_change_output, unlock_outputs_for_request,
+    },
     models::PendingTransactionStatus,
 };
 use chrono::{DateTime, Utc};
@@ -515,6 +517,11 @@ pub fn cancel_pending_transactions_by_ids(
     }
 
     conn.execute(&query_str, params.as_slice())?;
+
+    // A cancelled send will not land, so neither will its change output.
+    for id in ids {
+        soft_delete_unconfirmed_change_output(conn, id)?;
+    }
 
     Ok(())
 }
