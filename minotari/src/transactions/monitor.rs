@@ -71,14 +71,14 @@ use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::Connection;
 use tari_common_types::payment_reference::generate_payment_reference;
 use tari_common_types::types::FixedHash;
-use tari_transaction_components::rpc::models::{TxLocation, TxSubmissionRejectionReason};
+use tari_transaction_components::rpc::models::{TxLocation, TxQueryResponse, TxSubmissionRejectionReason};
 
 use crate::db::{
     self, CompletedTransaction, CompletedTransactionStatus, SqlitePool, get_pending_completed_transactions,
     mark_completed_transaction_as_broadcasted, mark_completed_transaction_as_confirmed,
-    mark_completed_transaction_as_rejected,
+    mark_completed_transaction_as_mined_unconfirmed, mark_completed_transaction_as_rejected,
 };
-use crate::http::WalletHttpClient;
+use crate::http::{HttpError, WalletHttpClient};
 use crate::models::{WalletEvent, WalletEventType};
 use crate::transactions::{DisplayedTransaction, TransactionDisplayStatus};
 use crate::webhooks::{WebhookTriggerConfig, utils::trigger_webhook_with_balance};
@@ -450,8 +450,14 @@ impl TransactionMonitor {
                 );
 
                 result.extend(
-                    self.check_broadcast_in_mempool(wallet_client, db_pool, account_id, by_status.broadcast)
-                        .await?,
+                    self.check_broadcast_in_mempool(
+                        wallet_client,
+                        db_pool,
+                        account_id,
+                        current_chain_height,
+                        by_status.broadcast,
+                    )
+                    .await?,
                 );
 
                 let terminal_transitions = result
@@ -560,20 +566,69 @@ impl TransactionMonitor {
     /// - In the mempool: nothing to do yet.
     /// - Not stored (dropped from the mempool, or never seen): rebroadcast it, or
     ///   reject it once it has used up its broadcast attempts.
-    /// - Mined: ignored. The block scan marks it mined when it scans that block.
+    /// - Mined at or below `scanned_height`: the scan has already passed that
+    ///   block without recognising the send (for example a send made before
+    ///   the scan could match sends), so it never will. It is marked mined at
+    ///   the height and block the node reports.
+    /// - Mined above `scanned_height`, or without a height and block hash:
+    ///   ignored. The block scan marks it mined when it scans that block.
+    ///
+    /// A transaction that cannot be decoded is logged and skipped.
     async fn check_broadcast_in_mempool(
         &self,
         wallet_client: &WalletHttpClient,
         db_pool: &SqlitePool,
         account_id: i64,
+        scanned_height: u64,
         transactions: Vec<CompletedTransaction>,
     ) -> Result<MonitoringResult> {
         let mut result = MonitoringResult::default();
 
         for tx in transactions {
-            let location = Self::query_transaction_location(wallet_client, &tx).await?;
-            match location {
-                TxLocation::InMempool | TxLocation::Mined => {},
+            let Some(transaction) = Self::decode_transaction(&tx) else {
+                continue;
+            };
+            let Some(response) = Self::query_transaction(wallet_client, &tx, &transaction).await? else {
+                continue;
+            };
+            match response.location {
+                TxLocation::InMempool => {},
+                TxLocation::Mined => {
+                    let (Some(mined_height), Some(mined_block_hash)) =
+                        (response.mined_height, response.mined_header_hash)
+                    else {
+                        continue;
+                    };
+                    if mined_height > scanned_height {
+                        continue;
+                    }
+                    info!(
+                        target: "audit",
+                        id = tx.id.to_string().as_str(),
+                        height = mined_height;
+                        "Transaction mined in a block the scan has already passed (unconfirmed)"
+                    );
+                    let conn = Self::get_connection(db_pool)?;
+                    #[allow(clippy::cast_possible_wrap)]
+                    mark_completed_transaction_as_mined_unconfirmed(
+                        &conn,
+                        tx.id,
+                        mined_height as i64,
+                        &mined_block_hash,
+                    )?;
+                    let event = WalletEvent {
+                        id: 0,
+                        account_id,
+                        event_type: WalletEventType::TransactionUnconfirmed {
+                            tx_id: tx.id,
+                            mined_height,
+                            confirmations: 0,
+                        },
+                        description: format!("Transaction {} mined at height {}", tx.id, mined_height),
+                    };
+                    self.persist_event(&conn, account_id, &event)?;
+                    result.wallet_events.push(event);
+                },
                 TxLocation::NotStored | TxLocation::None => {
                     info!(
                         target: "audit",
@@ -613,8 +668,14 @@ impl TransactionMonitor {
             return self.reject_and_release(&conn, account_id, tx, reason, description, result);
         }
 
-        match Self::broadcast_transaction(wallet_client, tx).await {
-            Ok(()) => {
+        let Some(transaction) = Self::decode_transaction(tx) else {
+            return Ok(());
+        };
+
+        // A failed request (node unreachable, HTTP error) is a `NodeRequestError`
+        // and leaves the transaction as it is; only a refusal by the node rejects it.
+        match Self::broadcast_transaction(wallet_client, transaction).await? {
+            None => {
                 info!(
                     target: "audit",
                     id = tx.id.to_string().as_str();
@@ -636,7 +697,7 @@ impl TransactionMonitor {
                 result.wallet_events.push(event);
                 Ok(())
             },
-            Err(reason) => {
+            Some(reason) => {
                 warn!(
                     target: "audit",
                     id = tx.id.to_string().as_str(),
@@ -741,37 +802,65 @@ impl TransactionMonitor {
         Ok(events)
     }
 
-    async fn broadcast_transaction(wallet_client: &WalletHttpClient, tx: &CompletedTransaction) -> Result<(), String> {
-        let transaction: Transaction =
-            serde_json::from_slice(&tx.serialized_transaction).map_err(|e| format!("Deserialization failed: {}", e))?;
-
-        let response = wallet_client
-            .submit_transaction(transaction)
-            .await
-            .map_err(|e| format!("Broadcast failed: {}", e))?;
-
-        if response.accepted || response.rejection_reason == TxSubmissionRejectionReason::AlreadyMined {
-            Ok(())
-        } else {
-            Err(format!("Transaction rejected: {}", response.rejection_reason))
+    /// Decodes the stored transaction, or logs and returns `None` if it cannot
+    /// be decoded, so one bad row does not stop the monitor for every other one.
+    fn decode_transaction(tx: &CompletedTransaction) -> Option<Transaction> {
+        match serde_json::from_slice(&tx.serialized_transaction) {
+            Ok(transaction) => Some(transaction),
+            Err(e) => {
+                warn!(
+                    target: "audit",
+                    id = tx.id.to_string().as_str(),
+                    error:% = e;
+                    "Cannot decode stored transaction; skipping it"
+                );
+                None
+            },
         }
     }
 
-    /// Asks the node where `tx` is, by its kernel signature.
+    /// Submits `transaction` to the node.
     ///
-    /// A failed request is a [`NodeRequestError`].
-    async fn query_transaction_location(
+    /// Returns `None` if the node accepted it (or already has it mined), and the
+    /// reason if the node refused it. A request that did not get an answer from
+    /// the node (unreachable, HTTP error) is a [`NodeRequestError`].
+    async fn broadcast_transaction(
+        wallet_client: &WalletHttpClient,
+        transaction: Transaction,
+    ) -> Result<Option<String>> {
+        let response = match wallet_client.submit_transaction(transaction).await {
+            Ok(response) => response,
+            Err(e) if e.downcast_ref::<HttpError>().is_some() => {
+                return Err(NodeRequestError(format!("Broadcast failed: {}", e)).into());
+            },
+            // The node answered with an error, or the transaction is too large to send.
+            Err(e) => return Ok(Some(format!("Broadcast failed: {}", e))),
+        };
+
+        if response.accepted || response.rejection_reason == TxSubmissionRejectionReason::AlreadyMined {
+            Ok(None)
+        } else {
+            Ok(Some(format!("Transaction rejected: {}", response.rejection_reason)))
+        }
+    }
+
+    /// Asks the node where `transaction` is, by its kernel signature.
+    ///
+    /// A failed request is a [`NodeRequestError`]. A transaction without a
+    /// kernel cannot be looked up; it is logged and `None` is returned.
+    async fn query_transaction(
         wallet_client: &WalletHttpClient,
         tx: &CompletedTransaction,
-    ) -> Result<TxLocation> {
-        let transaction: Transaction =
-            serde_json::from_slice(&tx.serialized_transaction).map_err(|e| anyhow!("Deserialization failed: {}", e))?;
-
-        let kernel = transaction
-            .body()
-            .kernels()
-            .first()
-            .ok_or_else(|| anyhow!("Transaction has no kernel"))?;
+        transaction: &Transaction,
+    ) -> Result<Option<TxQueryResponse>> {
+        let Some(kernel) = transaction.body().kernels().first() else {
+            warn!(
+                target: "audit",
+                id = tx.id.to_string().as_str();
+                "Stored transaction has no kernel; skipping it"
+            );
+            return Ok(None);
+        };
 
         let excess_sig_nonce = kernel.excess_sig.get_compressed_public_nonce().as_bytes();
         let excess_sig = kernel.excess_sig.get_signature().as_bytes();
@@ -781,7 +870,7 @@ impl TransactionMonitor {
             .await
             .map_err(|e| NodeRequestError(format!("Transaction query failed: {}", e)))?;
 
-        Ok(response.location)
+        Ok(Some(response))
     }
 }
 
@@ -1021,18 +1110,46 @@ mod tests {
     }
 
     async fn node_reporting(location: &str) -> MockServer {
+        node_answering(serde_json::json!({
+            "location": location,
+            "mined_height": null,
+            "mined_header_hash": null,
+            "mined_timestamp": null,
+        }))
+        .await
+    }
+
+    async fn node_reporting_mined_at(height: u64) -> MockServer {
+        node_answering(serde_json::json!({
+            "location": "Mined",
+            "mined_height": height,
+            "mined_header_hash": vec![8u8; 32],
+            "mined_timestamp": 1_700_000_000u64,
+        }))
+        .await
+    }
+
+    async fn node_answering(query_response: serde_json::Value) -> MockServer {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/transactions"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "location": location,
-                "mined_height": null,
-                "mined_header_hash": null,
-                "mined_timestamp": null,
-            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(query_response))
             .mount(&server)
             .await;
         server
+    }
+
+    async fn failing_submissions(server: &MockServer) {
+        Mock::given(method("POST"))
+            .and(path("/json_rpc"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(server)
+            .await;
+    }
+
+    fn set_status(fixture: &SendFixture, status: CompletedTransactionStatus) {
+        let conn = fixture.pool.get().expect("conn");
+        db::update_completed_transaction_status(&conn, fixture.tx_id, status).expect("status");
     }
 
     async fn expect_submissions(server: &MockServer, count: u64) {
@@ -1155,8 +1272,25 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_transaction_the_node_reports_mined_is_left_to_the_scan() {
-        let fixture = send_fixture("mined.db", 1);
+    async fn a_transaction_the_node_reports_mined_above_the_scanned_height_is_left_to_the_scan() {
+        let fixture = send_fixture("mined_above.db", 1);
+        let server = node_reporting_mined_at(101).await;
+        expect_submissions(&server, 0).await;
+
+        let result = monitor_for(&fixture)
+            .monitor_if_needed(&client(&server), &fixture.pool, fixture.account_id, 100)
+            .await
+            .expect("monitor");
+
+        let completed = completed(&fixture);
+        assert_eq!(completed.status, CompletedTransactionStatus::Broadcast);
+        assert_eq!(completed.mined_height, None);
+        assert!(result.wallet_events.is_empty());
+    }
+
+    #[tokio::test]
+    async fn a_transaction_reported_mined_without_a_height_is_left_to_the_scan() {
+        let fixture = send_fixture("mined_no_height.db", 1);
         let server = node_reporting("Mined").await;
         expect_submissions(&server, 0).await;
 
@@ -1165,9 +1299,116 @@ mod tests {
             .await
             .expect("monitor");
 
+        assert_eq!(completed(&fixture).status, CompletedTransactionStatus::Broadcast);
+    }
+
+    #[tokio::test]
+    async fn a_transaction_mined_in_a_block_the_scan_already_passed_is_marked_mined() {
+        let fixture = send_fixture("mined_below.db", 1);
+        let server = node_reporting_mined_at(100).await;
+        expect_submissions(&server, 0).await;
+
+        let result = monitor_for(&fixture)
+            .monitor_if_needed(&client(&server), &fixture.pool, fixture.account_id, 100)
+            .await
+            .expect("monitor");
+
+        let completed = completed(&fixture);
+        assert_eq!(completed.status, CompletedTransactionStatus::MinedUnconfirmed);
+        assert_eq!(completed.mined_height, Some(100));
+        assert_eq!(completed.mined_block_hash, Some(vec![8u8; 32]));
+        assert!(result.wallet_events.iter().any(|e| matches!(
+            e.event_type,
+            WalletEventType::TransactionUnconfirmed { tx_id, mined_height: 100, confirmations: 0 } if tx_id == fixture.tx_id
+        )));
+        let conn = fixture.pool.get().expect("conn");
+        let stored = db::get_events_by_account_id(&conn, fixture.account_id, 10, 0).expect("events");
+        assert!(stored.iter().any(|e| e.event_type == "TransactionUnconfirmed"));
+    }
+
+    #[tokio::test]
+    async fn a_failed_submission_of_a_dropped_transaction_leaves_it_unchanged() {
+        let fixture = send_fixture("submit_fails_broadcast.db", 1);
+        let server = node_reporting("NotStored").await;
+        failing_submissions(&server).await;
+
+        let error = monitor_for(&fixture)
+            .monitor_if_needed(&client(&server), &fixture.pool, fixture.account_id, 100)
+            .await
+            .expect_err("the node failed");
+        assert!(error.downcast_ref::<NodeRequestError>().is_some(), "got: {error}");
+
         let completed = completed(&fixture);
         assert_eq!(completed.status, CompletedTransactionStatus::Broadcast);
-        assert_eq!(completed.mined_height, None);
+        assert_eq!(completed.broadcast_attempts, 1);
+        assert_eq!(input_state(&fixture), ("LOCKED".to_string(), true));
+        assert_eq!(change_state(&fixture), ("UNCONFIRMED".to_string(), false));
+    }
+
+    #[tokio::test]
+    async fn a_failed_rebroadcast_of_a_completed_transaction_leaves_it_unchanged() {
+        let fixture = send_fixture("submit_fails_completed.db", 1);
+        set_status(&fixture, CompletedTransactionStatus::Completed);
+        let server = MockServer::start().await;
+        failing_submissions(&server).await;
+
+        let error = monitor_for(&fixture)
+            .monitor_if_needed(&client(&server), &fixture.pool, fixture.account_id, 100)
+            .await
+            .expect_err("the node failed");
+        assert!(error.downcast_ref::<NodeRequestError>().is_some(), "got: {error}");
+
+        let completed = completed(&fixture);
+        assert_eq!(completed.status, CompletedTransactionStatus::Completed);
+        assert_eq!(completed.broadcast_attempts, 1);
+        assert_eq!(input_state(&fixture), ("LOCKED".to_string(), true));
+        assert_eq!(change_state(&fixture), ("UNCONFIRMED".to_string(), false));
+    }
+
+    #[tokio::test]
+    async fn an_undecodable_stored_transaction_is_skipped_not_fatal() {
+        let fixture = send_fixture("undecodable.db", 1);
+        {
+            let conn = fixture.pool.get().expect("conn");
+            conn.execute("UPDATE completed_transactions SET serialized_transaction = x'00ff'", [])
+                .expect("corrupt");
+        }
+        // No mocks: a request for the undecodable transaction would fail the test.
+        let server = MockServer::start().await;
+
+        monitor_for(&fixture)
+            .monitor_if_needed(&client(&server), &fixture.pool, fixture.account_id, 100)
+            .await
+            .expect("the monitor pass still succeeds");
+        assert_eq!(completed(&fixture).status, CompletedTransactionStatus::Broadcast);
+        assert!(server.received_requests().await.unwrap_or_default().is_empty());
+    }
+
+    /// A transaction serialized by tari 6.0.1-pre.2 (before the 6.2.0-pre.1 bump),
+    /// built and signed by that release's `TransactionBuilder`. Rows written by
+    /// earlier releases must still decode, or neither the scan nor the monitor
+    /// can recognise those sends.
+    #[test]
+    fn a_transaction_stored_by_tari_6_0_1_pre_2_still_decodes() {
+        let stored = include_bytes!("test_data/transaction_v6_0_1_pre_2.json");
+        let transaction: Transaction = serde_json::from_slice(stored).expect("decodes under the current tari");
+        assert_eq!(transaction.body().inputs().len(), 3);
+        assert_eq!(transaction.body().outputs().len(), 2);
+        assert_eq!(transaction.body().kernels().len(), 1);
+        for input in transaction.body().inputs() {
+            assert_ne!(input.output_hash(), FixedHash::zero());
+        }
+        // Re-encoding gives the same document, so nothing was dropped or renamed.
+        // The only difference is `body.sorted`, an in-memory flag that is not
+        // read back from JSON.
+        let mut original: serde_json::Value = serde_json::from_slice(stored).expect("json");
+        let mut reencoded = serde_json::to_value(&transaction).expect("encode");
+        for document in [&mut original, &mut reencoded] {
+            if let Some(body) = document.get_mut("body").and_then(|b| b.as_object_mut()) {
+                body.remove("sorted");
+            }
+        }
+        assert_eq!(original, reencoded);
     }
 
     #[tokio::test]

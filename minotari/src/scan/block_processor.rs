@@ -643,13 +643,20 @@ impl<E: EventSender> BlockProcessor<E> {
                 continue;
             };
 
-            let transaction: Transaction = serde_json::from_slice(&completed.serialized_transaction).map_err(|e| {
-                BlockProcessorError::WalletEvent(anyhow::anyhow!(
-                    "Failed to deserialize transaction {}: {}",
-                    completed.id,
-                    e
-                ))
-            })?;
+            // A row that cannot be decoded must not fail the block: the batch
+            // would roll back and the same block be retried for ever.
+            let transaction: Transaction = match serde_json::from_slice(&completed.serialized_transaction) {
+                Ok(transaction) => transaction,
+                Err(e) => {
+                    warn!(
+                        target: "audit",
+                        id = completed.id.to_string().as_str(),
+                        error:% = e;
+                        "Cannot decode stored transaction; not matching it against this block"
+                    );
+                    continue;
+                },
+            };
 
             let mut all_inputs_in_block = true;
             for input in transaction.body().inputs() {
@@ -1306,6 +1313,31 @@ mod tests {
             processor.process_block(conn, block, account_id).expect("process block");
         }
         processor.match_sends(conn).expect("match sends");
+    }
+
+    #[test]
+    fn a_send_that_cannot_be_decoded_is_skipped_without_failing_the_block() {
+        let wallet = test_wallet();
+        let conn = wallet.pool.get().expect("conn");
+        let send = record_send(&wallet, &conn, 1, &[1, 2], Some(3));
+        conn.execute("UPDATE completed_transactions SET serialized_transaction = x'00ff'", [])
+            .expect("corrupt");
+
+        let mined_block = block(50, vec![send.change.clone().unwrap()], send.input_hashes.clone());
+        let mut processor = processor(&wallet, true);
+        process(
+            &mut processor,
+            &conn,
+            wallet.account_id,
+            std::slice::from_ref(&mined_block),
+        );
+
+        assert_eq!(
+            completed(&conn, send.tx_id).status,
+            db::CompletedTransactionStatus::Broadcast
+        );
+        // The rest of the block was still processed.
+        assert_eq!(change_row(&conn, &send).1, "UNSPENT");
     }
 
     #[test]
