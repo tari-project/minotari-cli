@@ -88,6 +88,12 @@ impl<E: EventSender + Clone + Send + 'static> ScanDbHandler<E> {
             let mut last_height: Option<u64> = None;
 
             for block in blocks.iter() {
+                // The base node never splits a block across pages: when a page
+                // fills up it drops the partial last block and starts the next
+                // page at it. The one exception is a single block larger than a
+                // whole page, which is sent partial and not continued (the scanner
+                // stops on the repeated header). So results behind the resume
+                // point are never the rest of a block and are skipped.
                 if block.height < next_block_to_scan {
                     continue;
                 }
@@ -111,9 +117,10 @@ impl<E: EventSender + Clone + Send + 'static> ScanDbHandler<E> {
                     .map_err(|e| WalletDbError::Unexpected(e.to_string()))?;
             }
 
-            // Match the wallet's sends in the last block of the batch. It may be
-            // incomplete (a large block split over two batches), so a mismatch
-            // there does not reject a send.
+            // Match the wallet's sends in the last block of the batch. Normally
+            // that block is complete (see above), but a single block larger than
+            // a page arrives partial, so as a safeguard a mismatch there does not
+            // reject a send; the post-scan monitor settles it instead.
             processor
                 .match_sends(&tx, false)
                 .map_err(|e| WalletDbError::Unexpected(e.to_string()))?;
