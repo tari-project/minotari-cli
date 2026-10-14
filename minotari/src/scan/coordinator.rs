@@ -797,12 +797,14 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
             .iter()
             .map(|target| (target.account.id, target.view_key.clone()))
             .collect();
-        let block_processor = BlockProcessor::with_event_sender(
+        let mut block_processor = BlockProcessor::with_event_sender(
             all_accounts,
             self.event_sender.clone(),
             false,
             self.required_confirmations,
         );
+        // This phase scans with `exclude_inputs`, so no send can be matched here.
+        block_processor.set_inputs_excluded(true);
         let mut db_handler = ScanDbHandler::new(self.pool.clone(), block_processor);
 
         let global_next_block = targets.iter().map(|t| t.next_block_to_scan).min().unwrap_or(0);

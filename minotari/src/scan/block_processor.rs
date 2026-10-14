@@ -10,6 +10,7 @@ use minotari_scanning::BlockScanResult;
 use rusqlite::Connection;
 use std::collections::{HashMap, HashSet};
 use tari_common_types::payment_reference::generate_payment_reference;
+use tari_common_types::transaction::TxId;
 use tari_common_types::types::{FixedHash, PrivateKey};
 use tari_transaction_components::MicroMinotari;
 use tari_transaction_components::transaction_components::{Transaction, WalletOutput};
@@ -99,6 +100,10 @@ pub struct BlockProcessor<E: EventSender = NoopEventSender> {
     /// When true, uses OR IGNORE inserts for outputs/inputs/balance_changes
     /// to skip already-existing records during history backfill (Phase 3 of FastSync).
     backfill_mode: bool,
+    /// When true, the scan leaves inputs out of every block (Phase 1 of
+    /// FastSync), so no send can be matched against a block. See
+    /// [`Self::set_inputs_excluded`].
+    inputs_excluded: bool,
     /// What the block being processed showed of the wallet's own sends. Only
     /// collected while `has_pending_outbound` is set. See [`Self::match_sends`].
     send_block: Option<SendBlock>,
@@ -144,6 +149,7 @@ impl BlockProcessor<NoopEventSender> {
             required_confirmations,
             webhook_config: None,
             backfill_mode: false,
+            inputs_excluded: false,
             send_block: None,
         }
     }
@@ -179,6 +185,7 @@ impl<E: EventSender> BlockProcessor<E> {
             required_confirmations,
             webhook_config: None,
             backfill_mode: false,
+            inputs_excluded: false,
             send_block: None,
         }
     }
@@ -214,6 +221,18 @@ impl<E: EventSender> BlockProcessor<E> {
     /// In backfill mode, outputs and inputs use OR IGNORE inserts to skip duplicates.
     pub fn set_backfill_mode(&mut self, value: bool) {
         self.backfill_mode = value;
+    }
+
+    /// Tells the processor the scan leaves inputs out of every block (Phase 1
+    /// of FastSync, `exclude_inputs`).
+    ///
+    /// Sends are then never matched against a block: without inputs the full
+    /// rule cannot hold, and a mismatch would wrongly reject them. The one thing
+    /// still done is settling a send the monitor rejected when its change output
+    /// turns up: that change is the proof the send landed, it is linked back to
+    /// the send, and nothing would look at it again later.
+    pub fn set_inputs_excluded(&mut self, value: bool) {
+        self.inputs_excluded = value;
     }
 
     /// Processes a single scanned block.
@@ -264,7 +283,7 @@ impl<E: EventSender> BlockProcessor<E> {
 
         let mut request_ids = self.process_outputs(tx, block, account_id, &account_view_key)?;
         request_ids.extend(self.process_inputs(tx, block, account_id)?);
-        if self.has_pending_outbound || !request_ids.is_empty() {
+        if !self.inputs_excluded && (self.has_pending_outbound || !request_ids.is_empty()) {
             self.collect_send_block(block, account_id, request_ids);
         }
         self.record_scanned_block(tx, block, account_id)?;
@@ -398,7 +417,16 @@ impl<E: EventSender> BlockProcessor<E> {
                 {
                     db::reset_displayed_transaction_to_pending(tx, completed_tx_id)?;
                 }
-                request_ids.push(request_id);
+                if self.inputs_excluded {
+                    // The inputs cannot be checked in this scan, and once the
+                    // change is an active row nothing would find the send again,
+                    // so the change (decrypted with the wallet's own keys, its hash
+                    // unique to the send) settles it now.
+                    let event = self.settle_rejected_send_by_change(tx, account_id, completed_tx_id, block)?;
+                    generated_events.push(event);
+                } else {
+                    request_ids.push(request_id);
+                }
             }
 
             // A send's change output was written at send time as `UNCONFIRMED`.
@@ -496,6 +524,44 @@ impl<E: EventSender> BlockProcessor<E> {
         }
 
         Ok(request_ids)
+    }
+
+    /// Marks a send the monitor rejected `MinedUnconfirmed` in `block`, on the
+    /// evidence of its change output alone, and persists `TransactionUnconfirmed`.
+    /// Used only when the scan excludes inputs (see [`Self::set_inputs_excluded`]).
+    fn settle_rejected_send_by_change(
+        &mut self,
+        tx: &Connection,
+        account_id: i64,
+        completed_tx_id: TxId,
+        block: &BlockScanResult,
+    ) -> Result<(i64, WalletEvent), BlockProcessorError> {
+        info!(
+            target: "audit",
+            id = completed_tx_id.to_string().as_str(),
+            height = block.height;
+            "Transaction the monitor rejected was mined after all (its change is in a block)"
+        );
+        #[allow(clippy::cast_possible_wrap)]
+        db::mark_completed_transaction_as_mined_unconfirmed(
+            tx,
+            completed_tx_id,
+            block.height as i64,
+            block.block_hash.as_slice(),
+        )?;
+        let event = WalletEvent {
+            id: 0,
+            account_id,
+            event_type: WalletEventType::TransactionUnconfirmed {
+                tx_id: completed_tx_id,
+                mined_height: block.height,
+                confirmations: 0,
+            },
+            description: format!("Transaction {} mined at height {}", completed_tx_id, block.height),
+        };
+        let event_id = db::insert_wallet_event(tx, account_id, &event)?;
+        self.wallet_events.push(event.clone());
+        Ok((event_id, event))
     }
 
     /// Creates a wallet event for a newly detected output.
@@ -661,6 +727,10 @@ impl<E: EventSender> BlockProcessor<E> {
         let Some(send_block) = self.send_block.take() else {
             return Ok(());
         };
+        // Without inputs no send can match, and none may be rejected.
+        if self.inputs_excluded {
+            return Ok(());
+        }
 
         let mut generated_events: Vec<(i64, WalletEvent)> = Vec::new();
         let mut rejected_displayed_transactions = Vec::new();
@@ -2108,6 +2178,92 @@ mod tests {
         assert_eq!(
             completed(&conn, y.tx_id).status,
             db::CompletedTransactionStatus::Rejected
+        );
+    }
+
+    #[test]
+    fn a_scan_without_inputs_settles_a_monitor_rejected_send_by_its_change_and_rejects_nothing() {
+        // FastSync Phase 1 scans without inputs. X was rejected by the monitor
+        // and its change turns up there.
+        let wallet = test_wallet();
+        let conn = wallet.pool.get().expect("conn");
+        let x = record_send(&wallet, &conn, 1, &[1, 2], Some(3));
+        let (original_change_id, ..) = change_row(&conn, &x);
+        reject_as_the_monitor_does(&conn, &x);
+
+        let (sender, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut processor = BlockProcessor::with_event_sender(
+            vec![(wallet.account_id, wallet.view_key.clone())],
+            crate::scan::events::ChannelEventSender::new(sender),
+            false,
+            3,
+        );
+        processor.set_inputs_excluded(true);
+        let phase_one_block = block(50, vec![x.change.clone().unwrap()], Vec::new());
+        let next_block = block(51, Vec::new(), Vec::new());
+        process(&mut processor, &conn, wallet.account_id, &[phase_one_block, next_block]);
+
+        // Settled on its change: mined at 50, with its event.
+        let x_completed = completed(&conn, x.tx_id);
+        assert_eq!(x_completed.status, db::CompletedTransactionStatus::MinedUnconfirmed);
+        assert_eq!(x_completed.mined_height, Some(50));
+        let events = processor.take_wallet_events();
+        assert!(events.iter().any(|e| matches!(
+            e.event_type,
+            WalletEventType::TransactionUnconfirmed { tx_id, mined_height: 50, .. } if tx_id == x.tx_id
+        )));
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e.event_type, WalletEventType::TransactionRejected { .. }))
+        );
+
+        // Its change is its own row, linked to it, and its one entry is mined.
+        let (change_id, status, height, _) = change_row(&conn, &x);
+        assert_eq!(change_id, original_change_id);
+        assert_eq!(status, "UNSPENT");
+        assert_eq!(height, 50);
+        let displayed = db::get_displayed_transaction_by_id(&conn, &x.tx_id.to_string())
+            .expect("query")
+            .expect("displayed");
+        assert_ne!(displayed.status, TransactionDisplayStatus::Rejected);
+        assert_eq!(displayed.blockchain.block_height, 50);
+        assert_eq!(displayed_count(&conn, wallet.account_id), 1);
+
+        // No rejection is announced.
+        while let Ok(event) = events_rx.try_recv() {
+            if let ProcessingEvent::TransactionsUpdated(update) = event {
+                assert!(
+                    !update
+                        .updated_transactions
+                        .iter()
+                        .any(|t| t.status == TransactionDisplayStatus::Rejected),
+                    "no rejection may be announced"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn a_scan_without_inputs_never_rejects_a_pending_send() {
+        let wallet = test_wallet();
+        let conn = wallet.pool.get().expect("conn");
+        let send = record_send(&wallet, &conn, 1, &[1, 2], Some(3));
+
+        let mut processor = processor(&wallet, true);
+        processor.set_inputs_excluded(true);
+        let phase_one_block = block(50, vec![send.change.clone().unwrap()], Vec::new());
+        let next_block = block(51, Vec::new(), Vec::new());
+        process(&mut processor, &conn, wallet.account_id, &[phase_one_block, next_block]);
+
+        // Neither matched nor rejected: the later phases or the monitor settle it.
+        assert_eq!(
+            completed(&conn, send.tx_id).status,
+            db::CompletedTransactionStatus::Broadcast
+        );
+        assert_eq!(
+            input_statuses(&conn, &send),
+            vec!["LOCKED".to_string(), "LOCKED".to_string()]
         );
     }
 }
