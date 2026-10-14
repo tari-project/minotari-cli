@@ -531,7 +531,8 @@ impl<E: EventSender> BlockProcessor<E> {
     /// `has_pending_outbound` is set, the `locked_by_request_id` of every spent
     /// output that had one; and always, the `released_from_request_id` of a
     /// spent output (whether or not a later send has locked it since), when
-    /// that send was rejected by the monitor (it may have been mined after all).
+    /// that send was rejected by the monitor and its change output is in this
+    /// block (it may have been mined after all).
     fn process_inputs(
         &mut self,
         tx: &Connection,
@@ -575,13 +576,19 @@ impl<E: EventSender> BlockProcessor<E> {
             // An input released when the monitor rejected its send is spent: that
             // send may have been mined after all, even if a later send has locked
             // the input since (then both are matched; at most one can be mined
-            // here). Its displayed transaction goes back to pending first, so this
-            // block updates it rather than adding a second entry; `match_sends`
-            // rejects it again if the send does not match.
+            // here). A spent input alone proves nothing (anything holding the keys
+            // can spend it), so the send is only taken up when its own change
+            // output is in this block too: that hash is unique to the send. A send
+            // without a change row is never reconciled this way. Its displayed
+            // transaction then goes back to pending, so this block updates its one
+            // entry rather than adding a second; `match_sends` still applies the
+            // full rule and rejects it again if it does not match.
             if let Some(request_id) = released_from
                 && locked_by.as_deref() != Some(request_id.as_str())
                 && let Some(completed) = db::get_completed_transaction_to_match(tx, account_id, &request_id)?
                 && completed.status == db::CompletedTransactionStatus::Rejected
+                && let Some(change_hash) = db::get_change_output_hash_for_request(tx, &request_id)?
+                && self.block_has_wallet_output(block, account_id, &change_hash)
             {
                 if let Some(displayed) = db::get_displayed_transaction_by_id(tx, &completed.id.to_string())?
                     && displayed.status == TransactionDisplayStatus::Rejected
@@ -605,6 +612,29 @@ impl<E: EventSender> BlockProcessor<E> {
         }
 
         Ok(request_ids)
+    }
+
+    /// Whether `output_hash` is one of this account's outputs in the block being
+    /// processed: in this result, or in an earlier result of the same block.
+    ///
+    /// A large block arrives as several results; outputs are processed before
+    /// inputs within a result, so a change output in an earlier or the same
+    /// result is known by the time an input is. One in a later result is not
+    /// (accepted limitation: such a block needs thousands of outputs).
+    fn block_has_wallet_output(&self, block: &BlockScanResult, account_id: i64, output_hash: &FixedHash) -> bool {
+        for (hash, _output, wallet_idx) in &block.wallet_outputs {
+            if hash == output_hash && self.wallet_index_to_account_id.get(*wallet_idx).copied() == Some(account_id) {
+                return true;
+            }
+        }
+        match &self.send_block {
+            Some(send_block) => {
+                send_block.account_id == account_id
+                    && send_block.block_hash == block.block_hash
+                    && send_block.wallet_outputs.contains(output_hash)
+            },
+            None => false,
+        }
     }
 
     /// Adds this block result's inputs, wallet outputs and spent requests to
@@ -701,8 +731,10 @@ impl<E: EventSender> BlockProcessor<E> {
 
             let change_in_block = match db::get_change_output_hash_for_request(tx, request_id)? {
                 Some(change_hash) => send_block.wallet_outputs.contains(&change_hash),
-                // Legacy send: no change row to look for, so the inputs decide.
-                None => true,
+                // Legacy send: no change row to look for, so the inputs decide;
+                // but never for a send the monitor rejected, which needs its change
+                // as proof that it landed.
+                None => !was_rejected,
             };
 
             #[allow(clippy::cast_possible_wrap)]
@@ -1879,8 +1911,9 @@ mod tests {
         let send = record_send(&wallet, &conn, 1, &[1, 2], Some(3));
         reject_as_the_monitor_does(&conn, &send);
 
-        // Only one of its released inputs is spent, by something else.
-        let other_block = block(50, Vec::new(), vec![send.input_hashes[0]]);
+        // Its change is in the block, so it is taken up, but only one of its
+        // released inputs is spent: it does not match.
+        let other_block = block(50, vec![send.change.clone().unwrap()], vec![send.input_hashes[0]]);
         let next_block = block(51, Vec::new(), Vec::new());
         let (sender, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
         let mut processor = BlockProcessor::with_event_sender(
@@ -1982,5 +2015,81 @@ mod tests {
 
         // X's change is linked to X again.
         assert_eq!(change_row(&conn, &x).1, "UNSPENT");
+    }
+
+    #[test]
+    fn a_monitor_rejected_send_without_a_change_row_is_never_reconciled_by_its_inputs() {
+        // X (legacy, no change row) was rejected by the monitor; Y re-locked one
+        // of its released inputs and is mined with it.
+        let wallet = test_wallet();
+        let conn = wallet.pool.get().expect("conn");
+        let x = record_send(&wallet, &conn, 1, &[1], None);
+        reject_as_the_monitor_does(&conn, &x);
+        let y = record_send(&wallet, &conn, 2, &[1, 5], Some(9));
+
+        let mined_block = block(50, vec![y.change.clone().unwrap()], y.input_hashes.clone());
+        let next_block = block(51, Vec::new(), Vec::new());
+        let mut processor = processor(&wallet, true);
+        process(&mut processor, &conn, wallet.account_id, &[mined_block, next_block]);
+
+        let x_completed = completed(&conn, x.tx_id);
+        assert_eq!(x_completed.status, db::CompletedTransactionStatus::Rejected);
+        assert_eq!(x_completed.mined_height, None);
+        let events = processor.take_wallet_events();
+        assert!(
+            !events.iter().any(|e| matches!(
+                e.event_type,
+                WalletEventType::TransactionUnconfirmed { tx_id, .. } if tx_id == x.tx_id
+            )),
+            "no false mined event for X"
+        );
+        let x_displayed = db::get_displayed_transaction_by_id(&conn, &x.tx_id.to_string())
+            .expect("query")
+            .expect("x displayed");
+        assert_eq!(x_displayed.status, TransactionDisplayStatus::Rejected);
+        assert_eq!(x_displayed.blockchain.block_height, 0);
+
+        // Y is processed as usual and its history shows it mined.
+        assert_eq!(
+            completed(&conn, y.tx_id).status,
+            db::CompletedTransactionStatus::MinedUnconfirmed
+        );
+        let y_displayed = db::get_displayed_transaction_by_id(&conn, &y.tx_id.to_string())
+            .expect("query")
+            .expect("y displayed");
+        assert_eq!(y_displayed.blockchain.block_height, 50);
+        assert_eq!(displayed_count(&conn, wallet.account_id), 2);
+    }
+
+    #[test]
+    fn a_monitor_rejected_send_is_left_alone_when_its_released_input_is_spent_elsewhere() {
+        // X's released input is spent by something outside this wallet's sends,
+        // and X's change is not in the block.
+        let wallet = test_wallet();
+        let conn = wallet.pool.get().expect("conn");
+        let x = record_send(&wallet, &conn, 1, &[1, 2], Some(3));
+        reject_as_the_monitor_does(&conn, &x);
+
+        let other_block = block(50, Vec::new(), vec![x.input_hashes[0]]);
+        let next_block = block(51, Vec::new(), Vec::new());
+        let mut processor = processor(&wallet, false);
+        process(&mut processor, &conn, wallet.account_id, &[other_block, next_block]);
+
+        assert_eq!(
+            completed(&conn, x.tx_id).status,
+            db::CompletedTransactionStatus::Rejected
+        );
+        let x_displayed = db::get_displayed_transaction_by_id(&conn, &x.tx_id.to_string())
+            .expect("query")
+            .expect("x displayed");
+        assert_eq!(x_displayed.status, TransactionDisplayStatus::Rejected);
+        assert_eq!(x_displayed.blockchain.block_height, 0);
+        // The spend gets its own history entry instead of being swallowed by X's.
+        assert_eq!(displayed_count(&conn, wallet.account_id), 2);
+        let events = processor.take_wallet_events();
+        assert!(!events.iter().any(|e| matches!(
+            e.event_type,
+            WalletEventType::TransactionUnconfirmed { .. } | WalletEventType::TransactionRejected { .. }
+        )));
     }
 }
