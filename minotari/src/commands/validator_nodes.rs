@@ -115,6 +115,36 @@ fn claim_reservation_for_broadcast(
     Ok(pending_tx_id)
 }
 
+/// Claims this command's reservation and records what it will broadcast, in
+/// one `IMMEDIATE` write transaction.
+///
+/// `record` writes the completed transaction (and its change) for the claimed
+/// request id. The claim and the record used to commit separately: if the
+/// record then failed, the reservation was `Completed` with no transaction to
+/// show for it, so nothing (not the unlocker, which only expires `PENDING`
+/// reservations, nor the monitor) would ever release its inputs. Now a failed
+/// record rolls the claim back and the reservation stays `PENDING`, to be
+/// expired and released as usual.
+///
+/// `new_unchecked` because only a shared connection is available here, and no
+/// transaction is open on it.
+fn claim_and_record<F>(
+    conn: &Connection,
+    account_id: i64,
+    idempotency_key: &str,
+    tx_kind: &str,
+    record: F,
+) -> Result<String, anyhow::Error>
+where
+    F: FnOnce(&rusqlite::Transaction<'_>, &str) -> Result<(), anyhow::Error>,
+{
+    let transaction = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+    let pending_tx_id = claim_reservation_for_broadcast(&transaction, account_id, idempotency_key, tx_kind)?;
+    record(&transaction, &pending_tx_id)?;
+    transaction.commit()?;
+    Ok(pending_tx_id)
+}
+
 /// Signs an unsigned VN transaction, saves it to the DB, and broadcasts it.
 ///
 /// This is the common post-processing step shared by all three VN commands.
@@ -149,31 +179,35 @@ async fn sign_save_and_broadcast(
         .map_err(|e| anyhow!("Failed to serialize transaction: {}", e))?;
     let sent_output_hash = signed_result.signed_transaction.sent_hashes.first().map(hex::encode);
 
-    let pending_tx_id = claim_reservation_for_broadcast(conn, account.id, idempotency_key, tx_kind)?;
     // The completed transaction and its change output go in together: the
-    // wallet's scan recognises the send by that change output. `new_unchecked`
-    // because only a shared connection is available here, and no transaction is
-    // open on it.
-    let transaction = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
-    db::create_completed_transaction(
-        &transaction,
+    // wallet's scan recognises the send by that change output.
+    claim_and_record(
+        conn,
         account.id,
-        &pending_tx_id,
-        &kernel_excess,
-        &serialized_tx,
-        sent_output_hash,
-        completed_tx_id,
+        idempotency_key,
+        tx_kind,
+        |transaction, pending_tx_id| {
+            db::create_completed_transaction(
+                transaction,
+                account.id,
+                pending_tx_id,
+                &kernel_excess,
+                &serialized_tx,
+                sent_output_hash,
+                completed_tx_id,
+            )?;
+            if let Some(change_output) = &signed_result.signed_transaction.change_output {
+                db::insert_unconfirmed_change_output(
+                    transaction,
+                    account.id,
+                    &key_manager.get_private_view_key(),
+                    pending_tx_id,
+                    change_output,
+                )?;
+            }
+            Ok(())
+        },
     )?;
-    if let Some(change_output) = &signed_result.signed_transaction.change_output {
-        db::insert_unconfirmed_change_output(
-            &transaction,
-            account.id,
-            &key_manager.get_private_view_key(),
-            &pending_tx_id,
-            change_output,
-        )?;
-    }
-    transaction.commit()?;
 
     // The transaction is recorded: from here on nothing is reported as an error.
     let response = client
@@ -492,5 +526,33 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("reservation exists")
+    }
+
+    /// A record that fails after the claim must not leave the reservation
+    /// claimed: it rolls back to `PENDING`, so its inputs are released when it
+    /// expires rather than stranded behind a `Completed` reservation with no
+    /// transaction.
+    #[test]
+    fn a_failed_record_leaves_the_reservation_pending() {
+        let (pool, account_id, _temp) = setup_reservation();
+
+        let conn = pool.get().expect("conn");
+        claim_and_record(&conn, account_id, KEY, "VN registration", |_, _| {
+            Err(anyhow!("the record failed"))
+        })
+        .expect_err("the record failed");
+        drop(conn);
+        assert_eq!(status_of(&pool), PendingTransactionStatus::Pending.to_string());
+
+        // And a record that succeeds commits with the claim.
+        let conn = pool.get().expect("conn");
+        let claimed = claim_and_record(&conn, account_id, KEY, "VN registration", |_, pending_tx_id| {
+            assert_eq!(pending_tx_id, pending_id(&pool));
+            Ok(())
+        })
+        .expect("claimed and recorded");
+        drop(conn);
+        assert_eq!(claimed, pending_id(&pool));
+        assert_eq!(status_of(&pool), PendingTransactionStatus::Completed.to_string());
     }
 }
