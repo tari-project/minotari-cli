@@ -572,6 +572,7 @@ async fn main() -> Result<(), anyhow::Error> {
             account,
             tx_id,
             force,
+            accept_unreconcilable,
         } => {
             let name = account.account_name.as_deref().unwrap_or("default");
             info!(target: "audit", account = name, tx_id = tx_id; "Abandoning send...");
@@ -587,6 +588,7 @@ async fn main() -> Result<(), anyhow::Error> {
                 name,
                 tx_id,
                 force,
+                accept_unreconcilable,
                 webhook_trigger_config,
             )
         },

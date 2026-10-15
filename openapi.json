@@ -419,7 +419,7 @@
           "accounts"
         ],
         "summary": "Abandons a send the base node has not accepted, releasing its inputs.",
-        "description": "Only a send that is `completed` or `broadcast` (not mined) can be abandoned.\nUnless `force` is set it must also be stalled: the node has not accepted it\n10 times in a row. A send any of whose inputs is already spent on chain\ncannot be abandoned; the wallet's scan settles it.\n\nThe send is marked `rejected` (\"abandoned by user\"), its inputs released,\nits change output kept as rejected, its displayed transaction rejected and a\n`TransactionRejected` event recorded.\n\n**This does not unsend it.** If a node still holds the transaction it can\nstill be mined; the wallet's scan then marks it mined after all, and a send\nmade with the released funds in the meantime fails.\n\n# Errors\n\n- `404 Not Found`: account or send does not exist\n- `409 Conflict`: the send is mined or rejected already, is not stalled\n  (and `force` is not set), an input is already spent on chain, or its\n  change output is an input of another send\n- `500`: database error",
+        "description": "Only a send that is `completed` or `broadcast` (not mined) can be abandoned.\nUnless `force` is set it must also be stalled: the node has not accepted it\n10 times in a row. A send any of whose inputs is already spent on chain, or\nwhose change output has already been seen on chain, cannot be abandoned;\nthe wallet's scan settles it.\n\nA send without a change output is refused unless `accept_unreconcilable` is\nset: the wallet recognises a send mined after all by its change output, so\nsuch a send, if mined, stays `rejected` in the wallet.\n\nThe send is marked `rejected` (\"abandoned by user\"), its inputs released,\nits change output kept as rejected, its displayed transaction rejected and a\n`TransactionRejected` event recorded.\n\n**This does not unsend it.** If a node still holds the transaction it can\nstill be mined; the wallet's scan then marks it mined after all (if it has a\nchange output), and a send made with the released funds in the meantime\nfails.\n\n# Errors\n\n- `404 Not Found`: account or send does not exist\n- `409 Conflict`: the send is mined or rejected already, is not stalled\n  (and `force` is not set), an input is already spent on chain, its change\n  output is already seen on chain (the send appears to have landed; wait\n  for the scan), its change output is an input of another send, or it has\n  no change output (and `accept_unreconcilable` is not set)\n- `500`: database error",
         "operationId": "api_abandon_send",
         "parameters": [
           {
@@ -1038,6 +1038,10 @@
         "type": "object",
         "description": "Request body for abandoning a send.",
         "properties": {
+          "accept_unreconcilable": {
+            "type": "boolean",
+            "description": "Abandon the send even though it has no change output. The wallet\nrecognises an abandoned send that is mined after all by its change\noutput; without one, if it is mined, it stays `rejected` in the wallet\nwhile its inputs show as spent. Defaults to `false`."
+          },
           "force": {
             "type": "boolean",
             "description": "Abandon the send even though it is not stalled yet (the node has not\nrefused it 10 times in a row). Defaults to `false`."
@@ -1055,7 +1059,7 @@
         "properties": {
           "note": {
             "type": "string",
-            "description": "What abandoning means for the user."
+            "description": "What abandoning means for the user. It differs for a send without a\nchange output (abandoned with `accept_unreconcilable`)."
           },
           "status": {
             "type": "string",

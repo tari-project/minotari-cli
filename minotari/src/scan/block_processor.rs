@@ -2727,7 +2727,8 @@ mod tests {
         let mut conn = wallet.pool.get().expect("conn");
         let x = record_send(&wallet, &conn, 1, &[1, 2], Some(3));
         let (original_change_id, ..) = change_row(&conn, &x);
-        crate::transactions::abandon::abandon_send(&mut conn, wallet.account_id, x.tx_id, true, None).expect("abandon");
+        crate::transactions::abandon::abandon_send(&mut conn, wallet.account_id, x.tx_id, true, false, None)
+            .expect("abandon");
         assert_eq!(
             completed(&conn, x.tx_id).status,
             db::CompletedTransactionStatus::Rejected
@@ -2797,7 +2798,8 @@ mod tests {
         );
 
         // X cannot be abandoned while C is Y's input.
-        let refused = crate::transactions::abandon::abandon_send(&mut conn, wallet.account_id, x.tx_id, true, None);
+        let refused =
+            crate::transactions::abandon::abandon_send(&mut conn, wallet.account_id, x.tx_id, true, false, None);
         assert!(
             matches!(
                 &refused,
@@ -2811,12 +2813,12 @@ mod tests {
         );
 
         // Abandoning Y releases C.
-        crate::transactions::abandon::abandon_send(&mut conn, wallet.account_id, y.tx_id, true, None)
+        crate::transactions::abandon::abandon_send(&mut conn, wallet.account_id, y.tx_id, true, false, None)
             .expect("abandon Y");
         assert_eq!(lock_of_c(&conn), ("UNCONFIRMED".to_string(), None));
 
         // Now X can be abandoned, and when it is mined after all C is spendable.
-        crate::transactions::abandon::abandon_send(&mut conn, wallet.account_id, x.tx_id, true, None)
+        crate::transactions::abandon::abandon_send(&mut conn, wallet.account_id, x.tx_id, true, false, None)
             .expect("abandon X");
         let mut again = processor(&wallet, false);
         let remined = block(51, vec![x.change.clone().unwrap()], x.input_hashes.clone());

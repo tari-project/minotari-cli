@@ -7,7 +7,9 @@
 //!
 //! Abandoning does not unsend anything. If a node still holds the signed
 //! transaction it can still be mined; the wallet's scan then finds its change
-//! output and marks it mined (`MinedUnconfirmed`) after all.
+//! output and marks it mined (`MinedUnconfirmed`) after all. A send without a
+//! change output cannot be recognised that way, so it is only abandoned when
+//! the caller accepts that (`accept_unreconcilable`).
 
 use log::warn;
 use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
@@ -17,13 +19,24 @@ use thiserror::Error;
 
 use crate::{
     db::{self, CompletedTransactionStatus, WalletDbError},
-    models::{WalletEvent, WalletEventType},
+    models::{OutputStatus, WalletEvent, WalletEventType},
     transactions::{DisplayedTransaction, monitor::MAX_BROADCAST_ATTEMPTS},
     webhooks::{WebhookTriggerConfig, utils::trigger_webhook_with_balance},
 };
 
 /// The rejection reason recorded for an abandoned send.
 pub const ABANDONED_REASON: &str = "abandoned by user";
+
+/// What abandoning a send with a change output does not do.
+pub const ABANDON_NOTE: &str = "The send is abandoned and its inputs are released. If a node still holds the \
+     transaction it can still be mined: the wallet will then show it as mined, and a send made with the released \
+     funds in the meantime will fail.";
+
+/// What abandoning a send without a change output does not do.
+pub const UNRECONCILABLE_ABANDON_NOTE: &str = "The send is abandoned and its inputs are released. WARNING: it has \
+     no change output, so if a node still holds the transaction and it is mined, the wallet will NOT show it as \
+     mined: it stays rejected while its inputs show as spent, and a send made with the released funds in the \
+     meantime will fail.";
 
 /// Why a send cannot be abandoned.
 #[derive(Debug, Error)]
@@ -41,6 +54,16 @@ pub enum AbandonSendError {
     InputSpent { tx_id: TxId },
     #[error("The change of send {tx_id} is an input of another send ({by}); abandon or settle that send first")]
     ChangeInUse { tx_id: TxId, by: String },
+    #[error(
+        "The change of send {tx_id} has already been seen on chain: the send appears to have landed; \
+         wait for the wallet's scan to settle it"
+    )]
+    ChangeAlreadyMined { tx_id: TxId },
+    #[error(
+        "Send {tx_id} has no change output, so the wallet could not recognise it if it is mined after all; \
+         refusing. Pass accept_unreconcilable to abandon it anyway"
+    )]
+    NoChangeOutput { tx_id: TxId },
     #[error(transparent)]
     Db(#[from] WalletDbError),
 }
@@ -58,6 +81,21 @@ pub struct AbandonedSend {
     pub event: WalletEvent,
     /// The send's displayed transaction, now rejected, if it has one.
     pub displayed_transaction: Option<DisplayedTransaction>,
+    /// Whether the send has a change output, by which the scan recognises it
+    /// if it is mined after all.
+    pub reconcilable: bool,
+}
+
+impl AbandonedSend {
+    /// What abandoning this send does not do: [`ABANDON_NOTE`], or
+    /// [`UNRECONCILABLE_ABANDON_NOTE`] for a send without a change output.
+    pub fn note(&self) -> &'static str {
+        if self.reconcilable {
+            ABANDON_NOTE
+        } else {
+            UNRECONCILABLE_ABANDON_NOTE
+        }
+    }
 }
 
 /// Gives up a send the node has not accepted, and hands its inputs back.
@@ -66,7 +104,13 @@ pub struct AbandonedSend {
 /// `force` is set it must also be stalled: the node has not accepted it
 /// [`MAX_BROADCAST_ATTEMPTS`] times in a row. A send any of whose inputs has
 /// already been seen spent on chain is refused: the scan settles it. So is a
-/// send whose change output is an input of another send.
+/// send whose change output is an input of another send, and one whose change
+/// output has already been seen on chain (the send appears to have landed).
+///
+/// The scan recognises an abandoned send that is mined after all by its change
+/// output. A send without one is refused ([`AbandonSendError::NoChangeOutput`])
+/// unless `accept_unreconcilable` is set: if it is mined after all, it stays
+/// rejected in the wallet.
 ///
 /// In one write transaction: the send is marked `Rejected` ("abandoned by
 /// user"), its change output `REJECTED` (kept, so the scan can still recognise
@@ -75,13 +119,14 @@ pub struct AbandonedSend {
 /// persisted (with its webhook when `webhook_config` is given).
 ///
 /// The original transaction can still be mined if a node holds it; the scan
-/// then marks it `MinedUnconfirmed`. A released input spent again in the
-/// meantime then loses to it.
+/// then marks it `MinedUnconfirmed` (when it has a change output). A released
+/// input spent again in the meantime then loses to it.
 pub fn abandon_send(
     conn: &mut Connection,
     account_id: i64,
     tx_id: TxId,
     force: bool,
+    accept_unreconcilable: bool,
     webhook_config: Option<&WebhookTriggerConfig>,
 ) -> Result<AbandonedSend, AbandonSendError> {
     let db_tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -128,24 +173,41 @@ pub fn abandon_send(
         return Err(AbandonSendError::InputSpent { tx_id });
     }
 
-    // Its change may be an input of a later send (a reorg made it unconfirmed
-    // again). Rejecting it would strand that send, and its lock with it.
-    let change_lock: Option<Option<String>> = db_tx
+    // The scan recognises the send by its change output if it is mined after
+    // all; it must still be unconfirmed (no real mined data), or the send has
+    // landed already.
+    let change: Option<(String, i64, Option<String>)> = db_tx
         .query_row(
-            "SELECT locked_by_request_id FROM outputs WHERE created_by_request_id = :req AND deleted_at IS NULL",
+            r#"
+            SELECT status, mined_in_block_height, locked_by_request_id
+            FROM outputs WHERE created_by_request_id = :req AND deleted_at IS NULL
+            "#,
             rusqlite::named_params! { ":req": send.pending_tx_id },
-            |row| row.get(0),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .optional()?;
-    if let Some(Some(by)) = change_lock
-        && by != send.pending_tx_id
-    {
-        return Err(AbandonSendError::ChangeInUse { tx_id, by });
+    let reconcilable = change.is_some();
+    match change {
+        None if !accept_unreconcilable => return Err(AbandonSendError::NoChangeOutput { tx_id }),
+        None => {},
+        Some((status, mined_height, change_lock)) => {
+            if status != OutputStatus::Unconfirmed.to_string() || mined_height != 0 {
+                return Err(AbandonSendError::ChangeAlreadyMined { tx_id });
+            }
+            // It may be an input of a later send (a reorg made it unconfirmed
+            // again). Rejecting it would strand that send, and its lock with it.
+            if let Some(by) = change_lock
+                && by != send.pending_tx_id
+            {
+                return Err(AbandonSendError::ChangeInUse { tx_id, by });
+            }
+        },
     }
 
     warn!(
         target: "audit",
-        id = tx_id.to_string().as_str();
+        id = tx_id.to_string().as_str(),
+        reconcilable = reconcilable;
         "Send abandoned by user; its inputs are released"
     );
     db::mark_completed_transaction_as_rejected(&db_tx, tx_id, ABANDONED_REASON)?;
@@ -185,6 +247,7 @@ pub fn abandon_send(
     Ok(AbandonedSend {
         event,
         displayed_transaction,
+        reconcilable,
     })
 }
 
@@ -361,8 +424,39 @@ mod tests {
             send.account_id,
             send.tx_id,
             force,
+            false,
             None,
         )
+    }
+
+    fn abandon_unreconcilable(send: &Send) -> Result<AbandonedSend, AbandonSendError> {
+        abandon_send(
+            &mut send.pool.get().expect("conn"),
+            send.account_id,
+            send.tx_id,
+            true,
+            true,
+            None,
+        )
+    }
+
+    fn input_row(send: &Send) -> (String, Option<String>) {
+        let conn = send.pool.get().expect("conn");
+        conn.query_row(
+            "SELECT status, locked_by_request_id FROM outputs WHERE id = :id",
+            named_params! { ":id": send.input_id },
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("input")
+    }
+
+    fn remove_change(send: &Send) {
+        let conn = send.pool.get().expect("conn");
+        conn.execute(
+            "DELETE FROM outputs WHERE created_by_request_id = :req",
+            named_params! { ":req": send.request_id },
+        )
+        .expect("delete change");
     }
 
     fn status_of(send: &Send) -> CompletedTransactionStatus {
@@ -473,9 +567,73 @@ mod tests {
                 send.account_id + 1,
                 send.tx_id,
                 true,
+                false,
                 None
             ),
             Err(AbandonSendError::NotFound(_))
         ));
+    }
+
+    #[test]
+    fn a_send_whose_change_is_already_mined_cannot_be_abandoned() {
+        // The scan saw the change in a block: the send landed.
+        let send = send_with_attempts(MAX_BROADCAST_ATTEMPTS);
+        {
+            let conn = send.pool.get().expect("conn");
+            conn.execute(
+                "UPDATE outputs SET status = 'UNSPENT', mined_in_block_height = 50 WHERE created_by_request_id = :req",
+                named_params! { ":req": send.request_id },
+            )
+            .expect("mine change");
+        }
+        assert!(matches!(
+            abandon(&send, true),
+            Err(AbandonSendError::ChangeAlreadyMined { .. })
+        ));
+        assert_eq!(status_of(&send), CompletedTransactionStatus::Broadcast);
+        assert_eq!(input_row(&send).0, "LOCKED");
+
+        // Still flagged unconfirmed but with real mined data: refused too.
+        let send = send_with_attempts(MAX_BROADCAST_ATTEMPTS);
+        {
+            let conn = send.pool.get().expect("conn");
+            conn.execute(
+                "UPDATE outputs SET mined_in_block_height = 50 WHERE created_by_request_id = :req",
+                named_params! { ":req": send.request_id },
+            )
+            .expect("mined height");
+        }
+        assert!(matches!(
+            abandon(&send, true),
+            Err(AbandonSendError::ChangeAlreadyMined { .. })
+        ));
+        assert_eq!(status_of(&send), CompletedTransactionStatus::Broadcast);
+    }
+
+    #[test]
+    fn a_send_without_change_is_refused_unless_accepted_as_unreconcilable() {
+        let send = send_with_attempts(MAX_BROADCAST_ATTEMPTS);
+        remove_change(&send);
+
+        assert!(matches!(
+            abandon(&send, true),
+            Err(AbandonSendError::NoChangeOutput { .. })
+        ));
+        assert_eq!(status_of(&send), CompletedTransactionStatus::Broadcast);
+        assert_eq!(input_row(&send).0, "LOCKED");
+
+        let abandoned = abandon_unreconcilable(&send).expect("abandon, accepting it is unreconcilable");
+        assert!(!abandoned.reconcilable);
+        assert_eq!(abandoned.note(), UNRECONCILABLE_ABANDON_NOTE);
+        assert_eq!(status_of(&send), CompletedTransactionStatus::Rejected);
+        assert_eq!(input_row(&send), ("UNSPENT".to_string(), None));
+    }
+
+    #[test]
+    fn a_send_with_change_gets_the_reconcilable_note() {
+        let send = send_with_attempts(MAX_BROADCAST_ATTEMPTS);
+        let abandoned = abandon_unreconcilable(&send).expect("the flag does not matter when there is change");
+        assert!(abandoned.reconcilable);
+        assert_eq!(abandoned.note(), ABANDON_NOTE);
     }
 }
