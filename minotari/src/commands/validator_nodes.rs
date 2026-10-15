@@ -127,7 +127,7 @@ async fn sign_save_and_broadcast(
     password: &str,
     network: Network,
     idempotency_key: &str,
-    base_url: &str,
+    client: &WalletHttpClient,
     tx_kind: &str,
 ) -> Result<(), anyhow::Error> {
     let key_manager = account.get_key_manager(password)?;
@@ -175,17 +175,20 @@ async fn sign_save_and_broadcast(
     }
     transaction.commit()?;
 
-    let client = WalletHttpClient::new(base_url.parse()?)?;
+    // The transaction is recorded: from here on nothing is reported as an error.
     let response = client
         .submit_transaction(signed_result.signed_transaction.transaction)
         .await;
 
     // The transaction is recorded: whatever the node says, it is seen through
     // (the monitor rebroadcasts it), so this succeeds either way.
-    let first_broadcast = record_first_broadcast(conn, completed_tx_id, response)?;
+    let first_broadcast = record_first_broadcast(Some(conn), completed_tx_id, response);
     if first_broadcast.accepted_by_node {
         info!(target: "audit", tx_id = completed_tx_id.to_string().as_str(); "{} broadcasted", tx_kind);
         println!("{} transaction broadcasted. tx_id={}", tx_kind, completed_tx_id);
+        if let Some(note) = first_broadcast.note() {
+            println!("{note}");
+        }
     } else {
         println!(
             "{} transaction recorded, pending. tx_id={}\nNode said: {}\n{}",
@@ -232,6 +235,8 @@ where
     ) -> Result<PrepareOneSidedTransactionForSigningResult, anyhow::Error>,
 {
     let idempotency_key = idempotency_key.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    // Checked before anything is locked or recorded.
+    let client = WalletHttpClient::new(base_url.parse()?)?;
     let pool = init_db(database_file)?;
     // One connection for the command: the VN transaction is built on it and the result is
     // then saved and broadcast with it, so nothing is held idle while `lock` waits.
@@ -256,7 +261,7 @@ where
         password,
         network,
         &idempotency_key,
-        base_url,
+        &client,
         tx_kind,
     )
     .await

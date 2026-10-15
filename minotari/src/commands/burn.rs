@@ -50,6 +50,8 @@ pub async fn handle_burn_funds(
         .map_err(|e| anyhow!("Invalid sidechain-deployment-key: {}", e))?;
 
     let idempotency_key = idempotency_key.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    // Checked before anything is locked or recorded.
+    let client = WalletHttpClient::new(base_url.parse()?)?;
 
     let pool = init_db(database_file)?;
     let mut conn = pool.get()?;
@@ -87,13 +89,10 @@ pub async fn handle_burn_funds(
         ..
     } = result;
 
-    // Broadcast.
-    let client = WalletHttpClient::new(base_url.parse()?)?;
+    // Broadcast. The burn is recorded: whatever the node says, it is seen
+    // through (the monitor rebroadcasts it), so from here on this succeeds.
     let response = client.submit_transaction(transaction).await;
-
-    // The burn is recorded: whatever the node says, it is seen through (the
-    // monitor rebroadcasts it), so this succeeds either way.
-    let first_broadcast = record_first_broadcast(&conn, tx_id, response)?;
+    let first_broadcast = record_first_broadcast(Some(&*conn), tx_id, response);
     if first_broadcast.accepted_by_node {
         info!(
             target: "audit",
@@ -106,6 +105,9 @@ pub async fn handle_burn_funds(
             tx_id,
             hex::encode(output_hash)
         );
+        if let Some(note) = first_broadcast.note() {
+            println!("{note}");
+        }
     } else {
         println!(
             "Burn transaction recorded, pending. tx_id={}, output_hash={}\nNode said: {}\n{}",

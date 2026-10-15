@@ -4,7 +4,7 @@ use axum::{
     Json,
     extract::{Path, State},
 };
-use log::info;
+use log::{info, warn};
 use serde::{Deserialize, Serialize};
 use tari_common_types::transaction::TxId;
 use tari_transaction_components::{tari_amount::MicroMinotari, transaction_components::Transaction};
@@ -111,30 +111,46 @@ impl BurnFundsResponse {
 
 /// Broadcasts a recorded burn for the first time and records the node's answer.
 ///
-/// Returns what the node said. Whatever it said, the burn is recorded and
-/// the transaction monitor rebroadcasts it if needed, so this only fails on a
-/// database error.
+/// Returns what the node said. This never fails: the burn is recorded and the
+/// transaction monitor rebroadcasts it if needed, and an error would invite the
+/// caller to burn again. A database failure here is logged and reported as
+/// `local_record_lagging` (see [`record_first_broadcast`]).
 async fn broadcast_recorded_burn(
     pool: SqlitePool,
-    base_node_url: &str,
+    client: &WalletHttpClient,
     transaction: Transaction,
     tx_id: TxId,
-) -> Result<FirstBroadcast, ApiError> {
-    let client = WalletHttpClient::new(
-        base_node_url
-            .parse()
-            .map_err(|e| ApiError::InternalServerError(format!("Invalid base node URL: {}", e)))?,
-    )
-    .map_err(|e| ApiError::InternalServerError(e.to_string()))?;
-
+) -> FirstBroadcast {
     let response = client.submit_transaction(transaction).await;
 
-    tokio::task::spawn_blocking(move || {
-        let conn = pool.get().map_err(|e| ApiError::DbError(e.to_string()))?;
-        record_first_broadcast(&conn, tx_id, response).map_err(|e| ApiError::DbError(e.to_string()))
+    let recorded = tokio::task::spawn_blocking(move || match pool.get() {
+        Ok(conn) => record_first_broadcast(Some(&*conn), tx_id, response),
+        Err(e) => {
+            warn!(target: "audit", error:% = e; "No database connection after a burn was recorded");
+            record_first_broadcast(None, tx_id, response)
+        },
     })
-    .await
-    .map_err(|e| ApiError::InternalServerError(format!("Task join error: {}", e)))?
+    .await;
+    match recorded {
+        Ok(first_broadcast) => first_broadcast,
+        Err(e) => {
+            warn!(target: "audit", error:% = e; "Recording a burn's first broadcast failed; the monitor will catch up");
+            FirstBroadcast {
+                accepted_by_node: false,
+                node_reason: None,
+                local_record_lagging: true,
+            }
+        },
+    }
+}
+
+/// Builds the client for the base node, before anything is recorded: once the
+/// burn is recorded no failure may be reported as an error.
+fn base_node_client(base_node_url: &str) -> Result<WalletHttpClient, ApiError> {
+    let url = base_node_url
+        .parse()
+        .map_err(|e| ApiError::InternalServerError(format!("Invalid base node URL: {}", e)))?;
+    WalletHttpClient::new(url).map_err(|e| ApiError::InternalServerError(e.to_string()))
 }
 
 /// Burns funds from an account and records a partial burn proof for L2 claiming.
@@ -211,6 +227,8 @@ pub async fn api_burn_funds(
     let network = app_state.network;
     let password = app_state.password.clone();
     let fee_per_gram = body.fee_per_gram.unwrap_or(DEFAULT_FEE_PER_GRAM);
+    // Checked before anything is locked or recorded.
+    let client = base_node_client(&app_state.base_node_url)?;
     let seconds_to_lock = body.seconds_to_lock.unwrap_or(DEFAULT_SECONDS_TO_LOCK_UTXOS);
     // Reject an out-of-range duration as a client error before doing any work.
     validate_seconds_to_lock(seconds_to_lock)?;
@@ -271,13 +289,7 @@ pub async fn api_burn_funds(
     .await
     .map_err(|e| ApiError::InternalServerError(format!("Task join error: {}", e)))??;
 
-    let first_broadcast = broadcast_recorded_burn(
-        app_state.db_pool.clone(),
-        &app_state.base_node_url,
-        result.transaction,
-        tx_id,
-    )
-    .await?;
+    let first_broadcast = broadcast_recorded_burn(app_state.db_pool.clone(), &client, result.transaction, tx_id).await;
 
     info!(
         target: "audit",
@@ -396,9 +408,8 @@ mod tests {
         let burn = recorded_burn();
         let server = node_answering(false, "DoubleSpend").await;
 
-        let first = broadcast_recorded_burn(burn.pool.clone(), &server.uri(), empty_transaction(), burn.tx_id)
-            .await
-            .expect("a refusal is not an error");
+        let client = base_node_client(&server.uri()).expect("client");
+        let first = broadcast_recorded_burn(burn.pool.clone(), &client, empty_transaction(), burn.tx_id).await;
         assert!(!first.accepted_by_node);
 
         let response = BurnFundsResponse::new(burn.tx_id.to_string(), "00".to_string(), first);
@@ -430,9 +441,8 @@ mod tests {
         let burn = recorded_burn();
         let server = node_answering(true, "None").await;
 
-        let first = broadcast_recorded_burn(burn.pool.clone(), &server.uri(), empty_transaction(), burn.tx_id)
-            .await
-            .expect("broadcast");
+        let client = base_node_client(&server.uri()).expect("client");
+        let first = broadcast_recorded_burn(burn.pool.clone(), &client, empty_transaction(), burn.tx_id).await;
         assert!(first.accepted_by_node);
 
         let body = serde_json::to_value(BurnFundsResponse::new(burn.tx_id.to_string(), "00".to_string(), first))
@@ -446,5 +456,39 @@ mod tests {
             .expect("query")
             .expect("completed");
         assert_eq!(completed.status, crate::db::CompletedTransactionStatus::Broadcast);
+    }
+
+    #[tokio::test]
+    async fn a_database_failure_after_the_burn_is_recorded_is_still_a_success() {
+        let burn = recorded_burn();
+        burn.pool
+            .get()
+            .expect("conn")
+            .execute_batch(
+                "CREATE TRIGGER no_status BEFORE UPDATE ON completed_transactions \
+                 BEGIN SELECT RAISE(ABORT, 'disk full'); END;",
+            )
+            .expect("trigger");
+        let server = node_answering(true, "None").await;
+        let client = base_node_client(&server.uri()).expect("client");
+
+        let first = broadcast_recorded_burn(burn.pool.clone(), &client, empty_transaction(), burn.tx_id).await;
+        assert!(first.accepted_by_node);
+        assert!(first.local_record_lagging);
+
+        let body = serde_json::to_value(BurnFundsResponse::new(burn.tx_id.to_string(), "00".to_string(), first))
+            .expect("json");
+        assert_eq!(body["accepted_by_node"], true);
+        let note = body["note"].as_str().expect("a note that the record lags");
+        assert!(note.contains("Do not send it again"), "got: {note}");
+    }
+
+    #[test]
+    fn a_bad_node_url_is_refused_before_anything_is_recorded() {
+        // The handler builds this client before creating or recording the burn.
+        assert!(matches!(
+            base_node_client("not a url"),
+            Err(ApiError::InternalServerError(_))
+        ));
     }
 }

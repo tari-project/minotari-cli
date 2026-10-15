@@ -755,6 +755,17 @@ impl TransactionSender {
             .first()
             .map(hex::encode);
 
+        // The node's address is checked before anything is recorded: once the
+        // send is recorded, no failure may be reported as an error (see below).
+        let wallet_http_client = grpc_address
+            .parse()
+            .map_err(|e| anyhow!("Invalid base node URL: {}", e))
+            .and_then(WalletHttpClient::new)
+            .inspect_err(|e| {
+                warn!(target: "audit", error:% = e; "Transaction finalization preparation failed");
+                self.release_unclaimed_reservation(&connection, processed_transaction);
+            })?;
+
         self.claim_for_broadcast(&connection, processed_transaction)
             .inspect_err(|e| {
                 warn!(target: "audit", error:% = e; "Transaction finalization preparation failed");
@@ -796,19 +807,28 @@ impl TransactionSender {
             self.fail_and_unlock_pending_transaction(&connection, processed_transaction.id());
         })?;
 
-        let wallet_http_client = WalletHttpClient::new(grpc_address.parse()?)?;
+        // From here on the send is recorded: it is seen through whatever happens
+        // (the monitor rebroadcasts it, the scan settles it), so nothing below is
+        // reported as an error; that would invite the caller to pay twice.
         let response = wallet_http_client
             .submit_transaction(signed_transaction_result.signed_transaction.transaction)
             .await;
 
-        // Whatever the node said, the send is recorded and will be rebroadcast.
-        let first_broadcast = record_first_broadcast(&connection, completed_tx_id, response)?;
+        let mut first_broadcast = record_first_broadcast(Some(&connection), completed_tx_id, response);
 
         // Build and save DisplayedTransaction for immediate UI display
         let displayed_transaction =
             self.build_pending_displayed_transaction(processed_transaction, &signed_transaction, actual_fee)?;
 
-        db::insert_displayed_transaction(&connection, &displayed_transaction)?;
+        if let Err(e) = db::insert_displayed_transaction(&connection, &displayed_transaction) {
+            warn!(
+                target: "audit",
+                id = completed_tx_id.to_string().as_str(),
+                error:% = e;
+                "Could not save the displayed transaction for a recorded send; the scan will add it"
+            );
+            first_broadcast.local_record_lagging = true;
+        }
 
         Ok(FinalizedSend::new(displayed_transaction, first_broadcast))
     }
@@ -1013,15 +1033,19 @@ impl TransactionSender {
 /// The node's answer (sanitised) is kept as the send's `last_broadcast_error`
 /// until a broadcast is accepted.
 ///
-/// Returns whether the node took it (accepted, or already mined), and its
-/// answer when it did not. When it did not, callers report success with
-/// [`NOT_YET_ACCEPTED_NOTE`]: the send must not be made again.
+/// This never fails: it runs once the send is recorded, and an error would
+/// invite the caller to send again. A database failure (or no `connection` at
+/// all) is logged and reported as `local_record_lagging`: the monitor and the
+/// scan bring the record up to date.
+///
+/// Returns whether the node took it (accepted, or already mined), its answer
+/// when it did not, and the note for the user (see [`FirstBroadcast::note`]).
 pub fn record_first_broadcast(
-    connection: &Connection,
+    connection: Option<&Connection>,
     completed_tx_id: TxId,
     response: Result<TxSubmissionResponse, anyhow::Error>,
-) -> Result<FirstBroadcast, anyhow::Error> {
-    match response {
+) -> FirstBroadcast {
+    let (mut first_broadcast, recorded) = match response {
         Ok(submission) if submission.accepted => {
             info!(
                 target: "audit",
@@ -1029,8 +1053,9 @@ pub fn record_first_broadcast(
                 "Transaction accepted by network"
             );
             // An accepted broadcast does not count towards the stall limit.
-            db::mark_completed_transaction_as_broadcasted(connection, completed_tx_id, 0)?;
-            Ok(FirstBroadcast::accepted())
+            let recorded =
+                connection.map(|conn| db::mark_completed_transaction_as_broadcasted(conn, completed_tx_id, 0));
+            (FirstBroadcast::accepted(), recorded)
         },
         Ok(submission) if submission.rejection_reason == TxSubmissionRejectionReason::AlreadyMined => {
             info!(
@@ -1038,7 +1063,7 @@ pub fn record_first_broadcast(
                 id = completed_tx_id.to_string().as_str();
                 "Transaction already mined by network"
             );
-            Ok(FirstBroadcast::accepted())
+            (FirstBroadcast::accepted(), Some(Ok(())))
         },
         Ok(submission) => {
             let reason =
@@ -1049,8 +1074,9 @@ pub fn record_first_broadcast(
                 reason:% = reason;
                 "Transaction not accepted by the network yet; it is recorded and will be rebroadcast"
             );
-            db::record_failed_broadcast_attempt(connection, completed_tx_id, 1, &reason)?;
-            Ok(FirstBroadcast::not_accepted(reason))
+            let recorded =
+                connection.map(|conn| db::record_failed_broadcast_attempt(conn, completed_tx_id, 1, &reason));
+            (FirstBroadcast::not_accepted(reason), recorded)
         },
         Err(e) => {
             // The error can carry text from the node; it is logged and kept.
@@ -1061,10 +1087,33 @@ pub fn record_first_broadcast(
                 reason:% = reason;
                 "Transaction submission failed; it is recorded and will be rebroadcast"
             );
-            db::record_last_broadcast_error(connection, completed_tx_id, &reason)?;
-            Ok(FirstBroadcast::not_accepted(reason))
+            let recorded = connection.map(|conn| db::record_last_broadcast_error(conn, completed_tx_id, &reason));
+            (FirstBroadcast::not_accepted(reason), recorded)
+        },
+    };
+
+    match recorded {
+        Some(Ok(())) => {},
+        Some(Err(e)) => {
+            warn!(
+                target: "audit",
+                id = completed_tx_id.to_string().as_str(),
+                error:% = e;
+                "Could not record the node's answer for a recorded send; the monitor and scan will catch up"
+            );
+            first_broadcast.local_record_lagging = true;
+        },
+        None => {
+            warn!(
+                target: "audit",
+                id = completed_tx_id.to_string().as_str();
+                "No database connection to record the node's answer for a recorded send; the monitor and scan will \
+                 catch up"
+            );
+            first_broadcast.local_record_lagging = true;
         },
     }
+    first_broadcast
 }
 
 /// What a send's first broadcast found, from [`record_first_broadcast`].
@@ -1074,6 +1123,10 @@ pub struct FirstBroadcast {
     pub accepted_by_node: bool,
     /// The node's answer (sanitised) when it did not take it.
     pub node_reason: Option<String>,
+    /// The wallet could not record all of it locally (a database failure after
+    /// the send was recorded). The send itself is recorded; its status catches
+    /// up through the monitor and the scan.
+    pub local_record_lagging: bool,
 }
 
 impl FirstBroadcast {
@@ -1081,6 +1134,7 @@ impl FirstBroadcast {
         Self {
             accepted_by_node: true,
             node_reason: None,
+            local_record_lagging: false,
         }
     }
 
@@ -1088,16 +1142,20 @@ impl FirstBroadcast {
         Self {
             accepted_by_node: false,
             node_reason: Some(reason),
+            local_record_lagging: false,
         }
     }
 
     /// What to tell the user: [`NOT_YET_ACCEPTED_NOTE`] when the node did not
-    /// take the send, nothing otherwise.
+    /// take the send, [`RECORD_LAGGING_NOTE`] when it did but the wallet could
+    /// not record everything, nothing otherwise.
     pub fn note(&self) -> Option<String> {
-        if self.accepted_by_node {
-            None
-        } else {
+        if !self.accepted_by_node {
             Some(NOT_YET_ACCEPTED_NOTE.to_string())
+        } else if self.local_record_lagging {
+            Some(RECORD_LAGGING_NOTE.to_string())
+        } else {
+            None
         }
     }
 }
@@ -1129,6 +1187,11 @@ impl FinalizedSend {
         }
     }
 }
+
+/// What to tell the caller when the node took a recorded send but the wallet
+/// could not record all of it yet.
+pub const RECORD_LAGGING_NOTE: &str = "The node accepted the transaction. The wallet could not update its local \
+     record yet; it will catch up. Do not send it again.";
 
 /// What to tell the caller when the node did not take a recorded send.
 pub const NOT_YET_ACCEPTED_NOTE: &str = "The transaction is recorded but the node has not accepted it yet. \
@@ -2006,7 +2069,7 @@ mod tests {
             let send = recorded_send();
             {
                 let conn = send.pool.get().expect("conn");
-                record_first_broadcast(&conn, send.tx_id, Ok(not_accepted(reason.clone()))).expect("record");
+                record_first_broadcast(Some(&*conn), send.tx_id, Ok(not_accepted(reason.clone())));
             }
             let (status, attempts, input_status, lock, change_kept) = send_state(&send);
             assert_eq!(status, "completed", "{reason}");
@@ -2022,8 +2085,11 @@ mod tests {
         let send = recorded_send();
         {
             let conn = send.pool.get().expect("conn");
-            record_first_broadcast(&conn, send.tx_id, Err(anyhow!("Broadcast failed: connection refused")))
-                .expect("record");
+            record_first_broadcast(
+                Some(&*conn),
+                send.tx_id,
+                Err(anyhow!("Broadcast failed: connection refused")),
+            );
         }
         let (status, attempts, input_status, lock, change_kept) = send_state(&send);
         assert_eq!(status, "completed");
@@ -2044,7 +2110,7 @@ mod tests {
                 is_synced: true,
                 details: None,
             };
-            record_first_broadcast(&conn, send.tx_id, Ok(accepted)).expect("record");
+            record_first_broadcast(Some(&*conn), send.tx_id, Ok(accepted));
         }
         let (status, attempts, ..) = send_state(&send);
         assert_eq!(status, "broadcast");
@@ -2089,11 +2155,10 @@ mod tests {
         let accepted = {
             let conn = send.pool.get().expect("conn");
             record_first_broadcast(
-                &conn,
+                Some(&*conn),
                 send.tx_id,
                 Ok(not_accepted(TxSubmissionRejectionReason::DoubleSpend)),
             )
-            .expect("record")
         };
         let sent = FinalizedSend::new(pending_displayed(send.tx_id), accepted);
         assert!(!sent.accepted_by_node);
@@ -2123,11 +2188,107 @@ mod tests {
                 is_synced: true,
                 details: None,
             };
-            record_first_broadcast(&conn, send.tx_id, Ok(accepted)).expect("record")
+            record_first_broadcast(Some(&*conn), send.tx_id, Ok(accepted))
         };
         let sent = FinalizedSend::new(pending_displayed(send.tx_id), accepted);
         assert!(sent.accepted_by_node);
         assert_eq!(sent.note, None);
         assert_eq!(sent.node_reason, None);
+    }
+
+    /// A send prepared by `start_new_transaction`, with a stand-in signed result
+    /// (finalising only records and submits it; nothing checks the signature).
+    fn prepared_send(pool: &SqlitePool) -> (TransactionSender, SignedOneSidedTransactionResult) {
+        let mut sender = sender_for(pool);
+        let recipient = Recipient {
+            address: sender
+                .account
+                .get_address(Network::LocalNet, &Zeroizing::new(PASSWORD.to_string()))
+                .expect("address"),
+            amount: MicroMinotari(1_000),
+            payment_id: None,
+        };
+        let prepared = sender
+            .start_new_transaction("finalise".to_string(), recipient, 300)
+            .expect("prepare");
+        let signed = SignedOneSidedTransactionResult {
+            version: prepared.version.clone(),
+            signed_transaction: SignedTransaction {
+                transaction: tari_transaction_components::transaction_components::Transaction::new(
+                    Vec::new(),
+                    Vec::new(),
+                    Vec::new(),
+                    tari_common_types::types::PrivateKey::default(),
+                    tari_common_types::types::PrivateKey::default(),
+                ),
+                sent_hashes: Vec::new(),
+                outputs: Vec::new(),
+                change_hashes: Vec::new(),
+                change_output: None,
+                tx_id: prepared.tx_id,
+            },
+            request: prepared,
+        };
+        (sender, signed)
+    }
+
+    #[tokio::test]
+    async fn a_bad_node_url_fails_before_anything_is_recorded() {
+        let (pool, _temp) = setup_funded_wallet(3);
+        let (sender, signed) = prepared_send(&pool);
+        assert_eq!(count(&pool, "SELECT COUNT(*) FROM outputs WHERE status = 'LOCKED'"), 1);
+
+        sender
+            .finalize_transaction_and_broadcast(signed, "not a url".to_string())
+            .await
+            .expect_err("a bad node URL is an error");
+
+        // Nothing recorded, and the reservation handed back.
+        assert_eq!(count(&pool, "SELECT COUNT(*) FROM completed_transactions"), 0);
+        assert_eq!(count(&pool, "SELECT COUNT(*) FROM outputs WHERE status = 'LOCKED'"), 0);
+        assert_eq!(
+            count(
+                &pool,
+                "SELECT COUNT(*) FROM pending_transactions WHERE status = 'PENDING'"
+            ),
+            0
+        );
+    }
+
+    #[tokio::test]
+    async fn a_database_failure_after_the_send_is_recorded_is_not_an_error() {
+        let (pool, _temp) = setup_funded_wallet(3);
+        let (sender, signed) = prepared_send(&pool);
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "result": { "accepted": true, "rejection_reason": "None", "is_synced": true },
+                "error": null,
+                "id": "1",
+            })))
+            .mount(&server)
+            .await;
+        // Everything after recording the send fails to write.
+        pool.get()
+            .expect("conn")
+            .execute_batch(
+                "CREATE TRIGGER no_display BEFORE INSERT ON displayed_transactions \
+                 BEGIN SELECT RAISE(ABORT, 'disk full'); END; \
+                 CREATE TRIGGER no_status BEFORE UPDATE ON completed_transactions \
+                 BEGIN SELECT RAISE(ABORT, 'disk full'); END;",
+            )
+            .expect("triggers");
+
+        let sent = sender
+            .finalize_transaction_and_broadcast(signed, server.uri())
+            .await
+            .expect("a recorded send is never an error");
+
+        assert!(sent.accepted_by_node);
+        assert_eq!(sent.note.as_deref(), Some(RECORD_LAGGING_NOTE));
+        assert!(RECORD_LAGGING_NOTE.contains("Do not send it again"));
+        // The send itself is recorded, inputs still locked.
+        assert_eq!(count(&pool, "SELECT COUNT(*) FROM completed_transactions"), 1);
+        assert_eq!(count(&pool, "SELECT COUNT(*) FROM outputs WHERE status = 'LOCKED'"), 1);
     }
 }
