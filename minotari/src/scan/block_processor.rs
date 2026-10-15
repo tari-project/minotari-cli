@@ -422,7 +422,13 @@ impl<E: EventSender> BlockProcessor<E> {
                     // change is an active row nothing would find the send again,
                     // so the change (decrypted with the wallet's own keys, its hash
                     // unique to the send) settles it now.
-                    let event = self.settle_rejected_send_by_change(tx, account_id, completed_tx_id, block)?;
+                    let event = self.settle_rejected_send_by_change(
+                        tx,
+                        account_id,
+                        completed_tx_id,
+                        block.height,
+                        &block.block_hash,
+                    )?;
                     generated_events.push(event);
                 } else {
                     request_ids.push(request_id);
@@ -526,38 +532,36 @@ impl<E: EventSender> BlockProcessor<E> {
         Ok(request_ids)
     }
 
-    /// Marks a send the monitor rejected `MinedUnconfirmed` in `block`, on the
-    /// evidence of its change output alone, and persists `TransactionUnconfirmed`.
-    /// Used only when the scan excludes inputs (see [`Self::set_inputs_excluded`]).
+    /// Marks a send the monitor rejected `MinedUnconfirmed` in the block at
+    /// `height`, on the evidence of its change output alone, and persists
+    /// `TransactionUnconfirmed`. Used only when the inputs cannot be checked: a
+    /// scan that excludes them (see [`Self::set_inputs_excluded`]), or the last
+    /// block of a batch, which may be incomplete.
     fn settle_rejected_send_by_change(
         &mut self,
         tx: &Connection,
         account_id: i64,
         completed_tx_id: TxId,
-        block: &BlockScanResult,
+        height: u64,
+        block_hash: &FixedHash,
     ) -> Result<(i64, WalletEvent), BlockProcessorError> {
         info!(
             target: "audit",
             id = completed_tx_id.to_string().as_str(),
-            height = block.height;
+            height = height;
             "Transaction the monitor rejected was mined after all (its change is in a block)"
         );
         #[allow(clippy::cast_possible_wrap)]
-        db::mark_completed_transaction_as_mined_unconfirmed(
-            tx,
-            completed_tx_id,
-            block.height as i64,
-            block.block_hash.as_slice(),
-        )?;
+        db::mark_completed_transaction_as_mined_unconfirmed(tx, completed_tx_id, height as i64, block_hash.as_slice())?;
         let event = WalletEvent {
             id: 0,
             account_id,
             event_type: WalletEventType::TransactionUnconfirmed {
                 tx_id: completed_tx_id,
-                mined_height: block.height,
+                mined_height: height,
                 confirmations: 0,
             },
-            description: format!("Transaction {} mined at height {}", completed_tx_id, block.height),
+            description: format!("Transaction {} mined at height {}", completed_tx_id, height),
         };
         let event_id = db::insert_wallet_event(tx, account_id, &event)?;
         self.wallet_events.push(event.clone());
@@ -824,18 +828,6 @@ impl<E: EventSender> BlockProcessor<E> {
                 continue;
             }
 
-            if was_rejected {
-                // Not this send after all: it stays rejected. Its displayed
-                // transaction was put back to pending for this block (and may have
-                // been shown at this block's height); make it the unmined, rejected
-                // entry it was, and announce it.
-                db::reset_displayed_transaction_to_pending(tx, completed.id)?;
-                if let Some(displayed) = db::mark_displayed_transaction_rejected(tx, completed.id)? {
-                    rejected_displayed_transactions.push(displayed);
-                }
-                continue;
-            }
-
             if !block_is_complete {
                 warn!(
                     target: "audit",
@@ -845,6 +837,35 @@ impl<E: EventSender> BlockProcessor<E> {
                     change_in_block = change_in_block;
                     "Transaction not matched in the last block of a batch, which may be incomplete; leaving it"
                 );
+                if was_rejected && change_in_block {
+                    // A send the monitor rejected is only taken up when its change
+                    // is in this block, and that change has been restored, credited
+                    // and shown in its history entry. Rejecting it again on what may
+                    // be part of the block would be wrong, and leaving it rejected
+                    // would leave it so for good (nothing finds it again once its
+                    // change is active). The change is the proof it landed, as in a
+                    // scan without inputs: settle it on that.
+                    let event = self.settle_rejected_send_by_change(
+                        tx,
+                        send_block.account_id,
+                        completed.id,
+                        send_block.height,
+                        &send_block.block_hash,
+                    )?;
+                    generated_events.push(event);
+                }
+                continue;
+            }
+
+            if was_rejected {
+                // Not this send after all: it stays rejected. Its displayed
+                // transaction was put back to pending for this block (and may have
+                // been shown at this block's height); make it the unmined, rejected
+                // entry it was, and announce it.
+                db::reset_displayed_transaction_to_pending(tx, completed.id)?;
+                if let Some(displayed) = db::mark_displayed_transaction_rejected(tx, completed.id)? {
+                    rejected_displayed_transactions.push(displayed);
+                }
                 continue;
             }
 
@@ -2486,5 +2507,58 @@ mod tests {
         let (id, status, ..) = change_row(&conn, &send);
         assert_eq!(id, change_id, "the change row is kept and still the send's");
         assert_eq!(status, "UNCONFIRMED");
+    }
+
+    #[test]
+    fn a_monitor_rejected_send_in_a_possibly_incomplete_last_block_is_not_rejected_again() {
+        // X's change is in the last block of a batch, but not all its inputs: the
+        // block may be cut short. X must not be rejected again.
+        let wallet = test_wallet();
+        let conn = wallet.pool.get().expect("conn");
+        let x = record_send(&wallet, &conn, 1, &[1, 2], Some(3));
+        reject_as_the_monitor_does(&conn, &x);
+
+        let (sender, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
+        let mut processor = BlockProcessor::with_event_sender(
+            vec![(wallet.account_id, wallet.view_key.clone())],
+            crate::scan::events::ChannelEventSender::new(sender),
+            false,
+            3,
+        );
+        let last_block = block(50, vec![x.change.clone().unwrap()], vec![x.input_hashes[0]]);
+        process(
+            &mut processor,
+            &conn,
+            wallet.account_id,
+            std::slice::from_ref(&last_block),
+        );
+
+        // Settled on its change, not rejected.
+        let x_completed = completed(&conn, x.tx_id);
+        assert_eq!(x_completed.status, db::CompletedTransactionStatus::MinedUnconfirmed);
+        assert_eq!(x_completed.mined_height, Some(50));
+        let displayed = db::get_displayed_transaction_by_id(&conn, &x.tx_id.to_string())
+            .expect("query")
+            .expect("displayed");
+        assert_ne!(displayed.status, TransactionDisplayStatus::Rejected);
+        assert_eq!(displayed_count(&conn, wallet.account_id), 1);
+
+        let events = processor.take_wallet_events();
+        assert!(
+            !events
+                .iter()
+                .any(|e| matches!(e.event_type, WalletEventType::TransactionRejected { .. }))
+        );
+        while let Ok(event) = events_rx.try_recv() {
+            if let ProcessingEvent::TransactionsUpdated(update) = event {
+                assert!(
+                    !update
+                        .updated_transactions
+                        .iter()
+                        .any(|t| t.status == TransactionDisplayStatus::Rejected),
+                    "no rejection may be announced"
+                );
+            }
+        }
     }
 }
