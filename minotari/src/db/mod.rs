@@ -67,17 +67,22 @@ pub use accounts::{
 mod scanned_tip_blocks;
 pub use scanned_tip_blocks::{
     LatestScannedBlock, delete_scanned_tip_blocks_from_height, get_latest_scanned_block_with_timestamp,
-    get_latest_scanned_tip_block_by_account, get_scanned_tip_blocks_by_account, insert_scanned_tip_block,
-    prune_scanned_tip_blocks,
+    get_latest_scanned_tip_block_by_account, get_scanned_tip_block_hash_at_height, get_scanned_tip_blocks_by_account,
+    insert_scanned_tip_block, prune_scanned_tip_blocks,
 };
 
 mod outputs;
 pub use outputs::{
-    DbOutput, DbWalletOutput, UnresolvedSpentOutput, fetch_outputs_by_lock_request_id, fetch_unspent_outputs,
-    get_active_outputs_from_height, get_output_by_id, get_output_info_by_hash, get_output_info_by_hash_for_account,
-    get_output_totals_for_account, get_total_unspent_balance, get_unconfirmed_outputs,
-    get_unresolved_spent_unconfirmed_outputs, insert_output, insert_spent_output_if_not_exists, lock_output,
-    mark_output_confirmed, resolve_spent_unconfirmed_with_inputs, soft_delete_outputs_from_height,
+    ChangeOutputToRevert, DbOutput, DbWalletOutput, UnresolvedSpentOutput, clear_dead_lock,
+    confirm_unconfirmed_change_output, fetch_outputs_by_lock_request_id, fetch_unspent_outputs,
+    get_active_outputs_from_height, get_change_output_hash_for_request, get_output_by_id,
+    get_output_hashes_mined_in_block, get_output_hashes_spent_in_block, get_output_info_by_hash,
+    get_output_info_by_hash_for_account, get_output_lock_request_id, get_output_spend, get_output_totals_for_account,
+    get_total_unspent_balance, get_unconfirmed_outputs, get_unresolved_spent_unconfirmed_outputs, insert_output,
+    insert_spent_output_if_not_exists, insert_unconfirmed_change_output, is_lock_holder_live, lock_output,
+    mark_change_output_rejected, mark_output_confirmed, record_spender_of_inputs, relock_inputs_for_revived_send,
+    resolve_spent_unconfirmed_with_inputs, restore_change_of_rejected_send, revert_change_outputs_from_height,
+    revert_rejected_change_output, soft_delete_outputs_from_height, soft_delete_unconfirmed_change_output,
     unlock_outputs_for_request, unlock_outputs_for_request as unlock_outputs_for_pending_transaction,
     update_output_status,
 };
@@ -94,10 +99,12 @@ pub use pending_transactions::{
 mod completed_transactions;
 pub use completed_transactions::{
     CompletedTransaction, CompletedTransactionStatus, create_completed_transaction, get_completed_transaction_by_id,
-    get_completed_transaction_by_payref, get_completed_transactions_by_account, get_completed_transactions_by_status,
-    get_pending_completed_transactions, mark_completed_transaction_as_broadcasted,
+    get_completed_transaction_by_payref, get_completed_transaction_to_match, get_completed_transactions_by_account,
+    get_completed_transactions_by_status, get_last_broadcast_error, get_pending_completed_transactions,
+    get_scan_rejected_pending_tx_ids_from_height, keep_rejected_after_reorg, mark_completed_transaction_as_broadcasted,
     mark_completed_transaction_as_confirmed, mark_completed_transaction_as_mined_unconfirmed,
-    mark_completed_transaction_as_rejected, reset_mined_completed_transactions_from_height,
+    mark_completed_transaction_as_rejected, mark_completed_transaction_as_rejected_in_block,
+    record_failed_broadcast_attempt, record_last_broadcast_error, reset_mined_completed_transactions_from_height,
     revert_completed_transaction_to_completed, update_completed_transaction_status,
 };
 
@@ -136,8 +143,9 @@ pub use displayed_transactions::{
     get_displayed_transactions_excluding_reorged, get_displayed_transactions_from_height,
     get_displayed_transactions_needing_confirmation_update, get_displayed_transactions_paginated,
     insert_displayed_transaction, mark_displayed_transaction_rejected, mark_displayed_transactions_reorganized,
-    mark_displayed_transactions_reorganized_and_return, update_displayed_transaction_confirmations,
-    update_displayed_transaction_mined, update_displayed_transaction_status,
+    mark_displayed_transactions_reorganized_and_return, reset_displayed_transaction_to_pending,
+    update_displayed_transaction_confirmations, update_displayed_transaction_mined,
+    update_displayed_transaction_status,
 };
 
 const DB_POOL_SIZE: u32 = 5;

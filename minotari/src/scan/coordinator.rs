@@ -1,4 +1,4 @@
-use log::{debug, info};
+use log::{debug, info, warn};
 use minotari_scanning::{HttpBlockchainScanner, scanning::BlockchainScanner};
 use std::{collections::VecDeque, sync::Arc};
 use tari_common_types::{seeds::cipher_seed::BIRTHDAY_GENESIS_FROM_UNIX_EPOCH, types::PrivateKey};
@@ -19,13 +19,38 @@ use crate::{
         scan_db_handler::ScanDbHandler,
         scanner_state_manager::ScannerStateManager,
     },
-    transactions::{MonitoringResult, MonitoringState, TransactionMonitor},
+    transactions::{MonitoringResult, MonitoringState, TransactionMonitor, monitor::NodeRequestError},
     webhooks::WebhookTriggerConfig,
 };
 use tari_transaction_components::key_manager::TransactionKeyManagerInterface;
 use tari_utilities::hex::Hex;
 
 const MAX_CONTINUOUS_BUFFERED_EVENTS: usize = 10_000;
+
+/// Why a pass of the scan loop stopped.
+#[derive(Debug, Clone)]
+enum ScanStop {
+    /// The scan reached the chain tip.
+    CaughtUp,
+    /// The scan paused before reaching the chain tip.
+    Paused(PauseReason),
+}
+
+impl ScanStop {
+    /// Whether the post-scan monitor runs when the scan stops this way.
+    ///
+    /// Transactions can only change state when there is a new tip, so the
+    /// monitor runs once per pass rather than per batch: when the scan is
+    /// caught up and when it stops at its block limit. A cancelled scan stops
+    /// without it.
+    fn runs_post_scan(&self) -> bool {
+        match self {
+            ScanStop::CaughtUp => true,
+            ScanStop::Paused(PauseReason::MaxBlocksReached { .. }) => true,
+            ScanStop::Paused(PauseReason::Cancelled) => false,
+        }
+    }
+}
 
 /// Represents an account that is part of the current global scan session.
 /// This is an internal state object and should not be exposed publicly.
@@ -293,11 +318,15 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
                         )));
                     };
 
+                    let has_pending_outbound = target
+                        .transaction_monitor
+                        .refresh_pending_outbound(&self.pool, target.account.id)
+                        .map_err(ScanError::Fatal)?;
                     let events = db_handler
                         .process_blocks(
                             shared_blocks.clone(),
                             *account_id,
-                            target.transaction_monitor.has_pending_outbound(),
+                            has_pending_outbound,
                             self.webhook_config.clone(),
                             target.next_block_to_scan,
                         )
@@ -305,26 +334,10 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
                     Self::push_events_with_limit(&mut all_events, events, max_buffered_events);
                     if let Some(last) = shared_blocks.last() {
                         target.next_block_to_scan = next_block_height(last.height)?;
-                    }
-                    if let Some(last) = shared_blocks.last()
-                        && last.height >= target.next_block_to_scan
-                    {
+
                         if last.height > max_new_height_in_batch {
                             max_new_height_in_batch = last.height;
                         }
-
-                        let monitor_res = target
-                            .transaction_monitor
-                            .monitor_if_needed(&self.client, &self.pool, target.account.id, last.height)
-                            .await
-                            .map_err(ScanError::Fatal)?;
-
-                        Self::push_events_with_limit(
-                            &mut all_events,
-                            monitor_res.wallet_events.clone(),
-                            max_buffered_events,
-                        );
-                        self.emit_monitor_events(target.account.id, last.height, monitor_res);
 
                         db_handler.prune_tips(target.account.id, last.height).await?;
 
@@ -355,6 +368,9 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
                 && total_scanned_globally >= max_blocks
             {
                 info!(last_scanned_block = max_new_height_in_batch; "Scan completed successfully up to stop height");
+                let stop = ScanStop::Paused(PauseReason::MaxBlocksReached { limit: max_blocks });
+                self.finish_pass(&targets, &stop, &mut all_events, max_buffered_events)
+                    .await?;
                 return self.handle_pause(
                     &targets,
                     PauseReason::MaxBlocksReached { limit: max_blocks },
@@ -362,6 +378,11 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
                 );
             }
             if is_batch_empty {
+                // Settle pending transactions before reporting completion, and
+                // before `wait_for_next_poll_cycle` moves the cursor back a block.
+                self.finish_pass(&targets, &ScanStop::CaughtUp, &mut all_events, max_buffered_events)
+                    .await?;
+
                 for account_id in &active_account_ids {
                     let Some(target) = targets.iter().find(|target| target.account.id == *account_id) else {
                         return Err(ScanError::Fatal(anyhow::anyhow!(
@@ -472,6 +493,73 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
         Ok((events.into_iter().collect(), true))
     }
 
+    /// Runs the post-scan monitor if the scan pass stopped in a way that calls
+    /// for it (see [`ScanStop::runs_post_scan`]), buffering its wallet events.
+    async fn finish_pass(
+        &self,
+        targets: &[AccountSyncTarget],
+        stop: &ScanStop,
+        all_events: &mut VecDeque<WalletEvent>,
+        max_buffered_events: Option<usize>,
+    ) -> Result<(), ScanError> {
+        if !stop.runs_post_scan() {
+            return Ok(());
+        }
+        let events = self.run_post_scan(targets).await?;
+        Self::push_events_with_limit(all_events, events, max_buffered_events);
+        Ok(())
+    }
+
+    /// Runs the transaction monitor for every account at the height it has been
+    /// scanned to, after a scan pass.
+    ///
+    /// The block scan has already marked mined sends; this updates displayed
+    /// transaction confirmations, confirms mined transactions at depth,
+    /// rebroadcasts `Completed` transactions and asks the node about the mempool
+    /// status of `Broadcast` ones. Its events are emitted (see
+    /// [`Self::emit_monitor_events`]) and its wallet events returned.
+    ///
+    /// A failed node request does not fail the pass: the monitor logs it and
+    /// leaves that transaction for the next cycle, and every other transaction
+    /// and account is still monitored, so the scan still reports `Completed` or
+    /// pauses normally and a Continuous scan keeps running. Should a node error
+    /// still reach this point, it is logged and the next account is monitored.
+    /// A database failure is [`ScanError::Fatal`].
+    async fn run_post_scan(&self, targets: &[AccountSyncTarget]) -> Result<Vec<WalletEvent>, ScanError> {
+        let mut wallet_events = Vec::new();
+        for target in targets {
+            let scanned_height = target.next_block_to_scan.saturating_sub(1);
+            let monitor_res = match target
+                .transaction_monitor
+                .monitor_if_needed(&self.client, &self.pool, target.account.id, scanned_height)
+                .await
+            {
+                Ok(monitor_res) => monitor_res,
+                Err(e) if e.downcast_ref::<NodeRequestError>().is_some() => {
+                    warn!(
+                        account_id = target.account.id,
+                        error:% = e;
+                        "Base node request failed while monitoring transactions; retrying next cycle"
+                    );
+                    continue;
+                },
+                Err(e) => return Err(ScanError::Fatal(e)),
+            };
+
+            wallet_events.extend(monitor_res.wallet_events.clone());
+            self.emit_monitor_events(target.account.id, scanned_height, monitor_res);
+        }
+        Ok(wallet_events)
+    }
+
+    /// Sends the displayed transactions the monitor updated.
+    ///
+    /// They go out twice: as [`ProcessingEvent::TransactionsUpdated`] and as
+    /// [`ProcessingEvent::TransactionsReady`] with `is_initial_sync: false`.
+    /// Consumers that treat `TransactionsReady` as "new transactions found" see
+    /// every monitor update (a confirmation count, a status change) as a new
+    /// transaction and must de-duplicate. This is the library's public event
+    /// contract and is kept as is.
     fn emit_monitor_events(&self, account_id: i64, height: u64, res: MonitoringResult) {
         if !res.updated_displayed_transactions.is_empty() {
             self.event_sender
@@ -709,12 +797,14 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
             .iter()
             .map(|target| (target.account.id, target.view_key.clone()))
             .collect();
-        let block_processor = BlockProcessor::with_event_sender(
+        let mut block_processor = BlockProcessor::with_event_sender(
             all_accounts,
             self.event_sender.clone(),
             false,
             self.required_confirmations,
         );
+        // This phase scans with `exclude_inputs`, so no send can be matched here.
+        block_processor.set_inputs_excluded(true);
         let mut db_handler = ScanDbHandler::new(self.pool.clone(), block_processor);
 
         let global_next_block = targets.iter().map(|t| t.next_block_to_scan).min().unwrap_or(0);
@@ -840,10 +930,12 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
             .await
             .map_err(|e| ScanError::Intermittent(e.to_string()))?;
 
+        let mut cancelled = false;
         while let Some(response) = utxo_stream.recv().await {
             if let Some(token) = cancel_token
                 && token.is_cancelled()
             {
+                cancelled = true;
                 break;
             }
 
@@ -860,11 +952,15 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
                     continue;
                 };
 
+                let has_pending_outbound = target
+                    .transaction_monitor
+                    .refresh_pending_outbound(&self.pool, target.account.id)
+                    .map_err(ScanError::Fatal)?;
                 let events = db_handler
                     .process_blocks(
                         shared_blocks.clone(),
                         *account_id,
-                        target.transaction_monitor.has_pending_outbound(),
+                        has_pending_outbound,
                         self.webhook_config.clone(),
                         target.next_block_to_scan,
                     )
@@ -874,15 +970,6 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
                 if let Some(last) = shared_blocks.last() {
                     target.next_block_to_scan = next_block_height(last.height)?;
 
-                    let monitor_res = target
-                        .transaction_monitor
-                        .monitor_if_needed(&self.client, &self.pool, target.account.id, last.height)
-                        .await
-                        .map_err(ScanError::Fatal)?;
-
-                    all_events.extend(monitor_res.wallet_events.clone());
-                    self.emit_monitor_events(target.account.id, last.height, monitor_res);
-
                     self.event_sender
                         .send(ProcessingEvent::ScanStatus(ScanStatusEvent::Progress {
                             account_id: target.account.id,
@@ -891,6 +978,17 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
                         }));
                 }
             }
+        }
+
+        // The end of the fast sync: settle pending transactions once, at the
+        // height each account reached. Not when cancelled.
+        let stop = if cancelled {
+            ScanStop::Paused(PauseReason::Cancelled)
+        } else {
+            ScanStop::CaughtUp
+        };
+        if stop.runs_post_scan() {
+            all_events.extend(self.run_post_scan(targets).await?);
         }
 
         Ok((all_events, false))
@@ -1175,6 +1273,28 @@ fn next_block_height(height: u64) -> Result<u64, ScanError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::db::{
+        create_account, get_account_by_name, get_displayed_transaction_by_id, get_scanned_tip_blocks_by_account,
+        init_db, insert_displayed_transaction, insert_scanned_tip_block,
+    };
+    use crate::scan::events::ChannelEventSender;
+    use crate::transactions::idempotency::{IdempotencyBinding, IdempotencyOperation, RequestFingerprint};
+    use crate::transactions::{
+        BlockchainInfo, DisplayedTransaction, TransactionDetails, TransactionDirection, TransactionDisplayStatus,
+        TransactionSource,
+    };
+    use tari_common_types::seeds::cipher_seed::CipherSeed;
+    use tari_common_types::transaction::TxId;
+    use tari_common_types::types::FixedHash;
+    use tari_transaction_components::MicroMinotari;
+    use tari_transaction_components::key_manager::wallet_types::{SeedWordsWallet, WalletType};
+    use tari_transaction_components::rpc::models::{
+        BlockUtxoInfo, SyncUtxosByBlockResponseV0, SyncUtxosByBlockResponseV1,
+    };
+    use tari_transaction_components::transaction_components::{Transaction, TransactionKernel};
+    use tempfile::TempDir;
+    use tokio::sync::mpsc::UnboundedReceiver;
+    use wiremock::{MockServer, Request, Respond, ResponseTemplate};
 
     #[test]
     fn birthday_timestamp_applies_offset_in_days() {
@@ -1203,5 +1323,384 @@ mod tests {
     #[test]
     fn next_block_height_at_max_is_error() {
         assert!(matches!(next_block_height(u64::MAX), Err(ScanError::Fatal(_))));
+    }
+
+    #[test]
+    fn the_post_scan_monitor_runs_when_caught_up_or_at_the_block_limit_but_not_when_cancelled() {
+        assert!(ScanStop::CaughtUp.runs_post_scan());
+        assert!(ScanStop::Paused(PauseReason::MaxBlocksReached { limit: 10 }).runs_post_scan());
+        assert!(!ScanStop::Paused(PauseReason::Cancelled).runs_post_scan());
+    }
+
+    /// The hash the mock chain gives the block at `height`.
+    fn block_hash(height: u64) -> Vec<u8> {
+        let mut hash = vec![0x5A; 32];
+        hash.splice(0..8, height.to_be_bytes());
+        hash
+    }
+
+    fn height_of(hash_hex: &str) -> u64 {
+        let bytes = hex::decode(hash_hex).expect("hex hash");
+        let mut height = [0u8; 8];
+        height.copy_from_slice(bytes.get(0..8).expect("hash is 32 bytes"));
+        u64::from_be_bytes(height)
+    }
+
+    fn query_param(request: &Request, name: &str) -> String {
+        request
+            .url
+            .query_pairs()
+            .find(|(key, _)| key == name)
+            .map(|(_, value)| value.to_string())
+            .expect("query parameter")
+    }
+
+    /// A base node whose chain has empty blocks up to `tip`.
+    struct MockChain {
+        tip: u64,
+    }
+
+    impl Respond for MockChain {
+        fn respond(&self, request: &Request) -> ResponseTemplate {
+            match request.url.path() {
+                "/get_tip_info" => ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "metadata": {
+                        "best_block_height": self.tip,
+                        "best_block_hash": block_hash(self.tip),
+                        "accumulated_difficulty": "0",
+                        "pruned_height": 0,
+                        "timestamp": 0,
+                    }
+                })),
+                "/get_header_by_height" => {
+                    let height: u64 = query_param(request, "height").parse().expect("height");
+                    if height > self.tip {
+                        return ResponseTemplate::new(404);
+                    }
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "height": height,
+                        "hash": block_hash(height),
+                        "timestamp": 1_700_000_000u64,
+                    }))
+                },
+                "/sync_utxos_by_block" => {
+                    let start = height_of(&query_param(request, "start_header_hash"));
+                    let limit: u64 = query_param(request, "limit").parse().expect("limit");
+                    let last = (start + limit - 1).min(self.tip);
+                    let mut blocks = Vec::new();
+                    for height in start..=last {
+                        blocks.push(BlockUtxoInfo {
+                            header_hash: block_hash(height),
+                            height,
+                            outputs: Vec::new(),
+                            inputs: Vec::new(),
+                            mined_timestamp: 1_700_000_000,
+                        });
+                    }
+                    let next_header_to_scan = if last < self.tip {
+                        block_hash(last + 1)
+                    } else {
+                        Vec::new()
+                    };
+                    let response = SyncUtxosByBlockResponseV1::from(SyncUtxosByBlockResponseV0 {
+                        blocks,
+                        has_next_page: false,
+                        next_header_to_scan,
+                    });
+                    ResponseTemplate::new(200).set_body_json(response)
+                },
+                _ => ResponseTemplate::new(404),
+            }
+        }
+    }
+
+    struct Setup {
+        coordinator: ScanCoordinator<ChannelEventSender>,
+        events: UnboundedReceiver<ProcessingEvent>,
+        pool: SqlitePool,
+        account_id: i64,
+        _server: MockServer,
+        _dir: TempDir,
+    }
+
+    /// A wallet scanned to `scanned_to` (with an old tip block at height 1
+    /// that pruning should remove) on a chain whose tip is `tip`, holding a
+    /// displayed send mined at `scanned_to - 100` that is still `Pending`.
+    async fn setup(scanned_to: u64, tip: u64) -> Setup {
+        let server = MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::any())
+            .respond_with(MockChain { tip })
+            .mount(&server)
+            .await;
+
+        let dir = tempfile::tempdir().expect("temp dir");
+        let pool = init_db(dir.path().join("coordinator.db")).expect("init db");
+        let conn = pool.get().expect("conn");
+        let wallet = WalletType::SeedWords(SeedWordsWallet::construct_new(CipherSeed::random()).unwrap());
+        create_account(&conn, "default", &wallet, "password").unwrap();
+        let account = get_account_by_name(&conn, "default").unwrap().unwrap();
+
+        insert_scanned_tip_block(&conn, account.id, 1, &block_hash(1)).expect("old tip");
+        #[allow(clippy::cast_possible_wrap)]
+        insert_scanned_tip_block(&conn, account.id, scanned_to as i64, &block_hash(scanned_to)).expect("tip");
+        insert_displayed_transaction(&conn, &mined_pending_send(account.id, scanned_to - 100)).expect("displayed");
+        drop(conn);
+
+        let (sender, events) = tokio::sync::mpsc::unbounded_channel();
+        let coordinator = ScanCoordinator::new(
+            pool.clone(),
+            server.uri(),
+            ChannelEventSender::new(sender),
+            ScanRetryConfig {
+                timeout: std::time::Duration::from_secs(5),
+                max_timeout_retries: 1,
+                max_error_retries: 1,
+                error_backoff_base_secs: 1,
+            },
+            3,
+            None,
+            1,
+            1_000,
+            10,
+        )
+        .expect("coordinator");
+
+        Setup {
+            coordinator,
+            events,
+            pool,
+            account_id: account.id,
+            _server: server,
+            _dir: dir,
+        }
+    }
+
+    fn mined_pending_send(account_id: i64, block_height: u64) -> DisplayedTransaction {
+        DisplayedTransaction {
+            id: TxId::from(1u64),
+            direction: TransactionDirection::Outgoing,
+            source: TransactionSource::OneSided,
+            status: TransactionDisplayStatus::Pending,
+            amount: MicroMinotari::from(1_000),
+            message: None,
+            counterparty: None,
+            blockchain: BlockchainInfo {
+                block_height,
+                timestamp: chrono::Utc::now().naive_utc(),
+                confirmations: 0,
+                block_hash: FixedHash::zero(),
+            },
+            fee: None,
+            details: TransactionDetails {
+                account_id,
+                total_credit: MicroMinotari::from(0),
+                total_debit: MicroMinotari::from(1_000),
+                inputs: Vec::new(),
+                outputs: Vec::new(),
+                output_type: None,
+                coinbase_extra: None,
+                memo_hex: None,
+                sent_output_hashes: Vec::new(),
+                sent_payrefs: Vec::new(),
+            },
+            lock_height: 0,
+        }
+    }
+
+    fn account(pool: &SqlitePool) -> AccountRow {
+        let conn = pool.get().expect("conn");
+        get_account_by_name(&conn, "default").expect("query").expect("account")
+    }
+
+    fn drain(events: &mut UnboundedReceiver<ProcessingEvent>) -> Vec<ProcessingEvent> {
+        let mut drained = Vec::new();
+        while let Ok(event) = events.try_recv() {
+            drained.push(event);
+        }
+        drained
+    }
+
+    fn position(events: &[ProcessingEvent], matches: impl Fn(&ProcessingEvent) -> bool) -> Option<usize> {
+        events.iter().position(matches)
+    }
+
+    fn displayed_status(pool: &SqlitePool) -> TransactionDisplayStatus {
+        let conn = pool.get().expect("conn");
+        get_displayed_transaction_by_id(&conn, &TxId::from(1u64).to_string())
+            .expect("query")
+            .expect("displayed")
+            .status
+    }
+
+    #[tokio::test]
+    async fn a_full_scan_prunes_tips_reports_progress_and_runs_the_post_scan_monitor_when_caught_up() {
+        let mut setup = setup(1500, 1505).await;
+
+        let (_, more_blocks) = setup
+            .coordinator
+            .run(vec![account(&setup.pool)], "password", ScanMode::Full, 0, None)
+            .await
+            .expect("scan");
+        assert!(!more_blocks);
+        let events = drain(&mut setup.events);
+
+        // Per batch: progress is reported and old tip blocks are pruned.
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                ProcessingEvent::ScanStatus(ScanStatusEvent::Progress {
+                    current_height: 1505,
+                    ..
+                })
+            )),
+            "a Progress event must be emitted for a non-empty batch"
+        );
+        let conn = setup.pool.get().expect("conn");
+        let tips = get_scanned_tip_blocks_by_account(&conn, setup.account_id).expect("tips");
+        assert!(tips.iter().all(|t| t.height != 1), "the old tip block must be pruned");
+        assert!(tips.iter().any(|t| t.height == 1505));
+
+        // Caught up: the monitor ran at the scanned height before completion was reported.
+        assert_eq!(displayed_status(&setup.pool), TransactionDisplayStatus::Confirmed);
+        let updated = position(&events, |e| matches!(e, ProcessingEvent::TransactionsUpdated(_)))
+            .expect("the post-scan monitor must emit the updated transaction");
+        let completed = position(&events, |e| {
+            matches!(e, ProcessingEvent::ScanStatus(ScanStatusEvent::Completed { .. }))
+        })
+        .expect("completed");
+        assert!(updated < completed, "monitor events come before Completed");
+    }
+
+    #[tokio::test]
+    async fn a_partial_scan_runs_the_post_scan_monitor_when_it_reaches_its_block_limit() {
+        let mut setup = setup(1500, 1600).await;
+
+        let (_, more_blocks) = setup
+            .coordinator
+            .run(
+                vec![account(&setup.pool)],
+                "password",
+                ScanMode::Partial { max_blocks: 2 },
+                0,
+                None,
+            )
+            .await
+            .expect("scan");
+        assert!(more_blocks, "the scan paused before the tip");
+        let events = drain(&mut setup.events);
+
+        assert_ne!(displayed_status(&setup.pool), TransactionDisplayStatus::Pending);
+        let updated = position(&events, |e| matches!(e, ProcessingEvent::TransactionsUpdated(_)))
+            .expect("the post-scan monitor must emit the updated transaction");
+        let paused = position(&events, |e| {
+            matches!(
+                e,
+                ProcessingEvent::ScanStatus(ScanStatusEvent::Paused {
+                    reason: PauseReason::MaxBlocksReached { .. },
+                    ..
+                })
+            )
+        })
+        .expect("paused");
+        assert!(updated < paused, "monitor events come before the pause");
+    }
+
+    /// Records a send for `account_id`, in `Broadcast` with a kernel the node can
+    /// be asked about, and returns its id.
+    fn record_broadcast_send(conn: &rusqlite::Connection, account_id: i64, id: u64) -> TxId {
+        let key = format!("send-{id}");
+        let binding = IdempotencyBinding::new(
+            Some(key.clone()),
+            IdempotencyOperation::SendTransaction,
+            RequestFingerprint::new(IdempotencyOperation::SendTransaction),
+        );
+        let request_id = crate::db::create_pending_transaction(
+            conn,
+            &key,
+            &binding,
+            account_id,
+            true,
+            MicroMinotari(0),
+            MicroMinotari(0),
+            MicroMinotari(0),
+            chrono::Utc::now() + chrono::Duration::hours(1),
+        )
+        .expect("pending transaction");
+        let transaction = Transaction::new(
+            Vec::new(),
+            Vec::new(),
+            vec![TransactionKernel::default()],
+            PrivateKey::default(),
+            PrivateKey::default(),
+        );
+        let tx_id = TxId::from(id);
+        crate::db::create_completed_transaction(
+            conn,
+            account_id,
+            &request_id,
+            &[],
+            &serde_json::to_vec(&transaction).expect("serialize"),
+            Some(hex::encode([9u8; 32])),
+            tx_id,
+        )
+        .expect("completed");
+        crate::db::mark_completed_transaction_as_broadcasted(conn, tx_id, 1).expect("broadcast");
+        tx_id
+    }
+
+    #[tokio::test]
+    async fn a_node_error_for_one_account_does_not_stop_the_others_or_the_scan() {
+        // The mock chain does not answer `/transactions`, so asking about the
+        // first account's broadcast send fails. The second account's mined send
+        // must still be confirmed, and the scan must still complete.
+        let mut setup = setup(1500, 1505).await;
+        let (first_send, second_send, second_id) = {
+            let conn = setup.pool.get().expect("conn");
+            let wallet = WalletType::SeedWords(SeedWordsWallet::construct_new(CipherSeed::random()).unwrap());
+            create_account(&conn, "second", &wallet, "password").unwrap();
+            let second = get_account_by_name(&conn, "second").unwrap().unwrap();
+            insert_scanned_tip_block(&conn, second.id, 1500, &block_hash(1500)).expect("tip");
+
+            let first_send = record_broadcast_send(&conn, setup.account_id, 1);
+            let second_send = record_broadcast_send(&conn, second.id, 2);
+            crate::db::mark_completed_transaction_as_mined_unconfirmed(&conn, second_send, 1400, &[7u8; 32])
+                .expect("mined");
+            (first_send, second_send, second.id)
+        };
+
+        let accounts = {
+            let conn = setup.pool.get().expect("conn");
+            vec![
+                get_account_by_name(&conn, "default").unwrap().unwrap(),
+                get_account_by_name(&conn, "second").unwrap().unwrap(),
+            ]
+        };
+        setup
+            .coordinator
+            .run(accounts, "password", ScanMode::Full, 0, None)
+            .await
+            .expect("a node error does not fail the scan");
+        let events = drain(&mut setup.events);
+
+        let conn = setup.pool.get().expect("conn");
+        let first = crate::db::get_completed_transaction_by_id(&conn, first_send)
+            .expect("query")
+            .expect("first");
+        assert_eq!(first.status, crate::db::CompletedTransactionStatus::Broadcast);
+        let second = crate::db::get_completed_transaction_by_id(&conn, second_send)
+            .expect("query")
+            .expect("second");
+        assert_eq!(
+            second.status,
+            crate::db::CompletedTransactionStatus::MinedConfirmed,
+            "the second account is still monitored"
+        );
+        assert!(
+            events.iter().any(|e| matches!(
+                e,
+                ProcessingEvent::ScanStatus(ScanStatusEvent::Completed { account_id, .. }) if *account_id == second_id
+            )),
+            "the scan still reports Completed"
+        );
     }
 }

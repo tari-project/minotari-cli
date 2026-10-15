@@ -18,7 +18,7 @@ use crate::{
     db::get_account_by_name,
     log::mask_amount,
     transactions::{
-        fund_locker::{FundLocker, MAX_SECONDS_TO_LOCK_UTXOS, validate_seconds_to_lock},
+        fund_locker::{FundLocker, MAX_SECONDS_TO_LOCK_UTXOS, validate_fee_per_gram, validate_seconds_to_lock},
         idempotency::{IdempotencyBinding, IdempotencyOperation, RequestFingerprint},
         one_sided_transaction::{OneSidedTransaction, Recipient, unsigned_transaction_binding},
     },
@@ -295,8 +295,10 @@ pub async fn api_lock_funds(
     let num_outputs = body.num_outputs.unwrap_or(DEFAULT_NUM_OUTPUTS);
     let fee_per_gram = body.fee_per_gram.unwrap_or(DEFAULT_FEE_PER_GRAM);
     let seconds_to_lock_utxos = body.seconds_to_lock_utxos.unwrap_or(DEFAULT_SECONDS_TO_LOCK_UTXOS);
-    // Reject an out-of-range duration as a client error before doing any work.
+    // Reject an out-of-range duration or a fee the node would not accept as a
+    // client error before doing any work.
     validate_seconds_to_lock(seconds_to_lock_utxos)?;
+    validate_fee_per_gram(fee_per_gram)?;
 
     let response = tokio::task::spawn_blocking(move || {
         // One connection for the whole request: the account lookup and the lock share it,

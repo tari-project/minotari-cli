@@ -1,5 +1,5 @@
 use log::{debug, warn};
-use rusqlite::{Connection, named_params};
+use rusqlite::{Connection, OptionalExtension, named_params};
 use serde::Deserialize;
 use serde_rusqlite::from_rows;
 
@@ -110,6 +110,25 @@ pub fn get_latest_scanned_block_with_timestamp(
         hash: r.hash,
         scanned_at: r.created_at,
     }))
+}
+
+/// The hash of the scanned block at `height` for the account, if it is still
+/// recorded (old blocks are pruned).
+pub fn get_scanned_tip_block_hash_at_height(
+    conn: &Connection,
+    account_id: i64,
+    height: u64,
+) -> WalletDbResult<Option<Vec<u8>>> {
+    #[allow(clippy::cast_possible_wrap)]
+    let height = height as i64;
+    let hash = conn
+        .query_row(
+            "SELECT hash FROM scanned_tip_blocks WHERE account_id = :account_id AND height = :height",
+            named_params! { ":account_id": account_id, ":height": height },
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(hash)
 }
 
 pub fn insert_scanned_tip_block(conn: &Connection, account_id: i64, height: i64, hash: &[u8]) -> WalletDbResult<()> {

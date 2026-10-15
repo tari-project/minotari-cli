@@ -88,6 +88,12 @@ impl<E: EventSender + Clone + Send + 'static> ScanDbHandler<E> {
             let mut last_height: Option<u64> = None;
 
             for block in blocks.iter() {
+                // The base node never truncates a block: it sends every chunk of a
+                // block before checking the page limit. When a page fills up it
+                // drops the last block whole and starts the next page at it; a
+                // first block larger than a page is sent whole, over-filling the
+                // page. So results behind the resume point are never the rest of
+                // a block and are skipped.
                 if block.height < next_block_to_scan {
                     continue;
                 }
@@ -108,6 +114,23 @@ impl<E: EventSender + Clone + Send + 'static> ScanDbHandler<E> {
 
                 processor
                     .process_block(&tx, block, target_account_id)
+                    .map_err(|e| WalletDbError::Unexpected(e.to_string()))?;
+            }
+
+            // Match the wallet's sends in the last block of the batch. The node
+            // sends blocks whole (see above), so that block is complete; still,
+            // defensively, a mismatch there does not reject a send until the
+            // scan has moved past the block.
+            processor
+                .match_sends(&tx, false)
+                .map_err(|e| WalletDbError::Unexpected(e.to_string()))?;
+
+            // Blocks below the last one of this batch have been moved past, so
+            // they are complete: decide the sends whose inputs were spent there
+            // that an earlier batch's last block left undecided.
+            if let Some(last) = last_height {
+                processor
+                    .settle_sends_in_passed_blocks(&tx, target_account_id, last)
                     .map_err(|e| WalletDbError::Unexpected(e.to_string()))?;
             }
 

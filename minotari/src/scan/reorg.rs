@@ -11,6 +11,7 @@ use rusqlite::Connection;
 use std::collections::HashSet;
 use tari_common_types::types::FixedHash;
 use tari_transaction_components::key_manager::KeyManager;
+use tari_transaction_components::transaction_components::Transaction;
 
 /// Result of a reorg check operation.
 #[derive(Debug, Clone)]
@@ -164,6 +165,31 @@ pub fn rollback_from_height(
         }
     }
 
+    // A send's change output is not soft-deleted with the other outputs: it goes
+    // back to `UNCONFIRMED`, because the send is reverted and rebroadcast below
+    // and the scan recognises it by this row. It is still reported as rolled back.
+    let reverted_change_outputs = db::revert_change_outputs_from_height(tx, account_id, reorg_start_height)?;
+    for output_row in &reverted_change_outputs {
+        let output_hash = FixedHash::try_from(output_row.output_hash.as_slice())?;
+        invalidated_output_hashes.push(output_hash);
+
+        let event = WalletEvent {
+            id: 0,
+            account_id,
+            event_type: WalletEventType::OutputRolledBack {
+                hash: output_hash,
+                original_block_height: output_row.mined_in_block_height as u64,
+                rolled_back_at_height: reorg_start_height,
+            },
+            description: format!(
+                "Output {:x?} at height {} was rolled back due to reorg",
+                output_row.output_hash, output_row.mined_in_block_height
+            ),
+        };
+        let event_id = db::insert_wallet_event(tx, account_id, &event)?;
+        generated_events.push((event_id, event));
+    }
+
     // 3. Cancel pending transactions linked to reorged outputs
     let cancelled_transaction_ids: Vec<String> = cancelled_pending_tx_ids.into_iter().collect();
     if !cancelled_transaction_ids.is_empty() {
@@ -200,7 +226,7 @@ pub fn rollback_from_height(
         );
     }
 
-    let reorganized_displayed_transactions =
+    let mut reorganized_displayed_transactions =
         db::mark_displayed_transactions_reorganized_and_return(tx, account_id, reorg_start_height)?;
 
     // Save old payrefs to history before they are cleared by the reset
@@ -211,6 +237,72 @@ pub fn rollback_from_height(
             count = saved_payrefs;
             "Saved payref(s) to history before reorg reset"
         );
+    }
+
+    // Sends the scan rejected (inputs spent by a different transaction) in a
+    // rolled-back block are revived, if their inputs can be theirs again: the
+    // inputs are locked to the send again, the change goes back to
+    // `UNCONFIRMED` and the displayed transaction to an unmined `Pending` (so
+    // the scan matches it when the send is mined rather than adding a second
+    // entry; it replaces any copy already reported as reorganized), the reset
+    // below makes the send `Completed` to be rebroadcast, and a
+    // `TransactionReorged` event is emitted. A send whose inputs are now locked
+    // by another send or spent in a block still on the chain stays `Rejected`.
+    let scan_rejected = db::get_scan_rejected_pending_tx_ids_from_height(tx, account_id, reorg_start_height)?;
+    for (pending_tx_id, completed_tx_id) in &scan_rejected {
+        let Some(completed) = db::get_completed_transaction_by_id(tx, *completed_tx_id)? else {
+            continue;
+        };
+        let input_hashes: Option<Vec<FixedHash>> =
+            serde_json::from_slice::<Transaction>(&completed.serialized_transaction)
+                .ok()
+                .map(|t| t.body().inputs().iter().map(|i| i.output_hash()).collect());
+        let revived = match &input_hashes {
+            Some(input_hashes) => db::relock_inputs_for_revived_send(tx, account_id, pending_tx_id, input_hashes)?,
+            None => false,
+        };
+        if !revived {
+            warn!(
+                target: "audit",
+                id = completed_tx_id.to_string().as_str();
+                "Reorg removed the block a send was rejected in, but its inputs are no longer its own; keeping it rejected"
+            );
+            db::keep_rejected_after_reorg(
+                tx,
+                *completed_tx_id,
+                "inputs spent by a different transaction (still, after reorg)",
+            )?;
+            // Its displayed transaction may have just been marked reorganized
+            // with its block; it is still rejected.
+            if let Some(displayed) = db::mark_displayed_transaction_rejected(tx, *completed_tx_id)? {
+                reorganized_displayed_transactions.retain(|d| d.id != displayed.id);
+                reorganized_displayed_transactions.push(displayed);
+            }
+            continue;
+        }
+
+        db::revert_rejected_change_output(tx, pending_tx_id)?;
+        if let Some(displayed) = db::reset_displayed_transaction_to_pending(tx, *completed_tx_id)? {
+            reorganized_displayed_transactions.retain(|d| d.id != displayed.id);
+            reorganized_displayed_transactions.push(displayed);
+        }
+
+        #[allow(clippy::cast_sign_loss)]
+        let original_mined_height = completed.mined_height.unwrap_or(0) as u64;
+        let event = WalletEvent {
+            id: 0,
+            account_id,
+            event_type: WalletEventType::TransactionReorged {
+                tx_id: *completed_tx_id,
+                original_mined_height,
+            },
+            description: format!(
+                "Transaction {} is no longer rejected: the block at height {} it was rejected in was rolled back",
+                completed_tx_id, original_mined_height
+            ),
+        };
+        let event_id = db::insert_wallet_event(tx, account_id, &event)?;
+        generated_events.push((event_id, event));
     }
 
     let affected_count = db::reset_mined_completed_transactions_from_height(tx, account_id, reorg_start_height)?;

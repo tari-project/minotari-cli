@@ -176,6 +176,7 @@ impl FromRef<AppState> for SqlitePool {
         accounts::api_create_unsigned_transaction,
         accounts::api_estimate_fees,
         accounts::api_burn_funds,
+        accounts::api_abandon_send,
     ),
     components(
         schemas(
@@ -198,6 +199,8 @@ impl FromRef<AppState> for SqlitePool {
             crate::api::types::FeeEstimateResponse,
             crate::api::types::FeePriorityResponse,
             accounts::BurnFundsRequest,
+            accounts::AbandonSendRequest,
+            accounts::AbandonSendResponse,
             accounts::BurnFundsResponse,
             crate::transactions::DisplayedTransaction,
             crate::transactions::TransactionDirection,
@@ -354,7 +357,11 @@ pub fn create_router(
             post(accounts::api_create_unsigned_transaction),
         )
         .route("/accounts/{name}/estimate_fees", post(accounts::api_estimate_fees))
-        .route("/accounts/{name}/burn", post(accounts::api_burn_funds));
+        .route("/accounts/{name}/burn", post(accounts::api_burn_funds))
+        .route(
+            "/accounts/{name}/completed_transactions/{tx_id}/abandon",
+            post(accounts::api_abandon_send),
+        );
 
     let router = match api_auth {
         // Layered last so it wraps every route above, the Swagger UI and `/openapi.json`

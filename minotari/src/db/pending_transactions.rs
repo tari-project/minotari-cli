@@ -5,6 +5,7 @@ use crate::log::mask_amount;
 use crate::transactions::idempotency::IdempotencyBinding;
 use crate::{
     api::types::LockFundsResult,
+    db::completed_transactions::CompletedTransactionStatus,
     db::outputs::{fetch_outputs_by_lock_request_id, unlock_outputs_for_request},
     models::PendingTransactionStatus,
 };
@@ -515,6 +516,32 @@ pub fn cancel_pending_transactions_by_ids(
     }
 
     conn.execute(&query_str, params.as_slice())?;
+
+    // A cancelled request with no completed transaction in play will not land:
+    // its inputs are released (else those not removed with the reorged blocks
+    // would stay `LOCKED` for it for good) and its change output dropped. One
+    // that was signed and recorded as a completed transaction still in play
+    // (not rejected or cancelled) keeps its locks and its change: the reorg
+    // resets it to be rebroadcast, and the scan finds it by that change when
+    // it lands again.
+    for id in ids {
+        let in_play: i64 = conn.query_row(
+            r#"
+            SELECT COUNT(*) FROM completed_transactions
+            WHERE pending_tx_id = :id AND status NOT IN (:rejected, :canceled)
+            "#,
+            named_params! {
+                ":id": id,
+                ":rejected": CompletedTransactionStatus::Rejected.to_string(),
+                ":canceled": CompletedTransactionStatus::Canceled.to_string(),
+            },
+            |row| row.get(0),
+        )?;
+        if in_play == 0 {
+            // Also soft-deletes its unconfirmed change output.
+            unlock_outputs_for_request(conn, id)?;
+        }
+    }
 
     Ok(())
 }

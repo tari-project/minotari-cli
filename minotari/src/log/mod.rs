@@ -91,3 +91,34 @@ pub fn mask_amount(amount: MicroMinotari) -> String {
 
     "<REDACTED>".to_string()
 }
+
+/// Most characters kept of text that came from a base node.
+const MAX_NODE_TEXT_CHARS: usize = 256;
+
+/// Makes text that came from a base node (an error message, a rejection
+/// reason) safe to log, store and send on in webhooks: control characters are
+/// dropped, so the node cannot forge log lines with newlines or escape codes,
+/// and at most 256 characters are kept.
+pub fn sanitize_node_text(text: &str) -> String {
+    text.chars()
+        .filter(|c| !c.is_control())
+        .take(MAX_NODE_TEXT_CHARS)
+        .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn node_text_loses_control_characters_and_is_truncated() {
+        let forged = "rejected\n2026-10-14 INFO audit: Transaction confirmed\u{1b}[31m\t";
+        let clean = sanitize_node_text(forged);
+        assert!(!clean.chars().any(char::is_control), "got: {clean:?}");
+        assert!(clean.starts_with("rejected2026-10-14 INFO audit"));
+
+        let long = "x".repeat(10_000);
+        assert_eq!(sanitize_node_text(&long).chars().count(), 256);
+        assert_eq!(sanitize_node_text("DoubleSpend"), "DoubleSpend");
+    }
+}

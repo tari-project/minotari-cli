@@ -382,7 +382,12 @@ pub fn get_displayed_transactions_paginated(
     process_json_rows(from_rows::<TransactionJsonRow>(rows))
 }
 
-/// Returns transactions where current_tip_height - block_height < required_confirmations.
+/// Returns mined transactions that are still pending, unconfirmed or locked.
+///
+/// Rows with `block_height = 0` are unmined (a send that has not been seen in a
+/// block yet). Counting their confirmations as `tip - 0` would mark them Confirmed
+/// at once, so they are left to the scan, which sets `block_height` when the
+/// transaction is mined.
 pub fn get_displayed_transactions_needing_confirmation_update(
     conn: &Connection,
     account_id: Id,
@@ -397,6 +402,7 @@ pub fn get_displayed_transactions_needing_confirmation_update(
         FROM displayed_transactions
         WHERE account_id = :account_id
           AND status IN (:s1, :s2, :s3)
+          AND block_height > 0
         "#,
     )?;
 
@@ -500,6 +506,51 @@ pub fn get_displayed_transactions_excluding_reorged(
     })?;
 
     process_json_rows(from_rows::<TransactionJsonRow>(rows))
+}
+
+/// Puts a send's displayed transaction back to an unmined `Pending`, for a
+/// reorg that undid the scan's rejection of it.
+///
+/// Its block height goes back to 0, so the monitor does not count
+/// confirmations for it, and the scan matches it again (it only matches
+/// `Pending` rows) when the send is mined, instead of adding a second entry.
+/// Returns the updated transaction, or `None` if there is none.
+pub fn reset_displayed_transaction_to_pending(
+    conn: &Connection,
+    tx_id: TxId,
+) -> WalletDbResult<Option<DisplayedTransaction>> {
+    let json_row: Option<String> = conn
+        .query_row(
+            "SELECT transaction_json FROM displayed_transactions WHERE id = :id",
+            named_params! { ":id": tx_id.to_string() },
+            |r| r.get(0),
+        )
+        .optional()?;
+    let Some(json) = json_row else {
+        return Ok(None);
+    };
+
+    let mut tx: DisplayedTransaction = serde_json::from_str(&json)?;
+    tx.status = TransactionDisplayStatus::Pending;
+    tx.blockchain.block_height = 0;
+    tx.blockchain.confirmations = 0;
+    tx.blockchain.block_hash = FixedHash::zero();
+
+    conn.execute(
+        r#"
+        UPDATE displayed_transactions
+        SET status = :status, block_height = 0, transaction_json = :json, updated_at = :now
+        WHERE id = :id
+        "#,
+        named_params! {
+            ":status": format!("{:?}", TransactionDisplayStatus::Pending).to_lowercase(),
+            ":json": serialize_tx(&tx)?,
+            ":now": current_db_timestamp(),
+            ":id": tx_id.to_string(),
+        },
+    )?;
+
+    Ok(Some(tx))
 }
 
 pub fn mark_displayed_transactions_reorganized_and_return(

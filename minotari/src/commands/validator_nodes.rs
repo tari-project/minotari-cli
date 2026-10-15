@@ -9,9 +9,13 @@ use crate::{
     db::{self, AccountRow, init_db},
     http::WalletHttpClient,
     models::PendingTransactionStatus,
-    transactions::validator_node::{
-        exit::{ValidatorNodeExitParams, create_validator_node_exit_tx},
-        registration::{ValidatorNodeRegistrationParams, create_validator_node_registration_tx},
+    transactions::{
+        input_selector::map_change_required_error,
+        manager::{NOT_YET_ACCEPTED_NOTE, record_first_broadcast},
+        validator_node::{
+            exit::{ValidatorNodeExitParams, create_validator_node_exit_tx},
+            registration::{ValidatorNodeRegistrationParams, create_validator_node_registration_tx},
+        },
     },
 };
 use anyhow::anyhow;
@@ -24,6 +28,7 @@ use tari_common_types::{
 };
 use tari_transaction_components::{
     consensus::ConsensusConstantsBuilder,
+    key_manager::TransactionKeyManagerInterface,
     offline_signing::{models::PrepareOneSidedTransactionForSigningResult, sign_locked_transaction},
     tari_amount::MicroMinotari,
 };
@@ -110,6 +115,36 @@ fn claim_reservation_for_broadcast(
     Ok(pending_tx_id)
 }
 
+/// Claims this command's reservation and records what it will broadcast, in
+/// one `IMMEDIATE` write transaction.
+///
+/// `record` writes the completed transaction (and its change) for the claimed
+/// request id. The claim and the record used to commit separately: if the
+/// record then failed, the reservation was `Completed` with no transaction to
+/// show for it, so nothing (not the unlocker, which only expires `PENDING`
+/// reservations, nor the monitor) would ever release its inputs. Now a failed
+/// record rolls the claim back and the reservation stays `PENDING`, to be
+/// expired and released as usual.
+///
+/// `new_unchecked` because only a shared connection is available here, and no
+/// transaction is open on it.
+fn claim_and_record<F>(
+    conn: &Connection,
+    account_id: i64,
+    idempotency_key: &str,
+    tx_kind: &str,
+    record: F,
+) -> Result<String, anyhow::Error>
+where
+    F: FnOnce(&rusqlite::Transaction<'_>, &str) -> Result<(), anyhow::Error>,
+{
+    let transaction = rusqlite::Transaction::new_unchecked(conn, rusqlite::TransactionBehavior::Immediate)?;
+    let pending_tx_id = claim_reservation_for_broadcast(&transaction, account_id, idempotency_key, tx_kind)?;
+    record(&transaction, &pending_tx_id)?;
+    transaction.commit()?;
+    Ok(pending_tx_id)
+}
+
 /// Signs an unsigned VN transaction, saves it to the DB, and broadcasts it.
 ///
 /// This is the common post-processing step shared by all three VN commands.
@@ -122,12 +157,13 @@ async fn sign_save_and_broadcast(
     password: &str,
     network: Network,
     idempotency_key: &str,
-    base_url: &str,
+    client: &WalletHttpClient,
     tx_kind: &str,
 ) -> Result<(), anyhow::Error> {
     let key_manager = account.get_key_manager(password)?;
     let consensus_constants = ConsensusConstantsBuilder::new(network).build();
     let signed_result = sign_locked_transaction(&key_manager, consensus_constants, network, unsigned_result)
+        .map_err(map_change_required_error)
         .map_err(|e| anyhow!("Failed to sign {} transaction: {}", tx_kind, e))?;
 
     let completed_tx_id = signed_result.signed_transaction.tx_id;
@@ -143,30 +179,58 @@ async fn sign_save_and_broadcast(
         .map_err(|e| anyhow!("Failed to serialize transaction: {}", e))?;
     let sent_output_hash = signed_result.signed_transaction.sent_hashes.first().map(hex::encode);
 
-    let pending_tx_id = claim_reservation_for_broadcast(conn, account.id, idempotency_key, tx_kind)?;
-    db::create_completed_transaction(
+    // The completed transaction and its change output go in together: the
+    // wallet's scan recognises the send by that change output.
+    claim_and_record(
         conn,
         account.id,
-        &pending_tx_id,
-        &kernel_excess,
-        &serialized_tx,
-        sent_output_hash,
-        completed_tx_id,
+        idempotency_key,
+        tx_kind,
+        |transaction, pending_tx_id| {
+            db::create_completed_transaction(
+                transaction,
+                account.id,
+                pending_tx_id,
+                &kernel_excess,
+                &serialized_tx,
+                sent_output_hash,
+                completed_tx_id,
+            )?;
+            if let Some(change_output) = &signed_result.signed_transaction.change_output {
+                db::insert_unconfirmed_change_output(
+                    transaction,
+                    account.id,
+                    &key_manager.get_private_view_key(),
+                    pending_tx_id,
+                    change_output,
+                )?;
+            }
+            Ok(())
+        },
     )?;
 
-    let client = WalletHttpClient::new(base_url.parse()?)?;
+    // The transaction is recorded: from here on nothing is reported as an error.
     let response = client
         .submit_transaction(signed_result.signed_transaction.transaction)
         .await;
 
-    match response {
-        Ok(r) if r.accepted => {
-            db::mark_completed_transaction_as_broadcasted(conn, completed_tx_id, 1)?;
-            info!(target: "audit", tx_id = completed_tx_id.to_string().as_str(); "{} broadcasted", tx_kind);
-            println!("{} transaction broadcasted. tx_id={}", tx_kind, completed_tx_id);
-        },
-        Ok(r) => return Err(anyhow!("Transaction rejected by network: {}", r.rejection_reason)),
-        Err(e) => return Err(anyhow!("Broadcast failed: {}", e)),
+    // The transaction is recorded: whatever the node says, it is seen through
+    // (the monitor rebroadcasts it), so this succeeds either way.
+    let first_broadcast = record_first_broadcast(Some(conn), completed_tx_id, response);
+    if first_broadcast.accepted_by_node {
+        info!(target: "audit", tx_id = completed_tx_id.to_string().as_str(); "{} broadcasted", tx_kind);
+        println!("{} transaction broadcasted. tx_id={}", tx_kind, completed_tx_id);
+        if let Some(note) = first_broadcast.note() {
+            println!("{note}");
+        }
+    } else {
+        println!(
+            "{} transaction recorded, pending. tx_id={}\nNode said: {}\n{}",
+            tx_kind,
+            completed_tx_id,
+            first_broadcast.node_reason.as_deref().unwrap_or("-"),
+            NOT_YET_ACCEPTED_NOTE
+        );
     }
 
     Ok(())
@@ -205,6 +269,8 @@ where
     ) -> Result<PrepareOneSidedTransactionForSigningResult, anyhow::Error>,
 {
     let idempotency_key = idempotency_key.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    // Checked before anything is locked or recorded.
+    let client = WalletHttpClient::new(base_url.parse()?)?;
     let pool = init_db(database_file)?;
     // One connection for the command: the VN transaction is built on it and the result is
     // then saved and broadcast with it, so nothing is held idle while `lock` waits.
@@ -229,7 +295,7 @@ where
         password,
         network,
         &idempotency_key,
-        base_url,
+        &client,
         tx_kind,
     )
     .await
@@ -301,6 +367,7 @@ pub async fn handle_submit_validator_node_exit(
     vn_public_key: String,
     vn_sig_nonce: String,
     vn_sig: String,
+    activation_epoch: u64,
     max_epoch: u64,
     fee_per_gram: u64,
     payment_id: Option<String>,
@@ -320,6 +387,7 @@ pub async fn handle_submit_validator_node_exit(
     let params = ValidatorNodeExitParams {
         validator_node_public_key: vn_public_key,
         validator_node_signature: vn_signature,
+        activation_epoch: VnEpoch(activation_epoch),
         max_epoch: VnEpoch(max_epoch),
         fee_per_gram: MicroMinotari(fee_per_gram),
         payment_id,
@@ -458,5 +526,33 @@ mod tests {
                 |row| row.get(0),
             )
             .expect("reservation exists")
+    }
+
+    /// A record that fails after the claim must not leave the reservation
+    /// claimed: it rolls back to `PENDING`, so its inputs are released when it
+    /// expires rather than stranded behind a `Completed` reservation with no
+    /// transaction.
+    #[test]
+    fn a_failed_record_leaves_the_reservation_pending() {
+        let (pool, account_id, _temp) = setup_reservation();
+
+        let conn = pool.get().expect("conn");
+        claim_and_record(&conn, account_id, KEY, "VN registration", |_, _| {
+            Err(anyhow!("the record failed"))
+        })
+        .expect_err("the record failed");
+        drop(conn);
+        assert_eq!(status_of(&pool), PendingTransactionStatus::Pending.to_string());
+
+        // And a record that succeeds commits with the claim.
+        let conn = pool.get().expect("conn");
+        let claimed = claim_and_record(&conn, account_id, KEY, "VN registration", |_, pending_tx_id| {
+            assert_eq!(pending_tx_id, pending_id(&pool));
+            Ok(())
+        })
+        .expect("claimed and recorded");
+        drop(conn);
+        assert_eq!(claimed, pending_id(&pool));
+        assert_eq!(status_of(&pool), PendingTransactionStatus::Completed.to_string());
     }
 }

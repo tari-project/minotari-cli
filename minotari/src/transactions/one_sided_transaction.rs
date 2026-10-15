@@ -41,7 +41,9 @@
 //! ```
 
 use crate::db::SqlitePool;
+use crate::transactions::fund_locker::validate_fee_per_gram;
 use crate::transactions::idempotency::{IdempotencyBinding, IdempotencyOperation, RequestFingerprint};
+use crate::transactions::input_selector::map_change_required_error;
 use crate::{api::types::LockFundsResult, db::AccountRow};
 use anyhow::anyhow;
 use log::info;
@@ -246,6 +248,7 @@ impl OneSidedTransaction {
         if recipients.is_empty() {
             return Err(anyhow!("No recipients provided"));
         }
+        validate_fee_per_gram(fee_per_gram)?;
 
         info!(
             target: "audit",
@@ -260,6 +263,8 @@ impl OneSidedTransaction {
         let mut tx_builder = TransactionBuilder::new(consensus_constants, key_manager.clone(), self.network)?;
 
         tx_builder.with_fee_per_gram(fee_per_gram);
+        // Every send carries a change output, so the wallet's scan can see it land.
+        tx_builder.with_change_required();
 
         for utxo in &locked_funds.utxos {
             tx_builder.with_input(utxo.clone())?;
@@ -294,7 +299,8 @@ impl OneSidedTransaction {
             &payment_recipients,
             main_payment_id,
             sender_address,
-        )?;
+        )
+        .map_err(map_change_required_error)?;
 
         Ok(result)
     }

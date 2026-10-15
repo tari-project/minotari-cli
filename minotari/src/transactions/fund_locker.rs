@@ -76,6 +76,38 @@ pub fn validate_seconds_to_lock(seconds_to_lock_utxos: u64) -> Result<(), Invali
     Ok(())
 }
 
+/// The lowest fee per gram the wallet sends with.
+///
+/// A base node's mempool refuses a transaction whose total fee is below its
+/// `min_fee` (`UnconfirmedPoolConfig`, 50 µT by default in tari_core
+/// 6.2.0-pre.1). It sets no per-gram minimum, but the smallest send this wallet
+/// makes (one input, a recipient output and a change output) weighs well over 50
+/// grams, so 1 µT per gram always clears it, while 0 never does. A send at 0 would
+/// be signed, recorded and then never accepted.
+pub const MIN_FEE_PER_GRAM: MicroMinotari = MicroMinotari(1);
+
+/// A fee per gram below [`MIN_FEE_PER_GRAM`].
+///
+/// Like [`InvalidLockDuration`], callers map this to a client error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Error)]
+#[error("fee_per_gram must be at least {minimum} µT per gram (a base node will not accept less), got {fee_per_gram}")]
+pub struct FeePerGramTooLow {
+    pub fee_per_gram: MicroMinotari,
+    pub minimum: MicroMinotari,
+}
+
+/// Rejects a fee per gram the base node would not accept, before anything is
+/// locked or signed.
+pub fn validate_fee_per_gram(fee_per_gram: MicroMinotari) -> Result<(), FeePerGramTooLow> {
+    if fee_per_gram < MIN_FEE_PER_GRAM {
+        return Err(FeePerGramTooLow {
+            fee_per_gram,
+            minimum: MIN_FEE_PER_GRAM,
+        });
+    }
+    Ok(())
+}
+
 /// Computes when a UTXO lock taken at `now` should expire.
 ///
 /// This is total: every step that chrono would panic on (out-of-range
@@ -341,6 +373,7 @@ impl FundLocker {
         // the global mutex, so untrusted input can never reach the critical
         // section (see `MAX_SECONDS_TO_LOCK_UTXOS`).
         validate_seconds_to_lock(seconds_to_lock_utxos)?;
+        validate_fee_per_gram(fee_per_gram)?;
         // Fast idempotency check (without the global mutex).  If the pending
         // transaction already exists we can return immediately without waiting
         // for any concurrent `lock()` call to finish.  A key that does not match
@@ -604,7 +637,7 @@ mod tests {
             account_id,
             MicroMinotari(100_000),
             1,
-            MicroMinotari(0),
+            MicroMinotari(1),
             Some(1000),
             binding,
             3600,
@@ -649,7 +682,7 @@ mod tests {
                                 account_id,
                                 MicroMinotari(100_000),
                                 1,
-                                MicroMinotari(0),
+                                MicroMinotari(1),
                                 Some(1000),
                                 test_binding(None, i),
                                 3600,
@@ -702,7 +735,7 @@ mod tests {
                 account_id,
                 MicroMinotari(100_000),
                 1,
-                MicroMinotari(0),
+                MicroMinotari(1),
                 Some(1000),
                 test_binding(None, 1),
                 3600,
@@ -716,7 +749,7 @@ mod tests {
                 account_id,
                 MicroMinotari(100_000),
                 1,
-                MicroMinotari(0),
+                MicroMinotari(1),
                 Some(1000),
                 test_binding(None, 1),
                 3600,
@@ -760,7 +793,7 @@ mod tests {
                 account_id,
                 MicroMinotari(200_000),
                 1,
-                MicroMinotari(0),
+                MicroMinotari(1),
                 Some(1000),
                 test_binding(Some(&key), 1),
                 3600,
@@ -774,7 +807,7 @@ mod tests {
                 account_id,
                 MicroMinotari(200_000),
                 1,
-                MicroMinotari(0),
+                MicroMinotari(1),
                 Some(1000),
                 test_binding(Some(&key2), 1),
                 3600,
@@ -823,7 +856,7 @@ mod tests {
                 account_a,
                 MicroMinotari(200_000),
                 1,
-                MicroMinotari(0),
+                MicroMinotari(1),
                 Some(1000),
                 test_binding(None, 1),
                 3600,
@@ -836,7 +869,7 @@ mod tests {
                 account_b,
                 MicroMinotari(200_000),
                 1,
-                MicroMinotari(0),
+                MicroMinotari(1),
                 Some(1000),
                 test_binding(None, 1),
                 3600,
@@ -866,7 +899,7 @@ mod tests {
                 account_id,
                 MicroMinotari(100_000),
                 1,
-                MicroMinotari(0),
+                MicroMinotari(1),
                 Some(1000),
                 test_binding(None, 1),
                 3600,
@@ -903,7 +936,7 @@ mod tests {
                 account_id,
                 MicroMinotari(100_000),
                 1,
-                MicroMinotari(0),
+                MicroMinotari(1),
                 Some(1000),
                 test_binding(None, 1),
                 3600,
@@ -932,7 +965,7 @@ mod tests {
                 account_id,
                 MicroMinotari(500_000),
                 1,
-                MicroMinotari(0),
+                MicroMinotari(1),
                 Some(1000),
                 test_binding(None, 1),
                 3600,
@@ -946,7 +979,7 @@ mod tests {
                 account_id,
                 MicroMinotari(500_000),
                 1,
-                MicroMinotari(0),
+                MicroMinotari(1),
                 Some(1000),
                 test_binding(Some("doomed-key"), 1),
                 3600,
@@ -1019,7 +1052,7 @@ mod tests {
                 account_id,
                 MicroMinotari(100_000),
                 1,
-                MicroMinotari(0),
+                MicroMinotari(1),
                 Some(1000),
                 test_binding(None, 1),
                 10_000_000_000_000,
@@ -1040,7 +1073,7 @@ mod tests {
                 account_id,
                 MicroMinotari(100_000),
                 1,
-                MicroMinotari(0),
+                MicroMinotari(1),
                 Some(1000),
                 test_binding(None, 1),
                 3600,
@@ -1069,7 +1102,7 @@ mod tests {
                 account_id,
                 MicroMinotari(100_000),
                 1,
-                MicroMinotari(0),
+                MicroMinotari(1),
                 Some(1000),
                 test_binding(None, 1),
                 3600,
@@ -1248,5 +1281,46 @@ mod tests {
                 "a keyless request reused another request's reservation",
             );
         }
+    }
+
+    #[test]
+    fn a_fee_below_the_minimum_is_refused_before_anything_is_locked() {
+        let (pool, account_id, _temp) = setup_test_env(1, 1_000_000);
+
+        let error = FundLocker::new()
+            .lock(
+                &mut pool.get().expect("conn"),
+                account_id,
+                MicroMinotari(500_000),
+                1,
+                MicroMinotari(0),
+                Some(1000),
+                test_binding(Some("zero-fee"), 1),
+                3600,
+                100,
+            )
+            .expect_err("a zero fee per gram is refused");
+        assert_eq!(
+            error.downcast_ref::<FeePerGramTooLow>(),
+            Some(&FeePerGramTooLow {
+                fee_per_gram: MicroMinotari(0),
+                minimum: MIN_FEE_PER_GRAM,
+            })
+        );
+
+        // Nothing was reserved or locked.
+        let conn = pool.get().expect("conn");
+        let pending: i64 = conn
+            .query_row("SELECT COUNT(*) FROM pending_transactions", [], |row| row.get(0))
+            .expect("count");
+        assert_eq!(pending, 0);
+        let locked: i64 = conn
+            .query_row("SELECT COUNT(*) FROM outputs WHERE status = 'LOCKED'", [], |row| {
+                row.get(0)
+            })
+            .expect("count");
+        assert_eq!(locked, 0);
+
+        assert!(validate_fee_per_gram(MIN_FEE_PER_GRAM).is_ok());
     }
 }

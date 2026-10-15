@@ -198,7 +198,7 @@
           "accounts"
         ],
         "summary": "Burns funds from an account and records a partial burn proof for L2 claiming.",
-        "description": "Creates a burn transaction, broadcasts it, and stores the partial proof in the\ndatabase. The daemon's `BurnProofWorker` will automatically fetch the burn\noutput proof once the transaction is confirmed and write the complete\n`CompleteClaimBurnProof` JSON file to the configured `burn_proofs_dir`.\n\n# Path Parameters\n\n- `name`: The account to burn funds from\n\n# Request Body\n\nSee [`BurnFundsRequest`] for the complete schema.\n\n# Response\n\nReturns a [`BurnFundsResponse`] with:\n- `tx_id`: the transaction ID\n- `output_hash`: hex-encoded output hash (use this to identify the proof file)\n\n# Errors\n\n- `400 Bad Request`: invalid `claim_public_key` or `sidechain_deployment_key` hex\n- `404 Not Found`: account does not exist\n- `500`: insufficient funds, broadcast failure, or other internal error\n\n# Example Request\n\n```bash\ncurl -X POST http://127.0.0.1:9000/accounts/default/burn \\\n  -H \"Authorization: Bearer $MINOTARI_API_TOKEN\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\"amount\": 1000000, \"claim_public_key\": \"a3f9...\"}'\n```",
+        "description": "Creates a burn transaction, broadcasts it, and stores the partial proof in the\ndatabase. The daemon's `BurnProofWorker` will automatically fetch the burn\noutput proof once the transaction is confirmed and write the complete\n`CompleteClaimBurnProof` JSON file to the configured `burn_proofs_dir`.\n\n# Path Parameters\n\n- `name`: The account to burn funds from\n\n# Request Body\n\nSee [`BurnFundsRequest`] for the complete schema.\n\n# Response\n\nReturns a [`BurnFundsResponse`] with:\n- `tx_id`: the transaction ID\n- `output_hash`: hex-encoded output hash (use this to identify the proof file)\n- `accepted_by_node`: whether the node accepted the first broadcast\n- `note`: when it did not, that the burn is recorded, will be rebroadcast\n  automatically and must not be sent again\n- `node_reason`: when it did not, the node's answer\n\nA burn the node refuses (or cannot be reached for) once it is recorded is\nstill a success: it stays pending with its inputs locked and the wallet\nrebroadcasts it.\n\n# Errors\n\n- `400 Bad Request`: invalid `claim_public_key` or `sidechain_deployment_key` hex\n- `404 Not Found`: account does not exist\n- `500`: insufficient funds, or other internal error\n\n# Example Request\n\n```bash\ncurl -X POST http://127.0.0.1:9000/accounts/default/burn \\\n  -H \"Authorization: Bearer $MINOTARI_API_TOKEN\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\"amount\": 1000000, \"claim_public_key\": \"a3f9...\"}'\n```",
         "operationId": "api_burn_funds",
         "parameters": [
           {
@@ -223,7 +223,7 @@
         },
         "responses": {
           "200": {
-            "description": "Burn transaction broadcast successfully",
+            "description": "Burn transaction recorded (and broadcast unless `accepted_by_node` is false)",
             "content": {
               "application/json": {
                 "schema": {
@@ -392,6 +392,90 @@
           },
           "404": {
             "description": "Account or transaction not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/accounts/{name}/completed_transactions/{tx_id}/abandon": {
+      "post": {
+        "tags": [
+          "accounts"
+        ],
+        "summary": "Abandons a send the base node has not accepted, releasing its inputs.",
+        "description": "Only a send that is `completed` or `broadcast` (not mined) can be abandoned.\nUnless `force` is set it must also be stalled: the node has not accepted it\n10 times in a row. A send any of whose inputs is already spent on chain, or\nwhose change output has already been seen on chain, cannot be abandoned;\nthe wallet's scan settles it.\n\nA send without a change output is refused unless `accept_unreconcilable` is\nset: the wallet recognises a send mined after all by its change output, so\nsuch a send, if mined, stays `rejected` in the wallet.\n\nThe send is marked `rejected` (\"abandoned by user\"), its inputs released,\nits change output kept as rejected, its displayed transaction rejected and a\n`TransactionRejected` event recorded.\n\n**This does not unsend it.** If a node still holds the transaction it can\nstill be mined; the wallet's scan then marks it mined after all (if it has a\nchange output), and a send made with the released funds in the meantime\nfails.\n\n# Errors\n\n- `404 Not Found`: account or send does not exist\n- `409 Conflict`: the send is mined or rejected already, is not stalled\n  (and `force` is not set), an input is already spent on chain, its change\n  output is already seen on chain (the send appears to have landed; wait\n  for the scan), its change output is an input of another send, or it has\n  no change output (and `accept_unreconcilable` is not set)\n- `500`: database error",
+        "operationId": "api_abandon_send",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Name of the account",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tx_id",
+            "in": "path",
+            "description": "Transaction id of the send to abandon",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AbandonSendRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Send abandoned",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AbandonSendResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Account or send not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The send cannot be abandoned",
             "content": {
               "application/json": {
                 "schema": {
@@ -950,6 +1034,43 @@
   },
   "components": {
     "schemas": {
+      "AbandonSendRequest": {
+        "type": "object",
+        "description": "Request body for abandoning a send.",
+        "properties": {
+          "accept_unreconcilable": {
+            "type": "boolean",
+            "description": "Abandon the send even though it has no change output. The wallet\nrecognises an abandoned send that is mined after all by its change\noutput; without one, if it is mined, it stays `rejected` in the wallet\nwhile its inputs show as spent. Defaults to `false`."
+          },
+          "force": {
+            "type": "boolean",
+            "description": "Abandon the send even though it is not stalled yet (the node has not\nrefused it 10 times in a row). Defaults to `false`."
+          }
+        }
+      },
+      "AbandonSendResponse": {
+        "type": "object",
+        "description": "Response returned after abandoning a send.",
+        "required": [
+          "tx_id",
+          "status",
+          "note"
+        ],
+        "properties": {
+          "note": {
+            "type": "string",
+            "description": "What abandoning means for the user. It differs for a send without a\nchange output (abandoned with `accept_unreconcilable`)."
+          },
+          "status": {
+            "type": "string",
+            "description": "The send's status now (`rejected`)."
+          },
+          "tx_id": {
+            "type": "string",
+            "description": "The abandoned send's transaction id."
+          }
+        }
+      },
       "AccountBalance": {
         "type": "object",
         "required": [
@@ -1289,9 +1410,28 @@
         "description": "Response returned after a successful burn transaction.",
         "required": [
           "tx_id",
-          "output_hash"
+          "output_hash",
+          "accepted_by_node"
         ],
         "properties": {
+          "accepted_by_node": {
+            "type": "boolean",
+            "description": "Whether the base node accepted the burn on its first broadcast (or\nalready had it mined). When `false` the burn is still recorded and will\nbe rebroadcast automatically: it must not be sent again."
+          },
+          "node_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The node's answer (sanitised) when it did not accept the burn."
+          },
+          "note": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "Set when the node has not accepted the burn yet; says it is recorded,\nwill be rebroadcast and must not be sent again."
+          },
           "output_hash": {
             "type": "string",
             "description": "Hex-encoded output hash of the burn output.\n\nThe daemon will use this to track when the proof is ready."
@@ -1324,7 +1464,7 @@
           "broadcast_attempts": {
             "type": "integer",
             "format": "int32",
-            "description": "Number of broadcast attempts made"
+            "description": "Number of broadcasts in a row the node did not accept (0 once one is\naccepted). At 10 or more the transaction is stalled: still pending, inputs\nlocked, rebroadcast less often."
           },
           "confirmation_height": {
             "type": [
@@ -1809,7 +1949,9 @@
           "Unspent",
           "Locked",
           "Spent",
-          "SpentUnconfirmed"
+          "SpentUnconfirmed",
+          "Unconfirmed",
+          "Rejected"
         ]
       },
       "RecipientRequest": {

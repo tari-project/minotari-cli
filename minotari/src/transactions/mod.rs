@@ -68,7 +68,9 @@
 //! - [`monitor`]: Tracks transaction lifecycle from broadcast to confirmation
 //! - [`one_sided_transaction`]: Builds one-sided (non-interactive) transactions
 //! - [`transaction_history`]: Provides transaction history querying capabilities
+//! - [`abandon`]: Abandoning a send the node has not accepted
 
+pub mod abandon;
 pub mod burn;
 pub mod displayed_transaction_processor;
 pub mod fee_estimator;

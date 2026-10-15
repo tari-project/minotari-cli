@@ -365,7 +365,7 @@ impl WalletHttpClient {
                 Ok(result)
             },
             None => {
-                let error_msg = response.error.unwrap_or_else(|| "Unknown error".to_string());
+                let error_msg = crate::log::sanitize_node_text(response.error.as_deref().unwrap_or("Unknown error"));
                 warn!(
                     target: "audit",
                     reason = &*error_msg;
@@ -535,5 +535,47 @@ impl WalletHttpClient {
             .await?;
 
         Ok(response)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tari_common_types::types::PrivateKey;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn a_node_error_message_is_sanitised_before_it_is_used() {
+        let server = MockServer::start().await;
+        let forged = format!(
+            "bad\n2026-10-14 INFO audit: Transaction confirmed\u{1b}[0m{}",
+            "x".repeat(1_000)
+        );
+        Mock::given(method("POST"))
+            .and(path("/json_rpc"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "result": null,
+                "error": forged,
+                "id": "1",
+            })))
+            .mount(&server)
+            .await;
+        let client = WalletHttpClient::new(server.uri().parse().expect("url")).expect("client");
+        let transaction = Transaction::new(
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            PrivateKey::default(),
+            PrivateKey::default(),
+        );
+
+        let error = client
+            .submit_transaction(transaction)
+            .await
+            .expect_err("the node answered with an error")
+            .to_string();
+        assert!(!error.chars().any(char::is_control), "got: {error:?}");
+        assert!(error.chars().count() < 300, "the node's text is truncated");
     }
 }

@@ -4,17 +4,19 @@ use axum::{
     Json,
     extract::{Path, State},
 };
-use log::info;
+use log::{info, warn};
 use serde::{Deserialize, Serialize};
-use tari_transaction_components::tari_amount::MicroMinotari;
+use tari_common_types::transaction::TxId;
+use tari_transaction_components::{tari_amount::MicroMinotari, transaction_components::Transaction};
 
 use crate::{
     api::{AppState, error::ApiError},
-    db::get_account_by_name,
+    db::{SqlitePool, get_account_by_name},
     http::WalletHttpClient,
     transactions::{
         burn::{BurnTxParams, create_burn_tx, persist_burn_records},
-        fund_locker::validate_seconds_to_lock,
+        fund_locker::{validate_fee_per_gram, validate_seconds_to_lock},
+        manager::{FirstBroadcast, record_first_broadcast},
     },
     utils::crypto::{parse_claimable_public_key_hex, parse_private_key_hex},
 };
@@ -81,6 +83,74 @@ pub struct BurnFundsResponse {
     ///
     /// The daemon will use this to track when the proof is ready.
     pub output_hash: String,
+    /// Whether the base node accepted the burn on its first broadcast (or
+    /// already had it mined). When `false` the burn is still recorded and will
+    /// be rebroadcast automatically: it must not be sent again.
+    pub accepted_by_node: bool,
+    /// Set when the node has not accepted the burn yet; says it is recorded,
+    /// will be rebroadcast and must not be sent again.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub note: Option<String>,
+    /// The node's answer (sanitised) when it did not accept the burn.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node_reason: Option<String>,
+}
+
+impl BurnFundsResponse {
+    /// The response for a recorded burn, as its first broadcast found it.
+    fn new(tx_id: String, output_hash: String, first_broadcast: FirstBroadcast) -> Self {
+        Self {
+            tx_id,
+            output_hash,
+            accepted_by_node: first_broadcast.accepted_by_node,
+            note: first_broadcast.note(),
+            node_reason: first_broadcast.node_reason,
+        }
+    }
+}
+
+/// Broadcasts a recorded burn for the first time and records the node's answer.
+///
+/// Returns what the node said. This never fails: the burn is recorded and the
+/// transaction monitor rebroadcasts it if needed, and an error would invite the
+/// caller to burn again. A database failure here is logged and reported as
+/// `local_record_lagging` (see [`record_first_broadcast`]).
+async fn broadcast_recorded_burn(
+    pool: SqlitePool,
+    client: &WalletHttpClient,
+    transaction: Transaction,
+    tx_id: TxId,
+) -> FirstBroadcast {
+    let response = client.submit_transaction(transaction).await;
+
+    let recorded = tokio::task::spawn_blocking(move || match pool.get() {
+        Ok(conn) => record_first_broadcast(Some(&*conn), tx_id, response),
+        Err(e) => {
+            warn!(target: "audit", error:% = e; "No database connection after a burn was recorded");
+            record_first_broadcast(None, tx_id, response)
+        },
+    })
+    .await;
+    match recorded {
+        Ok(first_broadcast) => first_broadcast,
+        Err(e) => {
+            warn!(target: "audit", error:% = e; "Recording a burn's first broadcast failed; the monitor will catch up");
+            FirstBroadcast {
+                accepted_by_node: false,
+                node_reason: None,
+                local_record_lagging: true,
+            }
+        },
+    }
+}
+
+/// Builds the client for the base node, before anything is recorded: once the
+/// burn is recorded no failure may be reported as an error.
+fn base_node_client(base_node_url: &str) -> Result<WalletHttpClient, ApiError> {
+    let url = base_node_url
+        .parse()
+        .map_err(|e| ApiError::InternalServerError(format!("Invalid base node URL: {}", e)))?;
+    WalletHttpClient::new(url).map_err(|e| ApiError::InternalServerError(e.to_string()))
 }
 
 /// Burns funds from an account and records a partial burn proof for L2 claiming.
@@ -103,12 +173,20 @@ pub struct BurnFundsResponse {
 /// Returns a [`BurnFundsResponse`] with:
 /// - `tx_id`: the transaction ID
 /// - `output_hash`: hex-encoded output hash (use this to identify the proof file)
+/// - `accepted_by_node`: whether the node accepted the first broadcast
+/// - `note`: when it did not, that the burn is recorded, will be rebroadcast
+///   automatically and must not be sent again
+/// - `node_reason`: when it did not, the node's answer
+///
+/// A burn the node refuses (or cannot be reached for) once it is recorded is
+/// still a success: it stays pending with its inputs locked and the wallet
+/// rebroadcasts it.
 ///
 /// # Errors
 ///
 /// - `400 Bad Request`: invalid `claim_public_key` or `sidechain_deployment_key` hex
 /// - `404 Not Found`: account does not exist
-/// - `500`: insufficient funds, broadcast failure, or other internal error
+/// - `500`: insufficient funds, or other internal error
 ///
 /// # Example Request
 ///
@@ -123,7 +201,7 @@ pub struct BurnFundsResponse {
     path = "/accounts/{name}/burn",
     request_body = BurnFundsRequest,
     responses(
-        (status = 200, description = "Burn transaction broadcast successfully", body = BurnFundsResponse),
+        (status = 200, description = "Burn transaction recorded (and broadcast unless `accepted_by_node` is false)", body = BurnFundsResponse),
         (status = 400, description = "Invalid request parameters", body = ApiError),
         (status = 404, description = "Account not found", body = ApiError),
         (status = 409, description = "Idempotency key reused for a different request", body = ApiError),
@@ -149,9 +227,12 @@ pub async fn api_burn_funds(
     let network = app_state.network;
     let password = app_state.password.clone();
     let fee_per_gram = body.fee_per_gram.unwrap_or(DEFAULT_FEE_PER_GRAM);
+    // Checked before anything is locked or recorded.
+    let client = base_node_client(&app_state.base_node_url)?;
     let seconds_to_lock = body.seconds_to_lock.unwrap_or(DEFAULT_SECONDS_TO_LOCK_UTXOS);
     // Reject an out-of-range duration as a client error before doing any work.
     validate_seconds_to_lock(seconds_to_lock)?;
+    validate_fee_per_gram(fee_per_gram)?;
     let confirmation_window = app_state.required_confirmations;
     let idempotency_key = body.idempotency_key.clone();
     let amount = body.amount;
@@ -208,45 +289,206 @@ pub async fn api_burn_funds(
     .await
     .map_err(|e| ApiError::InternalServerError(format!("Task join error: {}", e)))??;
 
-    let client = WalletHttpClient::new(
-        app_state
-            .base_node_url
-            .parse()
-            .map_err(|e| ApiError::InternalServerError(format!("Invalid base node URL: {}", e)))?,
-    )
-    .map_err(|e| ApiError::InternalServerError(e.to_string()))?;
-
-    let response = client
-        .submit_transaction(result.transaction)
-        .await
-        .map_err(|e| ApiError::FailedToBurnFunds(format!("Broadcast failed: {}", e)))?;
-
-    if !response.accepted {
-        return Err(ApiError::FailedToBurnFunds(format!(
-            "Transaction rejected: {}",
-            response.rejection_reason
-        )));
-    }
-
-    // Mark broadcasted.
-    let pool = app_state.db_pool.clone();
-    tokio::task::spawn_blocking(move || {
-        let conn = pool.get().map_err(|e| ApiError::DbError(e.to_string()))?;
-        crate::db::mark_completed_transaction_as_broadcasted(&conn, tx_id, 1)
-            .map_err(|e| ApiError::DbError(e.to_string()))
-    })
-    .await
-    .map_err(|e| ApiError::InternalServerError(format!("Task join error: {}", e)))??;
+    let first_broadcast = broadcast_recorded_burn(app_state.db_pool.clone(), &client, result.transaction, tx_id).await;
 
     info!(
         target: "audit",
         tx_id = &*tx_id.to_string(),
-        output_hash = &*hex::encode(output_hash);
-        "API: Burn transaction broadcasted"
+        output_hash = &*hex::encode(output_hash),
+        accepted_by_node = first_broadcast.accepted_by_node;
+        "API: Burn transaction recorded"
     );
 
-    Ok(Json(BurnFundsResponse {
-        tx_id: tx_id.to_string(),
-        output_hash: hex::encode(output_hash),
-    }))
+    Ok(Json(BurnFundsResponse::new(
+        tx_id.to_string(),
+        hex::encode(output_hash),
+        first_broadcast,
+    )))
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::indexing_slicing)]
+
+    use super::*;
+    use crate::db::{create_account, init_db};
+    use crate::transactions::idempotency::{IdempotencyBinding, IdempotencyOperation, RequestFingerprint};
+    use chrono::Utc;
+    use rusqlite::named_params;
+    use tari_common_types::seeds::cipher_seed::CipherSeed;
+    use tari_common_types::types::PrivateKey;
+    use tari_transaction_components::key_manager::wallet_types::{SeedWordsWallet, WalletType};
+    use tempfile::TempDir;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    struct RecordedBurn {
+        pool: SqlitePool,
+        tx_id: TxId,
+        input_id: i64,
+        _dir: TempDir,
+    }
+
+    /// A burn as `persist_burn_records` leaves it before the first broadcast:
+    /// completed transaction, input locked to it.
+    fn recorded_burn() -> RecordedBurn {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let pool = init_db(dir.path().join("burn.db")).expect("init db");
+        let conn = pool.get().expect("conn");
+        let wallet = WalletType::SeedWords(SeedWordsWallet::construct_new(CipherSeed::random()).unwrap());
+        create_account(&conn, "default", &wallet, "password").unwrap();
+        let account = get_account_by_name(&conn, "default").unwrap().unwrap();
+        let binding = IdempotencyBinding::new(
+            Some("burn".to_string()),
+            IdempotencyOperation::BurnFunds,
+            RequestFingerprint::new(IdempotencyOperation::BurnFunds),
+        );
+        let request_id = crate::db::create_pending_transaction(
+            &conn,
+            "burn",
+            &binding,
+            account.id,
+            true,
+            MicroMinotari(0),
+            MicroMinotari(0),
+            MicroMinotari(0),
+            Utc::now() + chrono::Duration::hours(1),
+        )
+        .expect("pending");
+        conn.execute(
+            r#"
+            INSERT INTO outputs (
+                account_id, tx_id, output_hash, mined_in_block_height, mined_in_block_hash, value,
+                mined_timestamp, wallet_output_json, status, confirmed_height, is_burn, maturity
+            ) VALUES (:account_id, 1, :hash, 10, :hash, 10000, :ts, '{}', 'UNSPENT', 10, 0, 0)
+            "#,
+            named_params! { ":account_id": account.id, ":hash": vec![1u8; 32], ":ts": Utc::now() },
+        )
+        .expect("input");
+        let input_id = conn.last_insert_rowid();
+        crate::db::lock_output(&conn, input_id, &request_id, Utc::now()).expect("lock");
+        let tx_id = TxId::from(5u64);
+        crate::db::create_completed_transaction(&conn, account.id, &request_id, &[], b"{}", None, tx_id)
+            .expect("completed");
+        drop(conn);
+        RecordedBurn {
+            pool,
+            tx_id,
+            input_id,
+            _dir: dir,
+        }
+    }
+
+    async fn node_answering(accepted: bool, reason: &str) -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/json_rpc"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "result": { "accepted": accepted, "rejection_reason": reason, "is_synced": true },
+                "error": null,
+                "id": "1",
+            })))
+            .mount(&server)
+            .await;
+        server
+    }
+
+    fn empty_transaction() -> Transaction {
+        Transaction::new(
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+            PrivateKey::default(),
+            PrivateKey::default(),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_burn_the_node_refuses_is_a_success_marked_pending() {
+        let burn = recorded_burn();
+        let server = node_answering(false, "DoubleSpend").await;
+
+        let client = base_node_client(&server.uri()).expect("client");
+        let first = broadcast_recorded_burn(burn.pool.clone(), &client, empty_transaction(), burn.tx_id).await;
+        assert!(!first.accepted_by_node);
+
+        let response = BurnFundsResponse::new(burn.tx_id.to_string(), "00".to_string(), first);
+        let body = serde_json::to_value(&response).expect("json");
+        assert_eq!(body["accepted_by_node"], false);
+        let note = body["note"].as_str().expect("a pending note");
+        assert!(note.contains("Do not send it again"), "got: {note}");
+        let reason = body["node_reason"].as_str().expect("the node's answer");
+        assert!(reason.contains("Double Spend"), "got: {reason}");
+
+        // Still recorded, inputs still locked, for the monitor to rebroadcast.
+        let conn = burn.pool.get().expect("conn");
+        let completed = crate::db::get_completed_transaction_by_id(&conn, burn.tx_id)
+            .expect("query")
+            .expect("completed");
+        assert_eq!(completed.status, crate::db::CompletedTransactionStatus::Completed);
+        let input_status: String = conn
+            .query_row(
+                "SELECT status FROM outputs WHERE id = :id",
+                named_params! { ":id": burn.input_id },
+                |row| row.get(0),
+            )
+            .expect("input");
+        assert_eq!(input_status, "LOCKED");
+    }
+
+    #[tokio::test]
+    async fn an_accepted_burn_has_no_pending_note() {
+        let burn = recorded_burn();
+        let server = node_answering(true, "None").await;
+
+        let client = base_node_client(&server.uri()).expect("client");
+        let first = broadcast_recorded_burn(burn.pool.clone(), &client, empty_transaction(), burn.tx_id).await;
+        assert!(first.accepted_by_node);
+
+        let body = serde_json::to_value(BurnFundsResponse::new(burn.tx_id.to_string(), "00".to_string(), first))
+            .expect("json");
+        assert_eq!(body["accepted_by_node"], true);
+        assert!(body.get("note").is_none(), "no note when accepted");
+        assert!(body.get("node_reason").is_none(), "no reason when accepted");
+
+        let conn = burn.pool.get().expect("conn");
+        let completed = crate::db::get_completed_transaction_by_id(&conn, burn.tx_id)
+            .expect("query")
+            .expect("completed");
+        assert_eq!(completed.status, crate::db::CompletedTransactionStatus::Broadcast);
+    }
+
+    #[tokio::test]
+    async fn a_database_failure_after_the_burn_is_recorded_is_still_a_success() {
+        let burn = recorded_burn();
+        burn.pool
+            .get()
+            .expect("conn")
+            .execute_batch(
+                "CREATE TRIGGER no_status BEFORE UPDATE ON completed_transactions \
+                 BEGIN SELECT RAISE(ABORT, 'disk full'); END;",
+            )
+            .expect("trigger");
+        let server = node_answering(true, "None").await;
+        let client = base_node_client(&server.uri()).expect("client");
+
+        let first = broadcast_recorded_burn(burn.pool.clone(), &client, empty_transaction(), burn.tx_id).await;
+        assert!(first.accepted_by_node);
+        assert!(first.local_record_lagging);
+
+        let body = serde_json::to_value(BurnFundsResponse::new(burn.tx_id.to_string(), "00".to_string(), first))
+            .expect("json");
+        assert_eq!(body["accepted_by_node"], true);
+        let note = body["note"].as_str().expect("a note that the record lags");
+        assert!(note.contains("Do not send it again"), "got: {note}");
+    }
+
+    #[test]
+    fn a_bad_node_url_is_refused_before_anything_is_recorded() {
+        // The handler builds this client before creating or recording the burn.
+        assert!(matches!(
+            base_node_client("not a url"),
+            Err(ApiError::InternalServerError(_))
+        ));
+    }
 }

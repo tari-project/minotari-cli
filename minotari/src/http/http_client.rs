@@ -184,6 +184,8 @@ impl HttpClient {
                 .text()
                 .await
                 .unwrap_or_else(|_| "Failed to read response body".into());
+            // The body is the node's text; it ends up in logs and on the terminal.
+            let body = crate::log::sanitize_node_text(&body);
             return Err(HttpError::ServerError { status, body });
         }
 
@@ -212,5 +214,65 @@ impl HttpClient {
     /// no requests have been sent yet.
     pub async fn get_latency(&self) -> Option<Duration> {
         self.last_latency.read().await.map(|(d, _)| d)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn forged_text() -> String {
+        format!(
+            "bad\n2026-10-14 INFO audit: Transaction confirmed\u{1b}[0m\r{}",
+            "x".repeat(1_000)
+        )
+    }
+
+    fn client(server: &MockServer) -> HttpClient {
+        HttpClient::with_config(server.uri().parse().expect("url"), 0, Duration::from_secs(5)).expect("client")
+    }
+
+    #[tokio::test]
+    async fn a_node_error_body_is_sanitised_and_truncated() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/broken"))
+            .respond_with(ResponseTemplate::new(500).set_body_string(forged_text()))
+            .mount(&server)
+            .await;
+
+        let error = client(&server)
+            .send_request::<serde_json::Value>(Method::GET, "/broken", None)
+            .await
+            .expect_err("the node failed");
+        let HttpError::ServerError { body, .. } = &error else {
+            panic!("expected a server error, got {error}");
+        };
+        assert!(!body.chars().any(char::is_control), "got: {body:?}");
+        assert_eq!(body.chars().count(), 256);
+        let shown = error.to_string();
+        assert!(!shown.chars().any(char::is_control), "got: {shown:?}");
+        assert!(shown.chars().count() < 300);
+    }
+
+    #[tokio::test]
+    async fn a_malformed_node_answer_is_sanitised_when_shown() {
+        // A JSON decode error quotes the value it could not decode.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/odd"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!(forged_text())))
+            .mount(&server)
+            .await;
+
+        let error = client(&server)
+            .send_request::<u64>(Method::GET, "/odd", None)
+            .await
+            .expect_err("not a number");
+        let shown = error.to_string();
+        assert!(!shown.chars().any(char::is_control), "got: {shown:?}");
+        assert!(shown.chars().count() <= 300, "got {} characters", shown.chars().count());
     }
 }

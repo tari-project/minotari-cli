@@ -31,7 +31,7 @@ use tari_transaction_components::{
     key_manager::{KeyManager, SecretTransactionKeyManagerInterface, TariKeyId, TransactionKeyManagerInterface},
     transaction_builder::PendingOutput,
     transaction_components::{
-        KernelFeatures, OutputFeatures, WalletOutputBuilder,
+        KernelFeatures, OutputFeatures, WalletOutput, WalletOutputBuilder,
         memo_field::{MemoField, TxType},
     },
 };
@@ -44,6 +44,7 @@ use crate::{
         fee_estimator::{estimated_output_size_for_payment_id, measure_output_size},
         fund_locker::FundLocker,
         idempotency::{IdempotencyBinding, IdempotencyConflict, IdempotencyOperation, RequestFingerprint},
+        input_selector::map_change_required_error,
     },
 };
 
@@ -57,6 +58,11 @@ pub struct BurnTxResult {
     pub new_burn_proof: NewBurnProof,
     /// The generated tx_id.
     pub tx_id: TxId,
+    /// The burn's change output. Written to `outputs` as `UNCONFIRMED` by
+    /// [`persist_burn_records`] so the wallet's scan can see the burn land.
+    pub change_output: Option<WalletOutput>,
+    /// The account's private view key, needed to derive the change output's `tx_id`.
+    pub view_key: PrivateKey,
 }
 
 /// Parameters for a burn transaction.
@@ -206,6 +212,8 @@ pub fn create_burn_tx(
     // Assemble the transaction.
     let mut tx_builder = TransactionBuilder::new(consensus_constants, key_manager.clone(), network)?;
     tx_builder.with_fee_per_gram(params.fee_per_gram);
+    // Every send carries a change output, so the wallet's scan can see it land.
+    tx_builder.with_change_required();
     tx_builder.with_kernel_features(KernelFeatures::create_burn());
     tx_builder.with_tx_type(TxType::Burn);
     tx_builder.with_memo(memo.clone());
@@ -276,7 +284,9 @@ pub fn create_burn_tx(
             &memo,
         )?,
     );
-    tx_builder.reserve_sender_offset_keys(&[pending_burn_output])?;
+    tx_builder
+        .reserve_sender_offset_keys(&[pending_burn_output])
+        .map_err(map_change_required_error)?;
 
     // Default address used as placeholder — burn outputs have no real "recipient".
     tx_builder.add_recipient(
@@ -330,6 +340,8 @@ pub fn create_burn_tx(
         output_hash,
         new_burn_proof,
         tx_id: finalized.tx_id,
+        change_output: finalized.change,
+        view_key: key_manager.get_private_view_key(),
     })
 }
 
@@ -432,6 +444,11 @@ pub fn persist_burn_records(
         result.tx_id,
     )
     .map_err(|e| anyhow!("Failed to record completed transaction for burn: {}", e))?;
+
+    if let Some(change_output) = &result.change_output {
+        crate::db::insert_unconfirmed_change_output(&tx, account_id, &result.view_key, &pending_tx_id, change_output)
+            .map_err(|e| anyhow!("Failed to record the change output for burn: {}", e))?;
+    }
 
     tx.commit()?;
 

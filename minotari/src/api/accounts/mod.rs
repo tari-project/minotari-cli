@@ -19,6 +19,7 @@
 //! | GET | `/accounts/{name}/events` | Retrieve wallet events |
 //! | POST | `/accounts/{name}/lock_funds` | Lock UTXOs for spending |
 //! | POST | `/accounts/{name}/create_unsigned_transaction` | Create unsigned transaction |
+//! | POST | `/accounts/{name}/completed_transactions/{tx_id}/abandon` | Abandon a send the node has not accepted |
 //!
 //! # Authentication
 //!
@@ -45,6 +46,7 @@
 //!   -d '{"amount": 1000000}'
 //! ```
 
+mod abandon;
 mod balance;
 mod burn;
 mod events;
@@ -53,6 +55,7 @@ mod fund_lock;
 mod params;
 mod transactions;
 
+pub use abandon::{AbandonSendRequest, AbandonSendResponse, SendParams, api_abandon_send};
 pub use balance::{
     CreatePaymentIdAddressRequest, api_create_address_with_payment_id, api_get_address, api_get_balance,
     api_get_scan_status, api_get_version,
@@ -71,6 +74,7 @@ pub use transactions::{
 
 // Re-export utoipa-generated path structs so that the OpenApi derive in api/mod.rs
 // can resolve `accounts::__path_*` names.
+pub use abandon::__path_api_abandon_send;
 pub use balance::{
     __path_api_create_address_with_payment_id, __path_api_get_address, __path_api_get_balance,
     __path_api_get_scan_status, __path_api_get_version,
