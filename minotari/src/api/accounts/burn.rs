@@ -15,7 +15,7 @@ use crate::{
     http::WalletHttpClient,
     transactions::{
         burn::{BurnTxParams, create_burn_tx, persist_burn_records},
-        fund_locker::validate_seconds_to_lock,
+        fund_locker::{validate_fee_per_gram, validate_seconds_to_lock},
         manager::{NOT_YET_ACCEPTED_NOTE, record_first_broadcast},
     },
     utils::crypto::{parse_claimable_public_key_hex, parse_private_key_hex},
@@ -215,6 +215,7 @@ pub async fn api_burn_funds(
     let seconds_to_lock = body.seconds_to_lock.unwrap_or(DEFAULT_SECONDS_TO_LOCK_UTXOS);
     // Reject an out-of-range duration as a client error before doing any work.
     validate_seconds_to_lock(seconds_to_lock)?;
+    validate_fee_per_gram(fee_per_gram)?;
     let confirmation_window = app_state.required_confirmations;
     let idempotency_key = body.idempotency_key.clone();
     let amount = body.amount;

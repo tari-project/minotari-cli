@@ -112,7 +112,7 @@ use crate::{
             TransactionInput, TransactionSource,
         },
         fee_estimator::estimated_output_size_for_payment_id,
-        fund_locker::{check_replay_allowed, lock_expiry_at},
+        fund_locker::{check_replay_allowed, lock_expiry_at, validate_fee_per_gram},
         idempotency::{IdempotencyBinding, IdempotencyConflict, IdempotencyOperation, RequestFingerprint},
         input_selector::{InputSelector, UtxoSelection, map_change_required_error},
         one_sided_transaction::Recipient,
@@ -350,6 +350,7 @@ impl TransactionSender {
     /// transaction, because a check outside it can be overtaken between the read
     /// and the insert that acts on it.
     fn validate_transaction_creation_request(&self) -> Result<(), anyhow::Error> {
+        validate_fee_per_gram(self.fee_per_gram)?;
         let sender_address = self.account.get_address(self.network, &self.password)?;
         if !sender_address
             .features()

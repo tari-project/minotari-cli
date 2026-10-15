@@ -43,9 +43,12 @@ api_bind_address = "127.0.0.1"
 # - TransactionBroadcast: An outbound transaction was successfully broadcast to the network.
 # - TransactionUnconfirmed: An outbound transaction was mined but is awaiting confirmations.
 # - TransactionConfirmed: An outbound transaction has reached sufficient confirmations.
-# - TransactionRejected: An outbound transaction was rejected by the base node.
-# - TransactionReorged: A previously mined outbound transaction was removed via reorg.
-# send_only_event_types = ["OutputDetected", "TransactionConfirmed", "TransactionRejected"]
+# - TransactionRejected: An outbound transaction was rejected: the wallet's scan saw its inputs spent by a
+#   different transaction.
+# - TransactionReorged: A previously mined or rejected outbound transaction was undone by a reorg.
+# - TransactionStalled: The base node has not accepted an outbound transaction after repeated tries. Not
+#   terminal: it stays pending with its inputs locked and is rebroadcast less often.
+# send_only_event_types = ["OutputDetected", "TransactionConfirmed", "TransactionRejected", "TransactionStalled"]
 
 [mainnet.wallet]
 base_url = "https://rpc.tari.com"

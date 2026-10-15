@@ -47,7 +47,10 @@ use utoipa::ToSchema;
 
 use crate::{
     db::WalletDbError,
-    transactions::{fund_locker::InvalidLockDuration, idempotency::IdempotencyConflict},
+    transactions::{
+        fund_locker::{FeePerGramTooLow, InvalidLockDuration},
+        idempotency::IdempotencyConflict,
+    },
 };
 
 /// Represents all possible errors returned by the REST API.
@@ -218,6 +221,9 @@ impl ApiError {
     /// it through `fallback` would report a server fault and invite the client
     /// to retry the very request that was just refused.
     pub fn from_transaction_error(err: anyhow::Error, fallback: impl FnOnce(String) -> ApiError) -> ApiError {
+        if let Some(too_low) = err.downcast_ref::<FeePerGramTooLow>() {
+            return ApiError::BadRequest(too_low.to_string());
+        }
         match err.downcast::<IdempotencyConflict>() {
             Ok(conflict) => ApiError::Conflict(conflict.to_string()),
             Err(err) => fallback(err.to_string()),
@@ -241,6 +247,13 @@ impl From<IdempotencyConflict> for ApiError {
 /// status code: nothing is wrong on the server.
 impl From<InvalidLockDuration> for ApiError {
     fn from(err: InvalidLockDuration) -> Self {
+        ApiError::BadRequest(err.to_string())
+    }
+}
+
+/// Converts a fee per gram the base node would not accept into a client error.
+impl From<FeePerGramTooLow> for ApiError {
+    fn from(err: FeePerGramTooLow) -> Self {
         ApiError::BadRequest(err.to_string())
     }
 }
@@ -335,5 +348,23 @@ impl IntoResponse for ApiError {
         }));
 
         (status, body).into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::transactions::fund_locker::validate_fee_per_gram;
+    use tari_transaction_components::tari_amount::MicroMinotari;
+
+    #[test]
+    fn a_fee_per_gram_below_the_minimum_is_a_bad_request() {
+        let too_low = validate_fee_per_gram(MicroMinotari(0)).expect_err("too low");
+        assert!(matches!(ApiError::from(too_low), ApiError::BadRequest(_)));
+        let through_a_lock = ApiError::from_transaction_error(too_low.into(), ApiError::FailedToLockFunds);
+        assert!(
+            matches!(through_a_lock, ApiError::BadRequest(_)),
+            "got {through_a_lock:?}"
+        );
     }
 }

@@ -41,6 +41,7 @@
 //! ```
 
 use crate::db::SqlitePool;
+use crate::transactions::fund_locker::validate_fee_per_gram;
 use crate::transactions::idempotency::{IdempotencyBinding, IdempotencyOperation, RequestFingerprint};
 use crate::transactions::input_selector::map_change_required_error;
 use crate::{api::types::LockFundsResult, db::AccountRow};
@@ -247,6 +248,7 @@ impl OneSidedTransaction {
         if recipients.is_empty() {
             return Err(anyhow!("No recipients provided"));
         }
+        validate_fee_per_gram(fee_per_gram)?;
 
         info!(
             target: "audit",
