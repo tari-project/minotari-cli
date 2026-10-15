@@ -14,7 +14,10 @@ use tari_transaction_components::tari_amount::MicroMinotari;
 use crate::{
     db::{self, init_db},
     http::WalletHttpClient,
-    transactions::burn::{BurnTxParams, BurnTxResult, create_burn_tx, persist_burn_records},
+    transactions::{
+        burn::{BurnTxParams, BurnTxResult, create_burn_tx, persist_burn_records},
+        manager::{NOT_YET_ACCEPTED_NOTE, record_first_broadcast},
+    },
     utils::crypto::{parse_claimable_public_key_hex, parse_private_key_hex},
 };
 
@@ -88,23 +91,27 @@ pub async fn handle_burn_funds(
     let client = WalletHttpClient::new(base_url.parse()?)?;
     let response = client.submit_transaction(transaction).await;
 
-    match response {
-        Ok(r) if r.accepted => {
-            db::mark_completed_transaction_as_broadcasted(&conn, tx_id, 0)?;
-            info!(
-                target: "audit",
-                tx_id = &*tx_id.to_string(),
-                output_hash = &*hex::encode(output_hash);
-                "Burn transaction broadcasted"
-            );
-            println!(
-                "Burn transaction broadcasted. tx_id={}, output_hash={}",
-                tx_id,
-                hex::encode(output_hash)
-            );
-        },
-        Ok(r) => return Err(anyhow!("Transaction rejected by network: {}", r.rejection_reason)),
-        Err(e) => return Err(anyhow!("Broadcast failed: {}", e)),
+    // The burn is recorded: whatever the node says, it is seen through (the
+    // monitor rebroadcasts it), so this succeeds either way.
+    if record_first_broadcast(&conn, tx_id, response)? {
+        info!(
+            target: "audit",
+            tx_id = &*tx_id.to_string(),
+            output_hash = &*hex::encode(output_hash);
+            "Burn transaction broadcasted"
+        );
+        println!(
+            "Burn transaction broadcasted. tx_id={}, output_hash={}",
+            tx_id,
+            hex::encode(output_hash)
+        );
+    } else {
+        println!(
+            "Burn transaction recorded, pending. tx_id={}, output_hash={}\n{}",
+            tx_id,
+            hex::encode(output_hash),
+            NOT_YET_ACCEPTED_NOTE
+        );
     }
 
     Ok(())

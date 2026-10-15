@@ -11,6 +11,7 @@ use crate::{
     models::PendingTransactionStatus,
     transactions::{
         input_selector::map_change_required_error,
+        manager::{NOT_YET_ACCEPTED_NOTE, record_first_broadcast},
         validator_node::{
             exit::{ValidatorNodeExitParams, create_validator_node_exit_tx},
             registration::{ValidatorNodeRegistrationParams, create_validator_node_registration_tx},
@@ -179,14 +180,16 @@ async fn sign_save_and_broadcast(
         .submit_transaction(signed_result.signed_transaction.transaction)
         .await;
 
-    match response {
-        Ok(r) if r.accepted => {
-            db::mark_completed_transaction_as_broadcasted(conn, completed_tx_id, 0)?;
-            info!(target: "audit", tx_id = completed_tx_id.to_string().as_str(); "{} broadcasted", tx_kind);
-            println!("{} transaction broadcasted. tx_id={}", tx_kind, completed_tx_id);
-        },
-        Ok(r) => return Err(anyhow!("Transaction rejected by network: {}", r.rejection_reason)),
-        Err(e) => return Err(anyhow!("Broadcast failed: {}", e)),
+    // The transaction is recorded: whatever the node says, it is seen through
+    // (the monitor rebroadcasts it), so this succeeds either way.
+    if record_first_broadcast(conn, completed_tx_id, response)? {
+        info!(target: "audit", tx_id = completed_tx_id.to_string().as_str(); "{} broadcasted", tx_kind);
+        println!("{} transaction broadcasted. tx_id={}", tx_kind, completed_tx_id);
+    } else {
+        println!(
+            "{} transaction recorded, pending. tx_id={}\n{}",
+            tx_kind, completed_tx_id, NOT_YET_ACCEPTED_NOTE
+        );
     }
 
     Ok(())

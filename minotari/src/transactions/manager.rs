@@ -792,7 +792,8 @@ impl TransactionSender {
             .submit_transaction(signed_transaction_result.signed_transaction.transaction)
             .await;
 
-        record_first_broadcast(&connection, completed_tx_id, response)?;
+        // Whatever the node said, the send is recorded and will be rebroadcast.
+        let _accepted = record_first_broadcast(&connection, completed_tx_id, response)?;
 
         // Build and save DisplayedTransaction for immediate UI display
         let displayed_transaction =
@@ -999,11 +1000,15 @@ impl TransactionSender {
 /// The transaction monitor rebroadcasts it, and only the wallet's own scan can
 /// show its inputs went elsewhere. A refusal counts as one broadcast the node
 /// did not accept; a request that got no answer does not.
-fn record_first_broadcast(
+///
+/// Returns whether the node took it (accepted, or already mined). When it did
+/// not, callers report success with [`NOT_YET_ACCEPTED_NOTE`]: the send must
+/// not be made again.
+pub fn record_first_broadcast(
     connection: &Connection,
     completed_tx_id: TxId,
     response: Result<TxSubmissionResponse, anyhow::Error>,
-) -> Result<(), anyhow::Error> {
+) -> Result<bool, anyhow::Error> {
     match response {
         Ok(submission) if submission.accepted => {
             info!(
@@ -1013,6 +1018,7 @@ fn record_first_broadcast(
             );
             // An accepted broadcast does not count towards the stall limit.
             db::mark_completed_transaction_as_broadcasted(connection, completed_tx_id, 0)?;
+            Ok(true)
         },
         Ok(submission) if submission.rejection_reason == TxSubmissionRejectionReason::AlreadyMined => {
             info!(
@@ -1020,6 +1026,7 @@ fn record_first_broadcast(
                 id = completed_tx_id.to_string().as_str();
                 "Transaction already mined by network"
             );
+            Ok(true)
         },
         Ok(submission) => {
             warn!(
@@ -1029,6 +1036,7 @@ fn record_first_broadcast(
                 "Transaction not accepted by the network yet; it is recorded and will be rebroadcast"
             );
             db::record_failed_broadcast_attempt(connection, completed_tx_id, 1)?;
+            Ok(false)
         },
         Err(e) => {
             // The error can carry text from the node; it is logged.
@@ -1039,10 +1047,14 @@ fn record_first_broadcast(
                 reason:% = e;
                 "Transaction submission failed; it is recorded and will be rebroadcast"
             );
+            Ok(false)
         },
     }
-    Ok(())
 }
+
+/// What to tell the caller when the node did not take a recorded send.
+pub const NOT_YET_ACCEPTED_NOTE: &str = "The transaction is recorded but the node has not accepted it yet. \
+     It will be rebroadcast automatically. Do not send it again.";
 
 #[cfg(test)]
 mod tests {
