@@ -24,11 +24,13 @@ Feature: Burn Funds
   # Durability scenario: burn proof is written to the DB *before* broadcast.
   # We point the command at an unreachable URL so broadcast always fails, but
   # the partial proof record must already be in the database by that point.
+  # The burn is recorded before the broadcast, so the command does not fail:
+  # it reports the burn as pending, for the monitor to rebroadcast.
   # ─────────────────────────────────────────────────────────────────────────────
 
   Scenario: Burn proof is persisted to database before broadcast attempt
     Given I have a test database with a full signing wallet
     And the wallet has sufficient balance
     When I burn "100000" microTari targeting an unreachable base node
-    Then the burn command fails with a broadcast error
+    Then the burn is recorded as pending
     And the database should contain a "pending_merkle" burn proof record

@@ -101,22 +101,21 @@ async fn error_contains(world: &mut MinotariWorld, expected: String) {
     );
 }
 
-#[then("the burn command fails with a broadcast error")]
-async fn burn_failed_with_broadcast_error(world: &mut MinotariWorld) {
-    assert_ne!(
-        world.last_command_exit_code,
-        Some(0),
-        "Expected burn-funds to fail, but it succeeded"
-    );
-
+#[then("the burn is recorded as pending")]
+async fn burn_recorded_as_pending(world: &mut MinotariWorld) {
     let stderr = world.last_command_error.as_deref().unwrap_or("");
     let stdout = world.last_command_output.as_deref().unwrap_or("");
-    let combined = format!("{stderr}{stdout}").to_lowercase();
 
-    // The error must come from the broadcast phase, not from fund-locking or parsing.
+    // A recorded burn is the wallet's to see through: the node not taking it is
+    // not an error (an error would invite the user to burn again).
+    assert_eq!(
+        world.last_command_exit_code,
+        Some(0),
+        "Expected burn-funds to record the burn, but it failed:\nstderr: {stderr}\nstdout: {stdout}",
+    );
     assert!(
-        combined.contains("broadcast") || combined.contains("connect") || combined.contains("connection"),
-        "Expected a broadcast/connection error, got:\nstderr: {stderr}\nstdout: {stdout}",
+        stdout.contains("Burn transaction recorded, pending"),
+        "Expected the burn to be reported as pending, got:\nstderr: {stderr}\nstdout: {stdout}",
     );
 }
 
