@@ -120,10 +120,19 @@ impl<E: EventSender + Clone + Send + 'static> ScanDbHandler<E> {
             // Match the wallet's sends in the last block of the batch. Normally
             // that block is complete (see above), but a single block larger than
             // a page arrives partial, so as a safeguard a mismatch there does not
-            // reject a send; the post-scan monitor settles it instead.
+            // reject a send yet.
             processor
                 .match_sends(&tx, false)
                 .map_err(|e| WalletDbError::Unexpected(e.to_string()))?;
+
+            // Blocks below the last one of this batch have been moved past, so
+            // they are complete: decide the sends whose inputs were spent there
+            // that an earlier batch's last block left undecided.
+            if let Some(last) = last_height {
+                processor
+                    .settle_sends_in_passed_blocks(&tx, target_account_id, last)
+                    .map_err(|e| WalletDbError::Unexpected(e.to_string()))?;
+            }
 
             let events = processor.take_wallet_events();
             tx.commit().map_err(WalletDbError::from)?;

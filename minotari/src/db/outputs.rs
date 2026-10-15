@@ -526,6 +526,96 @@ pub fn restore_change_of_rejected_send(
     Ok(Some((request_id, TxId::from(completed_id as u64))))
 }
 
+/// Where the scan saw the wallet's output `output_hash` spent: the height and
+/// block hash of its active input record, if it has one.
+pub fn get_output_spend(
+    conn: &Connection,
+    account_id: i64,
+    output_hash: &FixedHash,
+) -> WalletDbResult<Option<(u64, Vec<u8>)>> {
+    let spend: Option<(i64, Vec<u8>)> = conn
+        .query_row(
+            r#"
+            SELECT i.mined_in_block_height, i.mined_in_block_hash
+            FROM inputs i
+            JOIN outputs o ON i.output_id = o.id
+            WHERE o.account_id = :account_id
+              AND o.output_hash = :hash
+              AND o.deleted_at IS NULL
+              AND i.deleted_at IS NULL
+            "#,
+            named_params! { ":account_id": account_id, ":hash": output_hash.as_slice() },
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    #[allow(clippy::cast_sign_loss)]
+    Ok(spend.map(|(height, hash)| (height as u64, hash)))
+}
+
+/// Hashes of the wallet's outputs the scan saw spent in the block at `height`
+/// with `block_hash` (active input records).
+pub fn get_output_hashes_spent_in_block(
+    conn: &Connection,
+    account_id: i64,
+    height: u64,
+    block_hash: &[u8],
+) -> WalletDbResult<Vec<FixedHash>> {
+    #[allow(clippy::cast_possible_wrap)]
+    let height = height as i64;
+    let mut stmt = conn.prepare_cached(
+        r#"
+        SELECT o.output_hash
+        FROM inputs i
+        JOIN outputs o ON i.output_id = o.id
+        WHERE o.account_id = :account_id
+          AND o.deleted_at IS NULL
+          AND i.deleted_at IS NULL
+          AND i.mined_in_block_height = :height
+          AND i.mined_in_block_hash = :hash
+        "#,
+    )?;
+    let rows = stmt.query_map(
+        named_params! { ":account_id": account_id, ":height": height, ":hash": block_hash },
+        |row| row.get::<_, Vec<u8>>(0),
+    )?;
+    let mut hashes = Vec::new();
+    for row in rows {
+        hashes.push(FixedHash::try_from(row?).map_err(|e| WalletDbError::Decoding(e.to_string()))?);
+    }
+    Ok(hashes)
+}
+
+/// Hashes of the wallet's active outputs mined in the block at `height` with
+/// `block_hash`.
+pub fn get_output_hashes_mined_in_block(
+    conn: &Connection,
+    account_id: i64,
+    height: u64,
+    block_hash: &[u8],
+) -> WalletDbResult<Vec<FixedHash>> {
+    #[allow(clippy::cast_possible_wrap)]
+    let height = height as i64;
+    let mut stmt = conn.prepare_cached(
+        r#"
+        SELECT output_hash
+        FROM outputs
+        WHERE account_id = :account_id
+          AND deleted_at IS NULL
+          AND mined_in_block_height = :height
+          AND mined_in_block_hash = :hash
+        "#,
+    )?;
+    let rows = stmt.query_map(
+        named_params! { ":account_id": account_id, ":height": height, ":hash": block_hash },
+        |row| row.get::<_, Vec<u8>>(0),
+    )?;
+    let mut hashes = Vec::new();
+    for row in rows {
+        hashes.push(FixedHash::try_from(row?).map_err(|e| WalletDbError::Decoding(e.to_string()))?);
+    }
+    Ok(hashes)
+}
+
 /// Records `pending_tx_id` as the holder of the wallet's outputs it spent in a
 /// block (`locked_by_request_id` on the `SPENT` rows for `input_hashes`).
 ///
