@@ -64,10 +64,13 @@
 //! let signed = sign_transaction(unsigned)?;
 //!
 //! // Broadcast to network
-//! let displayed_tx = sender.finalize_transaction_and_broadcast(
+//! let sent = sender.finalize_transaction_and_broadcast(
 //!     signed,
 //!     grpc_address,
 //! ).await?;
+//! if !sent.accepted_by_node {
+//!     // Recorded and pending: it will be rebroadcast; do not send it again.
+//! }
 //! ```
 
 use anyhow::anyhow;
@@ -665,8 +668,9 @@ impl TransactionSender {
     ///
     /// # Returns
     ///
-    /// Returns a [`DisplayedTransaction`] representing the broadcasted transaction,
-    /// suitable for immediate display in the UI while awaiting confirmation.
+    /// Returns a [`FinalizedSend`]: the [`DisplayedTransaction`] for immediate
+    /// display while awaiting confirmation, whether the node accepted the first
+    /// broadcast, and, when it did not, a note for the user.
     ///
     /// # Errors
     ///
@@ -682,7 +686,8 @@ impl TransactionSender {
     ///
     /// Once the signed transaction is recorded, the send is the wallet's to see
     /// through. If the node refuses it (for any reason) or cannot be reached,
-    /// this still returns `Ok` with the pending displayed transaction: the send
+    /// this still returns `Ok` (with `accepted_by_node: false` and
+    /// [`NOT_YET_ACCEPTED_NOTE`]) and the pending displayed transaction: the send
     /// stays `Completed` with its inputs locked and its change recorded, and the
     /// transaction monitor rebroadcasts it. An error here would invite the
     /// caller to send again, paying twice. The node's answer is logged on the
@@ -693,18 +698,21 @@ impl TransactionSender {
     ///
     /// ```rust,ignore
     /// // After signing the transaction externally
-    /// let displayed_tx = sender.finalize_transaction_and_broadcast(
+    /// let sent = sender.finalize_transaction_and_broadcast(
     ///     signed_result,
     ///     "http://localhost:18080".to_string(),
     /// ).await?;
     ///
-    /// println!("Transaction {} broadcasted!", displayed_tx.id);
+    /// println!("Transaction {} recorded", sent.displayed_transaction.id);
+    /// if let Some(note) = &sent.note {
+    ///     println!("{note}");
+    /// }
     /// ```
     pub async fn finalize_transaction_and_broadcast(
         &self,
         signed_transaction_result: SignedOneSidedTransactionResult,
         grpc_address: String,
-    ) -> Result<DisplayedTransaction, anyhow::Error> {
+    ) -> Result<FinalizedSend, anyhow::Error> {
         let connection = self.get_connection()?;
         let processed_transaction = &self.processed_transactions;
         let account_id = self.account.id;
@@ -793,7 +801,7 @@ impl TransactionSender {
             .await;
 
         // Whatever the node said, the send is recorded and will be rebroadcast.
-        let _accepted = record_first_broadcast(&connection, completed_tx_id, response)?;
+        let accepted_by_node = record_first_broadcast(&connection, completed_tx_id, response)?;
 
         // Build and save DisplayedTransaction for immediate UI display
         let displayed_transaction =
@@ -801,7 +809,7 @@ impl TransactionSender {
 
         db::insert_displayed_transaction(&connection, &displayed_transaction)?;
 
-        Ok(displayed_transaction)
+        Ok(FinalizedSend::new(displayed_transaction, accepted_by_node))
     }
 
     /// Build a DisplayedTransaction for a pending (just broadcasted) transaction.
@@ -1049,6 +1057,37 @@ pub fn record_first_broadcast(
             );
             Ok(false)
         },
+    }
+}
+
+/// The result of [`TransactionSender::finalize_transaction_and_broadcast`].
+#[derive(Debug, Clone)]
+pub struct FinalizedSend {
+    /// The send as shown in the history, pending until the scan sees it mined.
+    pub displayed_transaction: DisplayedTransaction,
+    /// Whether the node accepted the first broadcast (or already had it mined).
+    /// When `false` the send is still recorded and is rebroadcast automatically;
+    /// it must not be sent again.
+    pub accepted_by_node: bool,
+    /// Set when the node has not accepted the send yet:
+    /// [`NOT_YET_ACCEPTED_NOTE`].
+    pub note: Option<String>,
+}
+
+impl FinalizedSend {
+    /// The result for a recorded send, `accepted_by_node` as its first broadcast
+    /// found it.
+    pub fn new(displayed_transaction: DisplayedTransaction, accepted_by_node: bool) -> Self {
+        let note = if accepted_by_node {
+            None
+        } else {
+            Some(NOT_YET_ACCEPTED_NOTE.to_string())
+        };
+        Self {
+            displayed_transaction,
+            accepted_by_node,
+            note,
+        }
     }
 }
 
@@ -1971,5 +2010,73 @@ mod tests {
         let (status, attempts, ..) = send_state(&send);
         assert_eq!(status, "broadcast");
         assert_eq!(attempts, 0);
+    }
+
+    fn pending_displayed(tx_id: TxId) -> DisplayedTransaction {
+        DisplayedTransaction {
+            id: tx_id,
+            direction: TransactionDirection::Outgoing,
+            source: TransactionSource::OneSided,
+            status: TransactionDisplayStatus::Pending,
+            amount: MicroMinotari::from(1_000),
+            message: None,
+            counterparty: None,
+            blockchain: crate::transactions::BlockchainInfo {
+                block_height: 0,
+                timestamp: Utc::now().naive_utc(),
+                confirmations: 0,
+                block_hash: FixedHash::zero(),
+            },
+            fee: None,
+            details: crate::transactions::TransactionDetails {
+                account_id: 1,
+                total_credit: MicroMinotari::from(0),
+                total_debit: MicroMinotari::from(1_000),
+                inputs: Vec::new(),
+                outputs: Vec::new(),
+                output_type: None,
+                coinbase_extra: None,
+                memo_hex: None,
+                sent_output_hashes: Vec::new(),
+                sent_payrefs: Vec::new(),
+            },
+            lock_height: 0,
+        }
+    }
+
+    #[test]
+    fn a_send_the_node_refuses_tells_the_caller_it_is_pending() {
+        let send = recorded_send();
+        let accepted = {
+            let conn = send.pool.get().expect("conn");
+            record_first_broadcast(
+                &conn,
+                send.tx_id,
+                Ok(not_accepted(TxSubmissionRejectionReason::DoubleSpend)),
+            )
+            .expect("record")
+        };
+        let sent = FinalizedSend::new(pending_displayed(send.tx_id), accepted);
+        assert!(!sent.accepted_by_node);
+        assert_eq!(sent.note.as_deref(), Some(NOT_YET_ACCEPTED_NOTE));
+        assert!(NOT_YET_ACCEPTED_NOTE.contains("Do not send it again"));
+    }
+
+    #[test]
+    fn a_send_the_node_accepts_carries_no_note() {
+        let send = recorded_send();
+        let accepted = {
+            let conn = send.pool.get().expect("conn");
+            let accepted = TxSubmissionResponse {
+                accepted: true,
+                rejection_reason: TxSubmissionRejectionReason::None,
+                is_synced: true,
+                details: None,
+            };
+            record_first_broadcast(&conn, send.tx_id, Ok(accepted)).expect("record")
+        };
+        let sent = FinalizedSend::new(pending_displayed(send.tx_id), accepted);
+        assert!(sent.accepted_by_node);
+        assert_eq!(sent.note, None);
     }
 }
