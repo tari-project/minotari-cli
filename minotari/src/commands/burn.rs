@@ -93,7 +93,8 @@ pub async fn handle_burn_funds(
 
     // The burn is recorded: whatever the node says, it is seen through (the
     // monitor rebroadcasts it), so this succeeds either way.
-    if record_first_broadcast(&conn, tx_id, response)? {
+    let first_broadcast = record_first_broadcast(&conn, tx_id, response)?;
+    if first_broadcast.accepted_by_node {
         info!(
             target: "audit",
             tx_id = &*tx_id.to_string(),
@@ -107,9 +108,10 @@ pub async fn handle_burn_funds(
         );
     } else {
         println!(
-            "Burn transaction recorded, pending. tx_id={}, output_hash={}\n{}",
+            "Burn transaction recorded, pending. tx_id={}, output_hash={}\nNode said: {}\n{}",
             tx_id,
             hex::encode(output_hash),
+            first_broadcast.node_reason.as_deref().unwrap_or("-"),
             NOT_YET_ACCEPTED_NOTE
         );
     }

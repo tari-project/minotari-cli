@@ -16,7 +16,7 @@ use crate::{
     transactions::{
         burn::{BurnTxParams, create_burn_tx, persist_burn_records},
         fund_locker::{validate_fee_per_gram, validate_seconds_to_lock},
-        manager::{NOT_YET_ACCEPTED_NOTE, record_first_broadcast},
+        manager::{FirstBroadcast, record_first_broadcast},
     },
     utils::crypto::{parse_claimable_public_key_hex, parse_private_key_hex},
 };
@@ -91,29 +91,27 @@ pub struct BurnFundsResponse {
     /// will be rebroadcast and must not be sent again.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub note: Option<String>,
+    /// The node's answer (sanitised) when it did not accept the burn.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub node_reason: Option<String>,
 }
 
 impl BurnFundsResponse {
-    /// The response for a recorded burn, `accepted_by_node` as the first
-    /// broadcast found it.
-    fn new(tx_id: String, output_hash: String, accepted_by_node: bool) -> Self {
-        let note = if accepted_by_node {
-            None
-        } else {
-            Some(NOT_YET_ACCEPTED_NOTE.to_string())
-        };
+    /// The response for a recorded burn, as its first broadcast found it.
+    fn new(tx_id: String, output_hash: String, first_broadcast: FirstBroadcast) -> Self {
         Self {
             tx_id,
             output_hash,
-            accepted_by_node,
-            note,
+            accepted_by_node: first_broadcast.accepted_by_node,
+            note: first_broadcast.note(),
+            node_reason: first_broadcast.node_reason,
         }
     }
 }
 
 /// Broadcasts a recorded burn for the first time and records the node's answer.
 ///
-/// Returns whether the node took it. Whatever it said, the burn is recorded and
+/// Returns what the node said. Whatever it said, the burn is recorded and
 /// the transaction monitor rebroadcasts it if needed, so this only fails on a
 /// database error.
 async fn broadcast_recorded_burn(
@@ -121,7 +119,7 @@ async fn broadcast_recorded_burn(
     base_node_url: &str,
     transaction: Transaction,
     tx_id: TxId,
-) -> Result<bool, ApiError> {
+) -> Result<FirstBroadcast, ApiError> {
     let client = WalletHttpClient::new(
         base_node_url
             .parse()
@@ -162,6 +160,7 @@ async fn broadcast_recorded_burn(
 /// - `accepted_by_node`: whether the node accepted the first broadcast
 /// - `note`: when it did not, that the burn is recorded, will be rebroadcast
 ///   automatically and must not be sent again
+/// - `node_reason`: when it did not, the node's answer
 ///
 /// A burn the node refuses (or cannot be reached for) once it is recorded is
 /// still a success: it stays pending with its inputs locked and the wallet
@@ -272,7 +271,7 @@ pub async fn api_burn_funds(
     .await
     .map_err(|e| ApiError::InternalServerError(format!("Task join error: {}", e)))??;
 
-    let accepted_by_node = broadcast_recorded_burn(
+    let first_broadcast = broadcast_recorded_burn(
         app_state.db_pool.clone(),
         &app_state.base_node_url,
         result.transaction,
@@ -284,14 +283,14 @@ pub async fn api_burn_funds(
         target: "audit",
         tx_id = &*tx_id.to_string(),
         output_hash = &*hex::encode(output_hash),
-        accepted_by_node = accepted_by_node;
+        accepted_by_node = first_broadcast.accepted_by_node;
         "API: Burn transaction recorded"
     );
 
     Ok(Json(BurnFundsResponse::new(
         tx_id.to_string(),
         hex::encode(output_hash),
-        accepted_by_node,
+        first_broadcast,
     )))
 }
 
@@ -397,16 +396,18 @@ mod tests {
         let burn = recorded_burn();
         let server = node_answering(false, "DoubleSpend").await;
 
-        let accepted = broadcast_recorded_burn(burn.pool.clone(), &server.uri(), empty_transaction(), burn.tx_id)
+        let first = broadcast_recorded_burn(burn.pool.clone(), &server.uri(), empty_transaction(), burn.tx_id)
             .await
             .expect("a refusal is not an error");
-        assert!(!accepted);
+        assert!(!first.accepted_by_node);
 
-        let response = BurnFundsResponse::new(burn.tx_id.to_string(), "00".to_string(), accepted);
+        let response = BurnFundsResponse::new(burn.tx_id.to_string(), "00".to_string(), first);
         let body = serde_json::to_value(&response).expect("json");
         assert_eq!(body["accepted_by_node"], false);
         let note = body["note"].as_str().expect("a pending note");
         assert!(note.contains("Do not send it again"), "got: {note}");
+        let reason = body["node_reason"].as_str().expect("the node's answer");
+        assert!(reason.contains("Double Spend"), "got: {reason}");
 
         // Still recorded, inputs still locked, for the monitor to rebroadcast.
         let conn = burn.pool.get().expect("conn");
@@ -429,19 +430,16 @@ mod tests {
         let burn = recorded_burn();
         let server = node_answering(true, "None").await;
 
-        let accepted = broadcast_recorded_burn(burn.pool.clone(), &server.uri(), empty_transaction(), burn.tx_id)
+        let first = broadcast_recorded_burn(burn.pool.clone(), &server.uri(), empty_transaction(), burn.tx_id)
             .await
             .expect("broadcast");
-        assert!(accepted);
+        assert!(first.accepted_by_node);
 
-        let body = serde_json::to_value(BurnFundsResponse::new(
-            burn.tx_id.to_string(),
-            "00".to_string(),
-            accepted,
-        ))
-        .expect("json");
+        let body = serde_json::to_value(BurnFundsResponse::new(burn.tx_id.to_string(), "00".to_string(), first))
+            .expect("json");
         assert_eq!(body["accepted_by_node"], true);
         assert!(body.get("note").is_none(), "no note when accepted");
+        assert!(body.get("node_reason").is_none(), "no reason when accepted");
 
         let conn = burn.pool.get().expect("conn");
         let completed = crate::db::get_completed_transaction_by_id(&conn, burn.tx_id)

@@ -802,7 +802,7 @@ impl TransactionSender {
             .await;
 
         // Whatever the node said, the send is recorded and will be rebroadcast.
-        let accepted_by_node = record_first_broadcast(&connection, completed_tx_id, response)?;
+        let first_broadcast = record_first_broadcast(&connection, completed_tx_id, response)?;
 
         // Build and save DisplayedTransaction for immediate UI display
         let displayed_transaction =
@@ -810,7 +810,7 @@ impl TransactionSender {
 
         db::insert_displayed_transaction(&connection, &displayed_transaction)?;
 
-        Ok(FinalizedSend::new(displayed_transaction, accepted_by_node))
+        Ok(FinalizedSend::new(displayed_transaction, first_broadcast))
     }
 
     /// Build a DisplayedTransaction for a pending (just broadcasted) transaction.
@@ -1010,14 +1010,17 @@ impl TransactionSender {
 /// show its inputs went elsewhere. A refusal counts as one broadcast the node
 /// did not accept; a request that got no answer does not.
 ///
-/// Returns whether the node took it (accepted, or already mined). When it did
-/// not, callers report success with [`NOT_YET_ACCEPTED_NOTE`]: the send must
-/// not be made again.
+/// The node's answer (sanitised) is kept as the send's `last_broadcast_error`
+/// until a broadcast is accepted.
+///
+/// Returns whether the node took it (accepted, or already mined), and its
+/// answer when it did not. When it did not, callers report success with
+/// [`NOT_YET_ACCEPTED_NOTE`]: the send must not be made again.
 pub fn record_first_broadcast(
     connection: &Connection,
     completed_tx_id: TxId,
     response: Result<TxSubmissionResponse, anyhow::Error>,
-) -> Result<bool, anyhow::Error> {
+) -> Result<FirstBroadcast, anyhow::Error> {
     match response {
         Ok(submission) if submission.accepted => {
             info!(
@@ -1027,7 +1030,7 @@ pub fn record_first_broadcast(
             );
             // An accepted broadcast does not count towards the stall limit.
             db::mark_completed_transaction_as_broadcasted(connection, completed_tx_id, 0)?;
-            Ok(true)
+            Ok(FirstBroadcast::accepted())
         },
         Ok(submission) if submission.rejection_reason == TxSubmissionRejectionReason::AlreadyMined => {
             info!(
@@ -1035,29 +1038,67 @@ pub fn record_first_broadcast(
                 id = completed_tx_id.to_string().as_str();
                 "Transaction already mined by network"
             );
-            Ok(true)
+            Ok(FirstBroadcast::accepted())
         },
         Ok(submission) => {
+            let reason =
+                crate::log::sanitize_node_text(&format!("Transaction not accepted: {}", submission.rejection_reason));
             warn!(
                 target: "audit",
                 id = completed_tx_id.to_string().as_str(),
-                reason:% = submission.rejection_reason;
+                reason:% = reason;
                 "Transaction not accepted by the network yet; it is recorded and will be rebroadcast"
             );
-            db::record_failed_broadcast_attempt(connection, completed_tx_id, 1)?;
-            Ok(false)
+            db::record_failed_broadcast_attempt(connection, completed_tx_id, 1, &reason)?;
+            Ok(FirstBroadcast::not_accepted(reason))
         },
         Err(e) => {
-            // The error can carry text from the node; it is logged.
-            let e = crate::log::sanitize_node_text(&e.to_string());
+            // The error can carry text from the node; it is logged and kept.
+            let reason = crate::log::sanitize_node_text(&e.to_string());
             warn!(
                 target: "audit",
                 id = completed_tx_id.to_string().as_str(),
-                reason:% = e;
+                reason:% = reason;
                 "Transaction submission failed; it is recorded and will be rebroadcast"
             );
-            Ok(false)
+            db::record_last_broadcast_error(connection, completed_tx_id, &reason)?;
+            Ok(FirstBroadcast::not_accepted(reason))
         },
+    }
+}
+
+/// What a send's first broadcast found, from [`record_first_broadcast`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FirstBroadcast {
+    /// Whether the node took the send (accepted, or already mined).
+    pub accepted_by_node: bool,
+    /// The node's answer (sanitised) when it did not take it.
+    pub node_reason: Option<String>,
+}
+
+impl FirstBroadcast {
+    fn accepted() -> Self {
+        Self {
+            accepted_by_node: true,
+            node_reason: None,
+        }
+    }
+
+    fn not_accepted(reason: String) -> Self {
+        Self {
+            accepted_by_node: false,
+            node_reason: Some(reason),
+        }
+    }
+
+    /// What to tell the user: [`NOT_YET_ACCEPTED_NOTE`] when the node did not
+    /// take the send, nothing otherwise.
+    pub fn note(&self) -> Option<String> {
+        if self.accepted_by_node {
+            None
+        } else {
+            Some(NOT_YET_ACCEPTED_NOTE.to_string())
+        }
     }
 }
 
@@ -1073,21 +1114,18 @@ pub struct FinalizedSend {
     /// Set when the node has not accepted the send yet:
     /// [`NOT_YET_ACCEPTED_NOTE`].
     pub note: Option<String>,
+    /// The node's answer (sanitised) when it did not accept the send.
+    pub node_reason: Option<String>,
 }
 
 impl FinalizedSend {
-    /// The result for a recorded send, `accepted_by_node` as its first broadcast
-    /// found it.
-    pub fn new(displayed_transaction: DisplayedTransaction, accepted_by_node: bool) -> Self {
-        let note = if accepted_by_node {
-            None
-        } else {
-            Some(NOT_YET_ACCEPTED_NOTE.to_string())
-        };
+    /// The result for a recorded send, as its first broadcast found it.
+    pub fn new(displayed_transaction: DisplayedTransaction, first_broadcast: FirstBroadcast) -> Self {
         Self {
             displayed_transaction,
-            accepted_by_node,
-            note,
+            accepted_by_node: first_broadcast.accepted_by_node,
+            note: first_broadcast.note(),
+            node_reason: first_broadcast.node_reason,
         }
     }
 }
@@ -2061,6 +2099,17 @@ mod tests {
         assert!(!sent.accepted_by_node);
         assert_eq!(sent.note.as_deref(), Some(NOT_YET_ACCEPTED_NOTE));
         assert!(NOT_YET_ACCEPTED_NOTE.contains("Do not send it again"));
+        let reason = sent.node_reason.expect("the node's answer");
+        assert!(reason.contains("Double Spend"), "got: {reason}");
+
+        // Kept on the send, and cleared once a broadcast is accepted.
+        let conn = send.pool.get().expect("conn");
+        assert_eq!(
+            db::get_last_broadcast_error(&conn, send.tx_id).expect("query"),
+            Some(reason)
+        );
+        db::mark_completed_transaction_as_broadcasted(&conn, send.tx_id, 0).expect("accepted later");
+        assert_eq!(db::get_last_broadcast_error(&conn, send.tx_id).expect("query"), None);
     }
 
     #[test]
@@ -2079,5 +2128,6 @@ mod tests {
         let sent = FinalizedSend::new(pending_displayed(send.tx_id), accepted);
         assert!(sent.accepted_by_node);
         assert_eq!(sent.note, None);
+        assert_eq!(sent.node_reason, None);
     }
 }

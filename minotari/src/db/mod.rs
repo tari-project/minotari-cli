@@ -100,11 +100,11 @@ mod completed_transactions;
 pub use completed_transactions::{
     CompletedTransaction, CompletedTransactionStatus, create_completed_transaction, get_completed_transaction_by_id,
     get_completed_transaction_by_payref, get_completed_transaction_to_match, get_completed_transactions_by_account,
-    get_completed_transactions_by_status, get_pending_completed_transactions,
+    get_completed_transactions_by_status, get_last_broadcast_error, get_pending_completed_transactions,
     get_scan_rejected_pending_tx_ids_from_height, keep_rejected_after_reorg, mark_completed_transaction_as_broadcasted,
     mark_completed_transaction_as_confirmed, mark_completed_transaction_as_mined_unconfirmed,
     mark_completed_transaction_as_rejected, mark_completed_transaction_as_rejected_in_block,
-    record_failed_broadcast_attempt, reset_mined_completed_transactions_from_height,
+    record_failed_broadcast_attempt, record_last_broadcast_error, reset_mined_completed_transactions_from_height,
     revert_completed_transaction_to_completed, update_completed_transaction_status,
 };
 

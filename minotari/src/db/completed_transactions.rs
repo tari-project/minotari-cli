@@ -287,7 +287,7 @@ pub fn mark_completed_transaction_as_broadcasted(conn: &Connection, tx_id: TxId,
     conn.execute(
         r#"
         UPDATE completed_transactions
-        SET status = :status, broadcast_attempts = :attempts, updated_at = :now
+        SET status = :status, broadcast_attempts = :attempts, last_broadcast_error = NULL, updated_at = :now
         WHERE id = :id
         "#,
         named_params! {
@@ -338,21 +338,58 @@ pub fn mark_completed_transaction_as_mined_unconfirmed(
 }
 
 /// Counts a broadcast attempt the node did not accept this time (fee too low,
-/// orphan, time-locked, ...), leaving the send's status as it is.
-pub fn record_failed_broadcast_attempt(conn: &Connection, tx_id: TxId, attempts: i32) -> WalletDbResult<()> {
+/// orphan, time-locked, ...), leaving the send's status as it is, and keeps the
+/// node's answer (`reason`, already sanitised) as `last_broadcast_error`.
+pub fn record_failed_broadcast_attempt(
+    conn: &Connection,
+    tx_id: TxId,
+    attempts: i32,
+    reason: &str,
+) -> WalletDbResult<()> {
     conn.execute(
         r#"
         UPDATE completed_transactions
-        SET broadcast_attempts = :attempts, updated_at = :now
+        SET broadcast_attempts = :attempts, last_broadcast_error = :reason, updated_at = :now
         WHERE id = :id
         "#,
         named_params! {
             ":attempts": attempts,
+            ":reason": reason,
             ":now": Utc::now(),
             ":id": tx_id.as_i64_wrapped()
         },
     )?;
     Ok(())
+}
+
+/// Keeps why a broadcast got no answer (`reason`, already sanitised) as
+/// `last_broadcast_error`, without counting it as an attempt.
+pub fn record_last_broadcast_error(conn: &Connection, tx_id: TxId, reason: &str) -> WalletDbResult<()> {
+    conn.execute(
+        r#"
+        UPDATE completed_transactions
+        SET last_broadcast_error = :reason, updated_at = :now
+        WHERE id = :id
+        "#,
+        named_params! {
+            ":reason": reason,
+            ":now": Utc::now(),
+            ":id": tx_id.as_i64_wrapped()
+        },
+    )?;
+    Ok(())
+}
+
+/// The node's answer to the send's last broadcast it did not accept, if any.
+pub fn get_last_broadcast_error(conn: &Connection, tx_id: TxId) -> WalletDbResult<Option<String>> {
+    let reason: Option<Option<String>> = conn
+        .query_row(
+            "SELECT last_broadcast_error FROM completed_transactions WHERE id = :id",
+            named_params! { ":id": tx_id.as_i64_wrapped() },
+            |row| row.get(0),
+        )
+        .optional()?;
+    Ok(reason.flatten())
 }
 
 pub fn mark_completed_transaction_as_confirmed(

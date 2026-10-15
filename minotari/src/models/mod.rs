@@ -125,6 +125,9 @@ pub enum WalletEventType {
     TransactionStalled {
         tx_id: TxId,
         failed_broadcast_attempts: i32,
+        /// The node's answer to the last try (sanitised), if it gave one.
+        #[serde(default)]
+        node_reason: Option<String>,
     },
 }
 

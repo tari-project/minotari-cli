@@ -796,6 +796,7 @@ impl TransactionMonitor {
                     event_type: WalletEventType::TransactionStalled {
                         tx_id: tx.id,
                         failed_broadcast_attempts: attempts,
+                        node_reason: Some(reason.clone()),
                     },
                     description: format!(
                         "Transaction {} not accepted by the node after {} tries; retrying less often",
@@ -805,7 +806,7 @@ impl TransactionMonitor {
                 // The count and the stall event go in together.
                 let mut conn = Self::get_connection(db_pool)?;
                 let db_tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-                db::record_failed_broadcast_attempt(&db_tx, tx.id, attempts)?;
+                db::record_failed_broadcast_attempt(&db_tx, tx.id, attempts, &reason)?;
                 if let Some(event) = &stalled_event {
                     self.persist_event(&db_tx, account_id, event)?;
                 }
@@ -1398,11 +1399,18 @@ mod tests {
         assert_eq!(completed.broadcast_attempts, MAX_BROADCAST_ATTEMPTS);
         assert_eq!(input_state(&fixture), ("LOCKED".to_string(), true));
         assert!(result.wallet_events.iter().any(|e| matches!(
-            e.event_type,
-            WalletEventType::TransactionStalled { tx_id, failed_broadcast_attempts }
-                if tx_id == fixture.tx_id && failed_broadcast_attempts == MAX_BROADCAST_ATTEMPTS
+            &e.event_type,
+            WalletEventType::TransactionStalled { tx_id, failed_broadcast_attempts, node_reason }
+                if *tx_id == fixture.tx_id
+                    && *failed_broadcast_attempts == MAX_BROADCAST_ATTEMPTS
+                    && node_reason.as_deref().is_some_and(|r| r.to_lowercase().contains("fee"))
         )));
         let conn = fixture.pool.get().expect("conn");
+        let kept = db::get_last_broadcast_error(&conn, fixture.tx_id).expect("query");
+        assert!(
+            kept.is_some_and(|r| r.to_lowercase().contains("fee")),
+            "the node's answer is kept"
+        );
         let stored = db::get_events_by_account_id(&conn, fixture.account_id, 10, 0).expect("events");
         assert!(stored.iter().any(|e| e.event_type == "TransactionStalled"));
     }
@@ -1917,5 +1925,25 @@ mod tests {
             assert_eq!(input_state(&fixture), ("LOCKED".to_string(), true), "{reason}");
             assert_eq!(change_state(&fixture), ("UNCONFIRMED".to_string(), false), "{reason}");
         }
+    }
+}
+
+#[cfg(test)]
+mod stalled_event_tests {
+    use crate::models::WalletEventType;
+
+    #[test]
+    fn a_stalled_event_stored_without_a_reason_still_reads() {
+        // Events written before `node_reason` existed have no such field.
+        let stored = r#"{"TransactionStalled":{"tx_id":7,"failed_broadcast_attempts":10}}"#;
+        let event: WalletEventType = serde_json::from_str(stored).expect("old event reads");
+        assert!(matches!(
+            event,
+            WalletEventType::TransactionStalled {
+                failed_broadcast_attempts: 10,
+                node_reason: None,
+                ..
+            }
+        ));
     }
 }

@@ -198,7 +198,7 @@
           "accounts"
         ],
         "summary": "Burns funds from an account and records a partial burn proof for L2 claiming.",
-        "description": "Creates a burn transaction, broadcasts it, and stores the partial proof in the\ndatabase. The daemon's `BurnProofWorker` will automatically fetch the burn\noutput proof once the transaction is confirmed and write the complete\n`CompleteClaimBurnProof` JSON file to the configured `burn_proofs_dir`.\n\n# Path Parameters\n\n- `name`: The account to burn funds from\n\n# Request Body\n\nSee [`BurnFundsRequest`] for the complete schema.\n\n# Response\n\nReturns a [`BurnFundsResponse`] with:\n- `tx_id`: the transaction ID\n- `output_hash`: hex-encoded output hash (use this to identify the proof file)\n- `accepted_by_node`: whether the node accepted the first broadcast\n- `note`: when it did not, that the burn is recorded, will be rebroadcast\n  automatically and must not be sent again\n\nA burn the node refuses (or cannot be reached for) once it is recorded is\nstill a success: it stays pending with its inputs locked and the wallet\nrebroadcasts it.\n\n# Errors\n\n- `400 Bad Request`: invalid `claim_public_key` or `sidechain_deployment_key` hex\n- `404 Not Found`: account does not exist\n- `500`: insufficient funds, or other internal error\n\n# Example Request\n\n```bash\ncurl -X POST http://127.0.0.1:9000/accounts/default/burn \\\n  -H \"Authorization: Bearer $MINOTARI_API_TOKEN\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\"amount\": 1000000, \"claim_public_key\": \"a3f9...\"}'\n```",
+        "description": "Creates a burn transaction, broadcasts it, and stores the partial proof in the\ndatabase. The daemon's `BurnProofWorker` will automatically fetch the burn\noutput proof once the transaction is confirmed and write the complete\n`CompleteClaimBurnProof` JSON file to the configured `burn_proofs_dir`.\n\n# Path Parameters\n\n- `name`: The account to burn funds from\n\n# Request Body\n\nSee [`BurnFundsRequest`] for the complete schema.\n\n# Response\n\nReturns a [`BurnFundsResponse`] with:\n- `tx_id`: the transaction ID\n- `output_hash`: hex-encoded output hash (use this to identify the proof file)\n- `accepted_by_node`: whether the node accepted the first broadcast\n- `note`: when it did not, that the burn is recorded, will be rebroadcast\n  automatically and must not be sent again\n- `node_reason`: when it did not, the node's answer\n\nA burn the node refuses (or cannot be reached for) once it is recorded is\nstill a success: it stays pending with its inputs locked and the wallet\nrebroadcasts it.\n\n# Errors\n\n- `400 Bad Request`: invalid `claim_public_key` or `sidechain_deployment_key` hex\n- `404 Not Found`: account does not exist\n- `500`: insufficient funds, or other internal error\n\n# Example Request\n\n```bash\ncurl -X POST http://127.0.0.1:9000/accounts/default/burn \\\n  -H \"Authorization: Bearer $MINOTARI_API_TOKEN\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\"amount\": 1000000, \"claim_public_key\": \"a3f9...\"}'\n```",
         "operationId": "api_burn_funds",
         "parameters": [
           {
@@ -1296,6 +1296,13 @@
           "accepted_by_node": {
             "type": "boolean",
             "description": "Whether the base node accepted the burn on its first broadcast (or\nalready had it mined). When `false` the burn is still recorded and will\nbe rebroadcast automatically: it must not be sent again."
+          },
+          "node_reason": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "description": "The node's answer (sanitised) when it did not accept the burn."
           },
           "note": {
             "type": [

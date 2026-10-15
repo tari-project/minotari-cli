@@ -182,13 +182,17 @@ async fn sign_save_and_broadcast(
 
     // The transaction is recorded: whatever the node says, it is seen through
     // (the monitor rebroadcasts it), so this succeeds either way.
-    if record_first_broadcast(conn, completed_tx_id, response)? {
+    let first_broadcast = record_first_broadcast(conn, completed_tx_id, response)?;
+    if first_broadcast.accepted_by_node {
         info!(target: "audit", tx_id = completed_tx_id.to_string().as_str(); "{} broadcasted", tx_kind);
         println!("{} transaction broadcasted. tx_id={}", tx_kind, completed_tx_id);
     } else {
         println!(
-            "{} transaction recorded, pending. tx_id={}\n{}",
-            tx_kind, completed_tx_id, NOT_YET_ACCEPTED_NOTE
+            "{} transaction recorded, pending. tx_id={}\nNode said: {}\n{}",
+            tx_kind,
+            completed_tx_id,
+            first_broadcast.node_reason.as_deref().unwrap_or("-"),
+            NOT_YET_ACCEPTED_NOTE
         );
     }
 
