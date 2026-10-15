@@ -16,7 +16,7 @@ use tari_transaction_components::{
 use crate::http::WalletHttpClient;
 use crate::{
     db::{self, AccountRow, SqlitePool},
-    transactions::input_selector::InputSelector,
+    transactions::{fund_locker::MIN_FEE_PER_GRAM, input_selector::InputSelector},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,6 +80,11 @@ impl FeeEstimator {
             },
             _ => (MicroMinotari::from(10), MicroMinotari::from(5), MicroMinotari::from(1)),
         };
+        // The node's statistics use integer division and can come out as 0; never
+        // recommend a fee the wallet refuses to send with.
+        let fast_fee = fast_fee.max(MIN_FEE_PER_GRAM);
+        let medium_fee = medium_fee.max(MIN_FEE_PER_GRAM);
+        let slow_fee = slow_fee.max(MIN_FEE_PER_GRAM);
 
         let input_selector = InputSelector::new(account.id, confirmation_window);
 
@@ -314,5 +319,88 @@ mod tests {
             usize::MAX,
         );
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn an_estimate_never_goes_below_the_minimum_fee_per_gram() {
+        use crate::db::{create_account, get_account_by_name, init_db, insert_scanned_tip_block};
+        use rusqlite::named_params;
+        use tari_common_types::seeds::cipher_seed::CipherSeed;
+        use tari_common_types::types::{ComAndPubSignature, CompressedPublicKey};
+        use tari_script::ExecutionStack;
+        use tari_transaction_components::key_manager::TariKeyId;
+        use tari_transaction_components::key_manager::wallet_types::{SeedWordsWallet, WalletType};
+        use tari_transaction_components::transaction_components::{
+            EncryptedData, TransactionOutputVersion, WalletOutput,
+        };
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        // A wallet with one confirmed output to estimate a send from.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let pool = init_db(dir.path().join("fees.db")).expect("init db");
+        {
+            let conn = pool.get().expect("conn");
+            let wallet = WalletType::SeedWords(SeedWordsWallet::construct_new(CipherSeed::random()).unwrap());
+            create_account(&conn, "default", &wallet, "password").unwrap();
+            let account_id = get_account_by_name(&conn, "default").unwrap().unwrap().id;
+            insert_scanned_tip_block(&conn, account_id, 200, &[0u8; 32]).expect("tip");
+            let output = WalletOutput::new_from_parts(
+                TransactionOutputVersion::default(),
+                MicroMinotari::from(1_000_000),
+                TariKeyId::default(),
+                OutputFeatures::default(),
+                TariScript::default(),
+                ExecutionStack::default(),
+                TariKeyId::default(),
+                CompressedPublicKey::default(),
+                ComAndPubSignature::default(),
+                0,
+                Covenant::default(),
+                EncryptedData::default(),
+                MicroMinotari::from(0),
+                None,
+                MemoField::new_empty(),
+                FixedHash::from([1u8; 32]),
+                Default::default(),
+            );
+            conn.execute(
+                r#"
+                INSERT INTO outputs (
+                    account_id, tx_id, output_hash, mined_in_block_height, mined_in_block_hash, value,
+                    mined_timestamp, wallet_output_json, status, confirmed_height, confirmed_hash, is_burn, maturity
+                ) VALUES (:account_id, 1, :hash, 100, :hash, 1000000, :ts, :json, 'UNSPENT', 100, :hash, 0, 0)
+                "#,
+                named_params! {
+                    ":account_id": account_id,
+                    ":hash": vec![1u8; 32],
+                    ":ts": chrono::Utc::now(),
+                    ":json": serde_json::to_string(&output).unwrap(),
+                },
+            )
+            .expect("output");
+        }
+
+        // The node's integer averages came out as 0.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/get_mempool_fee_per_gram_stats"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "stats": [
+                    { "order": 0, "min_fee_per_gram": 0, "avg_fee_per_gram": 0, "max_fee_per_gram": 0 },
+                    { "order": 1, "min_fee_per_gram": 0, "avg_fee_per_gram": 0, "max_fee_per_gram": 0 },
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let estimates = FeeEstimator::new(pool, server.uri())
+            .estimate_fees("default", MicroMinotari(10_000), 1, 100, None)
+            .await
+            .expect("estimate");
+        assert_eq!(estimates.len(), 3);
+        for estimate in estimates {
+            assert_eq!(estimate.fee_per_gram, MIN_FEE_PER_GRAM, "{:?}", estimate.priority);
+        }
     }
 }
