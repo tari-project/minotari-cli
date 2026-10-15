@@ -369,8 +369,8 @@ impl TransactionSender {
     /// at all. A replay would then mark someone else's row `Expired` and, having
     /// no right to unlock it, leave it that way — and the unlocker only ever
     /// revisits `Pending` rows, so those UTXOs stayed locked for good. Leaving
-    /// the write to `fail_and_unlock_pending_transaction` keeps status and unlock
-    /// in one transaction and behind one ownership check.
+    /// the write to `release_unclaimed_reservation` keeps status and unlock in
+    /// one transaction and behind one ownership check.
     fn check_if_transaction_expired(
         &self,
         conn: &Connection,
@@ -766,20 +766,37 @@ impl TransactionSender {
                 self.release_unclaimed_reservation(&connection, processed_transaction);
             })?;
 
-        self.claim_for_broadcast(&connection, processed_transaction)
-            .inspect_err(|e| {
-                warn!(target: "audit", error:% = e; "Transaction finalization preparation failed");
-                self.release_unclaimed_reservation(&connection, processed_transaction);
-            })?;
         let completed_tx_id = signed_transaction_result.signed_transaction.tx_id;
         let signed_transaction = signed_transaction_result.signed_transaction.clone();
-        // The completed transaction and its change output go in together: the
-        // wallet's scan recognises the send by that change output (status
+        // The change output's view key comes from the key manager, whose
+        // decryption (Argon2) is slow: it is done before the write transaction
+        // is opened, so the write lock is not held while it runs.
+        let view_key = match &signed_transaction.change_output {
+            Some(_) => Some(
+                self.account
+                    .get_key_manager(&self.password)
+                    .inspect_err(|e| {
+                        warn!(target: "audit", error:% = e; "Transaction finalization preparation failed");
+                        self.release_unclaimed_reservation(&connection, processed_transaction);
+                    })?
+                    .get_private_view_key(),
+            ),
+            None => None,
+        };
+        // The claim (`PENDING` -> `COMPLETED`), the completed transaction and its
+        // change output go in one write transaction. Committed separately, the
+        // request was `COMPLETED` with no completed transaction until the record
+        // landed, so the lock-liveness check took its locks for dead: abandoning
+        // another send could drop its lock on that send's change, and a reorg
+        // could release its inputs, while it was about to be broadcast. The
+        // wallet's scan recognises the send by its change output (status
         // `UNCONFIRMED` until it is seen in a block).
         let record_result = (|| -> Result<(), anyhow::Error> {
-            // `new_unchecked` for the same reason as in `fail_and_unlock_pending_transaction`.
+            // `new_unchecked`: only a shared connection is available here, and
+            // no transaction is open on it.
             let transaction =
                 rusqlite::Transaction::new_unchecked(&connection, rusqlite::TransactionBehavior::Immediate)?;
+            self.claim_for_broadcast(&transaction, processed_transaction)?;
             db::create_completed_transaction(
                 &transaction,
                 account_id,
@@ -789,12 +806,11 @@ impl TransactionSender {
                 sent_output_hash,
                 completed_tx_id,
             )?;
-            if let Some(change_output) = &signed_transaction.change_output {
-                let view_key = self.account.get_key_manager(&self.password)?.get_private_view_key();
+            if let (Some(change_output), Some(view_key)) = (&signed_transaction.change_output, &view_key) {
                 db::insert_unconfirmed_change_output(
                     &transaction,
                     account_id,
-                    &view_key,
+                    view_key,
                     processed_transaction.id(),
                     change_output,
                 )?;
@@ -802,9 +818,12 @@ impl TransactionSender {
             transaction.commit()?;
             Ok(())
         })();
+        // A failed claim or record rolled back with the transaction: the
+        // reservation is as it was (`PENDING` unless another request claimed or
+        // released it), and is released like any failure before the claim.
         record_result.inspect_err(|e| {
             warn!(target: "audit", error:% = e; "Transaction finalization preparation failed");
-            self.fail_and_unlock_pending_transaction(&connection, processed_transaction.id());
+            self.release_unclaimed_reservation(&connection, processed_transaction);
         })?;
 
         // From here on the send is recorded: it is seen through whatever happens
@@ -954,7 +973,8 @@ impl TransactionSender {
     }
 
     /// Cleans up after a failure that happened before this send claimed the
-    /// reservation for broadcast.
+    /// reservation for broadcast, or rolled its claim back with the record
+    /// that failed (see `finalize_transaction_and_broadcast`).
     ///
     /// Two things must hold before tearing one down, and they are different
     /// questions:
@@ -986,36 +1006,6 @@ impl TransactionSender {
             Err(e) => {
                 error!(target: "audit", error:% = e; "Failed to expire and unlock pending transaction during cleanup")
             },
-        }
-    }
-
-    /// Expires a reservation and releases the UTXOs it holds, whatever its status.
-    ///
-    /// For the post-claim failures only — a rejected or unbroadcastable
-    /// transaction. Those callers won the claim, so the row is theirs and is
-    /// already `Completed`; the `Pending` guard in
-    /// [`release_unclaimed_reservation`](Self::release_unclaimed_reservation)
-    /// would refuse exactly the cleanup they need.
-    ///
-    /// Both statements go in one write transaction. Run separately, a failure
-    /// between them left the row `Expired` with its outputs still `Locked`, and
-    /// `find_expired_pending_transactions` only ever revisits `Pending` rows —
-    /// so the unlocker would never come back for them.
-    fn fail_and_unlock_pending_transaction(&self, connection: &Connection, pending_tx_id: &str) {
-        // `new_unchecked` because callers reach this from `?`-chains that
-        // already borrow the connection immutably. What it gives up is rusqlite's
-        // detection of a nested transaction, and none is open at any call site.
-        let cleanup = (|| -> Result<(), anyhow::Error> {
-            let transaction =
-                rusqlite::Transaction::new_unchecked(connection, rusqlite::TransactionBehavior::Immediate)?;
-            db::update_pending_transaction_status(&transaction, pending_tx_id, PendingTransactionStatus::Expired)?;
-            db::unlock_outputs_for_request(&transaction, pending_tx_id)?;
-            transaction.commit()?;
-            Ok(())
-        })();
-
-        if let Err(e) = cleanup {
-            error!(target: "audit", error:% = e; "Failed to expire and unlock pending transaction during cleanup");
         }
     }
 }
@@ -2252,6 +2242,81 @@ mod tests {
                 "SELECT COUNT(*) FROM pending_transactions WHERE status = 'PENDING'"
             ),
             0
+        );
+    }
+
+    /// A record that fails takes the claim down with it: the request is never
+    /// `COMPLETED` without its completed transaction (the lock-liveness check
+    /// would take its locks for dead), and the reservation is released as for
+    /// any failure before the claim.
+    #[tokio::test]
+    async fn a_failed_record_rolls_the_claim_back() {
+        let (pool, _temp) = setup_funded_wallet(3);
+        let (sender, signed) = prepared_send(&pool);
+        pool.get()
+            .expect("conn")
+            .execute_batch(
+                "CREATE TRIGGER no_record BEFORE INSERT ON completed_transactions \
+                 BEGIN SELECT RAISE(ABORT, 'disk full'); END;",
+            )
+            .expect("trigger");
+
+        sender
+            .finalize_transaction_and_broadcast(signed, "http://127.0.0.1:1".to_string())
+            .await
+            .expect_err("a failed record is an error: nothing was sent");
+
+        assert_eq!(count(&pool, "SELECT COUNT(*) FROM completed_transactions"), 0);
+        assert_eq!(
+            count(
+                &pool,
+                "SELECT COUNT(*) FROM pending_transactions WHERE status = 'COMPLETED'"
+            ),
+            0,
+            "the claim rolled back with the record"
+        );
+        // This send created the reservation: it is released.
+        assert_eq!(
+            count(
+                &pool,
+                "SELECT COUNT(*) FROM pending_transactions WHERE status = 'EXPIRED'"
+            ),
+            1
+        );
+        assert_eq!(count(&pool, "SELECT COUNT(*) FROM outputs WHERE status = 'LOCKED'"), 0);
+    }
+
+    /// Even when the cleanup fails too, the failed record leaves no request
+    /// `COMPLETED` without its completed transaction: the claim was never
+    /// committed on its own, so the reservation is still `PENDING`, for the
+    /// unlocker to expire.
+    #[tokio::test]
+    async fn a_failed_record_never_leaves_a_claim_without_its_transaction() {
+        let (pool, _temp) = setup_funded_wallet(3);
+        let (sender, signed) = prepared_send(&pool);
+        pool.get()
+            .expect("conn")
+            .execute_batch(
+                "CREATE TRIGGER no_record BEFORE INSERT ON completed_transactions \
+                 BEGIN SELECT RAISE(ABORT, 'disk full'); END; \
+                 CREATE TRIGGER no_expiry BEFORE UPDATE OF status ON pending_transactions \
+                 WHEN NEW.status = 'EXPIRED' BEGIN SELECT RAISE(ABORT, 'disk full'); END;",
+            )
+            .expect("triggers");
+
+        sender
+            .finalize_transaction_and_broadcast(signed, "http://127.0.0.1:1".to_string())
+            .await
+            .expect_err("a failed record is an error: nothing was sent");
+
+        assert_eq!(count(&pool, "SELECT COUNT(*) FROM completed_transactions"), 0);
+        assert_eq!(
+            count(
+                &pool,
+                "SELECT COUNT(*) FROM pending_transactions WHERE status = 'PENDING'"
+            ),
+            1,
+            "the claim was never committed on its own"
         );
     }
 
