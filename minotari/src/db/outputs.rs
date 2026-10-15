@@ -318,7 +318,10 @@ pub fn insert_unconfirmed_change_output(
 /// chain, so it is real whatever the wallet concluded before.
 ///
 /// A change output that a reorg reverted to `UNCONFIRMED` while a later send
-/// had it locked as an input goes back to `LOCKED`, not `new_status`.
+/// had it locked as an input goes back to `LOCKED`, not `new_status`, but only
+/// while that send can still land (its reservation pending, or it is completed
+/// or broadcast). A lock left by a send that is gone is dropped, so the change
+/// can never be stranded `LOCKED` for a dead request.
 ///
 /// Returns the row id, or `None` when there was no such row and the caller
 /// should insert the output as usual.
@@ -351,7 +354,27 @@ pub fn confirm_unconfirmed_change_output(
                 memo_parsed = :memo_parsed,
                 memo_hex = :memo_hex,
                 payment_reference = :payment_reference,
-                status = CASE WHEN locked_by_request_id IS NOT NULL THEN :locked ELSE :new_status END
+                status = CASE WHEN (
+                    SELECT COUNT(*) FROM completed_transactions c
+                    WHERE c.pending_tx_id = outputs.locked_by_request_id AND c.status IN ('completed', 'broadcast')
+                ) + (
+                    SELECT COUNT(*) FROM pending_transactions p
+                    WHERE p.id = outputs.locked_by_request_id AND p.status = 'PENDING'
+                ) > 0 THEN :locked ELSE :new_status END,
+                locked_by_request_id = CASE WHEN (
+                    SELECT COUNT(*) FROM completed_transactions c
+                    WHERE c.pending_tx_id = outputs.locked_by_request_id AND c.status IN ('completed', 'broadcast')
+                ) + (
+                    SELECT COUNT(*) FROM pending_transactions p
+                    WHERE p.id = outputs.locked_by_request_id AND p.status = 'PENDING'
+                ) > 0 THEN locked_by_request_id ELSE NULL END,
+                locked_at = CASE WHEN (
+                    SELECT COUNT(*) FROM completed_transactions c
+                    WHERE c.pending_tx_id = outputs.locked_by_request_id AND c.status IN ('completed', 'broadcast')
+                ) + (
+                    SELECT COUNT(*) FROM pending_transactions p
+                    WHERE p.id = outputs.locked_by_request_id AND p.status = 'PENDING'
+                ) > 0 THEN locked_at ELSE NULL END
             WHERE account_id = :account_id
               AND output_hash = :output_hash
               AND status IN (:unconfirmed, :rejected)
@@ -1408,18 +1431,20 @@ pub fn unlock_outputs_for_request(conn: &Connection, locked_by_request_id: &str)
     )?;
 
     // An input of this request can be another send's change output that a reorg
-    // turned back into `UNCONFIRMED` (see `revert_change_outputs_from_height`).
-    // Release that lock too, or the change would come back `LOCKED` for a request
-    // that no longer exists when it is mined again.
+    // turned back into `UNCONFIRMED` (see `revert_change_outputs_from_height`), and
+    // that send may since have been rejected (`REJECTED`). Release that lock too,
+    // or the change would come back `LOCKED` for a request that no longer exists
+    // when it is mined again.
     conn.execute(
         r#"
         UPDATE outputs
         SET locked_at = NULL, locked_by_request_id = NULL
-        WHERE locked_by_request_id = :req_id AND status = :unconfirmed
+        WHERE locked_by_request_id = :req_id AND status IN (:unconfirmed, :rejected)
         "#,
         named_params! {
             ":req_id": locked_by_request_id,
             ":unconfirmed": OutputStatus::Unconfirmed.to_string(),
+            ":rejected": OutputStatus::Rejected.to_string(),
         },
     )?;
 
@@ -2052,5 +2077,52 @@ mod tests {
             status, "UNSPENT",
             "re-mined change is spendable, not locked to a dead request"
         );
+    }
+
+    #[test]
+    fn a_rejected_change_releases_the_lock_of_a_released_request_and_never_comes_back_locked_for_it() {
+        let temp = tempdir().expect("temp dir");
+        let pool = init_db(temp.path().join("rejected_change_lock.db")).expect("init db");
+        let conn = pool.get().expect("conn");
+        let account_id = create_test_account(&conn);
+
+        // A rejected change, still locked by a send that is gone.
+        insert_synthetic_output(&conn, account_id, 2, 300, 0, false, OutputStatus::Rejected, 0);
+        conn.execute(
+            "UPDATE outputs SET created_by_request_id = 'send-x', locked_by_request_id = 'send-y', locked_at = :now",
+            named_params! { ":now": Utc::now() },
+        )
+        .expect("lock");
+
+        unlock_outputs_for_request(&conn, "send-y").expect("release y");
+        let lock: Option<String> = conn
+            .query_row("SELECT locked_by_request_id FROM outputs", [], |row| row.get(0))
+            .expect("lock");
+        assert_eq!(lock, None);
+
+        // Even with a stale lock left behind, a mined change is not restored as
+        // LOCKED for a request that is no longer live.
+        conn.execute("UPDATE outputs SET locked_by_request_id = 'dead-request'", [])
+            .expect("stale lock");
+        confirm_unconfirmed_change_output(
+            &conn,
+            account_id,
+            &FixedHash::from([2u8; 32]),
+            60,
+            &FixedHash::from([60u8; 32]),
+            1_700_000_000,
+            None,
+            None,
+            FixedHash::zero(),
+            OutputStatus::Unspent,
+        )
+        .expect("confirm");
+        let (status, lock): (String, Option<String>) = conn
+            .query_row("SELECT status, locked_by_request_id FROM outputs", [], |row| {
+                Ok((row.get(0)?, row.get(1)?))
+            })
+            .expect("row");
+        assert_eq!(status, "UNSPENT");
+        assert_eq!(lock, None);
     }
 }

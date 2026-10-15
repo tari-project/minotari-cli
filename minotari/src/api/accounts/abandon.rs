@@ -68,7 +68,8 @@ const ABANDON_NOTE: &str = "The send is abandoned and its inputs are released. I
 ///
 /// - `404 Not Found`: account or send does not exist
 /// - `409 Conflict`: the send is mined or rejected already, is not stalled
-///   (and `force` is not set), or an input is already spent on chain
+///   (and `force` is not set), an input is already spent on chain, or its
+///   change output is an input of another send
 /// - `500`: database error
 #[utoipa::path(
     post,

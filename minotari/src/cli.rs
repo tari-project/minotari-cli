@@ -629,7 +629,8 @@ pub enum Commands {
     ///
     /// Only for a send that is completed or broadcast (not mined). Without `--force` the
     /// send must also be stalled: the node has not accepted it 10 times in a row. A send
-    /// any of whose inputs is already spent on chain cannot be abandoned.
+    /// any of whose inputs is already spent on chain, or whose change is an input of
+    /// another send, cannot be abandoned.
     ///
     /// WARNING: this does not unsend it. If a node still holds the transaction it can
     /// still be mined: the wallet's scan then shows it as mined after all, and a send made

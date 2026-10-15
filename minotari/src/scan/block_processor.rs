@@ -2760,4 +2760,76 @@ mod tests {
         assert_ne!(displayed.status, TransactionDisplayStatus::Rejected);
         assert_eq!(displayed_count(&conn, wallet.account_id), 1, "a single history entry");
     }
+
+    #[test]
+    fn abandoning_never_strands_a_change_output_locked_by_another_send() {
+        // X is mined and its change C becomes an input of Y. A reorg resets X and
+        // turns C back into UNCONFIRMED, still locked by Y.
+        let wallet = test_wallet();
+        let mut conn = wallet.pool.get().expect("conn");
+        let x = record_send(&wallet, &conn, 1, &[1, 2], Some(3));
+        let x_block = block(50, vec![x.change.clone().unwrap()], x.input_hashes.clone());
+        let mut first = processor(&wallet, true);
+        process(
+            &mut first,
+            &conn,
+            wallet.account_id,
+            &[x_block.clone(), block(51, Vec::new(), Vec::new())],
+        );
+        let (change_id, ..) = change_row(&conn, &x);
+        let y = record_send(&wallet, &conn, 2, &[3], Some(9));
+        assert_eq!(y.input_hashes, vec![x.change.as_ref().unwrap().output_hash()]);
+
+        let tx = conn.transaction().expect("tx");
+        crate::scan::reorg::rollback_from_height(&tx, wallet.account_id, 50, None).expect("rollback");
+        tx.commit().expect("commit");
+        let lock_of_c = |conn: &Connection| -> (String, Option<String>) {
+            conn.query_row(
+                "SELECT status, locked_by_request_id FROM outputs WHERE id = :id",
+                named_params! { ":id": change_id },
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("change C")
+        };
+        assert_eq!(
+            lock_of_c(&conn),
+            ("UNCONFIRMED".to_string(), Some(y.request_id.clone()))
+        );
+
+        // X cannot be abandoned while C is Y's input.
+        let refused = crate::transactions::abandon::abandon_send(&mut conn, wallet.account_id, x.tx_id, true, None);
+        assert!(
+            matches!(
+                &refused,
+                Err(crate::transactions::abandon::AbandonSendError::ChangeInUse { by, .. }) if *by == y.request_id
+            ),
+            "got {refused:?}"
+        );
+        assert_eq!(
+            completed(&conn, x.tx_id).status,
+            db::CompletedTransactionStatus::Completed
+        );
+
+        // Abandoning Y releases C.
+        crate::transactions::abandon::abandon_send(&mut conn, wallet.account_id, y.tx_id, true, None)
+            .expect("abandon Y");
+        assert_eq!(lock_of_c(&conn), ("UNCONFIRMED".to_string(), None));
+
+        // Now X can be abandoned, and when it is mined after all C is spendable.
+        crate::transactions::abandon::abandon_send(&mut conn, wallet.account_id, x.tx_id, true, None)
+            .expect("abandon X");
+        let mut again = processor(&wallet, false);
+        let remined = block(51, vec![x.change.clone().unwrap()], x.input_hashes.clone());
+        process(
+            &mut again,
+            &conn,
+            wallet.account_id,
+            &[remined, block(52, Vec::new(), Vec::new())],
+        );
+        assert_eq!(lock_of_c(&conn), ("UNSPENT".to_string(), None));
+        assert_eq!(
+            completed(&conn, x.tx_id).status,
+            db::CompletedTransactionStatus::MinedUnconfirmed
+        );
+    }
 }

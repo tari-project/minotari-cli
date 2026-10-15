@@ -10,7 +10,7 @@
 //! output and marks it mined (`MinedUnconfirmed`) after all.
 
 use log::warn;
-use rusqlite::{Connection, TransactionBehavior};
+use rusqlite::{Connection, OptionalExtension, TransactionBehavior};
 use tari_common_types::transaction::TxId;
 use tari_transaction_components::transaction_components::Transaction;
 use thiserror::Error;
@@ -39,6 +39,8 @@ pub enum AbandonSendError {
     NotStalled { tx_id: TxId, attempts: i32 },
     #[error("An input of send {tx_id} has already been spent on chain; the wallet's scan settles it")]
     InputSpent { tx_id: TxId },
+    #[error("The change of send {tx_id} is an input of another send ({by}); abandon or settle that send first")]
+    ChangeInUse { tx_id: TxId, by: String },
     #[error(transparent)]
     Db(#[from] WalletDbError),
 }
@@ -63,7 +65,8 @@ pub struct AbandonedSend {
 /// Only a send that is `Completed` or `Broadcast` can be abandoned. Unless
 /// `force` is set it must also be stalled: the node has not accepted it
 /// [`MAX_BROADCAST_ATTEMPTS`] times in a row. A send any of whose inputs has
-/// already been seen spent on chain is refused: the scan settles it.
+/// already been seen spent on chain is refused: the scan settles it. So is a
+/// send whose change output is an input of another send.
 ///
 /// In one write transaction: the send is marked `Rejected` ("abandoned by
 /// user"), its change output `REJECTED` (kept, so the scan can still recognise
@@ -113,12 +116,31 @@ pub fn abandon_send(
         }
     }
     let spent_inputs: i64 = db_tx.query_row(
-        "SELECT COUNT(*) FROM outputs WHERE locked_by_request_id = :req AND status = 'SPENT' AND deleted_at IS NULL",
+        r#"
+        SELECT COUNT(*) FROM outputs o
+        WHERE o.locked_by_request_id = :req AND o.status = 'SPENT' AND o.deleted_at IS NULL
+          AND EXISTS (SELECT 1 FROM inputs i WHERE i.output_id = o.id AND i.deleted_at IS NULL)
+        "#,
         rusqlite::named_params! { ":req": send.pending_tx_id },
         |row| row.get(0),
     )?;
     if spent_inputs > 0 {
         return Err(AbandonSendError::InputSpent { tx_id });
+    }
+
+    // Its change may be an input of a later send (a reorg made it unconfirmed
+    // again). Rejecting it would strand that send, and its lock with it.
+    let change_lock: Option<Option<String>> = db_tx
+        .query_row(
+            "SELECT locked_by_request_id FROM outputs WHERE created_by_request_id = :req AND deleted_at IS NULL",
+            rusqlite::named_params! { ":req": send.pending_tx_id },
+            |row| row.get(0),
+        )
+        .optional()?;
+    if let Some(Some(by)) = change_lock
+        && by != send.pending_tx_id
+    {
+        return Err(AbandonSendError::ChangeInUse { tx_id, by });
     }
 
     warn!(
@@ -131,6 +153,17 @@ pub fn abandon_send(
     // is kept, `REJECTED`, so the scan can still recognise the send by it.
     db::mark_change_output_rejected(&db_tx, &send.pending_tx_id)?;
     db::unlock_outputs_for_request(&db_tx, &send.pending_tx_id)?;
+    // An input a reorg un-spent (its spend record removed) is still marked
+    // `SPENT`; it is not spent on chain, so it is handed back too.
+    db_tx.execute(
+        r#"
+        UPDATE outputs
+        SET status = 'UNSPENT', locked_by_request_id = NULL, locked_at = NULL
+        WHERE locked_by_request_id = :req AND status = 'SPENT' AND deleted_at IS NULL
+          AND NOT EXISTS (SELECT 1 FROM inputs i WHERE i.output_id = outputs.id AND i.deleted_at IS NULL)
+        "#,
+        rusqlite::named_params! { ":req": send.pending_tx_id },
+    )?;
     let displayed_transaction = db::mark_displayed_transaction_rejected(&db_tx, tx_id)?;
 
     let mut event = WalletEvent {
