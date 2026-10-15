@@ -88,12 +88,12 @@ impl<E: EventSender + Clone + Send + 'static> ScanDbHandler<E> {
             let mut last_height: Option<u64> = None;
 
             for block in blocks.iter() {
-                // The base node never splits a block across pages: when a page
-                // fills up it drops the partial last block and starts the next
-                // page at it. The one exception is a single block larger than a
-                // whole page, which is sent partial and not continued (the scanner
-                // stops on the repeated header). So results behind the resume
-                // point are never the rest of a block and are skipped.
+                // The base node never truncates a block: it sends every chunk of a
+                // block before checking the page limit. When a page fills up it
+                // drops the last block whole and starts the next page at it; a
+                // first block larger than a page is sent whole, over-filling the
+                // page. So results behind the resume point are never the rest of
+                // a block and are skipped.
                 if block.height < next_block_to_scan {
                     continue;
                 }
@@ -117,10 +117,10 @@ impl<E: EventSender + Clone + Send + 'static> ScanDbHandler<E> {
                     .map_err(|e| WalletDbError::Unexpected(e.to_string()))?;
             }
 
-            // Match the wallet's sends in the last block of the batch. Normally
-            // that block is complete (see above), but a single block larger than
-            // a page arrives partial, so as a safeguard a mismatch there does not
-            // reject a send yet.
+            // Match the wallet's sends in the last block of the batch. The node
+            // sends blocks whole (see above), so that block is complete; still,
+            // defensively, a mismatch there does not reject a send until the
+            // scan has moved past the block.
             processor
                 .match_sends(&tx, false)
                 .map_err(|e| WalletDbError::Unexpected(e.to_string()))?;

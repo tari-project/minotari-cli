@@ -538,7 +538,7 @@ impl<E: EventSender> BlockProcessor<E> {
     /// so it is complete.
     ///
     /// A send's input may have been spent in the last block of an earlier batch,
-    /// where a mismatch is not acted on (the block may have been partial). For
+    /// where a mismatch is not acted on (defensively; see [`Self::match_sends`]). For
     /// each such send the block is rebuilt from the database (the wallet's
     /// inputs spent in it and its outputs mined in it) and matched as a complete
     /// block by [`Self::match_sends`]: a match marks it mined, a mismatch rejects
@@ -584,7 +584,7 @@ impl<E: EventSender> BlockProcessor<E> {
                 continue;
             };
             if height >= before_height {
-                // Possibly still partial: decided once the scan has moved past it.
+                // Not yet moved past: decided once the scan has (defensively).
                 continue;
             }
             let Ok(block_hash) = FixedHash::try_from(block_hash) else {
@@ -612,7 +612,7 @@ impl<E: EventSender> BlockProcessor<E> {
     /// `height`, on the evidence of its change output alone, and persists
     /// `TransactionUnconfirmed`. Used only when the inputs cannot be checked: a
     /// scan that excludes them (see [`Self::set_inputs_excluded`]), or the last
-    /// block of a batch, which may be incomplete.
+    /// block of a batch, which is defensively not treated as decided.
     fn settle_rejected_send_by_change(
         &mut self,
         tx: &Connection,
@@ -793,11 +793,12 @@ impl<E: EventSender> BlockProcessor<E> {
     /// transaction rejected. Its inputs that were spent in the block stay
     /// `SPENT`; any it still had locked are released.
     ///
-    /// The last block of a batch may be incomplete: a single block larger than a
-    /// page arrives partial. So when `block_is_complete` is false a mismatch is
-    /// only logged and the send is left as it is; once the scan has moved past
-    /// that block, [`Self::settle_sends_in_passed_blocks`] decides it from what
-    /// the scan recorded (match or rejection). The node's word never does.
+    /// The base node sends blocks whole, so the last block of a batch is complete
+    /// too; defensively, it is still not treated as decided: when
+    /// `block_is_complete` is false a mismatch is only logged and the send is
+    /// left as it is; once the scan has moved past that block,
+    /// [`Self::settle_sends_in_passed_blocks`] decides it from what the scan
+    /// recorded (match or rejection). The node's word never does.
     ///
     /// This relies on the wallet seeing the whole block. A mismatch is logged at
     /// `warn` on the audit target.
@@ -909,13 +910,13 @@ impl<E: EventSender> BlockProcessor<E> {
                     height = send_block.height,
                     all_inputs_in_block = all_inputs_in_block,
                     change_in_block = change_in_block;
-                    "Transaction not matched in the last block of a batch, which may be incomplete; leaving it"
+                    "Transaction not matched in the last block of a batch; deciding once the scan moves past it"
                 );
                 if was_rejected && change_in_block {
                     // A send the monitor rejected is only taken up when its change
                     // is in this block, and that change has been restored, credited
-                    // and shown in its history entry. Rejecting it again on what may
-                    // be part of the block would be wrong, and leaving it rejected
+                    // and shown in its history entry. Rejecting it again in a block
+                    // not yet treated as decided would be wrong, and leaving it rejected
                     // would leave it so for good (nothing finds it again once its
                     // change is active). The change is the proof it landed, as in a
                     // scan without inputs: settle it on that.
