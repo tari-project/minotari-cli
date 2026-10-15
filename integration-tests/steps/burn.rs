@@ -56,8 +56,11 @@ fn execute_burn_funds(world: &mut MinotariWorld, amount: &str, claim_public_key:
 #[when(regex = r#"^I try to burn "([^"]*)" microTari$"#)]
 async fn try_burn_no_claim_key(world: &mut MinotariWorld, amount: String) {
     // Use a dummy base URL — the command will fail before reaching broadcast
-    // because there are no funds to lock.
-    execute_burn_funds(world, &amount, None, "http://127.0.0.1:1");
+    // because there are no funds to lock. A burn needs a claim public key
+    // before it gets as far as locking funds; the wallet's own public spend
+    // key stands in for the L2 claim key.
+    let claim_public_key = world.wallet.get_public_spend_key().to_hex();
+    execute_burn_funds(world, &amount, Some(&claim_public_key), "http://127.0.0.1:1");
 }
 
 #[when(regex = r#"^I try to burn "([^"]*)" microTari with claim public key "([^"]*)"$"#)]
