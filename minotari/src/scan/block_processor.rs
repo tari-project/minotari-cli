@@ -2405,4 +2405,86 @@ mod tests {
             db::CompletedTransactionStatus::Completed
         );
     }
+
+    /// Moves the send's inputs into block 50, so a reorg back to 50 removes them.
+    fn mine_inputs_at_50(conn: &Connection, send: &TestSend) {
+        for input_hash in &send.input_hashes {
+            conn.execute(
+                "UPDATE outputs SET mined_in_block_height = 50 WHERE output_hash = :hash",
+                named_params! { ":hash": input_hash.as_slice() },
+            )
+            .expect("move input");
+        }
+    }
+
+    fn rollback_to_50(conn: &mut Connection, account_id: i64) {
+        let tx = conn.transaction().expect("tx");
+        crate::scan::reorg::rollback_from_height(&tx, account_id, 50, None).expect("rollback");
+        tx.commit().expect("commit");
+    }
+
+    #[test]
+    fn a_reorg_that_cancels_a_mined_send_keeps_its_change_for_the_rebroadcast() {
+        // The send's input was mined at 50 and the send itself at 51; a reorg back
+        // to 50 removes both. The send is reset to be rebroadcast, so its change
+        // must stay its change.
+        let wallet = test_wallet();
+        let mut conn = wallet.pool.get().expect("conn");
+        let send = record_send(&wallet, &conn, 1, &[1], Some(3));
+        mine_inputs_at_50(&conn, &send);
+        let (change_id, ..) = change_row(&conn, &send);
+
+        let mut first = processor(&wallet, true);
+        let send_block = block(51, vec![send.change.clone().unwrap()], send.input_hashes.clone());
+        process(
+            &mut first,
+            &conn,
+            wallet.account_id,
+            &[send_block, block(52, Vec::new(), Vec::new())],
+        );
+        assert_eq!(
+            completed(&conn, send.tx_id).status,
+            db::CompletedTransactionStatus::MinedUnconfirmed
+        );
+
+        rollback_to_50(&mut conn, wallet.account_id);
+
+        assert_eq!(
+            completed(&conn, send.tx_id).status,
+            db::CompletedTransactionStatus::Completed
+        );
+        let (id, status, height, _) = change_row(&conn, &send);
+        assert_eq!(id, change_id, "the change row is kept and still the send's");
+        assert_eq!(status, "UNCONFIRMED");
+        assert_eq!(height, 0);
+
+        // Mined again, the change is updated in place.
+        let mut again = processor(&wallet, false);
+        let remined = block(51, vec![send.change.clone().unwrap()], Vec::new());
+        process(&mut again, &conn, wallet.account_id, std::slice::from_ref(&remined));
+        let (id, status, height, _) = change_row(&conn, &send);
+        assert_eq!(id, change_id);
+        assert_eq!(status, "UNSPENT");
+        assert_eq!(height, 51);
+    }
+
+    #[test]
+    fn a_reorg_that_cancels_a_broadcast_send_keeps_its_change() {
+        // The send's input was mined at 50 and the send is broadcast, not yet mined.
+        let wallet = test_wallet();
+        let mut conn = wallet.pool.get().expect("conn");
+        let send = record_send(&wallet, &conn, 1, &[1], Some(3));
+        mine_inputs_at_50(&conn, &send);
+        let (change_id, ..) = change_row(&conn, &send);
+
+        rollback_to_50(&mut conn, wallet.account_id);
+
+        assert_eq!(
+            completed(&conn, send.tx_id).status,
+            db::CompletedTransactionStatus::Broadcast
+        );
+        let (id, status, ..) = change_row(&conn, &send);
+        assert_eq!(id, change_id, "the change row is kept and still the send's");
+        assert_eq!(status, "UNCONFIRMED");
+    }
 }
