@@ -55,7 +55,10 @@ pub async fn handle_reorgs(
         if let Some(chain_block) = chain_block {
             if chain_block.hash == block.hash {
                 // Found the fork point. All blocks after this height are reorged.
-                reorg_start_height = block.height + 1;
+                reorg_start_height = block
+                    .height
+                    .checked_add(1)
+                    .ok_or_else(|| anyhow!("Block height {} has no next block height", block.height))?;
                 break;
             } else {
                 // This block is reorged.
@@ -89,8 +92,12 @@ pub async fn handle_reorgs(
         })
     } else {
         debug!("No reorgs detected.");
+        let tip_height = last_blocks.first().expect("is already checked").height;
+        let resume_height = tip_height
+            .checked_add(1)
+            .ok_or_else(|| anyhow!("Block height {tip_height} has no next block height"))?;
         Ok(ReorgResult {
-            resume_height: last_blocks.first().expect("is already checked").height + 1,
+            resume_height,
             reorg_information: None,
         })
     }

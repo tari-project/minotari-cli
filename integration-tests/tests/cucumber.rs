@@ -1,3 +1,6 @@
+// Test-only crate: plain arithmetic is fine here.
+#![allow(clippy::arithmetic_side_effects)]
+
 use cucumber::World;
 use std::path::{Path, PathBuf};
 use std::process::Command;

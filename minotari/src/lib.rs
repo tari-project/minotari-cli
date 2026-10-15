@@ -118,6 +118,11 @@
 //!
 //! Database migrations are handled automatically via SQLx.
 
+// Unit tests may use plain arithmetic; production code is still checked because
+// `clippy::arithmetic_side_effects` is linted on the non-test build of this crate.
+// (clippy has no `allow-arithmetic-side-effects-in-tests` option.)
+#![cfg_attr(test, allow(clippy::arithmetic_side_effects))]
+
 pub mod api;
 pub mod cli;
 pub mod commands;

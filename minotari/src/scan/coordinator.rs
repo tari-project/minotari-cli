@@ -137,8 +137,7 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
         scanning_offset: u64,
         wallet_client: &WalletHttpClient,
     ) -> Result<u64, ScanError> {
-        let timestamp =
-            (account.birthday as u64).saturating_sub(scanning_offset) * 24 * 60 * 60 + BIRTHDAY_GENESIS_FROM_UNIX_EPOCH;
+        let timestamp = birthday_timestamp(account.birthday as u64, scanning_offset)?;
         wallet_client
             .get_height_at_time(timestamp)
             .await
@@ -206,8 +205,8 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
             self.required_confirmations,
         );
         let mut db_handler = ScanDbHandler::new(self.pool.clone(), block_processor);
-        let mut total_scanned_globally = 0;
-        let mut blocks_since_reorg_check = 0;
+        let mut total_scanned_globally: u64 = 0;
+        let mut blocks_since_reorg_check: u64 = 0;
 
         let mut state_manager = ScannerStateManager::new();
         loop {
@@ -305,7 +304,7 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
                         .await?;
                     Self::push_events_with_limit(&mut all_events, events, max_buffered_events);
                     if let Some(last) = shared_blocks.last() {
-                        target.next_block_to_scan = last.height + 1;
+                        target.next_block_to_scan = next_block_height(last.height)?;
                     }
                     if let Some(last) = shared_blocks.last()
                         && last.height >= target.next_block_to_scan
@@ -338,8 +337,8 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
                     }
                 }
 
-                blocks_since_reorg_check += new_blocks_count;
-                total_scanned_globally += new_blocks_count;
+                blocks_since_reorg_check = blocks_since_reorg_check.saturating_add(new_blocks_count);
+                total_scanned_globally = total_scanned_globally.saturating_add(new_blocks_count);
 
                 if blocks_since_reorg_check >= self.reorg_check_interval {
                     self.check_global_reorgs(&mut targets, &db_handler, scanner).await?;
@@ -762,7 +761,7 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
             if scanned_blocks.is_empty() {
                 break;
             }
-            total_scanned += scanned_blocks.len() as u64;
+            total_scanned = total_scanned.saturating_add(scanned_blocks.len() as u64);
 
             let shared_blocks = Arc::new(scanned_blocks);
 
@@ -783,7 +782,7 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
                 all_events.extend(events);
 
                 if let Some(last) = shared_blocks.last() {
-                    target.next_block_to_scan = last.height + 1;
+                    target.next_block_to_scan = next_block_height(last.height)?;
 
                     self.event_sender
                         .send(ProcessingEvent::ScanStatus(ScanStatusEvent::Progress {
@@ -852,7 +851,7 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
             if scanned_blocks.is_empty() {
                 break;
             }
-            total_scanned += scanned_blocks.len() as u64;
+            total_scanned = total_scanned.saturating_add(scanned_blocks.len() as u64);
 
             let shared_blocks = Arc::new(scanned_blocks);
 
@@ -873,7 +872,7 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
                 all_events.extend(events);
 
                 if let Some(last) = shared_blocks.last() {
-                    target.next_block_to_scan = last.height + 1;
+                    target.next_block_to_scan = next_block_height(last.height)?;
 
                     let monitor_res = target
                         .transaction_monitor
@@ -961,7 +960,7 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
             if scanned_blocks.is_empty() {
                 break;
             }
-            total_scanned += scanned_blocks.len() as u64;
+            total_scanned = total_scanned.saturating_add(scanned_blocks.len() as u64);
 
             let shared_blocks = Arc::new(scanned_blocks);
 
@@ -982,7 +981,7 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
                 all_events.extend(events);
 
                 if let Some(last) = shared_blocks.last() {
-                    target.next_block_to_scan = last.height + 1;
+                    target.next_block_to_scan = next_block_height(last.height)?;
 
                     self.event_sender
                         .send(ProcessingEvent::ScanStatus(ScanStatusEvent::Progress {
@@ -1115,12 +1114,12 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
 
                     crate::db::update_output_status(&tx, *output_id, OutputStatus::Spent)
                         .map_err(ScanError::DbError)?;
-                    confirmed_spent += 1;
+                    confirmed_spent = confirmed_spent.saturating_add(1);
                 },
                 VerifyAction::MarkUnspent { output_id } => {
                     crate::db::update_output_status(&tx, *output_id, OutputStatus::Unspent)
                         .map_err(ScanError::DbError)?;
-                    marked_unspent += 1;
+                    marked_unspent = marked_unspent.saturating_add(1);
                 },
             }
         }
@@ -1144,5 +1143,65 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
         HttpBlockchainScanner::new(self.base_url.clone(), vec![key_manager], OPTIMAL_SCANNING_THREADS)
             .await
             .map_err(|e| ScanError::Intermittent(e.to_string()))
+    }
+}
+
+/// Unix timestamp (seconds) of the wallet birthday, moved back by `scanning_offset` days.
+///
+/// `birthday_days` counts days since `BIRTHDAY_GENESIS_FROM_UNIX_EPOCH`. Returns an error
+/// instead of overflowing when the stored birthday is out of range (e.g. a negative value
+/// read back from the database).
+fn birthday_timestamp(birthday_days: u64, scanning_offset: u64) -> Result<u64, ScanError> {
+    const SECONDS_PER_DAY: u64 = 24 * 60 * 60;
+    let days = birthday_days.saturating_sub(scanning_offset);
+    days.checked_mul(SECONDS_PER_DAY)
+        .and_then(|seconds| seconds.checked_add(BIRTHDAY_GENESIS_FROM_UNIX_EPOCH))
+        .ok_or_else(|| {
+            ScanError::Fatal(anyhow::anyhow!(
+                "Wallet birthday of {birthday_days} days is out of range"
+            ))
+        })
+}
+
+/// Height of the block after `height`.
+///
+/// Returns an error instead of overflowing if a base node reports a block at `u64::MAX`.
+fn next_block_height(height: u64) -> Result<u64, ScanError> {
+    height
+        .checked_add(1)
+        .ok_or_else(|| ScanError::Fatal(anyhow::anyhow!("Block height {height} has no next block height")))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn birthday_timestamp_applies_offset_in_days() {
+        let timestamp = birthday_timestamp(10, 3).unwrap();
+        assert_eq!(timestamp, 7 * 24 * 60 * 60 + BIRTHDAY_GENESIS_FROM_UNIX_EPOCH);
+    }
+
+    #[test]
+    fn birthday_timestamp_offset_larger_than_birthday_is_genesis() {
+        let timestamp = birthday_timestamp(2, 5).unwrap();
+        assert_eq!(timestamp, BIRTHDAY_GENESIS_FROM_UNIX_EPOCH);
+    }
+
+    #[test]
+    fn birthday_timestamp_out_of_range_is_error() {
+        // A negative birthday cast to u64 becomes huge; this used to overflow.
+        let result = birthday_timestamp(-1i64 as u64, 0);
+        assert!(matches!(result, Err(ScanError::Fatal(_))));
+    }
+
+    #[test]
+    fn next_block_height_increments() {
+        assert_eq!(next_block_height(41).unwrap(), 42);
+    }
+
+    #[test]
+    fn next_block_height_at_max_is_error() {
+        assert!(matches!(next_block_height(u64::MAX), Err(ScanError::Fatal(_))));
     }
 }

@@ -239,7 +239,10 @@ impl PendingTransactionsByStatus {
 
     /// Returns the total count of transactions still needing monitoring.
     fn remaining_count(&self) -> usize {
-        self.completed.len() + self.broadcast.len() + self.mined_unconfirmed.len()
+        self.completed
+            .len()
+            .saturating_add(self.broadcast.len())
+            .saturating_add(self.mined_unconfirmed.len())
     }
 }
 
@@ -566,7 +569,7 @@ impl TransactionMonitor {
                         id = tx.id.to_string().as_str();
                         "Rebroadcasting transaction"
                     );
-                    mark_completed_transaction_as_broadcasted(&conn, tx.id, tx.broadcast_attempts + 1)?;
+                    mark_completed_transaction_as_broadcasted(&conn, tx.id, tx.broadcast_attempts.saturating_add(1))?;
 
                     let event = WalletEvent {
                         id: 0,

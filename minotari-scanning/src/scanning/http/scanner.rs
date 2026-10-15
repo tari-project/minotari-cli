@@ -206,8 +206,8 @@ where
         exclude_spent: bool,
         exclude_inputs: bool,
     ) -> WalletResult<SyncUtxosByBlockResponseV0> {
-        let mut timeout_retries = 0;
-        let mut error_retries = 0;
+        let mut timeout_retries: u32 = 0;
+        let mut error_retries: u32 = 0;
 
         loop {
             match timeout(
@@ -218,7 +218,7 @@ where
             {
                 Ok(Ok(result)) => return Ok(result),
                 Ok(Err(e)) => {
-                    error_retries += 1;
+                    error_retries = error_retries.saturating_add(1);
                     let error_msg = e.to_string();
                     warn!(
                         error = &*error_msg,
@@ -238,7 +238,7 @@ where
                     tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
                 },
                 Err(_) => {
-                    timeout_retries += 1;
+                    timeout_retries = timeout_retries.saturating_add(1);
                     warn!(
                         retry = timeout_retries,
                         max = self.max_error_retries;
@@ -340,14 +340,14 @@ where
     }
 
     async fn get_utxos_by_block(&self, current_header_hash: &str) -> WalletResult<GetUtxosByBlockResponse> {
-        let mut timeout_retries = 0;
-        let mut error_retries = 0;
+        let mut timeout_retries: u32 = 0;
+        let mut error_retries: u32 = 0;
 
         loop {
             match timeout(self.timeout, self.get_utxos_by_block_http_call(current_header_hash)).await {
                 Ok(Ok(result)) => return Ok(result),
                 Ok(Err(e)) => {
-                    error_retries += 1;
+                    error_retries = error_retries.saturating_add(1);
                     let error_msg = e.to_string();
                     warn!(
                         error = &*error_msg,
@@ -367,7 +367,7 @@ where
                     tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
                 },
                 Err(_) => {
-                    timeout_retries += 1;
+                    timeout_retries = timeout_retries.saturating_add(1);
                     warn!(
                         retry = timeout_retries,
                         max = self.max_error_retries;
@@ -837,14 +837,14 @@ where
     }
 
     async fn get_tip_info(&mut self) -> WalletResult<TipInfo> {
-        let mut timeout_retries = 0;
-        let mut error_retries = 0;
+        let mut timeout_retries: u32 = 0;
+        let mut error_retries: u32 = 0;
 
         loop {
             match timeout(self.timeout, self.get_tip_info_http_call()).await {
                 Ok(Ok(result)) => return Ok(result),
                 Ok(Err(e)) => {
-                    error_retries += 1;
+                    error_retries = error_retries.saturating_add(1);
                     let error_msg = e.to_string();
                     warn!(
                         error = &*error_msg,
@@ -864,7 +864,7 @@ where
                     tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
                 },
                 Err(_) => {
-                    timeout_retries += 1;
+                    timeout_retries = timeout_retries.saturating_add(1);
                     warn!(
                         retry = timeout_retries,
                         max = self.max_error_retries;
@@ -897,14 +897,14 @@ where
     }
 
     async fn get_header_by_height(&mut self, height: u64) -> WalletResult<Option<BlockHeaderInfo>> {
-        let mut timeout_retries = 0;
-        let mut error_retries = 0;
+        let mut timeout_retries: u32 = 0;
+        let mut error_retries: u32 = 0;
 
         loop {
             match timeout(self.timeout, self.get_header_by_height_http_call(height)).await {
                 Ok(Ok(result)) => return Ok(result),
                 Ok(Err(e)) => {
-                    error_retries += 1;
+                    error_retries = error_retries.saturating_add(1);
                     let error_msg = e.to_string();
                     warn!(
                         error = &*error_msg,
@@ -924,7 +924,7 @@ where
                     tokio::time::sleep(std::time::Duration::from_secs(backoff_secs)).await;
                 },
                 Err(_) => {
-                    timeout_retries += 1;
+                    timeout_retries = timeout_retries.saturating_add(1);
                     warn!(
                         retry = timeout_retries,
                         max = self.max_error_retries;

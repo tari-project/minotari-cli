@@ -249,15 +249,14 @@ impl DisplayedTransactionProcessor {
         let mut used_inputs = BinaryHeap::new();
 
         for (output_index, solution) in solutions {
-            let mut balance = MicroMinotari::from(0);
-            let mut debit_value = 0.into();
+            // `None` once the input total overflows u64; such a solution cannot match any output.
+            let mut balance = Some(MicroMinotari::from(0));
             let mut tx_inputs = Vec::new();
             for index in &solution {
                 let (_input_balance, input) = inputs
                     .get(*index)
                     .ok_or(ProcessorError::MissingError("Input index out of bounds".to_string()))?;
-                balance += input.output.value();
-                debit_value += input.output.value();
+                balance = balance.and_then(|total| total.checked_add(input.output.value()));
                 tx_inputs.push(TransactionInput {
                     output_hash: input.output.output_hash(),
                     amount: input.output.value(),
@@ -275,11 +274,14 @@ impl DisplayedTransactionProcessor {
                 .get_transaction_info_details()
                 .ok_or(ProcessorError::MissingError("Missing Output details".to_string()))?;
             let total_send = Self::claimed_total_send(&output.output, amount);
-            if total_send != Some(balance) {
-                unmatched_index.push(output_index);
-                debug!("Output does not have a matching input solution");
-                continue;
-            }
+            let debit_value = match (balance, total_send) {
+                (Some(balance), Some(total_send)) if balance == total_send => balance,
+                _ => {
+                    unmatched_index.push(output_index);
+                    debug!("Output does not have a matching input solution");
+                    continue;
+                },
+            };
             for index in solution {
                 used_inputs.push(index);
             }
@@ -387,11 +389,12 @@ impl DisplayedTransactionProcessor {
             .collect();
 
         let suffix: Vec<MicroMinotari> = {
-            let mut s = vec![0.into(); vals.len() + 1];
-            for i in (0..vals.len()).rev() {
-                let s_val = s.get(i + 1).expect("Should exist");
-                let val = vals.get(i).expect("Should exist");
-                *(s.get_mut(i).expect("Should exist")) = *s_val + *val;
+            // suffix[i] is an upper bound on the sum of vals[i..]. Saturating keeps it a valid
+            // upper bound for the pruning checks below even if the real sum exceeds u64.
+            let mut s = vec![MicroMinotari::from(0); vals.len().saturating_add(1)];
+            for (i, val) in vals.iter().enumerate().rev() {
+                let next = *s.get(i.saturating_add(1)).expect("Should exist");
+                *(s.get_mut(i).expect("Should exist")) = next.saturating_add(val);
             }
             s
         };
@@ -422,13 +425,15 @@ impl DisplayedTransactionProcessor {
                 Some(n) => n,
                 None => return false,
             };
-            let rem = match suffix.get(step + 1) {
+            let next_step = step.saturating_add(1);
+            let rem = match suffix.get(next_step) {
                 Some(rem) => rem,
                 None => return false,
             };
 
-            // Prune: even taking everything remaining won't reach target
-            if current + rem + n < target {
+            // Prune: even taking everything remaining won't reach target.
+            // Saturating keeps this an upper bound, so it never prunes a reachable target.
+            if current.saturating_add(rem).saturating_add(n) < target {
                 return false;
             }
             // Prune: already over target
@@ -440,16 +445,18 @@ impl DisplayedTransactionProcessor {
             }
 
             // Try taking this input
-            if current + n <= target {
+            if let Some(with_n) = current.checked_add(n)
+                && with_n <= target
+            {
                 *assignment.get_mut(step).expect("Already checked") = true;
-                if back_track(vals, suffix, assignment, step + 1, current + n, target) {
+                if back_track(vals, suffix, assignment, next_step, with_n, target) {
                     return true;
                 }
             }
 
             // Try skipping this input
             *assignment.get_mut(step).expect("Already checked") = false;
-            back_track(vals, suffix, assignment, step + 1, current, target)
+            back_track(vals, suffix, assignment, next_step, current, target)
         }
 
         if back_track(&vals, &suffix, &mut assignment, 0, 0.into(), target) {
@@ -1998,5 +2005,32 @@ mod tests {
             .unwrap();
         assert!(updated.is_empty());
         assert_eq!(new.len(), 1);
+    }
+
+    #[test]
+    fn test_backtrack_subset_finds_exact_match() {
+        let nums = [MicroMinotari(5), MicroMinotari(3), MicroMinotari(2)];
+        let used = DisplayedTransactionProcessor::backtrack_subset(&[0, 1, 2], &nums, MicroMinotari(7)).unwrap();
+        let total: u64 = used.iter().map(|&i| nums.get(i).unwrap().as_u64()).sum();
+        assert_eq!(total, 7);
+    }
+
+    #[test]
+    fn test_backtrack_subset_input_sum_overflowing_u64_does_not_panic() {
+        // The inputs together exceed u64::MAX; only one of them can match the target.
+        let nums = [MicroMinotari(u64::MAX), MicroMinotari(u64::MAX - 1), MicroMinotari(1)];
+        let used = DisplayedTransactionProcessor::backtrack_subset(&[0, 1, 2], &nums, MicroMinotari(u64::MAX)).unwrap();
+        let total = used
+            .iter()
+            .try_fold(0u64, |acc, &i| acc.checked_add(nums.get(i).unwrap().as_u64()))
+            .unwrap();
+        assert_eq!(total, u64::MAX);
+    }
+
+    #[test]
+    fn test_backtrack_subset_unreachable_target_is_none() {
+        let nums = [MicroMinotari(u64::MAX), MicroMinotari(u64::MAX)];
+        let used = DisplayedTransactionProcessor::backtrack_subset(&[0, 1], &nums, MicroMinotari(u64::MAX - 1));
+        assert!(used.is_none());
     }
 }

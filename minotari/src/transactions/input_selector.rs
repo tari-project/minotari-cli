@@ -316,8 +316,15 @@ impl InputSelector {
             .fee_calc
             .calculate(fee_per_gram, 0, 0, num_outputs, features_and_scripts_byte_size);
         let input_fee = self.fee_calc.calculate(fee_per_gram, 0, 1, 0, 0);
+        // An amount so large that adding the kernel fee overflows can never be funded.
+        let target_amount = amount
+            .checked_add(kernel_fee)
+            .ok_or(UtxoSelectionError::InsufficientFunds {
+                available: available_balance,
+                required: amount.saturating_add(kernel_fee),
+            })?;
         let bnb = BranchAndBoundUtxoSelectionBuilder::new(uo)
-            .with_target_amount(amount + kernel_fee)
+            .with_target_amount(target_amount)
             .with_fee_per_input(input_fee)
             .with_total_output_fee(output_fee)
             .with_change_fee(default_output_fee)
@@ -336,17 +343,23 @@ impl InputSelector {
             // the total is not enough to cover fees. So we just need to notify the user its not enough so we add 1 to it.
             return Err(UtxoSelectionError::InsufficientFunds {
                 available: available_balance,
-                required: amount + MicroMinotari(1),
+                required: amount.saturating_add(MicroMinotari(1)),
             });
         }
         let selection = selection_result.expect("Selection should be valid here");
         let selected_amount = selection.current_value;
         let requires_change_output = selection.has_change;
-        let final_fee = selection.final_fee + kernel_fee;
+        let final_fee = selection
+            .final_fee
+            .checked_add(kernel_fee)
+            .ok_or_else(|| UtxoSelectionError::ServiceError("Selection fee plus kernel fee overflows".to_string()))?;
         let (fee_with_change, fee_without_change) = if requires_change_output {
             (final_fee, final_fee.saturating_sub(default_output_fee))
         } else {
-            (final_fee + default_output_fee, final_fee)
+            let fee_with_change = final_fee
+                .checked_add(default_output_fee)
+                .ok_or_else(|| UtxoSelectionError::ServiceError("Fee plus change output fee overflows".to_string()))?;
+            (fee_with_change, final_fee)
         };
         let utxos = selection.selected_utxos;
 
@@ -364,5 +377,28 @@ impl InputSelector {
             fee_without_change,
             fee_with_change,
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn an_amount_that_overflows_with_the_kernel_fee_is_insufficient_funds() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let pool = crate::db::init_db(temp_dir.path().join("input_selector.db")).unwrap();
+        let conn = pool.get().unwrap();
+        let selector = InputSelector::new(1, 3);
+
+        let result = selector.fetch_unspent_outputs(&conn, MicroMinotari(u64::MAX), 1, MicroMinotari(5), Some(100));
+
+        match result {
+            Err(UtxoSelectionError::InsufficientFunds { available, required }) => {
+                assert_eq!(available, MicroMinotari(0));
+                assert_eq!(required, MicroMinotari(u64::MAX));
+            },
+            other => panic!("expected InsufficientFunds, got {other:?}"),
+        }
     }
 }

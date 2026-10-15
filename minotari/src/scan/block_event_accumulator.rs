@@ -31,7 +31,9 @@ impl BlockEventAccumulator {
     }
 
     pub fn total_changes(&self) -> usize {
-        self.debit_balance_changes.len() + self.credit_balance_changes.len()
+        self.debit_balance_changes
+            .len()
+            .saturating_add(self.credit_balance_changes.len())
     }
 
     pub fn debit_balance_changes(&self) -> &[(BalanceChange, SpentInput)] {
