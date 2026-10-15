@@ -268,7 +268,7 @@ fn migrate_in_transaction(
     for raw in outputs {
         let converted = match convert_output(raw)? {
             None => {
-                report.outputs_skipped += 1;
+                report.outputs_skipped = report.outputs_skipped.saturating_add(1);
                 continue;
             },
             Some(c) => c,
@@ -282,7 +282,7 @@ fn migrate_in_transaction(
         }
 
         let inserted_id = insert_converted_output(tx, account_id, &converted, &view_key_bytes)?;
-        report.outputs_migrated += 1;
+        report.outputs_migrated = report.outputs_migrated.saturating_add(1);
 
         // Index for the displayed-transactions join in step 6.
         let matched_for_indexes = MatchedOutput {
@@ -321,11 +321,11 @@ fn migrate_in_transaction(
         // ledger expects: each balance_change is linked to a specific
         // output or input id.
         if converted.legacy_status.is_unspent() {
-            report.unspent_outputs_count += 1;
+            report.unspent_outputs_count = report.unspent_outputs_count.saturating_add(1);
             insert_credit_balance_change(tx, account_id, &converted, inserted_id, &memo_claims)?;
             report.balance_credit = report.balance_credit.saturating_add(converted.value);
         } else if converted.legacy_status.is_spent() {
-            report.spent_outputs_count += 1;
+            report.spent_outputs_count = report.spent_outputs_count.saturating_add(1);
             // For spent outputs we need both a credit (the receive) and a
             // debit (the spend). The pair keeps the balance arithmetic
             // consistent and lets the user see a historical trail.
@@ -359,9 +359,10 @@ fn migrate_in_transaction(
                 raw_tx.tx_id
             )
         })?;
-        report.displayed_transactions_migrated += 1;
+        report.displayed_transactions_migrated = report.displayed_transactions_migrated.saturating_add(1);
         if had_matched {
-            report.displayed_transactions_with_matched_outputs += 1;
+            report.displayed_transactions_with_matched_outputs =
+                report.displayed_transactions_with_matched_outputs.saturating_add(1);
         }
     }
 

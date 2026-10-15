@@ -45,6 +45,11 @@
 //! - Transaction and balance data is stored in a SQLite database
 //! - Default data directory is `./data/`
 
+// Unit tests may use plain arithmetic; production code is still checked because
+// `clippy::arithmetic_side_effects` is linted on the non-test build of this crate.
+// (clippy has no `allow-arithmetic-side-effects-in-tests` option.)
+#![cfg_attr(test, allow(clippy::arithmetic_side_effects))]
+
 use std::{
     fs::{self, create_dir_all},
     path::{Path, PathBuf},

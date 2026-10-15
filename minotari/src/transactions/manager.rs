@@ -851,7 +851,9 @@ impl TransactionSender {
                 mined_in_block_hash: FixedHash::default(),
                 matched_output_id: input.id,
             });
-            debit += input.output.value();
+            debit = debit
+                .checked_add(input.output.value())
+                .ok_or_else(|| anyhow!("Total value of selected inputs overflows"))?;
         }
         let mut lock_height = 0;
         for output in &signed_transaction.outputs {
@@ -878,7 +880,8 @@ impl TransactionSender {
                 output_type: OutputType::Standard,
                 is_change: true,
             });
-            credit += change.value();
+            // The change output is the only credit, so it is assigned rather than summed.
+            credit = change.value();
         }
 
         let tx = DisplayedTransactionBuilder::new()

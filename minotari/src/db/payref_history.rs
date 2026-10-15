@@ -130,7 +130,7 @@ pub fn save_displayed_transaction_payrefs_before_reorg(
             for payref in payrefs {
                 if !payref.is_empty() {
                     save_payref_history(conn, account_id, tx_id, &payref, None)?;
-                    count += 1;
+                    count = count.saturating_add(1);
                 }
             }
         }
@@ -192,7 +192,7 @@ pub fn save_completed_transaction_payrefs_before_reorg(
         #[allow(clippy::cast_sign_loss)]
         let tx_id = TxId::from(tx_id_i64 as u64);
         save_payref_history(conn, account_id, tx_id, &payref, output_hash.as_deref())?;
-        count += 1;
+        count = count.saturating_add(1);
     }
 
     Ok(count)

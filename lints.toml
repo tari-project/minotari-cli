@@ -43,8 +43,7 @@ deny = [
     'clippy::needless_question_mark',
     'clippy::dbg_macro',
     # math checking
-    # this gives a lot of noise with stuff like i+1 etc
-    #'clippy::arithmetic_side_effects'
+    'clippy::arithmetic_side_effects',
 ]
 
 allow = [

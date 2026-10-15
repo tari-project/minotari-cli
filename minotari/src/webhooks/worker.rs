@@ -90,6 +90,7 @@ impl WebhookWorker {
     async fn process_item(&self, item: WebhookQueueItem, secret: &str) {
         let result = self.sender.send(&item.target_url, secret, &item.payload).await;
 
+        let attempt = item.attempt_count.saturating_add(1);
         let (new_status, next_retry, error_msg) = match result {
             DeliveryResult::Success => {
                 info!(id = item.id; "Webhook delivered successfully");
@@ -100,13 +101,13 @@ impl WebhookWorker {
                 (WebhookStatus::PermanentFailure, item.next_retry_at, Some(msg))
             },
             DeliveryResult::RetryableFailure(msg) => {
-                let (next_retry, stop_retrying) = calculate_backoff(item.attempt_count + 1);
+                let (next_retry, stop_retrying) = calculate_backoff(attempt);
 
                 if stop_retrying {
                     warn!(id = item.id, error:% = msg; "Webhook max retries exceeded");
                     (WebhookStatus::PermanentFailure, next_retry, Some(msg))
                 } else {
-                    warn!(id = item.id, attempt = item.attempt_count + 1, error:% = msg; "Webhook failed, retrying");
+                    warn!(id = item.id, attempt = attempt, error:% = msg; "Webhook failed, retrying");
                     (WebhookStatus::Failed, next_retry, Some(msg))
                 }
             },
@@ -115,14 +116,7 @@ impl WebhookWorker {
         let pool = self.db_pool.clone();
         let update_result = tokio::task::spawn_blocking(move || {
             let conn = pool.get()?;
-            db::update_webhook_status(
-                &conn,
-                item.id,
-                new_status,
-                item.attempt_count + 1,
-                next_retry,
-                error_msg.as_deref(),
-            )
+            db::update_webhook_status(&conn, item.id, new_status, attempt, next_retry, error_msg.as_deref())
         })
         .await;
 
@@ -144,20 +138,31 @@ fn calculate_backoff(attempt: i32) -> (NaiveDateTime, bool) {
     // 3: 8m
     // 4: 32m
     // ...
-    let base_seconds = 30 * 4u64.pow((attempt - 1) as u32);
+    // `attempt` is at least 1 for real deliveries; anything lower is treated as the first attempt.
+    let exponent = u32::try_from(attempt.saturating_sub(1)).unwrap_or(0);
+    // On overflow the delay is far beyond MAX_AGE anyway, so clamp straight to the cap.
+    let base_seconds = 4u64
+        .checked_pow(exponent)
+        .and_then(|factor| factor.checked_mul(30))
+        .unwrap_or(MAX_AGE);
     let capped_seconds = std::cmp::min(base_seconds, MAX_AGE);
 
     let jitter_range = capped_seconds / 10;
     let jitter = rand::thread_rng().gen_range(0..=jitter_range);
 
     let final_seconds = if rand::thread_rng().gen_bool(0.5) {
-        capped_seconds + jitter
+        capped_seconds.saturating_add(jitter)
     } else {
         capped_seconds.saturating_sub(jitter)
     };
 
     #[allow(clippy::cast_possible_wrap)]
-    let next_time = Utc::now().naive_utc() + chrono::Duration::seconds(final_seconds as i64);
+    let delay = chrono::Duration::seconds(final_seconds as i64);
+    // final_seconds is bounded by MAX_AGE plus jitter, so this only fails at the end of time.
+    let next_time = Utc::now()
+        .naive_utc()
+        .checked_add_signed(delay)
+        .unwrap_or(NaiveDateTime::MAX);
     (next_time, false)
 }
 
@@ -268,5 +273,29 @@ mod tests {
 
         let (_next_time, stop_at_max) = calculate_backoff(10);
         assert!(stop_at_max, "Should stop retrying after 10 attempts");
+    }
+
+    #[test]
+    fn test_backoff_last_attempt_is_capped_at_max_age() {
+        let before = Utc::now().naive_utc();
+        let (next_time, stop) = calculate_backoff(MAX_ATTEMPTS - 1);
+        assert!(!stop);
+        // 30 * 4^8 seconds is far above MAX_AGE, so the delay is capped (plus up to 10% jitter).
+        let cap = i64::try_from(MAX_AGE).unwrap();
+        let delay = (next_time - before).num_seconds();
+        assert!(delay >= cap - cap / 10 - 1, "delay {delay} below cap range");
+        assert!(delay <= cap + cap / 10 + 1, "delay {delay} above cap range");
+    }
+
+    #[test]
+    fn test_backoff_non_positive_attempt_does_not_panic() {
+        let before = Utc::now().naive_utc();
+        for attempt in [0, -1, i32::MIN] {
+            let (next_time, stop) = calculate_backoff(attempt);
+            assert!(!stop);
+            // Treated as the first attempt: 30s plus or minus 10% jitter.
+            let delay = (next_time - before).num_seconds();
+            assert!((26..=34).contains(&delay), "attempt {attempt} gave delay {delay}");
+        }
     }
 }

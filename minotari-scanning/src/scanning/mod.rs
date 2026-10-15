@@ -224,7 +224,7 @@ impl InProgressScan {
     }
 
     pub const fn increment_page(&mut self) {
-        self.current_page += 1;
+        self.current_page = self.current_page.saturating_add(1);
     }
 
     pub fn set_next_request(&mut self, header: String) {

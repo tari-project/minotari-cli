@@ -508,7 +508,7 @@ pub fn cancel_pending_transactions_by_ids(
         placeholders
     );
 
-    let mut params: Vec<&dyn ToSql> = Vec::with_capacity(ids.len() + 1);
+    let mut params: Vec<&dyn ToSql> = Vec::with_capacity(ids.len().saturating_add(1));
     params.push(&status_str);
     for id in ids {
         params.push(id);

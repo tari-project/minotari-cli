@@ -88,7 +88,9 @@ impl FeeEstimator {
 
         let input_count = selection.utxos.len();
         let total_outputs = if selection.requires_change_output {
-            num_outputs + 1
+            num_outputs
+                .checked_add(1)
+                .ok_or_else(|| anyhow!("Too many outputs to estimate a fee for"))?
         } else {
             num_outputs
         };
@@ -107,7 +109,7 @@ impl FeeEstimator {
         .map(|(priority, fee_per_gram)| {
             self.calculate_single_estimate(priority, fee_per_gram, amount, input_count, total_outputs, output_size)
         })
-        .collect();
+        .collect::<Result<Vec<_>>>()?;
 
         debug!(
             account = account_name,
@@ -126,18 +128,24 @@ impl FeeEstimator {
         input_count: usize,
         output_count: usize,
         output_size: usize,
-    ) -> FeeEstimateResult {
+    ) -> Result<FeeEstimateResult> {
+        let total_output_size = output_size
+            .checked_mul(output_count)
+            .ok_or_else(|| anyhow!("Total output size overflows while estimating fee"))?;
         let fee = self
             .fee_calc
-            .calculate(fee_per_gram, 1, input_count, output_count, output_size * output_count);
+            .calculate(fee_per_gram, 1, input_count, output_count, total_output_size);
+        let total_amount_required = amount
+            .checked_add(fee)
+            .ok_or_else(|| anyhow!("Amount plus fee overflows while estimating fee"))?;
 
-        FeeEstimateResult {
+        Ok(FeeEstimateResult {
             priority,
             fee_per_gram,
             estimated_fee: fee,
-            total_amount_required: amount + fee,
+            total_amount_required,
             input_count,
-        }
+        })
     }
 }
 
@@ -259,5 +267,52 @@ mod tests {
             estimated_output_size_for_payment_id(4096).unwrap(),
             estimated_output_size_for_payment_id(0).unwrap()
         );
+    }
+
+    fn test_estimator() -> (FeeEstimator, tempfile::TempDir) {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let pool = db::init_db(temp_dir.path().join("fee_estimator.db")).unwrap();
+        (FeeEstimator::new(pool, "http://127.0.0.1:1".to_string()), temp_dir)
+    }
+
+    #[test]
+    fn a_single_estimate_adds_the_fee_to_the_amount() {
+        let (estimator, _temp_dir) = test_estimator();
+        let estimate = estimator
+            .calculate_single_estimate(FeePriority::Slow, MicroMinotari(5), MicroMinotari(1_000), 1, 2, 100)
+            .unwrap();
+        assert!(estimate.estimated_fee > MicroMinotari(0));
+        assert_eq!(
+            estimate.total_amount_required,
+            MicroMinotari(1_000) + estimate.estimated_fee
+        );
+    }
+
+    #[test]
+    fn a_single_estimate_rejects_an_amount_that_overflows_with_the_fee() {
+        let (estimator, _temp_dir) = test_estimator();
+        let result = estimator.calculate_single_estimate(
+            FeePriority::Fast,
+            MicroMinotari(5),
+            MicroMinotari(u64::MAX),
+            1,
+            2,
+            100,
+        );
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn a_single_estimate_rejects_an_overflowing_output_size() {
+        let (estimator, _temp_dir) = test_estimator();
+        let result = estimator.calculate_single_estimate(
+            FeePriority::Fast,
+            MicroMinotari(5),
+            MicroMinotari(1),
+            1,
+            2,
+            usize::MAX,
+        );
+        assert!(result.is_err());
     }
 }

@@ -267,7 +267,7 @@ pub fn mark_displayed_transactions_reorganized(
                 },
             )?;
 
-            updated_count += 1;
+            updated_count = updated_count.saturating_add(1);
         }
     }
 
