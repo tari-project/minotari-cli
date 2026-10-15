@@ -1,10 +1,12 @@
 use crate::db::balance_changes::{
     get_balance_change_id_by_output, insert_balance_change, mark_balance_change_as_reversed,
 };
+use crate::db::completed_transactions::CompletedTransactionStatus;
 use crate::db::error::{WalletDbError, WalletDbResult};
 use crate::log::mask_amount;
 use crate::models::BalanceChange;
 use crate::models::OutputStatus;
+use crate::models::PendingTransactionStatus;
 use chrono::{DateTime, Utc};
 use log::{debug, info, warn};
 use rusqlite::{Connection, OptionalExtension, named_params};
@@ -344,9 +346,11 @@ pub fn confirm_unconfirmed_change_output(
     #[allow(clippy::cast_possible_wrap)]
     let block_height = block_height as i64;
 
+    let live = lock_holder_is_live_sql("outputs.locked_by_request_id");
     let output_id: Option<i64> = conn
         .query_row(
-            r#"
+            &format!(
+                r#"
             UPDATE outputs
             SET mined_in_block_height = :block_height,
                 mined_in_block_hash = :block_hash,
@@ -354,33 +358,16 @@ pub fn confirm_unconfirmed_change_output(
                 memo_parsed = :memo_parsed,
                 memo_hex = :memo_hex,
                 payment_reference = :payment_reference,
-                status = CASE WHEN (
-                    SELECT COUNT(*) FROM completed_transactions c
-                    WHERE c.pending_tx_id = outputs.locked_by_request_id AND c.status IN ('completed', 'broadcast')
-                ) + (
-                    SELECT COUNT(*) FROM pending_transactions p
-                    WHERE p.id = outputs.locked_by_request_id AND p.status = 'PENDING'
-                ) > 0 THEN :locked ELSE :new_status END,
-                locked_by_request_id = CASE WHEN (
-                    SELECT COUNT(*) FROM completed_transactions c
-                    WHERE c.pending_tx_id = outputs.locked_by_request_id AND c.status IN ('completed', 'broadcast')
-                ) + (
-                    SELECT COUNT(*) FROM pending_transactions p
-                    WHERE p.id = outputs.locked_by_request_id AND p.status = 'PENDING'
-                ) > 0 THEN locked_by_request_id ELSE NULL END,
-                locked_at = CASE WHEN (
-                    SELECT COUNT(*) FROM completed_transactions c
-                    WHERE c.pending_tx_id = outputs.locked_by_request_id AND c.status IN ('completed', 'broadcast')
-                ) + (
-                    SELECT COUNT(*) FROM pending_transactions p
-                    WHERE p.id = outputs.locked_by_request_id AND p.status = 'PENDING'
-                ) > 0 THEN locked_at ELSE NULL END
+                status = CASE WHEN {live} THEN :locked ELSE :new_status END,
+                locked_by_request_id = CASE WHEN {live} THEN locked_by_request_id ELSE NULL END,
+                locked_at = CASE WHEN {live} THEN locked_at ELSE NULL END
             WHERE account_id = :account_id
               AND output_hash = :output_hash
               AND status IN (:unconfirmed, :rejected)
               AND deleted_at IS NULL
             RETURNING id
-            "#,
+            "#
+            ),
             named_params! {
                 ":block_height": block_height,
                 ":block_hash": block_hash.as_slice(),
@@ -410,6 +397,68 @@ pub fn confirm_unconfirmed_change_output(
     }
 
     Ok(output_id)
+}
+
+/// SQL condition that holds while the request whose id is `request_id_sql`
+/// can still land, so a lock it holds on an output is live: its reservation is
+/// `PENDING`, or its send is `completed` or `broadcast`.
+///
+/// The one definition of a live lock: [`is_lock_holder_live`],
+/// [`clear_dead_lock`] and [`confirm_unconfirmed_change_output`] all use it.
+fn lock_holder_is_live_sql(request_id_sql: &str) -> String {
+    format!(
+        "(EXISTS (SELECT 1 FROM pending_transactions p WHERE p.id = {req} AND p.status = '{pending}') \
+         OR EXISTS (SELECT 1 FROM completed_transactions c WHERE c.pending_tx_id = {req} \
+         AND c.status IN ('{completed}', '{broadcast}')))",
+        req = request_id_sql,
+        pending = PendingTransactionStatus::Pending,
+        completed = CompletedTransactionStatus::Completed,
+        broadcast = CompletedTransactionStatus::Broadcast,
+    )
+}
+
+/// Whether request `request_id` can still land, so a lock it holds is live:
+/// its reservation is `PENDING`, or its send is `completed` or `broadcast`.
+pub fn is_lock_holder_live(conn: &Connection, request_id: &str) -> WalletDbResult<bool> {
+    let live: bool = conn.query_row(
+        &format!("SELECT {}", lock_holder_is_live_sql(":req")),
+        named_params! { ":req": request_id },
+        |row| row.get(0),
+    )?;
+    Ok(live)
+}
+
+/// Drops the lock on output `output_id` if the request holding it can no
+/// longer land (see [`is_lock_holder_live`]); a `LOCKED` output becomes
+/// `UNSPENT`. A live lock is left alone.
+///
+/// Returns whether a lock was dropped.
+pub fn clear_dead_lock(conn: &Connection, output_id: i64) -> WalletDbResult<bool> {
+    let live = lock_holder_is_live_sql("outputs.locked_by_request_id");
+    let cleared = conn.execute(
+        &format!(
+            r#"
+            UPDATE outputs
+            SET status = CASE WHEN status = :locked THEN :unspent ELSE status END,
+                locked_by_request_id = NULL,
+                locked_at = NULL
+            WHERE id = :id AND locked_by_request_id IS NOT NULL AND NOT {live}
+            "#
+        ),
+        named_params! {
+            ":id": output_id,
+            ":locked": OutputStatus::Locked.to_string(),
+            ":unspent": OutputStatus::Unspent.to_string(),
+        },
+    )?;
+    if cleared > 0 {
+        warn!(
+            target: "audit",
+            output_id = output_id;
+            "DB: Dropped a lock held by a request that can no longer land"
+        );
+    }
+    Ok(cleared > 0)
 }
 
 /// Soft-deletes the `UNCONFIRMED` change output of a send that will not be

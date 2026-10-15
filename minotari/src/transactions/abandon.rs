@@ -104,8 +104,9 @@ impl AbandonedSend {
 /// `force` is set it must also be stalled: the node has not accepted it
 /// [`MAX_BROADCAST_ATTEMPTS`] times in a row. A send any of whose inputs has
 /// already been seen spent on chain is refused: the scan settles it. So is a
-/// send whose change output is an input of another send, and one whose change
-/// output has already been seen on chain (the send appears to have landed).
+/// send whose change output is an input of another send that can still land
+/// (a lock left by one that cannot is dropped), and one whose change output has
+/// already been seen on chain (the send appears to have landed).
 ///
 /// The scan recognises an abandoned send that is mined after all by its change
 /// output. A send without one is refused ([`AbandonSendError::NoChangeOutput`])
@@ -176,30 +177,35 @@ pub fn abandon_send(
     // The scan recognises the send by its change output if it is mined after
     // all; it must still be unconfirmed (no real mined data), or the send has
     // landed already.
-    let change: Option<(String, i64, Option<String>)> = db_tx
+    let change: Option<(i64, String, i64, Option<String>)> = db_tx
         .query_row(
             r#"
-            SELECT status, mined_in_block_height, locked_by_request_id
+            SELECT id, status, mined_in_block_height, locked_by_request_id
             FROM outputs WHERE created_by_request_id = :req AND deleted_at IS NULL
             "#,
             rusqlite::named_params! { ":req": send.pending_tx_id },
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
         )
         .optional()?;
     let reconcilable = change.is_some();
     match change {
         None if !accept_unreconcilable => return Err(AbandonSendError::NoChangeOutput { tx_id }),
         None => {},
-        Some((status, mined_height, change_lock)) => {
+        Some((change_id, status, mined_height, change_lock)) => {
             if status != OutputStatus::Unconfirmed.to_string() || mined_height != 0 {
                 return Err(AbandonSendError::ChangeAlreadyMined { tx_id });
             }
             // It may be an input of a later send (a reorg made it unconfirmed
             // again). Rejecting it would strand that send, and its lock with it.
+            // A lock left by a request that can no longer land holds nothing:
+            // it is dropped, so the rejected change does not carry it.
             if let Some(by) = change_lock
                 && by != send.pending_tx_id
             {
-                return Err(AbandonSendError::ChangeInUse { tx_id, by });
+                if db::is_lock_holder_live(&db_tx, &by)? {
+                    return Err(AbandonSendError::ChangeInUse { tx_id, by });
+                }
+                db::clear_dead_lock(&db_tx, change_id)?;
             }
         },
     }
@@ -635,5 +641,65 @@ mod tests {
         let abandoned = abandon_unreconcilable(&send).expect("the flag does not matter when there is change");
         assert!(abandoned.reconcilable);
         assert_eq!(abandoned.note(), ABANDON_NOTE);
+    }
+
+    fn lock_change(send: &Send, by: &str) {
+        let conn = send.pool.get().expect("conn");
+        conn.execute(
+            "UPDATE outputs SET locked_by_request_id = :by, locked_at = :now WHERE created_by_request_id = :req",
+            named_params! { ":by": by, ":now": Utc::now(), ":req": send.request_id },
+        )
+        .expect("lock change");
+    }
+
+    fn change_lock(send: &Send) -> (String, Option<String>) {
+        let conn = send.pool.get().expect("conn");
+        conn.query_row(
+            "SELECT status, locked_by_request_id FROM outputs WHERE created_by_request_id = :req",
+            named_params! { ":req": send.request_id },
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .expect("change")
+    }
+
+    #[test]
+    fn a_change_locked_by_a_dead_request_is_freed_and_the_send_abandoned() {
+        // The change was an input of a request that no longer exists.
+        let send = send_with_attempts(MAX_BROADCAST_ATTEMPTS);
+        lock_change(&send, "request-that-is-gone");
+
+        abandon(&send, true).expect("a dead lock does not block abandoning");
+        assert_eq!(status_of(&send), CompletedTransactionStatus::Rejected);
+        assert_eq!(change_lock(&send), ("REJECTED".to_string(), None));
+    }
+
+    #[test]
+    fn a_change_locked_by_a_live_reservation_is_in_use() {
+        let send = send_with_attempts(MAX_BROADCAST_ATTEMPTS);
+        let binding = IdempotencyBinding::new(
+            Some("next".to_string()),
+            IdempotencyOperation::SendTransaction,
+            RequestFingerprint::new(IdempotencyOperation::SendTransaction),
+        );
+        let next = db::create_pending_transaction(
+            &send.pool.get().expect("conn"),
+            "next",
+            &binding,
+            send.account_id,
+            true,
+            MicroMinotari(0),
+            MicroMinotari(0),
+            MicroMinotari(0),
+            Utc::now() + chrono::Duration::hours(1),
+        )
+        .expect("live reservation");
+        lock_change(&send, &next);
+
+        assert!(matches!(
+            abandon(&send, true),
+            Err(AbandonSendError::ChangeInUse { by, .. }) if by == next
+        ));
+        assert_eq!(status_of(&send), CompletedTransactionStatus::Broadcast);
+        assert_eq!(change_lock(&send), ("UNCONFIRMED".to_string(), Some(next)));
     }
 }

@@ -6,9 +6,7 @@ use crate::transactions::idempotency::IdempotencyBinding;
 use crate::{
     api::types::LockFundsResult,
     db::completed_transactions::CompletedTransactionStatus,
-    db::outputs::{
-        fetch_outputs_by_lock_request_id, soft_delete_unconfirmed_change_output, unlock_outputs_for_request,
-    },
+    db::outputs::{fetch_outputs_by_lock_request_id, unlock_outputs_for_request},
     models::PendingTransactionStatus,
 };
 use chrono::{DateTime, Utc};
@@ -519,11 +517,13 @@ pub fn cancel_pending_transactions_by_ids(
 
     conn.execute(&query_str, params.as_slice())?;
 
-    // A cancelled request that was never sent will not land, so neither will
-    // its change output. One that was signed and recorded as a completed
-    // transaction still in play (not rejected or cancelled) keeps its change:
-    // the reorg resets it to be rebroadcast, and the scan finds it by that
-    // change when it lands again.
+    // A cancelled request with no completed transaction in play will not land:
+    // its inputs are released (else those not removed with the reorged blocks
+    // would stay `LOCKED` for it for good) and its change output dropped. One
+    // that was signed and recorded as a completed transaction still in play
+    // (not rejected or cancelled) keeps its locks and its change: the reorg
+    // resets it to be rebroadcast, and the scan finds it by that change when
+    // it lands again.
     for id in ids {
         let in_play: i64 = conn.query_row(
             r#"
@@ -538,7 +538,8 @@ pub fn cancel_pending_transactions_by_ids(
             |row| row.get(0),
         )?;
         if in_play == 0 {
-            soft_delete_unconfirmed_change_output(conn, id)?;
+            // Also soft-deletes its unconfirmed change output.
+            unlock_outputs_for_request(conn, id)?;
         }
     }
 

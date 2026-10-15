@@ -2834,4 +2834,81 @@ mod tests {
             db::CompletedTransactionStatus::MinedUnconfirmed
         );
     }
+
+    #[test]
+    fn a_reorg_releases_the_inputs_of_a_cancelled_reservation_but_not_of_a_send_in_play() {
+        let wallet = test_wallet();
+        let mut conn = wallet.pool.get().expect("conn");
+        let insert_locked = |conn: &Connection, byte: u8, height: u64, request_id: &str| -> i64 {
+            let output = test_wallet_output(10_000, byte);
+            let id = db::insert_output(
+                conn,
+                wallet.account_id,
+                &wallet.view_key,
+                output.output_hash().to_vec(),
+                &output,
+                height,
+                &hash(byte),
+                1_700_000_000,
+                None,
+                None,
+                FixedHash::zero(),
+                false,
+            )
+            .expect("output");
+            db::lock_output(conn, id, request_id, Utc::now()).expect("lock");
+            id
+        };
+        let lock_of = |conn: &Connection, id: i64| -> (String, Option<String>) {
+            conn.query_row(
+                "SELECT status, locked_by_request_id FROM outputs WHERE id = :id",
+                named_params! { ":id": id },
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("output")
+        };
+
+        // A reservation (never signed) with one input mined before the reorg
+        // and one in a block it removes.
+        let binding = IdempotencyBinding::new(
+            Some("reserve".to_string()),
+            IdempotencyOperation::SendTransaction,
+            RequestFingerprint::new(IdempotencyOperation::SendTransaction),
+        );
+        let reservation = db::create_pending_transaction(
+            &conn,
+            "reserve",
+            &binding,
+            wallet.account_id,
+            true,
+            MicroMinotari(0),
+            MicroMinotari(0),
+            MicroMinotari(0),
+            Utc::now() + chrono::Duration::hours(1),
+        )
+        .expect("reservation");
+        let kept_input = insert_locked(&conn, 20, 10, &reservation);
+        insert_locked(&conn, 21, 60, &reservation);
+
+        // A send in play, likewise.
+        let send = record_send(&wallet, &conn, 2, &[3], Some(9));
+        insert_locked(&conn, 22, 60, &send.request_id);
+        let send_input = db::get_output_info_by_hash_for_account(&conn, wallet.account_id, &send.input_hashes[0])
+            .expect("lookup")
+            .expect("send input")
+            .0;
+
+        let tx = conn.transaction().expect("tx");
+        let info = crate::scan::reorg::rollback_from_height(&tx, wallet.account_id, 50, None).expect("rollback");
+        tx.commit().expect("commit");
+        assert!(info.cancelled_transaction_ids.contains(&reservation));
+
+        // The reservation will not land: its remaining input is spendable again.
+        assert_eq!(lock_of(&conn, kept_input), ("UNSPENT".to_string(), None));
+        // The send is rebroadcast: its input stays locked to it.
+        assert_eq!(
+            lock_of(&conn, send_input),
+            ("LOCKED".to_string(), Some(send.request_id.clone()))
+        );
+    }
 }
