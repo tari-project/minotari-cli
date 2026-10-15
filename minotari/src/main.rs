@@ -62,7 +62,7 @@ use minotari::{
     ScanError,
     api::{ApiAuth, accounts::LockFundsRequest, auth::API_TOKEN_ENV_VAR, resolve_api_token},
     cli::{ApplyArgs, Cli, Commands, DaemonArgs},
-    commands::{burn::handle_burn_funds, validator_nodes},
+    commands::{abandon_send, burn::handle_burn_funds, validator_nodes},
     config::{defaults::WalletConfig, loader::load_configuration},
     daemon::{self, ApiServerConfig},
     db::{self, WalletDbError, get_accounts, get_balance, init_db},
@@ -566,6 +566,29 @@ async fn main() -> Result<(), anyhow::Error> {
                 wallet_config.base_url,
             )
             .await
+        },
+        Commands::AbandonSend {
+            db,
+            account,
+            tx_id,
+            force,
+        } => {
+            let name = account.account_name.as_deref().unwrap_or("default");
+            info!(target: "audit", account = name, tx_id = tx_id; "Abandoning send...");
+
+            wallet_config.apply_database(&db);
+            let webhook_trigger_config = wallet_config.webhook.url.clone().map(|url| WebhookTriggerConfig {
+                url,
+                send_only_event_types: wallet_config.webhook.send_only_event_types.clone(),
+            });
+
+            abandon_send::handle_abandon_send(
+                wallet_config.database_path.clone(),
+                name,
+                tx_id,
+                force,
+                webhook_trigger_config,
+            )
         },
         Commands::Delete { db, account } => {
             let name = account.account_name.as_deref().unwrap_or("default");

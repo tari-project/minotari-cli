@@ -625,6 +625,28 @@ pub enum Commands {
         seconds_to_lock: u64,
     },
 
+    /// Abandon a send the base node has not accepted, releasing its inputs.
+    ///
+    /// Only for a send that is completed or broadcast (not mined). Without `--force` the
+    /// send must also be stalled: the node has not accepted it 10 times in a row. A send
+    /// any of whose inputs is already spent on chain cannot be abandoned.
+    ///
+    /// WARNING: this does not unsend it. If a node still holds the transaction it can
+    /// still be mined: the wallet's scan then shows it as mined after all, and a send made
+    /// with the released funds in the meantime fails.
+    AbandonSend {
+        #[command(flatten)]
+        db: DatabaseArgs,
+        #[command(flatten)]
+        account: AccountArgs,
+        /// Transaction id of the send to abandon.
+        #[arg(long, help = "Transaction id of the send to abandon")]
+        tx_id: u64,
+        /// Abandon it even though it is not stalled yet.
+        #[arg(long, default_value_t = false, help = "Abandon a send that is not stalled yet")]
+        force: bool,
+    },
+
     /// Delete a wallet account and all associated data.
     ///
     /// This permanently removes the account, transaction history, and keys from the database.

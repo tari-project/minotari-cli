@@ -413,6 +413,90 @@
         }
       }
     },
+    "/accounts/{name}/completed_transactions/{tx_id}/abandon": {
+      "post": {
+        "tags": [
+          "accounts"
+        ],
+        "summary": "Abandons a send the base node has not accepted, releasing its inputs.",
+        "description": "Only a send that is `completed` or `broadcast` (not mined) can be abandoned.\nUnless `force` is set it must also be stalled: the node has not accepted it\n10 times in a row. A send any of whose inputs is already spent on chain\ncannot be abandoned; the wallet's scan settles it.\n\nThe send is marked `rejected` (\"abandoned by user\"), its inputs released,\nits change output kept as rejected, its displayed transaction rejected and a\n`TransactionRejected` event recorded.\n\n**This does not unsend it.** If a node still holds the transaction it can\nstill be mined; the wallet's scan then marks it mined after all, and a send\nmade with the released funds in the meantime fails.\n\n# Errors\n\n- `404 Not Found`: account or send does not exist\n- `409 Conflict`: the send is mined or rejected already, is not stalled\n  (and `force` is not set), or an input is already spent on chain\n- `500`: database error",
+        "operationId": "api_abandon_send",
+        "parameters": [
+          {
+            "name": "name",
+            "in": "path",
+            "description": "Name of the account",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "tx_id",
+            "in": "path",
+            "description": "Transaction id of the send to abandon",
+            "required": true,
+            "schema": {
+              "type": "integer",
+              "format": "int64",
+              "minimum": 0
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/AbandonSendRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "200": {
+            "description": "Send abandoned",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/AbandonSendResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "Account or send not found",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "The send cannot be abandoned",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          },
+          "500": {
+            "description": "Internal server error",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ApiError"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
     "/accounts/{name}/create_unsigned_transaction": {
       "post": {
         "tags": [
@@ -950,6 +1034,39 @@
   },
   "components": {
     "schemas": {
+      "AbandonSendRequest": {
+        "type": "object",
+        "description": "Request body for abandoning a send.",
+        "properties": {
+          "force": {
+            "type": "boolean",
+            "description": "Abandon the send even though it is not stalled yet (the node has not\nrefused it 10 times in a row). Defaults to `false`."
+          }
+        }
+      },
+      "AbandonSendResponse": {
+        "type": "object",
+        "description": "Response returned after abandoning a send.",
+        "required": [
+          "tx_id",
+          "status",
+          "note"
+        ],
+        "properties": {
+          "note": {
+            "type": "string",
+            "description": "What abandoning means for the user."
+          },
+          "status": {
+            "type": "string",
+            "description": "The send's status now (`rejected`)."
+          },
+          "tx_id": {
+            "type": "string",
+            "description": "The abandoned send's transaction id."
+          }
+        }
+      },
       "AccountBalance": {
         "type": "object",
         "required": [

@@ -93,7 +93,7 @@ use tari_utilities::ByteArray;
 /// Number of broadcasts in a row the node may not accept before a send counts
 /// as stalled. A stalled send is not given up: it keeps its inputs locked and is
 /// retried every [`STALLED_REBROADCAST_INTERVAL_SECS`] instead of every pass.
-const MAX_BROADCAST_ATTEMPTS: i32 = 10;
+pub const MAX_BROADCAST_ATTEMPTS: i32 = 10;
 
 /// How long a stalled send waits between rebroadcasts.
 const STALLED_REBROADCAST_INTERVAL_SECS: i64 = 60 * 60;

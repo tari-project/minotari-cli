@@ -2719,4 +2719,45 @@ mod tests {
         assert_eq!(displayed.blockchain.block_height, 50);
         assert_eq!(displayed_count(&conn, wallet.account_id), 1);
     }
+
+    #[test]
+    fn an_abandoned_send_that_is_mined_after_all_is_reconciled() {
+        // The user abandoned X, but a node still had it and mined it.
+        let wallet = test_wallet();
+        let mut conn = wallet.pool.get().expect("conn");
+        let x = record_send(&wallet, &conn, 1, &[1, 2], Some(3));
+        let (original_change_id, ..) = change_row(&conn, &x);
+        crate::transactions::abandon::abandon_send(&mut conn, wallet.account_id, x.tx_id, true, None).expect("abandon");
+        assert_eq!(
+            completed(&conn, x.tx_id).status,
+            db::CompletedTransactionStatus::Rejected
+        );
+
+        let mined = block(50, vec![x.change.clone().unwrap()], x.input_hashes.clone());
+        let mut processor = processor(&wallet, false);
+        process(
+            &mut processor,
+            &conn,
+            wallet.account_id,
+            &[mined, block(51, Vec::new(), Vec::new())],
+        );
+
+        let x_completed = completed(&conn, x.tx_id);
+        assert_eq!(x_completed.status, db::CompletedTransactionStatus::MinedUnconfirmed);
+        assert_eq!(x_completed.mined_height, Some(50));
+        let events = processor.take_wallet_events();
+        assert!(events.iter().any(|e| matches!(
+            e.event_type,
+            WalletEventType::TransactionUnconfirmed { tx_id, .. } if tx_id == x.tx_id
+        )));
+        let (change_id, status, height, _) = change_row(&conn, &x);
+        assert_eq!(change_id, original_change_id);
+        assert_eq!(status, "UNSPENT");
+        assert_eq!(height, 50);
+        let displayed = db::get_displayed_transaction_by_id(&conn, &x.tx_id.to_string())
+            .expect("query")
+            .expect("displayed");
+        assert_ne!(displayed.status, TransactionDisplayStatus::Rejected);
+        assert_eq!(displayed_count(&conn, wallet.account_id), 1, "a single history entry");
+    }
 }
