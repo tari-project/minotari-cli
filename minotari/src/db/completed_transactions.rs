@@ -268,6 +268,10 @@ pub fn update_completed_transaction_status(
     Ok(())
 }
 
+/// Marks a send `Broadcast` (the node accepted it).
+///
+/// `attempts` is the send's `broadcast_attempts`: the number of broadcasts in a
+/// row the node did not accept, so an accepted broadcast passes 0.
 pub fn mark_completed_transaction_as_broadcasted(conn: &Connection, tx_id: TxId, attempts: i32) -> WalletDbResult<()> {
     let id = tx_id.to_string();
     info!(

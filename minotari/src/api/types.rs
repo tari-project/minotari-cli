@@ -180,7 +180,9 @@ pub struct CompletedTransactionResponse {
     pub mined_block_hash_hex: Option<String>,
     /// Block height where the transaction was confirmed (if confirmed)
     pub confirmation_height: Option<i64>,
-    /// Number of broadcast attempts made
+    /// Number of broadcasts in a row the node did not accept (0 once one is
+    /// accepted). At 10 or more the transaction is stalled: still pending, inputs
+    /// locked, rebroadcast less often.
     pub broadcast_attempts: i32,
     /// Timestamp when the transaction was created
     pub created_at: String,

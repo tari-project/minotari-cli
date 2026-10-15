@@ -80,7 +80,7 @@ use tari_common::configuration::Network;
 use tari_common_types::types::FixedHash;
 use tari_common_types::{tari_address::TariAddressFeatures, transaction::TxId};
 use tari_transaction_components::offline_signing::models::SignedTransaction;
-use tari_transaction_components::rpc::models::TxSubmissionRejectionReason;
+use tari_transaction_components::rpc::models::{TxSubmissionRejectionReason, TxSubmissionResponse};
 use tari_transaction_components::transaction_components::OutputType;
 use tari_transaction_components::{
     MicroMinotari, TransactionBuilder,
@@ -676,14 +676,18 @@ impl TransactionSender {
     ///   another send already completed or released it
     ///   ([`IdempotencyConflict`])
     /// - Transaction serialization fails
-    /// - The network rejects the transaction
     /// - Database operations fail
     ///
-    /// # Network Rejection
+    /// # When the node does not accept it
     ///
-    /// If the network rejects the transaction, the error reason is recorded
-    /// and the transaction is marked as rejected in the database. The locked
-    /// UTXOs are also released.
+    /// Once the signed transaction is recorded, the send is the wallet's to see
+    /// through. If the node refuses it (for any reason) or cannot be reached,
+    /// this still returns `Ok` with the pending displayed transaction: the send
+    /// stays `Completed` with its inputs locked and its change recorded, and the
+    /// transaction monitor rebroadcasts it. An error here would invite the
+    /// caller to send again, paying twice. The node's answer is logged on the
+    /// audit target. Only the wallet's own scan can reject a send (its inputs
+    /// spent by a different transaction).
     ///
     /// # Example
     ///
@@ -788,58 +792,7 @@ impl TransactionSender {
             .submit_transaction(signed_transaction_result.signed_transaction.transaction)
             .await;
 
-        if let Err(e) = response {
-            // The error can carry text from the node; it is logged and stored.
-            let e = crate::log::sanitize_node_text(&e.to_string());
-            warn!(
-                target: "audit",
-                id = processed_transaction.id(),
-                reason:% = e;
-                "Transaction submission failed"
-            );
-            db::mark_completed_transaction_as_rejected(
-                &connection,
-                completed_tx_id,
-                &format!("Transaction submission failed: {}", e),
-            )?;
-            self.fail_and_unlock_pending_transaction(&connection, processed_transaction.id());
-
-            return Err(anyhow!("Transaction submission failed: {}", e));
-        }
-        let submission_response = response.expect("Already checked for Err above");
-
-        if submission_response.accepted {
-            info!(
-                target: "audit",
-                id = completed_tx_id.to_string().as_str();
-                "Transaction accepted by network"
-            );
-            db::mark_completed_transaction_as_broadcasted(&connection, completed_tx_id, 1)?;
-        } else if submission_response.rejection_reason != TxSubmissionRejectionReason::AlreadyMined {
-            warn!(
-                target: "audit",
-                id = completed_tx_id.to_string().as_str(),
-                reason:% = submission_response.rejection_reason;
-                "Transaction rejected by network"
-            );
-            db::mark_completed_transaction_as_rejected(
-                &connection,
-                completed_tx_id,
-                &submission_response.rejection_reason.to_string(),
-            )?;
-            self.fail_and_unlock_pending_transaction(&connection, processed_transaction.id());
-
-            return Err(anyhow!(
-                "Transaction was not accepted by the network: {}",
-                submission_response.rejection_reason
-            ));
-        } else {
-            info!(
-                target: "audit",
-                id = completed_tx_id.to_string().as_str();
-                "Transaction already mined by network"
-            );
-        }
+        record_first_broadcast(&connection, completed_tx_id, response)?;
 
         // Build and save DisplayedTransaction for immediate UI display
         let displayed_transaction =
@@ -1035,6 +988,60 @@ impl TransactionSender {
             error!(target: "audit", error:% = e; "Failed to expire and unlock pending transaction during cleanup");
         }
     }
+}
+
+/// Records what the node answered to a send's first broadcast.
+///
+/// Accepted: the send is `Broadcast`. Already mined: it is left `Completed`
+/// for the scan to find. Anything else (the node refused it, for whatever
+/// reason, or could not be asked) leaves it `Completed` with its inputs
+/// locked and its change `UNCONFIRMED`: the node's word never rejects a send.
+/// The transaction monitor rebroadcasts it, and only the wallet's own scan can
+/// show its inputs went elsewhere. A refusal counts as one broadcast the node
+/// did not accept; a request that got no answer does not.
+fn record_first_broadcast(
+    connection: &Connection,
+    completed_tx_id: TxId,
+    response: Result<TxSubmissionResponse, anyhow::Error>,
+) -> Result<(), anyhow::Error> {
+    match response {
+        Ok(submission) if submission.accepted => {
+            info!(
+                target: "audit",
+                id = completed_tx_id.to_string().as_str();
+                "Transaction accepted by network"
+            );
+            // An accepted broadcast does not count towards the stall limit.
+            db::mark_completed_transaction_as_broadcasted(connection, completed_tx_id, 0)?;
+        },
+        Ok(submission) if submission.rejection_reason == TxSubmissionRejectionReason::AlreadyMined => {
+            info!(
+                target: "audit",
+                id = completed_tx_id.to_string().as_str();
+                "Transaction already mined by network"
+            );
+        },
+        Ok(submission) => {
+            warn!(
+                target: "audit",
+                id = completed_tx_id.to_string().as_str(),
+                reason:% = submission.rejection_reason;
+                "Transaction not accepted by the network yet; it is recorded and will be rebroadcast"
+            );
+            db::record_failed_broadcast_attempt(connection, completed_tx_id, 1)?;
+        },
+        Err(e) => {
+            // The error can carry text from the node; it is logged.
+            let e = crate::log::sanitize_node_text(&e.to_string());
+            warn!(
+                target: "audit",
+                id = completed_tx_id.to_string().as_str(),
+                reason:% = e;
+                "Transaction submission failed; it is recorded and will be rebroadcast"
+            );
+        },
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1794,5 +1801,163 @@ mod tests {
             locked,
             "the inputs of a broadcast transaction must stay locked",
         );
+    }
+
+    // -----------------------------------------------------------------------
+    // First broadcast
+    // -----------------------------------------------------------------------
+
+    struct RecordedSend {
+        pool: SqlitePool,
+        tx_id: TxId,
+        input_id: i64,
+        request_id: String,
+        _dir: tempfile::TempDir,
+    }
+
+    /// A signed send as `finalize_transaction_and_broadcast` records it before
+    /// submitting: completed transaction, input locked, change `UNCONFIRMED`.
+    fn recorded_send() -> RecordedSend {
+        let (pool, dir) = setup_funded_wallet(1);
+        let conn = pool.get().expect("conn");
+        let account = get_account_by_name(&conn, "test").expect("query").expect("account");
+        let binding = IdempotencyBinding::new(
+            Some("first".to_string()),
+            IdempotencyOperation::SendTransaction,
+            RequestFingerprint::new(IdempotencyOperation::SendTransaction),
+        );
+        let request_id = db::create_pending_transaction(
+            &conn,
+            "first",
+            &binding,
+            account.id,
+            true,
+            MicroMinotari(0),
+            MicroMinotari(0),
+            MicroMinotari(0),
+            Utc::now() + chrono::Duration::hours(1),
+        )
+        .expect("pending");
+        let input_id: i64 = conn
+            .query_row(
+                "SELECT id FROM outputs WHERE account_id = :account_id",
+                named_params! { ":account_id": account.id },
+                |row| row.get(0),
+            )
+            .expect("input");
+        db::lock_output(&conn, input_id, &request_id, Utc::now()).expect("lock");
+        let tx_id = TxId::from(7u64);
+        db::create_completed_transaction(&conn, account.id, &request_id, &[], b"{}", None, tx_id).expect("completed");
+        db::insert_unconfirmed_change_output(
+            &conn,
+            account.id,
+            &tari_common_types::types::PrivateKey::default(),
+            &request_id,
+            &test_wallet_output(500, 99),
+        )
+        .expect("change");
+        drop(conn);
+        RecordedSend {
+            pool,
+            tx_id,
+            input_id,
+            request_id,
+            _dir: dir,
+        }
+    }
+
+    fn not_accepted(reason: TxSubmissionRejectionReason) -> TxSubmissionResponse {
+        TxSubmissionResponse {
+            accepted: false,
+            rejection_reason: reason,
+            is_synced: true,
+            details: None,
+        }
+    }
+
+    /// The send's status and attempt count, its input's status and lock, and
+    /// whether its change is still an active `UNCONFIRMED` row.
+    fn send_state(send: &RecordedSend) -> (String, i32, String, Option<String>, bool) {
+        let conn = send.pool.get().expect("conn");
+        let completed = db::get_completed_transaction_by_id(&conn, send.tx_id)
+            .expect("query")
+            .expect("completed");
+        let (input_status, lock): (String, Option<String>) = conn
+            .query_row(
+                "SELECT status, locked_by_request_id FROM outputs WHERE id = :id",
+                named_params! { ":id": send.input_id },
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("input");
+        let change_kept: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM outputs WHERE created_by_request_id = :req AND status = 'UNCONFIRMED' \
+                 AND deleted_at IS NULL",
+                named_params! { ":req": send.request_id },
+                |row| row.get(0),
+            )
+            .expect("change");
+        (
+            completed.status.to_string(),
+            completed.broadcast_attempts,
+            input_status,
+            lock,
+            change_kept == 1,
+        )
+    }
+
+    #[test]
+    fn a_first_broadcast_the_node_refuses_leaves_the_send_to_be_rebroadcast() {
+        for reason in [
+            TxSubmissionRejectionReason::DoubleSpend,
+            TxSubmissionRejectionReason::ValidationFailed,
+            TxSubmissionRejectionReason::FeeTooLow,
+        ] {
+            let send = recorded_send();
+            {
+                let conn = send.pool.get().expect("conn");
+                record_first_broadcast(&conn, send.tx_id, Ok(not_accepted(reason.clone()))).expect("record");
+            }
+            let (status, attempts, input_status, lock, change_kept) = send_state(&send);
+            assert_eq!(status, "completed", "{reason}");
+            assert_eq!(attempts, 1, "{reason}");
+            assert_eq!(input_status, "LOCKED", "{reason}");
+            assert_eq!(lock.as_deref(), Some(send.request_id.as_str()), "{reason}");
+            assert!(change_kept, "{reason}");
+        }
+    }
+
+    #[test]
+    fn a_first_broadcast_that_fails_leaves_the_send_to_be_rebroadcast() {
+        let send = recorded_send();
+        {
+            let conn = send.pool.get().expect("conn");
+            record_first_broadcast(&conn, send.tx_id, Err(anyhow!("Broadcast failed: connection refused")))
+                .expect("record");
+        }
+        let (status, attempts, input_status, lock, change_kept) = send_state(&send);
+        assert_eq!(status, "completed");
+        assert_eq!(attempts, 0, "no answer from the node is not counted");
+        assert_eq!(input_status, "LOCKED");
+        assert_eq!(lock.as_deref(), Some(send.request_id.as_str()));
+        assert!(change_kept);
+    }
+
+    #[test]
+    fn an_accepted_first_broadcast_is_broadcast_and_not_counted() {
+        let send = recorded_send();
+        {
+            let conn = send.pool.get().expect("conn");
+            let accepted = TxSubmissionResponse {
+                accepted: true,
+                rejection_reason: TxSubmissionRejectionReason::None,
+                is_synced: true,
+                details: None,
+            };
+            record_first_broadcast(&conn, send.tx_id, Ok(accepted)).expect("record");
+        }
+        let (status, attempts, ..) = send_state(&send);
+        assert_eq!(status, "broadcast");
+        assert_eq!(attempts, 0);
     }
 }

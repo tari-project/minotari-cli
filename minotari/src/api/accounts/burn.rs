@@ -232,7 +232,7 @@ pub async fn api_burn_funds(
     let pool = app_state.db_pool.clone();
     tokio::task::spawn_blocking(move || {
         let conn = pool.get().map_err(|e| ApiError::DbError(e.to_string()))?;
-        crate::db::mark_completed_transaction_as_broadcasted(&conn, tx_id, 1)
+        crate::db::mark_completed_transaction_as_broadcasted(&conn, tx_id, 0)
             .map_err(|e| ApiError::DbError(e.to_string()))
     })
     .await

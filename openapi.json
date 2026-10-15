@@ -1324,7 +1324,7 @@
           "broadcast_attempts": {
             "type": "integer",
             "format": "int32",
-            "description": "Number of broadcast attempts made"
+            "description": "Number of broadcasts in a row the node did not accept (0 once one is\naccepted). At 10 or more the transaction is stalled: still pending, inputs\nlocked, rebroadcast less often."
           },
           "confirmation_height": {
             "type": [

@@ -90,7 +90,7 @@ pub async fn handle_burn_funds(
 
     match response {
         Ok(r) if r.accepted => {
-            db::mark_completed_transaction_as_broadcasted(&conn, tx_id, 1)?;
+            db::mark_completed_transaction_as_broadcasted(&conn, tx_id, 0)?;
             info!(
                 target: "audit",
                 tx_id = &*tx_id.to_string(),

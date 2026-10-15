@@ -27,7 +27,10 @@
 //! - **Broadcast**: Transaction has been submitted to the network
 //! - **MinedUnconfirmed**: Transaction found in a block but not yet confirmed
 //! - **MinedConfirmed**: Transaction has sufficient confirmations
-//! - **Rejected**: Transaction was rejected by the network
+//! - **Rejected**: The wallet's scan saw the transaction's inputs spent by a
+//!   different transaction. The node's answers never reject a transaction: one
+//!   the node keeps not accepting stays Completed/Broadcast with its inputs
+//!   locked and is retried less often (stalled)
 //!
 //! # Confirmation Requirements
 //!
@@ -65,6 +68,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use anyhow::{Result, anyhow};
+use chrono::Utc;
 use log::{info, warn};
 use r2d2::PooledConnection;
 use r2d2_sqlite::SqliteConnectionManager;
@@ -76,7 +80,7 @@ use tari_transaction_components::rpc::models::{TxLocation, TxQueryResponse, TxSu
 use crate::db::{
     self, CompletedTransaction, CompletedTransactionStatus, SqlitePool, get_pending_completed_transactions,
     mark_completed_transaction_as_broadcasted, mark_completed_transaction_as_confirmed,
-    mark_completed_transaction_as_mined_unconfirmed, mark_completed_transaction_as_rejected,
+    mark_completed_transaction_as_mined_unconfirmed,
 };
 use crate::http::{HttpError, WalletHttpClient};
 use crate::log::sanitize_node_text;
@@ -86,18 +90,21 @@ use crate::webhooks::{WebhookTriggerConfig, utils::trigger_webhook_with_balance}
 use tari_transaction_components::transaction_components::Transaction;
 use tari_utilities::ByteArray;
 
-/// Maximum number of times to attempt broadcasting a transaction before giving up.
+/// Number of broadcasts in a row the node may not accept before a send counts
+/// as stalled. A stalled send is not given up: it keeps its inputs locked and is
+/// retried every [`STALLED_REBROADCAST_INTERVAL_SECS`] instead of every pass.
 const MAX_BROADCAST_ATTEMPTS: i32 = 10;
+
+/// How long a stalled send waits between rebroadcasts.
+const STALLED_REBROADCAST_INTERVAL_SECS: i64 = 60 * 60;
 
 /// What the node answered when a transaction was submitted to it.
 enum SubmitOutcome {
     /// Accepted into the mempool, or already mined.
     Accepted,
-    /// Refused for good: the transaction can never be valid (a double spend,
-    /// or it failed validation).
-    Refused(String),
-    /// Not accepted this time, for a reason that can pass (fee too low, orphan,
-    /// time-locked, validator node slot taken, an error answer): try again.
+    /// Not accepted, for any reason the node gives (including a double spend or
+    /// a failed validation) or an error answer. The node's word alone never
+    /// rejects a send: only the wallet's scan can show its inputs went elsewhere.
     NotAccepted(String),
 }
 
@@ -281,7 +288,7 @@ impl PendingTransactionsByStatus {
 /// - Rebroadcast transactions that haven't been picked up by miners, or that
 ///   dropped out of the node's mempool
 /// - Track confirmation depth until transactions are considered final
-/// - Handle rejections and update displayed transactions
+/// - Update displayed transactions
 ///
 /// # Usage
 ///
@@ -570,7 +577,7 @@ impl TransactionMonitor {
         let mut result = MonitoringResult::default();
         for tx in transactions {
             let outcome = self
-                .rebroadcast_or_reject(wallet_client, db_pool, account_id, &tx, &mut result)
+                .rebroadcast(wallet_client, db_pool, account_id, &tx, &mut result)
                 .await;
             Self::skip_on_node_error(outcome, &tx)?;
         }
@@ -603,7 +610,8 @@ impl TransactionMonitor {
     ///
     /// - In the mempool: nothing to do yet.
     /// - Not stored (dropped from the mempool, or never seen): rebroadcast it, or
-    ///   reject it once it has used up its broadcast attempts.
+    ///   retry it less often once the node has not accepted it
+    ///   [`MAX_BROADCAST_ATTEMPTS`] times in a row (stalled).
     /// - Mined at or below `scanned_height`: the scan has already passed that
     ///   block without recognising the send (for example a send made before
     ///   the scan could match sends), so it never will. It is marked mined at
@@ -704,7 +712,7 @@ impl TransactionMonitor {
                         "Broadcast transaction is not in the mempool"
                     );
                     let outcome = self
-                        .rebroadcast_or_reject(wallet_client, db_pool, account_id, &tx, &mut result)
+                        .rebroadcast(wallet_client, db_pool, account_id, &tx, &mut result)
                         .await;
                     Self::skip_on_node_error(outcome, &tx)?;
                 },
@@ -714,16 +722,18 @@ impl TransactionMonitor {
         Ok(result)
     }
 
-    /// Submits `tx` to the node again, counting the attempt.
+    /// Submits `tx` to the node again.
     ///
-    /// - Accepted: the send is `Broadcast`.
-    /// - Refused for good (double spend, failed validation): it is rejected and
-    ///   its inputs released (see [`Self::reject_and_release`]).
-    /// - Not accepted this time: the attempt is counted and the send is left as
-    ///   it is, inputs still locked.
+    /// - Accepted (or already mined): the send is `Broadcast` and its count of
+    ///   broadcasts not accepted goes back to 0.
+    /// - Not accepted, whatever the reason: that count goes up and the send is
+    ///   left as it is, inputs still locked, change still `UNCONFIRMED`. When the
+    ///   count reaches [`MAX_BROADCAST_ATTEMPTS`] the send is stalled and a
+    ///   persisted `TransactionStalled` is emitted.
     ///
-    /// Once `tx` has used up [`MAX_BROADCAST_ATTEMPTS`] it is rejected instead.
-    async fn rebroadcast_or_reject(
+    /// The node's answer never rejects a send or releases its inputs. A stalled
+    /// send is retried only every [`STALLED_REBROADCAST_INTERVAL_SECS`].
+    async fn rebroadcast(
         &self,
         wallet_client: &WalletHttpClient,
         db_pool: &SqlitePool,
@@ -732,14 +742,10 @@ impl TransactionMonitor {
         result: &mut MonitoringResult,
     ) -> Result<()> {
         if tx.broadcast_attempts >= MAX_BROADCAST_ATTEMPTS {
-            warn!(
-                target: "audit",
-                id = tx.id.to_string().as_str();
-                "Transaction exceeded max broadcast attempts"
-            );
-            let reason = format!("Exceeded {} broadcast attempts", MAX_BROADCAST_ATTEMPTS);
-            let description = format!("Transaction {} exceeded broadcast attempts", tx.id);
-            return self.reject_and_release(db_pool, account_id, tx, reason, description, result);
+            let since_last_try = Utc::now().signed_duration_since(tx.updated_at).num_seconds();
+            if since_last_try < STALLED_REBROADCAST_INTERVAL_SECS {
+                return Ok(());
+            }
         }
 
         let Some(transaction) = Self::decode_transaction(tx) else {
@@ -747,7 +753,7 @@ impl TransactionMonitor {
         };
 
         // A failed request (node unreachable, HTTP error) is a `NodeRequestError`
-        // and leaves the transaction as it is; only a refusal for good rejects it.
+        // and leaves the transaction as it is.
         match Self::broadcast_transaction(wallet_client, transaction).await? {
             SubmitOutcome::Accepted => {
                 info!(
@@ -764,10 +770,11 @@ impl TransactionMonitor {
                     },
                     description: format!("Transaction {} broadcast", tx.id),
                 };
-                // The status and its event go in together.
+                // The status and its event go in together. An accepted broadcast
+                // does not count towards the stall limit.
                 let mut conn = Self::get_connection(db_pool)?;
                 let db_tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-                mark_completed_transaction_as_broadcasted(&db_tx, tx.id, tx.broadcast_attempts + 1)?;
+                mark_completed_transaction_as_broadcasted(&db_tx, tx.id, 0)?;
                 self.persist_event(&db_tx, account_id, &event)?;
                 db_tx.commit()?;
                 result.wallet_events.push(event);
@@ -775,73 +782,45 @@ impl TransactionMonitor {
             },
             SubmitOutcome::NotAccepted(reason) => {
                 let reason = sanitize_node_text(&reason);
+                let attempts = tx.broadcast_attempts.saturating_add(1);
                 warn!(
                     target: "audit",
                     id = tx.id.to_string().as_str(),
-                    attempts = tx.broadcast_attempts + 1,
+                    attempts = attempts,
                     reason:% = reason;
                     "Transaction not accepted on rebroadcast; will try again"
                 );
-                let conn = Self::get_connection(db_pool)?;
-                db::record_failed_broadcast_attempt(&conn, tx.id, tx.broadcast_attempts + 1)?;
+                let stalled_event = (attempts == MAX_BROADCAST_ATTEMPTS).then(|| WalletEvent {
+                    id: 0,
+                    account_id,
+                    event_type: WalletEventType::TransactionStalled {
+                        tx_id: tx.id,
+                        failed_broadcast_attempts: attempts,
+                    },
+                    description: format!(
+                        "Transaction {} not accepted by the node after {} tries; retrying less often",
+                        tx.id, attempts
+                    ),
+                });
+                // The count and the stall event go in together.
+                let mut conn = Self::get_connection(db_pool)?;
+                let db_tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                db::record_failed_broadcast_attempt(&db_tx, tx.id, attempts)?;
+                if let Some(event) = &stalled_event {
+                    self.persist_event(&db_tx, account_id, event)?;
+                }
+                db_tx.commit()?;
+                if let Some(event) = stalled_event {
+                    warn!(
+                        target: "audit",
+                        id = tx.id.to_string().as_str();
+                        "Transaction stalled: the node keeps not accepting it"
+                    );
+                    result.wallet_events.push(event);
+                }
                 Ok(())
             },
-            SubmitOutcome::Refused(reason) => {
-                let reason = sanitize_node_text(&reason);
-                warn!(
-                    target: "audit",
-                    id = tx.id.to_string().as_str(),
-                    reason:% = reason;
-                    "Transaction refused on rebroadcast"
-                );
-                let description = format!("Transaction {} rejected", tx.id);
-                self.reject_and_release(db_pool, account_id, tx, reason, description, result)
-            },
         }
-    }
-
-    /// Marks `tx` rejected and hands its inputs back.
-    ///
-    /// Unlocking the inputs also soft-deletes the send's `UNCONFIRMED` change
-    /// output. The displayed transaction is rejected and a
-    /// `TransactionRejected` event is persisted (and its webhook queued).
-    ///
-    /// All of it is one write transaction: a crash part-way must not leave a
-    /// rejected send whose inputs stay locked for ever.
-    fn reject_and_release(
-        &self,
-        db_pool: &SqlitePool,
-        account_id: i64,
-        tx: &CompletedTransaction,
-        reason: String,
-        description: String,
-        result: &mut MonitoringResult,
-    ) -> Result<()> {
-        // The reason can carry text from the node; it is stored and sent in webhooks.
-        let reason = sanitize_node_text(&reason);
-        let event = WalletEvent {
-            id: 0,
-            account_id,
-            event_type: WalletEventType::TransactionRejected {
-                tx_id: tx.id,
-                reason: reason.clone(),
-            },
-            description,
-        };
-
-        let mut conn = Self::get_connection(db_pool)?;
-        let db_tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        mark_completed_transaction_as_rejected(&db_tx, tx.id, &reason)?;
-        db::unlock_outputs_for_pending_transaction(&db_tx, &tx.pending_tx_id)?;
-        let rejected_displayed_tx = db::mark_displayed_transaction_rejected(&db_tx, tx.id)?;
-        self.persist_event(&db_tx, account_id, &event)?;
-        db_tx.commit()?;
-
-        if let Some(rejected_displayed_tx) = rejected_displayed_tx {
-            result.updated_displayed_transactions.push(rejected_displayed_tx);
-        }
-        result.wallet_events.push(event);
-        Ok(())
     }
 
     fn check_confirmation_status(
@@ -929,10 +908,9 @@ impl TransactionMonitor {
 
     /// Submits `transaction` to the node and says what it answered.
     ///
-    /// Only `DoubleSpend` and `ValidationFailed` are a refusal for good; every
-    /// other reason, and an error answer, is "not this time". A request that did
-    /// not get an answer from the node (unreachable, HTTP error) is a
-    /// [`NodeRequestError`].
+    /// Any reason the node gives for not accepting it, and an error answer, is
+    /// "not accepted". A request that did not get an answer from the node
+    /// (unreachable, HTTP error) is a [`NodeRequestError`].
     async fn broadcast_transaction(
         wallet_client: &WalletHttpClient,
         transaction: Transaction,
@@ -949,13 +927,10 @@ impl TransactionMonitor {
         if response.accepted || response.rejection_reason == TxSubmissionRejectionReason::AlreadyMined {
             return Ok(SubmitOutcome::Accepted);
         }
-        let reason = format!("Transaction rejected: {}", response.rejection_reason);
-        match response.rejection_reason {
-            TxSubmissionRejectionReason::DoubleSpend | TxSubmissionRejectionReason::ValidationFailed => {
-                Ok(SubmitOutcome::Refused(reason))
-            },
-            _ => Ok(SubmitOutcome::NotAccepted(reason)),
-        }
+        Ok(SubmitOutcome::NotAccepted(format!(
+            "Transaction not accepted: {}",
+            response.rejection_reason
+        )))
     }
 
     /// Asks the node where `transaction` is, by its kernel signature.
@@ -1342,7 +1317,7 @@ mod tests {
 
         let completed = completed(&fixture);
         assert_eq!(completed.status, CompletedTransactionStatus::Broadcast);
-        assert_eq!(completed.broadcast_attempts, 2);
+        assert_eq!(completed.broadcast_attempts, 0, "an accepted broadcast does not count");
         assert!(
             result
                 .wallet_events
@@ -1352,8 +1327,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_dropped_transaction_out_of_attempts_is_rejected_and_released() {
-        let fixture = send_fixture("max_attempts.db", MAX_BROADCAST_ATTEMPTS);
+    async fn a_stalled_transaction_is_not_rejected_and_waits_before_the_next_try() {
+        // The node has not accepted it MAX_BROADCAST_ATTEMPTS times in a row, the
+        // last try just now.
+        let fixture = send_fixture("stalled.db", MAX_BROADCAST_ATTEMPTS);
         let server = node_reporting("NotStored").await;
         expect_submissions(&server, 0).await;
 
@@ -1362,27 +1339,86 @@ mod tests {
             .await
             .expect("monitor");
 
-        assert_eq!(completed(&fixture).status, CompletedTransactionStatus::Rejected);
-
-        let (input_status, input_locked) = input_state(&fixture);
-        assert_eq!(input_status, "UNSPENT", "the input is unlocked");
-        assert!(!input_locked);
-
-        let (change_status, change_deleted) = change_state(&fixture);
-        assert_eq!(change_status, "UNCONFIRMED");
-        assert!(change_deleted, "the change row is soft-deleted");
-
+        let completed = completed(&fixture);
+        assert_eq!(completed.status, CompletedTransactionStatus::Broadcast);
+        assert_eq!(completed.broadcast_attempts, MAX_BROADCAST_ATTEMPTS);
+        assert_eq!(input_state(&fixture), ("LOCKED".to_string(), true));
+        assert_eq!(change_state(&fixture), ("UNCONFIRMED".to_string(), false));
         let conn = fixture.pool.get().expect("conn");
         let displayed = get_displayed_transaction_by_id(&conn, &fixture.tx_id.to_string())
             .expect("query")
             .expect("displayed");
-        assert_eq!(displayed.status, TransactionDisplayStatus::Rejected);
+        assert_ne!(displayed.status, TransactionDisplayStatus::Rejected);
         assert!(
-            result
+            !result
                 .wallet_events
                 .iter()
                 .any(|e| matches!(e.event_type, WalletEventType::TransactionRejected { .. }))
         );
+    }
+
+    #[tokio::test]
+    async fn a_stalled_transaction_is_tried_again_after_the_back_off() {
+        let fixture = send_fixture("stalled_retry.db", MAX_BROADCAST_ATTEMPTS);
+        {
+            let conn = fixture.pool.get().expect("conn");
+            conn.execute(
+                "UPDATE completed_transactions SET updated_at = :then",
+                named_params! { ":then": Utc::now() - chrono::Duration::hours(2) },
+            )
+            .expect("age the last try");
+        }
+        let server = node_reporting("NotStored").await;
+        expect_submissions(&server, 1).await;
+
+        monitor_for(&fixture)
+            .monitor_if_needed(&client(&server), &fixture.pool, fixture.account_id, 100)
+            .await
+            .expect("monitor");
+
+        // Accepted this time: no longer stalled.
+        let completed = completed(&fixture);
+        assert_eq!(completed.status, CompletedTransactionStatus::Broadcast);
+        assert_eq!(completed.broadcast_attempts, 0);
+    }
+
+    #[tokio::test]
+    async fn a_send_the_node_keeps_refusing_becomes_stalled_with_an_event() {
+        let fixture = send_fixture("becomes_stalled.db", MAX_BROADCAST_ATTEMPTS - 1);
+        let server = node_reporting("NotStored").await;
+        submissions_answered(&server, refused_with("FeeTooLow")).await;
+
+        let result = monitor_for(&fixture)
+            .monitor_if_needed(&client(&server), &fixture.pool, fixture.account_id, 100)
+            .await
+            .expect("monitor");
+
+        let completed = completed(&fixture);
+        assert_eq!(completed.status, CompletedTransactionStatus::Broadcast);
+        assert_eq!(completed.broadcast_attempts, MAX_BROADCAST_ATTEMPTS);
+        assert_eq!(input_state(&fixture), ("LOCKED".to_string(), true));
+        assert!(result.wallet_events.iter().any(|e| matches!(
+            e.event_type,
+            WalletEventType::TransactionStalled { tx_id, failed_broadcast_attempts }
+                if tx_id == fixture.tx_id && failed_broadcast_attempts == MAX_BROADCAST_ATTEMPTS
+        )));
+        let conn = fixture.pool.get().expect("conn");
+        let stored = db::get_events_by_account_id(&conn, fixture.account_id, 10, 0).expect("events");
+        assert!(stored.iter().any(|e| e.event_type == "TransactionStalled"));
+    }
+
+    #[tokio::test]
+    async fn a_successful_rebroadcast_does_not_use_up_the_attempts() {
+        let fixture = send_fixture("accepted_near_cap.db", MAX_BROADCAST_ATTEMPTS - 1);
+        let server = node_reporting("NotStored").await;
+        expect_submissions(&server, 1).await;
+
+        monitor_for(&fixture)
+            .monitor_if_needed(&client(&server), &fixture.pool, fixture.account_id, 100)
+            .await
+            .expect("monitor");
+
+        assert_eq!(completed(&fixture).broadcast_attempts, 0);
     }
 
     #[tokio::test]
@@ -1686,7 +1722,10 @@ mod tests {
             .expect("query")
             .expect("exists");
         assert_eq!(second.status, CompletedTransactionStatus::Broadcast);
-        assert_eq!(second.broadcast_attempts, 2, "the other one is still rebroadcast");
+        assert_eq!(
+            second.broadcast_attempts, 0,
+            "the other one is still rebroadcast (and accepted)"
+        );
     }
 
     #[tokio::test]
@@ -1774,11 +1813,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_rejection_that_fails_part_way_leaves_nothing_half_done() {
-        // Make the last write of the rejection (its event) fail. The rejection
-        // must roll back as a whole: the send must not end up rejected with its
-        // inputs still locked.
-        let fixture = send_fixture("reject_atomic.db", MAX_BROADCAST_ATTEMPTS);
+    async fn a_stall_that_fails_part_way_leaves_nothing_half_done() {
+        // Make the last write of the stall (its event) fail. The attempt count
+        // and the event go in together, so neither is recorded.
+        let fixture = send_fixture("stall_atomic.db", MAX_BROADCAST_ATTEMPTS - 1);
         {
             let conn = fixture.pool.get().expect("conn");
             conn.execute_batch(
@@ -1787,13 +1825,16 @@ mod tests {
             .expect("trigger");
         }
         let server = node_reporting("NotStored").await;
+        submissions_answered(&server, refused_with("FeeTooLow")).await;
 
         let error = monitor_for(&fixture)
             .monitor_if_needed(&client(&server), &fixture.pool, fixture.account_id, 100)
             .await;
         assert!(error.is_err(), "a database failure fails the pass");
 
-        assert_eq!(completed(&fixture).status, CompletedTransactionStatus::Broadcast);
+        let completed = completed(&fixture);
+        assert_eq!(completed.status, CompletedTransactionStatus::Broadcast);
+        assert_eq!(completed.broadcast_attempts, MAX_BROADCAST_ATTEMPTS - 1);
         assert_eq!(input_state(&fixture), ("LOCKED".to_string(), true));
         assert_eq!(change_state(&fixture), ("UNCONFIRMED".to_string(), false));
     }
@@ -1858,7 +1899,8 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_refusal_for_good_rejects_the_send_and_releases_its_inputs() {
+    async fn a_double_spend_or_failed_validation_refusal_does_not_reject_the_send() {
+        // Only the wallet's own scan may reject a send; the node's word does not.
         for reason in ["DoubleSpend", "ValidationFailed"] {
             let fixture = send_fixture(&format!("refused_{reason}.db"), 1);
             let server = node_reporting("NotStored").await;
@@ -1870,10 +1912,10 @@ mod tests {
                 .expect("monitor");
 
             let completed = completed(&fixture);
-            assert_eq!(completed.status, CompletedTransactionStatus::Rejected, "{reason}");
-            assert_eq!(completed.mined_height, None);
-            assert_eq!(input_state(&fixture), ("UNSPENT".to_string(), false), "{reason}");
-            assert_eq!(change_state(&fixture), ("UNCONFIRMED".to_string(), true), "{reason}");
+            assert_eq!(completed.status, CompletedTransactionStatus::Broadcast, "{reason}");
+            assert_eq!(completed.broadcast_attempts, 2, "{reason}");
+            assert_eq!(input_state(&fixture), ("LOCKED".to_string(), true), "{reason}");
+            assert_eq!(change_state(&fixture), ("UNCONFIRMED".to_string(), false), "{reason}");
         }
     }
 }

@@ -119,6 +119,13 @@ pub enum WalletEventType {
         tx_id: TxId,
         original_mined_height: u64,
     },
+    /// The node has not accepted a send after `MAX_BROADCAST_ATTEMPTS` tries.
+    /// Not terminal: the send stays as it is, inputs locked, and is retried less
+    /// often; only the wallet's own scan can show it will never land.
+    TransactionStalled {
+        tx_id: TxId,
+        failed_broadcast_attempts: i32,
+    },
 }
 
 impl WalletEventType {
@@ -137,6 +144,7 @@ impl WalletEventType {
             WalletEventType::TransactionConfirmed { .. } => "TransactionConfirmed".to_string(),
             WalletEventType::TransactionRejected { .. } => "TransactionRejected".to_string(),
             WalletEventType::TransactionReorged { .. } => "TransactionReorged".to_string(),
+            WalletEventType::TransactionStalled { .. } => "TransactionStalled".to_string(),
         }
     }
 }
