@@ -347,10 +347,13 @@ impl InputSelector {
                 available: available_balance,
                 required: amount.saturating_add(kernel_fee),
             })?;
+        let total_output_fee = output_fee.checked_add(default_output_fee).ok_or_else(|| {
+            UtxoSelectionError::ServiceError("Output fee plus change output fee overflows".to_string())
+        })?;
         let bnb = BranchAndBoundUtxoSelectionBuilder::new(uo.clone())
             .with_target_amount(target_amount)
             .with_fee_per_input(input_fee)
-            .with_total_output_fee(output_fee + default_output_fee)
+            .with_total_output_fee(total_output_fee)
             .with_change_fee(MicroMinotari(0))
             .build()
             .map_err(|e| UtxoSelectionError::ServiceError(e.to_string()))?;
@@ -359,14 +362,18 @@ impl InputSelector {
             // Tell "cannot afford the change output" apart from plain
             // insufficient funds: search again without the change requirement.
             let without_change = BranchAndBoundUtxoSelectionBuilder::new(uo)
-                .with_target_amount(amount + kernel_fee)
+                // Cannot overflow: `target_amount` above is larger.
+                .with_target_amount(amount.saturating_add(kernel_fee))
                 .with_fee_per_input(input_fee)
                 .with_total_output_fee(output_fee)
                 .with_change_fee(default_output_fee)
                 .build()
                 .map_err(|e| UtxoSelectionError::ServiceError(e.to_string()))?;
             if let Some(selection) = without_change.search() {
-                let needed = selection.final_target + default_output_fee + min_change;
+                let needed = selection
+                    .final_target
+                    .saturating_add(default_output_fee)
+                    .saturating_add(min_change);
                 let shortfall = needed.saturating_sub(selection.current_value);
                 warn!(
                     target: "audit",
@@ -392,11 +399,15 @@ impl InputSelector {
         };
         let selected_amount = selection.current_value;
         let requires_change_output = true;
-        #[allow(clippy::cast_possible_truncation)]
-        let inputs_fee = input_fee * (selection.selected_utxos.len() as u64);
         // Computed rather than taken from `selection.final_fee`, which also
         // counts any dust the selector chose to burn; that dust becomes change.
-        let fee_with_change = kernel_fee + output_fee + default_output_fee + inputs_fee;
+        let fee_with_change = u64::try_from(selection.selected_utxos.len())
+            .ok()
+            .and_then(|count| input_fee.as_u64().checked_mul(count))
+            .map(MicroMinotari)
+            .and_then(|inputs_fee| inputs_fee.checked_add(kernel_fee))
+            .and_then(|fee| fee.checked_add(total_output_fee))
+            .ok_or_else(|| UtxoSelectionError::ServiceError("Transaction fee overflows".to_string()))?;
         let fee_without_change = fee_with_change.saturating_sub(default_output_fee);
         let utxos = selection.selected_utxos;
 
@@ -427,7 +438,7 @@ pub fn map_change_required_error(error: TransactionBuilderError) -> anyhow::Erro
     match error {
         TransactionBuilderError::OfflineTransactionRequiresChange { remainder, change_fee } => {
             // The builder creates change only when `remainder - change_fee >= 1`.
-            let shortfall = (change_fee + MicroMinotari(1)).saturating_sub(remainder);
+            let shortfall = change_fee.saturating_add(MicroMinotari(1)).saturating_sub(remainder);
             UtxoSelectionError::ChangeNotAffordable { shortfall }.into()
         },
         other => other.into(),
