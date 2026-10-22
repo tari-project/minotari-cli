@@ -10,7 +10,7 @@
 //   - Fragmentation: UTXO fragmentation then aggregation
 //   - Lock Contention: rapid sequential UTXO locking in escalating batches
 
-use super::common::MinotariWorld;
+use super::common::{MinotariWorld, confirm_payload};
 use cucumber::{then, when};
 use std::process::Command;
 use std::time::{Duration, Instant};
@@ -96,7 +96,14 @@ async fn send_one_transaction(world: &mut MinotariWorld, amount: u64, tx_index: 
     let key_manager = KeyManager::new(world.wallet.clone()).expect("Failed to create key manager");
     let consensus_constants = ConsensusConstantsBuilder::new(LocalNet).build();
 
-    let signed = match sign_locked_transaction(&key_manager, consensus_constants, LocalNet, unsigned_tx) {
+    let confirmed = match confirm_payload(unsigned_tx) {
+        Ok(c) => c,
+        Err(e) => {
+            println!("Load tx {} confirmation failed: {}", tx_index, e);
+            return false;
+        },
+    };
+    let signed = match sign_locked_transaction(&key_manager, consensus_constants, LocalNet, confirmed) {
         Ok(r) => r,
         Err(e) => {
             println!("Load tx {} signing failed: {}", tx_index, e);

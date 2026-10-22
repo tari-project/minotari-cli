@@ -183,7 +183,7 @@ impl DisplayedTransactionProcessor {
             let memo = MemoInfo::from_output(&output.output);
             let sent = output.output.payment_id().get_sent_hashes().unwrap_or_default();
             // this must be some received output
-            let other_party = output.output.payment_id().get_sender_address();
+            let other_party = output.output.payment_id().claimed_sender_address();
             let display_tx = DisplayedTransactionBuilder::new()
                 .account_id(accumulator.account_id as Id)
                 .source(TransactionSource::Transfer)
@@ -288,7 +288,7 @@ impl DisplayedTransactionProcessor {
             let sent = output.output.payment_id().get_sent_hashes().unwrap_or_default();
             let (initial_status, initial_confirmations) =
                 self.calculate_status_and_confirmations(output.height, output.output.max_lock_height());
-            let mut other_party = output.output.payment_id().get_sender_address();
+            let mut other_party = output.output.payment_id().claimed_sender_address();
             let id = TxId::new_deterministic(self.view_key.as_bytes(), &output.output.output_hash());
             let memo = MemoInfo::from_output(&output.output);
             let tx = DisplayedTransactionBuilder::new()
@@ -490,7 +490,7 @@ impl DisplayedTransactionProcessor {
             let id = TxId::new_deterministic(self.view_key.as_bytes(), &output.output.output_hash());
             let memo = MemoInfo::from_output(&output.output);
             let sent = output.output.payment_id().get_sent_hashes().unwrap_or_default();
-            let other_party = output.output.payment_id().get_sender_address();
+            let other_party = output.output.payment_id().claimed_sender_address();
             let display_tx = DisplayedTransactionBuilder::new()
                 .account_id(accumulator.account_id as Id)
                 .source(TransactionSource::Transfer)

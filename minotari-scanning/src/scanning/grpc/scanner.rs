@@ -215,7 +215,7 @@ where
         output: &TransactionOutput,
     ) -> WalletResult<Option<(WalletOutput, usize)>> {
         for (index, key_manager) in self.key_managers.iter().enumerate() {
-            if let Some((commitment_mask, value, memo)) = key_manager.try_output_key_recovery(
+            if let Some((commitment_mask, value, memo, _provenance)) = key_manager.try_output_key_recovery(
                 &output.commitment,
                 &output.encrypted_data,
                 &output.sender_offset_public_key,

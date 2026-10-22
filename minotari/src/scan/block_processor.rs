@@ -1247,7 +1247,7 @@ fn make_balance_change_for_output(
         effective_date,
         effective_height: height,
         claimed_recipient_address: payment_info.get_recipient_address(),
-        claimed_sender_address: payment_info.get_sender_address(),
+        claimed_sender_address: payment_info.claimed_sender_address(),
         memo_parsed: Some(String::from_utf8_lossy(&memo_bytes).to_string()),
         memo_hex: Some(hex::encode(&memo_bytes)),
         claimed_fee: payment_info.get_fee(),

@@ -572,7 +572,8 @@ pub enum Commands {
     /// - `--vn-sig-nonce`: the public nonce (compressed Ristretto point)
     /// - `--vn-sig`: the signature scalar
     ///
-    /// The exit signature does NOT include a claim public key (unlike registration).
+    /// The exit signature does NOT include a claim public key (unlike registration). It does include
+    /// the network and the activation epoch of the registration being exited.
     SubmitValidatorNodeExit {
         #[command(flatten)]
         security: SecurityArgs,

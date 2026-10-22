@@ -1699,11 +1699,11 @@
           "fee": {
             "oneOf": [
               {
-                "type": "null"
-              },
-              {
                 "$ref": "#/components/schemas/FeeInfo",
                 "description": "Fee information (only populated for outgoing transactions)."
+              },
+              {
+                "type": "null"
               }
             ]
           },

@@ -29,7 +29,10 @@ use tari_common_types::{
 use tari_transaction_components::{
     consensus::ConsensusConstantsBuilder,
     key_manager::TransactionKeyManagerInterface,
-    offline_signing::{models::PrepareOneSidedTransactionForSigningResult, sign_locked_transaction},
+    offline_signing::{
+        ConfirmationMode, ConfirmedPayload, PayloadSummary, models::PrepareOneSidedTransactionForSigningResult,
+        present_payload_summary, sign_locked_transaction,
+    },
     tari_amount::MicroMinotari,
 };
 use tari_utilities::byte_array::ByteArray;
@@ -145,6 +148,24 @@ where
     Ok(pending_tx_id)
 }
 
+/// Approves a VN payload for signing without prompting.
+///
+/// The confirmation step guards an air-gapped signer against a payload forged by a view-key holder. Here the payload
+/// was built by this process from its own database just before signing, so there is nothing to confirm. The summary
+/// is still logged by `present_payload_summary`.
+fn confirm_own_payload(
+    unsigned_result: PrepareOneSidedTransactionForSigningResult,
+) -> Result<ConfirmedPayload<PrepareOneSidedTransactionForSigningResult>, anyhow::Error> {
+    let summary = PayloadSummary::from_one_sided(unsigned_result);
+    let confirmation = present_payload_summary(
+        &summary,
+        ConfirmationMode::NonInteractive,
+        &mut std::io::sink(),
+        &mut std::io::empty(),
+    )?;
+    Ok(summary.confirm(confirmation)?)
+}
+
 /// Signs an unsigned VN transaction, saves it to the DB, and broadcasts it.
 ///
 /// This is the common post-processing step shared by all three VN commands.
@@ -162,7 +183,8 @@ async fn sign_save_and_broadcast(
 ) -> Result<(), anyhow::Error> {
     let key_manager = account.get_key_manager(password)?;
     let consensus_constants = ConsensusConstantsBuilder::new(network).build();
-    let signed_result = sign_locked_transaction(&key_manager, consensus_constants, network, unsigned_result)
+    let confirmed = confirm_own_payload(unsigned_result)?;
+    let signed_result = sign_locked_transaction(&key_manager, consensus_constants, network, confirmed)
         .map_err(map_change_required_error)
         .map_err(|e| anyhow!("Failed to sign {} transaction: {}", tx_kind, e))?;
 
