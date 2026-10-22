@@ -312,7 +312,7 @@ async fn main() -> Result<(), anyhow::Error> {
         } => {
             let address = TariAddress::from_base58(&address)?;
             if signing::verify_message(&address, &message, &signature)? {
-                println!("Signature is valid");
+                println!("Signature is valid for the spend key of {}", address.to_base58());
                 Ok(())
             } else {
                 Err(anyhow!("Signature is invalid"))

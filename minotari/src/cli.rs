@@ -390,7 +390,7 @@ pub enum Commands {
         message: String,
     },
 
-    /// Verify a message signature against a Tari address.
+    /// Verify a message signature against the spend key of a Tari address.
     VerifyMessage {
         /// Base58 Tari address of the signer.
         #[arg(short, long)]

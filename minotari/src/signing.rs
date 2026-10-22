@@ -3,7 +3,7 @@
 //! Messages are signed with the wallet's spend private key using a Schnorr signature
 //! under the `WalletMessageSigningDomain` tag. The signature is serialized as
 //! `"<signature_hex>|<public_nonce_hex>"` and verified against the spend public key of
-//! a Tari address.
+//! a Tari address. The signature binds only the spend key and the message bytes.
 
 use std::str::FromStr;
 
@@ -71,6 +71,10 @@ pub fn sign_message_with_seed(seed_words: &str, message: &str) -> Result<String,
 ///
 /// Returns `Ok(false)` for a well-formed but wrong signature, and an error for malformed
 /// input (wrong number of `|` parts or undecodable hex).
+///
+/// A valid signature proves control of the address's spend key only, not its view key,
+/// network or features. Verifiers should put a unique nonce (and the address, network or
+/// purpose where relevant) inside the message to prevent replay.
 pub fn verify_message(address: &TariAddress, message: &str, signature: &str) -> Result<bool, SigningError> {
     let public_key = address
         .public_spend_key()
