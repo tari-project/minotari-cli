@@ -481,7 +481,7 @@ impl ClaimedMemoFields {
             // sender; the others return None. Same story for recipient
             // on `TransactionInfo`.
             recipient_address: memo.get_recipient_address(),
-            sender_address: memo.get_sender_address(),
+            sender_address: memo.claimed_sender_address(),
             memo_parsed,
             memo_hex,
             fee: memo.get_fee(),

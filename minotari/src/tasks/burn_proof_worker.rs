@@ -15,12 +15,9 @@ use std::{path::PathBuf, time::Duration};
 use log::{error, info, warn};
 use reqwest::StatusCode;
 use tari_common::configuration::Network;
-use tari_common_types::{
-    burn_proof::BurnOutputProof,
-    types::{CompressedPublicKey, FixedHash, PrivateKey},
-};
+use tari_common_types::types::{CompressedPublicKey, FixedHash, PrivateKey};
 use tari_crypto::ristretto::CompressedRistrettoSchnorr;
-use tari_sidechain::{BurnClaimProof, CompleteClaimBurnProof};
+use tari_sidechain::{BurnClaimProof, BurnOutputProof, CompleteClaimBurnProof};
 use tari_transaction_components::{
     consensus::ConsensusManager, transaction_components::burn_output_proof::OutputHashPreimageExt,
 };
@@ -228,7 +225,7 @@ async fn write_proof_file(
 
 #[cfg(test)]
 mod tests {
-    use tari_common_types::burn_proof::{MmrInclusionProof, OutputHashPreimage};
+    use tari_sidechain::{MmrInclusionProof, OutputHashPreimage};
     use tari_transaction_components::transaction_components::TransactionOutput;
 
     use super::*;
@@ -268,11 +265,11 @@ mod tests {
             peaks: vec![],
         };
         BurnOutputProof {
-            block_hash: FixedHash::default(),
+            block_hash: tari_sidechain::FixedHash::default(),
             block_height: 1,
             output: OutputHashPreimage::from(&TransactionOutput::default()),
             normal_output_proof: mmr_proof.clone(),
-            normal_output_mr: FixedHash::default(),
+            normal_output_mr: tari_sidechain::FixedHash::default(),
             block_output_proof: mmr_proof,
         }
     }

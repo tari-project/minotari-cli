@@ -66,8 +66,8 @@ thiserror = "2.0.17"
 tokio = { version = "1.47.1", features = ["full"] }
 tokio-util = { version = "0.7.17", features = ["rt"] }
 url = "2.5"
-utoipa = "5.4.0"
-utoipa-swagger-ui = { version = "9.0.2", features = ["axum"] }
+utoipa = "6.0.0"
+utoipa-swagger-ui = { version = "10.0.2", features = ["axum"] }
 uuid = { version = "1", features = ["v4"] }
 
 [dev-dependencies]

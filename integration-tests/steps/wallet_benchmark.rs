@@ -2,7 +2,7 @@
 //
 // Step definitions for benchmarking wallet performance.
 
-use super::common::MinotariWorld;
+use super::common::{MinotariWorld, confirm_payload};
 use cucumber::{then, when};
 use std::process::Command;
 use std::time::Instant;
@@ -149,8 +149,15 @@ async fn send_transactions(world: &mut MinotariWorld, transactions: String) {
                 },
             };
 
+            let confirmed = match confirm_payload(unsigned_tx) {
+                Ok(c) => c,
+                Err(e) => {
+                    println!("Transaction {} confirmation failed: {}", i, e);
+                    continue;
+                },
+            };
             let signed_result =
-                match sign_locked_transaction(&key_manager, consensus_constants.clone(), LocalNet, unsigned_tx) {
+                match sign_locked_transaction(&key_manager, consensus_constants.clone(), LocalNet, confirmed) {
                     Ok(result) => result,
                     Err(e) => {
                         println!("Transaction {} signing failed: {}", i, e);

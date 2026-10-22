@@ -10,6 +10,10 @@ use std::path::PathBuf;
 use std::process::Command;
 use tari_common_types::seeds::mnemonic::{Mnemonic, MnemonicLanguage};
 use tari_transaction_components::key_manager::wallet_types::WalletType;
+use tari_transaction_components::offline_signing::{
+    ConfirmationMode, ConfirmedPayload, PayloadNotConfirmed, PayloadSummary,
+    models::PrepareOneSidedTransactionForSigningResult, present_payload_summary,
+};
 use tari_utilities::hex::Hex;
 use tempfile::TempDir;
 // Import the base node process from the test support library
@@ -35,6 +39,23 @@ pub fn api_args() -> Vec<String> {
         "--api-bind-address".to_string(),
         "127.0.0.1".to_string(),
     ]
+}
+
+/// Approves an unsigned one-sided payload for `sign_locked_transaction` without prompting.
+///
+/// The tests build the payloads themselves, so there is no operator to show the summary to.
+pub fn confirm_payload(
+    unsigned_tx: PrepareOneSidedTransactionForSigningResult,
+) -> Result<ConfirmedPayload<PrepareOneSidedTransactionForSigningResult>, PayloadNotConfirmed> {
+    let summary = PayloadSummary::from_one_sided(unsigned_tx);
+    let confirmation = present_payload_summary(
+        &summary,
+        ConfirmationMode::NonInteractive,
+        &mut std::io::sink(),
+        &mut std::io::empty(),
+    )
+    .expect("writing to a sink cannot fail");
+    summary.confirm(confirmation)
 }
 
 /// HTTP client that authenticates to the test daemon's API and gives up after
