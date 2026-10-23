@@ -70,6 +70,7 @@ use minotari::{
     migrate::{MigrationOptions, run_migration},
     models::WalletEvent,
     scan::{self, reorg::rollback_from_height},
+    signing,
     transactions::{
         fee_estimator::estimated_output_size_for_payment_id,
         fund_locker::FundLocker,
@@ -284,6 +285,38 @@ async fn main() -> Result<(), anyhow::Error> {
             println!("---------------------------------------------------------");
             println!("WARNING: Keep your private view key safe. Anyone with it can see your transaction history.");
             Ok(())
+        },
+        Commands::SignMessage {
+            security,
+            db,
+            account,
+            message,
+        } => {
+            wallet_config.apply_database(&db);
+            wallet_config.apply_account(&account);
+
+            let pool = init_db(wallet_config.database_path.clone())?;
+            let conn = pool.get()?;
+
+            let name = wallet_config.account_name.as_deref().unwrap_or("default");
+            let account =
+                db::get_account_by_name(&conn, name)?.ok_or_else(|| anyhow!("Account '{}' not found", name))?;
+
+            println!("{}", signing::sign_message(&account, &security.password, &message)?);
+            Ok(())
+        },
+        Commands::VerifyMessage {
+            address,
+            message,
+            signature,
+        } => {
+            let address = TariAddress::from_base58(&address)?;
+            if signing::verify_message(&address, &message, &signature)? {
+                println!("Signature is valid for the spend key of {}", address.to_base58());
+                Ok(())
+            } else {
+                Err(anyhow!("Signature is invalid"))
+            }
         },
         Commands::Scan {
             security,

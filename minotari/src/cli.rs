@@ -373,6 +373,38 @@ pub enum Commands {
         account: AccountArgs,
     },
 
+    /// Sign a message with the wallet's spend key.
+    ///
+    /// Prints the signature as `<signature_hex>|<public_nonce_hex>`.
+    /// View-only wallets cannot sign.
+    SignMessage {
+        #[command(flatten)]
+        security: SecurityArgs,
+        #[command(flatten)]
+        db: DatabaseArgs,
+        #[command(flatten)]
+        account: AccountArgs,
+
+        /// The message to sign.
+        #[arg(short, long)]
+        message: String,
+    },
+
+    /// Verify a message signature against the spend key of a Tari address.
+    VerifyMessage {
+        /// Base58 Tari address of the signer.
+        #[arg(short, long)]
+        address: String,
+
+        /// The signed message.
+        #[arg(short, long)]
+        message: String,
+
+        /// Signature in `<signature_hex>|<public_nonce_hex>` format.
+        #[arg(short, long)]
+        signature: String,
+    },
+
     /// Create an unsigned one-sided transaction.
     ///
     /// Builds a transaction that can be signed offline. The transaction sends
