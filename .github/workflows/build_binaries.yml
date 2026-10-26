@@ -99,6 +99,17 @@ jobs:
           sudo apt-get update
           sudo bash scripts/install_ubuntu_dependencies.sh
 
+      # minotari_app_grpc compiles its protos at build time, so every platform needs protoc
+      - name: Install macOS dependencies
+        if: startsWith(runner.os,'macOS')
+        run: |
+          brew install protobuf
+
+      - name: Install Windows dependencies
+        if: startsWith(runner.os,'Windows')
+        run: |
+          choco upgrade protoc -y
+
       - name: Cache cargo files and outputs
         if: ${{ ! startsWith(github.ref, 'refs/tags/v') }}
         uses: Swatinem/rust-cache@v2
