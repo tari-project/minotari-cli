@@ -240,6 +240,33 @@ mod tests {
         );
     }
 
+    /// Recipient memos carry the sender's address (`recipient_memo`), and the estimate for every
+    /// payment id length has to cover that larger memo too.
+    #[test]
+    fn the_estimate_covers_a_recipient_memo_carrying_the_sender_address() {
+        let sender = TariAddress::default();
+        let recipient = TariAddress::default();
+        for len in [0usize, 13, 48, 100] {
+            let payment_id = "x".repeat(len);
+            let memo = crate::transactions::one_sided_transaction::recipient_memo(
+                MemoField::new_open_from_string(&payment_id, TxType::PaymentToOther).unwrap(),
+                &sender,
+                &recipient,
+            )
+            .unwrap();
+            let output = measure_output_size(
+                &OutputFeatures::default(),
+                &script!(PushPubKey(Box::default())).unwrap(),
+                &memo,
+            )
+            .unwrap();
+            assert!(
+                estimated_output_size_for_payment_id(len).unwrap() >= output,
+                "estimate for a {len}-byte payment id must cover the recipient output"
+            );
+        }
+    }
+
     /// The old implementation summed features + an *empty* script + covenant and stopped, which
     /// is where the under-estimate came from. Both missing terms have to be back.
     #[test]

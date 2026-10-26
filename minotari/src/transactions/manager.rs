@@ -115,7 +115,7 @@ use crate::{
         fund_locker::{check_replay_allowed, lock_expiry_at, validate_fee_per_gram},
         idempotency::{IdempotencyBinding, IdempotencyConflict, IdempotencyOperation, RequestFingerprint},
         input_selector::{InputSelector, UtxoSelection, map_change_required_error},
-        one_sided_transaction::Recipient,
+        one_sided_transaction::{Recipient, recipient_memo},
     },
 };
 use zeroize::Zeroizing;
@@ -621,7 +621,7 @@ impl TransactionSender {
                 amount: recipient.amount,
                 output_features: output_features.clone(),
                 address: recipient.address.clone(),
-                payment_id: payment_id.clone(),
+                payment_id: recipient_memo(payment_id.clone(), &sender_address, &recipient.address)?,
             };
 
             let res = prepare_one_sided_transaction_for_signing(
@@ -1204,7 +1204,8 @@ mod tests {
     use rusqlite::named_params;
     use tari_common_types::{
         seeds::cipher_seed::CipherSeed,
-        types::{ComAndPubSignature, CompressedPublicKey},
+        tari_address::TariAddress,
+        types::{ComAndPubSignature, CompressedPublicKey, PrivateKey},
     };
     use tari_script::{ExecutionStack, TariScript};
     use tari_transaction_components::{
@@ -2220,6 +2221,38 @@ mod tests {
             request: prepared,
         };
         (sender, signed)
+    }
+
+    /// The recipient's output memo names the sender, so the recipient's wallet can show who paid
+    /// it; the change memo stays the plain payment id.
+    #[test]
+    fn the_recipient_memo_carries_the_sender_address() {
+        let (pool, _temp) = setup_funded_wallet(3);
+        let mut sender = sender_for(&pool);
+        let sender_address = sender
+            .account
+            .get_address(Network::LocalNet, &Zeroizing::new(PASSWORD.to_string()))
+            .expect("address");
+        let other = TariAddress::new_dual_address_with_default_features(
+            CompressedPublicKey::from_secret_key(&PrivateKey::from(7u64)),
+            CompressedPublicKey::from_secret_key(&PrivateKey::from(9u64)),
+            Network::LocalNet,
+        )
+        .expect("address");
+        let recipient = Recipient {
+            address: other,
+            amount: MicroMinotari(1_000),
+            payment_id: Some("invoice-42".to_string()),
+        };
+        let prepared = sender
+            .start_new_transaction("sender-address".to_string(), recipient, 300)
+            .expect("prepare");
+
+        let memo = &prepared.info.recipients[0].payment_id;
+        assert_eq!(memo.claimed_sender_address(), Some(sender_address));
+        assert_eq!(memo.payment_id_as_bytes(), b"invoice-42".to_vec());
+        assert_eq!(memo.get_type(), TxType::PaymentToOther);
+        assert_eq!(prepared.info.payment_id.claimed_sender_address(), None);
     }
 
     #[tokio::test]
