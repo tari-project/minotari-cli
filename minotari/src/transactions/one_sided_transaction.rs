@@ -92,6 +92,30 @@ pub struct Recipient {
     pub payment_id: Option<String>,
 }
 
+/// The memo a recipient's output carries: the payment id, with the sender's address on it.
+///
+/// A one-sided payment has no handshake, so the encrypted memo is the only place the recipient's
+/// wallet can learn who paid it. Without the address every wallet shows the sender as the
+/// all-zero default address. This matches what the console wallet writes: fee zero, sender
+/// one-sided, and `PaymentToSelf` when paying our own address.
+///
+/// Only the recipient's memo gets the address. The change memo is built by the transaction
+/// builder from the plain payment id.
+pub fn recipient_memo(
+    payment_id: MemoField,
+    sender_address: &TariAddress,
+    recipient_address: &TariAddress,
+) -> Result<MemoField, anyhow::Error> {
+    let tx_type = if recipient_address == sender_address {
+        TxType::PaymentToSelf
+    } else {
+        TxType::PaymentToOther
+    };
+    payment_id
+        .add_sender_address(sender_address.clone(), true, MicroMinotari::zero(), Some(tx_type))
+        .map_err(|e| anyhow!("Payment id does not fit alongside the sender address: {e}"))
+}
+
 /// Binds an idempotency key to an unsigned-transaction request.
 ///
 /// The recipients are the whole point of the binding. Without them, replaying a
@@ -272,25 +296,26 @@ impl OneSidedTransaction {
 
         let tx_id = TxId::new_random();
         let output_features = OutputFeatures::default();
-        let payment_recipients: Vec<PaymentRecipient> = recipients
+        let base_memo = |r: &Recipient| match &r.payment_id {
+            Some(s) => {
+                MemoField::new_open_from_string(s, TxType::PaymentToOther).unwrap_or_else(|_| MemoField::new_empty())
+            },
+            None => MemoField::new_empty(),
+        };
+        let payment_recipients = recipients
             .iter()
             .map(|r| {
-                let payment_id = match &r.payment_id {
-                    Some(s) => MemoField::new_open_from_string(s, TxType::PaymentToOther)
-                        .unwrap_or_else(|_| MemoField::new_empty()),
-                    None => MemoField::new_empty(),
-                };
-                PaymentRecipient {
+                Ok(PaymentRecipient {
                     amount: r.amount,
                     output_features: output_features.clone(),
                     address: r.address.clone(),
-                    payment_id,
-                }
+                    payment_id: recipient_memo(base_memo(r), &sender_address, &r.address)?,
+                })
             })
-            .collect();
+            .collect::<Result<Vec<_>, anyhow::Error>>()?;
 
-        // Use first recipient's payment_id as the overall transaction memo
-        let main_payment_id = payment_recipients.first().expect("Already checked").payment_id.clone();
+        // Use first recipient's payment_id, without the sender address, as the overall transaction memo
+        let main_payment_id = base_memo(recipients.first().expect("Already checked"));
 
         let result = prepare_one_sided_transaction_for_signing(
             &key_manager,
