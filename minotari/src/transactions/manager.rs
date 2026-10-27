@@ -651,7 +651,8 @@ impl TransactionSender {
     /// quotes the same numbers beforehand.
     ///
     /// Inputs worth no more than they cost to spend are skipped, and at most
-    /// `MAX_TRANSACTION_INPUTS` are spent, largest first; on a wallet with more
+    /// [`max_send_all_inputs`](crate::transactions::input_selector::max_send_all_inputs)
+    /// are spent, largest first; on a wallet with more
     /// this is a partial sweep and can be repeated
     /// ([`InputSelector::select_all`]).
     ///

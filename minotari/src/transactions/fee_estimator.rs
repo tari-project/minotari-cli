@@ -47,7 +47,7 @@ pub struct SendAllEstimate {
     pub fee: MicroMinotari,
     /// What the recipient receives: the inputs' total less the fee and the minimum change.
     pub amount_after_fee: MicroMinotari,
-    /// How many inputs the send-all spends (every spendable, unlocked UTXO).
+    /// How many inputs the send-all spends (the selection of [`InputSelector::select_all`](crate::transactions::input_selector::InputSelector::select_all)).
     pub input_count: usize,
 }
 
