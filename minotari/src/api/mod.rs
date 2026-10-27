@@ -513,4 +513,43 @@ mod tests {
             .status();
         assert_eq!(status, StatusCode::OK);
     }
+
+    /// A send-all names one recipient and leaves its amount out; every other
+    /// send gives an amount. Both are refused before any funds are touched.
+    #[tokio::test]
+    async fn create_unsigned_transaction_checks_send_all_and_amounts() {
+        use tari_common_types::{
+            tari_address::{TariAddress, TariAddressFeatures},
+            types::{CompressedPublicKey, PrivateKey},
+        };
+        let address = TariAddress::new_dual_address(
+            CompressedPublicKey::from_secret_key(&PrivateKey::from(7u64)),
+            CompressedPublicKey::from_secret_key(&PrivateKey::from(9u64)),
+            Network::LocalNet,
+            TariAddressFeatures::create_one_sided_only(),
+            None,
+        )
+        .unwrap()
+        .to_base58();
+        let bodies = [
+            serde_json::json!({ "recipients": [{ "address": address }] }),
+            serde_json::json!({ "send_all": true, "recipients": [{ "address": address, "amount": 1000 }] }),
+            serde_json::json!({ "send_all": true, "recipients": [{ "address": address }, { "address": address }] }),
+        ];
+        for body in bodies {
+            let (router, _dir) = router_with(ApiAuth::Disabled);
+            let response = router
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/accounts/default/create_unsigned_transaction")
+                        .header(header::CONTENT_TYPE, "application/json")
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{body}");
+        }
+    }
 }

@@ -20,6 +20,7 @@ use crate::{
     transactions::{
         fund_locker::{FundLocker, MAX_SECONDS_TO_LOCK_UTXOS, validate_fee_per_gram, validate_seconds_to_lock},
         idempotency::{IdempotencyBinding, IdempotencyOperation, RequestFingerprint},
+        input_selector::InputSelector,
         one_sided_transaction::{OneSidedTransaction, Recipient, unsigned_transaction_binding},
     },
 };
@@ -143,8 +144,11 @@ pub struct RecipientRequest {
     address: TariAddressBase58,
 
     /// The amount to send to this recipient in MicroMinotari.
-    #[schema(value_type = u64)]
-    amount: MicroMinotari,
+    ///
+    /// Required, except with `send_all`, where it must be omitted.
+    #[serde(default)]
+    #[schema(value_type = Option<u64>)]
+    amount: Option<MicroMinotari>,
 
     /// Optional payment identifier for transaction tracking.
     ///
@@ -213,6 +217,12 @@ pub struct CreateTransactionRequest {
 
     #[schema(schema_with = confirmation_window_schema)]
     pub confirmation_window: Option<u64>,
+
+    /// Spend every spendable UTXO to the single recipient, whose `amount` is
+    /// omitted: it receives their total less the fee and a minimum change
+    /// output (the offline signer requires change).
+    #[serde(default)]
+    send_all: bool,
 }
 
 /// Locks funds from an account for transaction preparation.
@@ -439,15 +449,29 @@ pub async fn api_create_unsigned_transaction(
     let password = app_state.password.clone();
     let default_confirmations = app_state.required_confirmations;
 
-    let recipients: Vec<Recipient> = body
-        .recipients
-        .iter()
-        .map(|r| Recipient {
+    if body.send_all && body.recipients.len() != 1 {
+        return Err(ApiError::BadRequest("send_all takes exactly one recipient".to_string()));
+    }
+    let mut recipients: Vec<Recipient> = Vec::with_capacity(body.recipients.len());
+    for r in &body.recipients {
+        // A send-all's amount is worked out from the inputs once they are locked.
+        let amount = match (body.send_all, r.amount) {
+            (false, Some(amount)) => amount,
+            (true, None) => MicroMinotari::zero(),
+            (false, None) => return Err(ApiError::BadRequest("Recipient amount is required".to_string())),
+            (true, Some(_)) => {
+                return Err(ApiError::BadRequest(
+                    "Recipient amount must be omitted with send_all".to_string(),
+                ));
+            },
+        };
+        recipients.push(Recipient {
             address: r.address.0.clone(),
-            amount: r.amount,
+            amount,
             payment_id: r.payment_id.clone(),
-        })
-        .collect();
+        });
+    }
+    let send_all = body.send_all;
 
     let seconds_to_lock_utxos = body.seconds_to_lock_utxos.unwrap_or(DEFAULT_SECONDS_TO_LOCK_UTXOS);
     // Reject an out-of-range duration as a client error before doing any work.
@@ -477,10 +501,21 @@ pub async fn api_create_unsigned_transaction(
             fee_per_gram,
             seconds_to_lock_utxos,
             confirmation_window,
+            send_all,
         );
         let lock_amount = FundLocker::new();
-        let locked_funds = lock_amount
-            .lock(
+        let locked_funds = if send_all {
+            lock_amount.lock_all(
+                &mut conn,
+                account.id,
+                fee_per_gram,
+                estimated_output_size,
+                idempotency,
+                seconds_to_lock_utxos,
+                confirmation_window,
+            )
+        } else {
+            lock_amount.lock(
                 &mut conn,
                 account.id,
                 amount,
@@ -491,7 +526,16 @@ pub async fn api_create_unsigned_transaction(
                 seconds_to_lock_utxos,
                 confirmation_window,
             )
-            .map_err(|e| ApiError::from_transaction_error(e, ApiError::FailedToLockFunds))?;
+        }
+        .map_err(|e| ApiError::from_transaction_error(e, ApiError::FailedToLockFunds))?;
+        if send_all {
+            let amount = InputSelector::new(account.id, confirmation_window)
+                .send_all_amount(locked_funds.total_value, locked_funds.fee_with_change, fee_per_gram)
+                .map_err(|e| ApiError::from_transaction_error(e.into(), ApiError::FailedToLockFunds))?;
+            for recipient in &mut recipients {
+                recipient.amount = amount;
+            }
+        }
         let one_sided_tx = OneSidedTransaction::new(pool, network, password);
         one_sided_tx
             .create_unsigned_transaction(&account, locked_funds, recipients, fee_per_gram)

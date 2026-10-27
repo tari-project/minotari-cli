@@ -1612,6 +1612,10 @@
             "default": 86400,
             "maximum": 31536000,
             "minimum": 0
+          },
+          "send_all": {
+            "type": "boolean",
+            "description": "Spend every spendable UTXO to the single recipient, whose `amount` is\nomitted: it receives their total less the fee and a minimum change\noutput (the offline signer requires change)."
           }
         }
       },
@@ -1958,8 +1962,7 @@
         "type": "object",
         "description": "Represents a single recipient in a transaction request.\n\nEach recipient specifies a destination address and the amount to send.\nAn optional payment ID can be included for tracking or identification\npurposes.\n\n# JSON Example\n\n```json\n{\n  \"address\": \"f4FxMqKAPDMqAjh6hTpC...\",\n  \"amount\": 500000,\n  \"payment_id\": \"invoice-2024-001\"\n}\n```",
         "required": [
-          "address",
-          "amount"
+          "address"
         ],
         "properties": {
           "address": {
@@ -1967,9 +1970,12 @@
             "description": "The recipient's Tari address in Base58 encoding.\n\nMust be a valid Tari address for the current network (mainnet, testnet, etc.)."
           },
           "amount": {
-            "type": "integer",
+            "type": [
+              "integer",
+              "null"
+            ],
             "format": "int64",
-            "description": "The amount to send to this recipient in MicroMinotari.",
+            "description": "The amount to send to this recipient in MicroMinotari.\n\nRequired, except with `send_all`, where it must be omitted.",
             "minimum": 0
           },
           "payment_id": {

@@ -362,11 +362,68 @@ impl FundLocker {
         seconds_to_lock_utxos: u64,
         confirmation_window: u64,
     ) -> Result<LockFundsResult, anyhow::Error> {
+        Self::lock_amount_or_all(
+            conn,
+            account_id,
+            Some(amount),
+            num_outputs,
+            fee_per_gram,
+            estimated_output_size,
+            idempotency,
+            seconds_to_lock_utxos,
+            confirmation_window,
+        )
+    }
+
+    /// Locks every spendable, unlocked UTXO for a send-all to one recipient.
+    ///
+    /// The same as [`lock`](Self::lock), but selects with
+    /// [`InputSelector::select_all`]; the recipient's amount is then
+    /// [`InputSelector::send_all_amount`] of the result's `total_value` and
+    /// `fee_with_change`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn lock_all(
+        &self,
+        conn: &mut Connection,
+        account_id: i64,
+        fee_per_gram: MicroMinotari,
+        estimated_output_size: Option<usize>,
+        idempotency: IdempotencyBinding,
+        seconds_to_lock_utxos: u64,
+        confirmation_window: u64,
+    ) -> Result<LockFundsResult, anyhow::Error> {
+        Self::lock_amount_or_all(
+            conn,
+            account_id,
+            None,
+            1,
+            fee_per_gram,
+            estimated_output_size,
+            idempotency,
+            seconds_to_lock_utxos,
+            confirmation_window,
+        )
+    }
+
+    /// Locks for `amount`, or everything spendable when `amount` is `None`.
+    #[allow(clippy::too_many_arguments)]
+    fn lock_amount_or_all(
+        conn: &mut Connection,
+        account_id: i64,
+        amount: Option<MicroMinotari>,
+        num_outputs: usize,
+        fee_per_gram: MicroMinotari,
+        estimated_output_size: Option<usize>,
+        idempotency: IdempotencyBinding,
+        seconds_to_lock_utxos: u64,
+        confirmation_window: u64,
+    ) -> Result<LockFundsResult, anyhow::Error> {
         info!(
             target: "audit",
             account_id = account_id,
             operation = idempotency.operation().as_str(),
-            amount = &*mask_amount(amount);
+            amount = &*mask_amount(amount.unwrap_or_default()),
+            send_all = amount.is_none();
             "Locking funds"
         );
         // Reject an out-of-range lock duration before touching the database or
@@ -432,13 +489,16 @@ impl FundLocker {
         }
 
         let input_selector = InputSelector::new(account_id, confirmation_window);
-        let utxo_selection = input_selector.fetch_unspent_outputs(
-            &transaction,
-            amount,
-            num_outputs,
-            fee_per_gram,
-            estimated_output_size,
-        )?;
+        let utxo_selection = match amount {
+            Some(amount) => input_selector.fetch_unspent_outputs(
+                &transaction,
+                amount,
+                num_outputs,
+                fee_per_gram,
+                estimated_output_size,
+            )?,
+            None => input_selector.select_all(&transaction, fee_per_gram, estimated_output_size)?,
+        };
 
         // Already validated above; `lock_expiry_at` is total, so a surprising
         // value returns an error rather than panicking under the held mutex.

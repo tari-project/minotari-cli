@@ -35,6 +35,17 @@ pub struct FeeEstimateResult {
     pub input_count: usize,
 }
 
+/// What a send-all would cost and pay, from [`FeeEstimator::estimate_fees_send_all`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SendAllEstimate {
+    /// The fee, for every input, the recipient output and the change output.
+    pub fee: MicroMinotari,
+    /// What the recipient receives: the inputs' total less the fee and the minimum change.
+    pub amount_after_fee: MicroMinotari,
+    /// How many inputs the send-all spends (every spendable, unlocked UTXO).
+    pub input_count: usize,
+}
+
 pub struct FeeEstimator {
     db_pool: SqlitePool,
     base_url: String,
@@ -123,6 +134,36 @@ impl FeeEstimator {
         );
 
         Ok(results)
+    }
+
+    /// Quotes a send-all at `fee_per_gram`, computed exactly as
+    /// [`TransactionSender::start_new_send_all_transaction`](crate::transactions::manager::TransactionSender::start_new_send_all_transaction)
+    /// computes it.
+    ///
+    /// `estimated_output_size` must be what the send will charge: use
+    /// [`estimated_output_size_for_payment_id`] with its payment id's length (`None`
+    /// means no payment id). Fails when the recipient's share would be dust.
+    pub fn estimate_fees_send_all(
+        &self,
+        account_name: &str,
+        fee_per_gram: MicroMinotari,
+        confirmation_window: u64,
+        estimated_output_size: Option<usize>,
+    ) -> Result<SendAllEstimate> {
+        let conn = self.db_pool.get()?;
+        let account: AccountRow = db::get_account_by_name(&conn, account_name)?
+            .ok_or_else(|| anyhow!("Account with name '{}' not found", account_name))?;
+
+        let input_selector = InputSelector::new(account.id, confirmation_window);
+        let selection = input_selector.select_all(&conn, fee_per_gram, estimated_output_size)?;
+        let amount_after_fee =
+            input_selector.send_all_amount(selection.total_value, selection.fee_with_change, fee_per_gram)?;
+
+        Ok(SendAllEstimate {
+            fee: selection.fee_with_change,
+            amount_after_fee,
+            input_count: selection.utxos.len(),
+        })
     }
 
     fn calculate_single_estimate(

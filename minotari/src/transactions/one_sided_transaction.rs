@@ -150,6 +150,7 @@ pub fn unsigned_transaction_binding(
     fee_per_gram: MicroMinotari,
     seconds_to_lock_utxos: u64,
     confirmation_window: u64,
+    send_all: bool,
 ) -> IdempotencyBinding {
     let operation = IdempotencyOperation::CreateUnsignedTransaction;
     let mut fingerprint = RequestFingerprint::new(operation)
@@ -165,6 +166,9 @@ pub fn unsigned_transaction_binding(
             .field("recipient_address", recipient.address.to_base58())
             .field("recipient_amount", recipient.amount.as_u64().to_le_bytes())
             .optional_field("recipient_payment_id", recipient.payment_id.as_deref());
+    }
+    if send_all {
+        fingerprint = fingerprint.field("send_all", [1u8]);
     }
     IdempotencyBinding::new(idempotency_key, operation, fingerprint)
 }

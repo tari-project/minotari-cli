@@ -343,7 +343,7 @@ impl InputSelector {
         // The builder refuses (`with_change_required`) a transaction without
         // change, which it only does with less than 1 µT left, so it agrees. An
         // amount so large that the target overflows can never be funded.
-        let min_change = input_fee.max(MicroMinotari(1));
+        let min_change = self.min_change(fee_per_gram);
         let target_amount = amount
             .checked_add(kernel_fee)
             .and_then(|target| target.checked_add(min_change))
@@ -426,6 +426,99 @@ impl InputSelector {
             utxos,
             requires_change_output,
             total_value: selected_amount,
+            fee_without_change,
+            fee_with_change,
+        })
+    }
+
+    /// The smallest change worth keeping: what spending it as an input later
+    /// costs, and at least 1 µT. An output worth no more than this is dust.
+    pub fn min_change(&self, fee_per_gram: MicroMinotari) -> MicroMinotari {
+        self.fee_calc.calculate(fee_per_gram, 0, 1, 0, 0).max(MicroMinotari(1))
+    }
+
+    /// The fees, without and with the change output, of a send-all spending
+    /// `input_count` inputs to one recipient output of `output_size`.
+    pub fn send_all_fees(
+        &self,
+        input_count: usize,
+        fee_per_gram: MicroMinotari,
+        output_size: usize,
+    ) -> Result<(MicroMinotari, MicroMinotari), UtxoSelectionError> {
+        let outputs_size = output_size
+            .checked_mul(2)
+            .ok_or_else(|| UtxoSelectionError::ServiceError("Total output size overflows".to_string()))?;
+        let fee_without_change = self.fee_calc.calculate(fee_per_gram, 1, input_count, 1, output_size);
+        let fee_with_change = self.fee_calc.calculate(fee_per_gram, 1, input_count, 2, outputs_size);
+        Ok((fee_without_change, fee_with_change))
+    }
+
+    /// What a send-all pays its recipient: everything selected less the fee
+    /// with change and the minimum change.
+    ///
+    /// Every send carries a change output (the upstream offline signer sets
+    /// `with_change_required` and refuses to sign without one), so a send-all
+    /// keeps the minimum change rather than sweeping to zero. Fails when what
+    /// is left for the recipient would be dust.
+    pub fn send_all_amount(
+        &self,
+        total_value: MicroMinotari,
+        fee_with_change: MicroMinotari,
+        fee_per_gram: MicroMinotari,
+    ) -> Result<MicroMinotari, UtxoSelectionError> {
+        let min_change = self.min_change(fee_per_gram);
+        let kept = fee_with_change.saturating_add(min_change);
+        let amount = total_value.saturating_sub(kept);
+        if amount <= min_change {
+            return Err(UtxoSelectionError::InsufficientFunds {
+                available: total_value,
+                required: kept.saturating_add(min_change).saturating_add(MicroMinotari(1)),
+            });
+        }
+        Ok(amount)
+    }
+
+    /// Selects every spendable, unlocked output for a send-all to one recipient.
+    ///
+    /// The fees are for all of them, one recipient output and the change output.
+    /// Fails when the recipient's share would be dust (see
+    /// [`send_all_amount`](Self::send_all_amount)).
+    pub fn select_all(
+        &self,
+        conn: &Connection,
+        fee_per_gram: MicroMinotari,
+        estimated_output_size: Option<usize>,
+    ) -> Result<UtxoSelection, UtxoSelectionError> {
+        let tip_height = get_latest_scanned_tip_block_by_account(conn, self.account_id)?
+            .map(|b| b.height)
+            .unwrap_or(0);
+        let min_height = tip_height.saturating_sub(self.confirmation_window);
+        let utxos = crate::db::fetch_unspent_outputs(conn, self.account_id, min_height, tip_height)?;
+
+        let mut total_value = MicroMinotari::zero();
+        for utxo in &utxos {
+            total_value = total_value
+                .checked_add(utxo.output.value())
+                .ok_or_else(|| UtxoSelectionError::ServiceError("Total value of the outputs overflows".to_string()))?;
+        }
+        let output_size = match estimated_output_size {
+            Some(sz) => sz,
+            None => get_default_features_and_scripts_size()
+                .map_err(|err| UtxoSelectionError::SerializationError(err.to_string()))?,
+        };
+        let (fee_without_change, fee_with_change) = self.send_all_fees(utxos.len(), fee_per_gram, output_size)?;
+        self.send_all_amount(total_value, fee_with_change, fee_per_gram)?;
+
+        debug!(
+            count = utxos.len(),
+            total = &*mask_amount(total_value);
+            "All spendable UTXOs selected"
+        );
+
+        Ok(UtxoSelection {
+            utxos,
+            requires_change_output: true,
+            total_value,
             fee_without_change,
             fee_with_change,
         })
@@ -587,6 +680,55 @@ mod tests {
             change >= input_fee,
             "change must be worth at least the {input_fee} it costs to spend, got {change}"
         );
+    }
+
+    #[test]
+    fn a_send_all_takes_everything_but_the_fee_and_the_minimum_change() {
+        let (pool, account_id, _dir) = account_with_one_output(1_000_000);
+        let conn = pool.get().expect("conn");
+        let selector = InputSelector::new(account_id, 100);
+        let selection = selector
+            .select_all(&conn, MicroMinotari(5), Some(1000))
+            .expect("selection");
+        assert_eq!(selection.utxos.len(), 1);
+        assert_eq!(selection.total_value, MicroMinotari(1_000_000));
+        // Charged as the regular selector charges one recipient and change.
+        let fee = Fee::new(TransactionWeight::latest()).calculate(MicroMinotari(5), 1, 1, 2, 2000);
+        assert_eq!(selection.fee_with_change, fee);
+
+        let amount = selector
+            .send_all_amount(selection.total_value, selection.fee_with_change, MicroMinotari(5))
+            .expect("amount");
+        let min_change = selector.min_change(MicroMinotari(5));
+        assert_eq!(amount, MicroMinotari(1_000_000) - fee - min_change);
+    }
+
+    #[test]
+    fn a_send_all_of_dust_is_refused() {
+        let selector = InputSelector::new(1, 100);
+        let min_change = selector.min_change(MicroMinotari(5));
+        let (_, fee) = selector.send_all_fees(1, MicroMinotari(5), 1000).expect("fees");
+        // Leaves exactly the dust threshold for the recipient.
+        let total = fee + min_change + min_change;
+        assert!(matches!(
+            selector.send_all_amount(total, fee, MicroMinotari(5)),
+            Err(UtxoSelectionError::InsufficientFunds { .. })
+        ));
+        assert_eq!(
+            selector
+                .send_all_amount(total + MicroMinotari(1), fee, MicroMinotari(5))
+                .expect("amount"),
+            min_change + MicroMinotari(1)
+        );
+
+        // Nothing to spend at all.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let pool = init_db(dir.path().join("empty.db")).expect("init db");
+        let conn = pool.get().expect("conn");
+        assert!(matches!(
+            selector.select_all(&conn, MicroMinotari(5), Some(1000)),
+            Err(UtxoSelectionError::InsufficientFunds { .. })
+        ));
     }
 
     #[test]

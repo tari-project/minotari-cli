@@ -75,6 +75,7 @@ use minotari::{
         fee_estimator::estimated_output_size_for_payment_id,
         fund_locker::FundLocker,
         idempotency::{IdempotencyBinding, IdempotencyOperation, RequestFingerprint},
+        input_selector::InputSelector,
         one_sided_transaction::{OneSidedTransaction, Recipient, unsigned_transaction_binding},
     },
     utils::{self, crypto::PasswordCipher},
@@ -464,6 +465,7 @@ async fn main() -> Result<(), anyhow::Error> {
         Commands::CreateUnsignedTransaction {
             account_name,
             recipient,
+            send_all,
             output_file,
             security,
             db,
@@ -477,6 +479,7 @@ async fn main() -> Result<(), anyhow::Error> {
 
             handle_create_unsigned_transaction(
                 recipient,
+                send_all,
                 wallet_config.database_path.clone(),
                 account_name,
                 wallet_config.network,
@@ -766,6 +769,7 @@ fn handle_balance(config: &WalletConfig) -> Result<(), anyhow::Error> {
 #[allow(clippy::too_many_arguments)]
 fn handle_create_unsigned_transaction(
     recipient: Vec<String>,
+    send_all: bool,
     database_file: PathBuf,
     account_name: String,
     network: Network,
@@ -775,10 +779,26 @@ fn handle_create_unsigned_transaction(
     confirmation_window: u64,
     output_file: String,
 ) -> Result<(), anyhow::Error> {
+    if send_all && recipient.len() != 1 {
+        return Err(anyhow!("--send-all takes exactly one recipient"));
+    }
     let recipients: Result<Vec<Recipient>, anyhow::Error> = recipient
         .into_iter()
         .map(|r_str| {
             let parts: Vec<&str> = r_str.split("::").collect();
+            if send_all {
+                // The amount is worked out from the inputs once they are locked.
+                if parts.len() > 2 {
+                    return Err(anyhow!(
+                        "Invalid recipient format for --send-all. Expected 'address' or 'address::payment_id'"
+                    ));
+                }
+                return Ok(Recipient {
+                    address: TariAddress::from_str(parts.first().expect("split yields at least one part"))?,
+                    amount: MicroMinotari::zero(),
+                    payment_id: parts.get(1).map(|s| s.to_string()),
+                });
+            }
             if parts.len() < 2 || parts.len() > 3 {
                 return Err(anyhow!(
                     "Invalid recipient format. Expected 'address::amount' or 'address::amount::payment_id'"
@@ -798,7 +818,7 @@ fn handle_create_unsigned_transaction(
             })
         })
         .collect();
-    let recipients = recipients?;
+    let mut recipients = recipients?;
     let pool = init_db(database_file)?;
     // One connection for the whole command; `lock` uses this one rather than taking a
     // second from the pool.
@@ -828,10 +848,21 @@ fn handle_create_unsigned_transaction(
         fee_per_gram,
         seconds_to_lock,
         confirmation_window,
+        send_all,
     );
     let lock_amount = FundLocker::new();
-    let locked_funds = lock_amount
-        .lock(
+    let locked_funds = if send_all {
+        lock_amount.lock_all(
+            &mut conn,
+            account.id,
+            fee_per_gram,
+            estimated_output_size,
+            idempotency,
+            seconds_to_lock,
+            confirmation_window,
+        )
+    } else {
+        lock_amount.lock(
             &mut conn,
             account.id,
             amount,
@@ -842,7 +873,18 @@ fn handle_create_unsigned_transaction(
             seconds_to_lock,
             confirmation_window,
         )
-        .map_err(|e| anyhow!("Failed to lock funds: {}", e))?;
+    }
+    .map_err(|e| anyhow!("Failed to lock funds: {}", e))?;
+    if send_all {
+        let amount = InputSelector::new(account.id, confirmation_window).send_all_amount(
+            locked_funds.total_value,
+            locked_funds.fee_with_change,
+            fee_per_gram,
+        )?;
+        for recipient in &mut recipients {
+            recipient.amount = amount;
+        }
+    }
 
     let one_sided_tx = OneSidedTransaction::new(pool.clone(), network, Zeroizing::new(password.clone()));
     let result = one_sided_tx
