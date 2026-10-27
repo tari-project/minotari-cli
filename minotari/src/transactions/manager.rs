@@ -644,6 +644,11 @@ impl TransactionSender {
     /// ([`InputSelector::send_all_amount`]). [`FeeEstimator::estimate_fees_send_all`]
     /// quotes the same numbers beforehand.
     ///
+    /// Inputs worth no more than they cost to spend are skipped, and at most
+    /// `MAX_TRANSACTION_INPUTS` are spent, largest first; on a wallet with more
+    /// this is a partial sweep and can be repeated
+    /// ([`InputSelector::select_all`]).
+    ///
     /// The minimum change stays behind as a change output: the upstream offline
     /// signer requires change (`with_change_required`) and refuses to sign
     /// without it. That change is also how the scan confirms the send, as for
@@ -724,6 +729,7 @@ impl TransactionSender {
                     change_output_size,
                 )?;
                 let amount = input_selector.send_all_amount(total_value, fee_with_change, self.fee_per_gram)?;
+                input_selector.audit_send_all(amount, fee_with_change, utxo_selection.len());
                 for recipient in &mut processed_transaction.recipients {
                     recipient.amount = amount;
                 }

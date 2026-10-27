@@ -120,6 +120,12 @@ pub struct LockFundsResult {
     /// `requires_change_output` is `true`.
     #[schema(value_type = u64)]
     pub fee_with_change: MicroMinotari,
+
+    /// The pending transaction this call created, or `None` when it replayed
+    /// an existing reservation. Lets the caller release a reservation it took
+    /// when the send then fails (see `release_reservation`); not sent to clients.
+    #[serde(skip)]
+    pub created_reservation_id: Option<String>,
 }
 
 pub fn tx_id_schema() -> Schema {

@@ -532,6 +532,9 @@ mod tests {
         .unwrap()
         .to_base58();
         let bodies = [
+            serde_json::json!({ "recipients": [] }),
+            serde_json::json!({ "recipients": [{ "address": address, "amount": 0 }] }),
+            serde_json::json!({ "recipients": [{ "address": address, "amount": u64::MAX }, { "address": address, "amount": 1 }] }),
             serde_json::json!({ "recipients": [{ "address": address }] }),
             serde_json::json!({ "send_all": true, "recipients": [{ "address": address, "amount": 1000 }] }),
             serde_json::json!({ "send_all": true, "recipients": [{ "address": address }, { "address": address }] }),

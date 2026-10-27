@@ -27,7 +27,7 @@
 //! [`crate::transactions::idempotency`] for what that prevents.
 
 use chrono::{DateTime, TimeDelta, Utc};
-use log::{info, warn};
+use log::{error, info, warn};
 use rusqlite::Connection;
 use std::sync::Mutex;
 use tari_transaction_components::tari_amount::MicroMinotari;
@@ -557,7 +557,34 @@ impl FundLocker {
             total_value: utxo_selection.total_value,
             fee_without_change: utxo_selection.fee_without_change,
             fee_with_change: utxo_selection.fee_with_change,
+            created_reservation_id: Some(pending_tx_id),
         })
+    }
+}
+
+/// Hands back the UTXOs of a reservation a send took and then failed to use.
+///
+/// Only call it with a [`LockFundsResult::created_reservation_id`]: a replayed
+/// reservation belongs to the request that took it. A reservation that is no
+/// longer pending is left to whoever moved it on.
+pub fn release_reservation(conn: &Connection, reservation_id: &str) {
+    match db::expire_and_unlock_pending_transaction(conn, reservation_id) {
+        Ok(true) => info!(
+            target: "audit",
+            id = reservation_id;
+            "Released the reservation of a failed send"
+        ),
+        Ok(false) => warn!(
+            target: "audit",
+            id = reservation_id;
+            "Leaving a reservation that is no longer pending to whoever claimed it"
+        ),
+        Err(e) => error!(
+            target: "audit",
+            id = reservation_id,
+            error:% = e;
+            "Failed to release the reservation of a failed send"
+        ),
     }
 }
 
@@ -731,6 +758,30 @@ mod tests {
             3600,
             100,
         )
+    }
+
+    /// Only the call that took a reservation is told its id, and releasing it
+    /// hands its UTXOs back; a replay is never told it.
+    #[test]
+    fn a_reservation_the_caller_took_can_be_released() {
+        let (pool, account_id, _temp) = setup_test_env(3, 500_000);
+        let locked = lock_with(&pool, account_id, test_binding(Some("k"), 1)).expect("lock");
+        let id = locked.created_reservation_id.clone().expect("this call took it");
+        let replay = lock_with(&pool, account_id, test_binding(Some("k"), 1)).expect("replay");
+        assert_eq!(replay.created_reservation_id, None);
+
+        let conn = pool.get().expect("conn");
+        release_reservation(&conn, &id);
+        let locked_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM outputs WHERE status = 'LOCKED'", [], |row| {
+                row.get(0)
+            })
+            .expect("count");
+        assert_eq!(locked_count, 0);
+        let status: String = conn
+            .query_row("SELECT status FROM pending_transactions", [], |row| row.get(0))
+            .expect("status");
+        assert_eq!(status, "EXPIRED");
     }
 
     /// Callers in the shape of every real one: hold a connection, then lock.

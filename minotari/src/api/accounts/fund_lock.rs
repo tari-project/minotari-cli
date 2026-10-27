@@ -19,10 +19,12 @@ use crate::{
     log::mask_amount,
     transactions::{
         fee_estimator::{estimated_output_size_for_send, one_sided_output_sizes},
-        fund_locker::{FundLocker, MAX_SECONDS_TO_LOCK_UTXOS, validate_fee_per_gram, validate_seconds_to_lock},
+        fund_locker::{
+            FundLocker, MAX_SECONDS_TO_LOCK_UTXOS, release_reservation, validate_fee_per_gram, validate_seconds_to_lock,
+        },
         idempotency::{IdempotencyBinding, IdempotencyOperation, RequestFingerprint},
         input_selector::InputSelector,
-        one_sided_transaction::{OneSidedTransaction, Recipient, unsigned_transaction_binding},
+        one_sided_transaction::{OneSidedTransaction, Recipient, total_recipient_amount, unsigned_transaction_binding},
     },
 };
 
@@ -473,6 +475,12 @@ pub async fn api_create_unsigned_transaction(
         });
     }
     let send_all = body.send_all;
+    // Refuse an empty list, a zero amount or an overflowing total before anything is locked.
+    let amount = if send_all {
+        MicroMinotari::zero()
+    } else {
+        total_recipient_amount(&recipients).map_err(|e| ApiError::BadRequest(e.to_string()))?
+    };
 
     let seconds_to_lock_utxos = body.seconds_to_lock_utxos.unwrap_or(DEFAULT_SECONDS_TO_LOCK_UTXOS);
     // Reject an out-of-range duration as a client error before doing any work.
@@ -486,7 +494,6 @@ pub async fn api_create_unsigned_transaction(
             .map_err(|e| ApiError::DbError(e.to_string()))?
             .ok_or_else(|| ApiError::AccountNotFound(name.clone()))?;
 
-        let amount = recipients.iter().map(|r| r.amount).sum();
         let num_outputs = recipients.len();
         let fee_per_gram = DEFAULT_FEE_PER_GRAM;
         // Charge for the memos this send will carry; see `estimated_output_size_for_send`.
@@ -541,18 +548,31 @@ pub async fn api_create_unsigned_transaction(
             )
         }
         .map_err(|e| ApiError::from_transaction_error(e, ApiError::FailedToLockFunds))?;
-        if send_all {
-            let amount = InputSelector::new(account.id, confirmation_window)
-                .send_all_amount(locked_funds.total_value, locked_funds.fee_with_change, fee_per_gram)
-                .map_err(|e| ApiError::from_transaction_error(e.into(), ApiError::FailedToLockFunds))?;
-            for recipient in &mut recipients {
-                recipient.amount = amount;
+
+        let reservation_id = locked_funds.created_reservation_id.clone();
+        let built = (move || {
+            if send_all {
+                let input_selector = InputSelector::new(account.id, confirmation_window);
+                let amount = input_selector
+                    .send_all_amount(locked_funds.total_value, locked_funds.fee_with_change, fee_per_gram)
+                    .map_err(|e| ApiError::from_transaction_error(e.into(), ApiError::FailedToLockFunds))?;
+                input_selector.audit_send_all(amount, locked_funds.fee_with_change, locked_funds.utxos.len());
+                for recipient in &mut recipients {
+                    recipient.amount = amount;
+                }
             }
+            let one_sided_tx = OneSidedTransaction::new(pool, network, password);
+            one_sided_tx
+                .create_unsigned_transaction(&account, locked_funds, recipients, fee_per_gram)
+                .map_err(|e| ApiError::FailedCreateUnsignedTx(e.to_string()))
+        })();
+        // A reservation this request took is no use to anyone once its send failed.
+        if built.is_err()
+            && let Some(id) = &reservation_id
+        {
+            release_reservation(&conn, id);
         }
-        let one_sided_tx = OneSidedTransaction::new(pool, network, password);
-        one_sided_tx
-            .create_unsigned_transaction(&account, locked_funds, recipients, fee_per_gram)
-            .map_err(|e| ApiError::FailedCreateUnsignedTx(e.to_string()))
+        built
     })
     .await
     .map_err(|e| ApiError::InternalServerError(format!("Task join error: {}", e)))??;

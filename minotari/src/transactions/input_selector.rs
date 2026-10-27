@@ -42,10 +42,11 @@
 //! println!("Fee: {}", selection.fee());
 //! ```
 
-use log::{debug, warn};
+use log::{debug, info, warn};
 use rusqlite::Connection;
 use tari_transaction_components::{
-    TransactionBuilderError, fee::Fee, tari_amount::MicroMinotari, weight::TransactionWeight,
+    TransactionBuilderError, fee::Fee, tari_amount::MicroMinotari, transaction_components::MAX_TRANSACTION_INPUTS,
+    weight::TransactionWeight,
 };
 use thiserror::Error;
 
@@ -483,10 +484,27 @@ impl InputSelector {
         Ok(amount)
     }
 
-    /// Selects every spendable, unlocked output for a send-all to one recipient.
+    /// Records what a send-all is about to pay, once its amount is known.
+    pub fn audit_send_all(&self, amount: MicroMinotari, fee: MicroMinotari, input_count: usize) {
+        info!(
+            target: "audit",
+            account_id = self.account_id,
+            amount = &*mask_amount(amount),
+            fee = &*mask_amount(fee),
+            input_count = input_count;
+            "Send-all amount worked out"
+        );
+    }
+
+    /// Selects the spendable, unlocked outputs for a send-all to one recipient.
     ///
-    /// The fees are for all of them, one recipient output and the change output.
-    /// Fails when the recipient's share would be dust (see
+    /// Outputs worth no more than they cost to spend are skipped, and at most
+    /// [`MAX_TRANSACTION_INPUTS`] are taken, largest first: more could not be
+    /// signed. A send-all over a wallet with more outputs than that is a partial
+    /// sweep of its largest ones and can be repeated for the rest.
+    ///
+    /// The fees are for the selected outputs, one recipient output and the
+    /// change output. Fails when the recipient's share would be dust (see
     /// [`send_all_amount`](Self::send_all_amount)).
     pub fn select_all(
         &self,
@@ -495,11 +513,35 @@ impl InputSelector {
         recipient_output_size: usize,
         change_output_size: usize,
     ) -> Result<UtxoSelection, UtxoSelectionError> {
+        self.select_all_up_to(
+            conn,
+            fee_per_gram,
+            recipient_output_size,
+            change_output_size,
+            MAX_TRANSACTION_INPUTS,
+        )
+    }
+
+    fn select_all_up_to(
+        &self,
+        conn: &Connection,
+        fee_per_gram: MicroMinotari,
+        recipient_output_size: usize,
+        change_output_size: usize,
+        max_inputs: usize,
+    ) -> Result<UtxoSelection, UtxoSelectionError> {
         let tip_height = get_latest_scanned_tip_block_by_account(conn, self.account_id)?
             .map(|b| b.height)
             .unwrap_or(0);
         let min_height = tip_height.saturating_sub(self.confirmation_window);
-        let utxos = crate::db::fetch_unspent_outputs(conn, self.account_id, min_height, tip_height)?;
+        let spend_cost = self.min_change(fee_per_gram);
+        let mut utxos: Vec<DbWalletOutput> =
+            crate::db::fetch_unspent_outputs(conn, self.account_id, min_height, tip_height)?
+                .into_iter()
+                .filter(|utxo| utxo.output.value() > spend_cost)
+                .collect();
+        utxos.sort_by_key(|utxo| std::cmp::Reverse(utxo.output.value()));
+        utxos.truncate(max_inputs);
 
         let mut total_value = MicroMinotari::zero();
         for utxo in &utxos {
@@ -587,6 +629,11 @@ mod tests {
 
     /// An account holding one confirmed, spendable output of `value`.
     fn account_with_one_output(value: u64) -> (SqlitePool, i64, TempDir) {
+        account_with_outputs(&[value])
+    }
+
+    /// An account holding a confirmed, spendable output of each of `values`.
+    fn account_with_outputs(values: &[u64]) -> (SqlitePool, i64, TempDir) {
         let dir = tempfile::tempdir().expect("temp dir");
         let pool = init_db(dir.path().join("selector.db")).expect("init db");
         let conn = pool.get().expect("conn");
@@ -595,26 +642,30 @@ mod tests {
         let account_id = get_account_by_name(&conn, "default").unwrap().unwrap().id;
         insert_scanned_tip_block(&conn, account_id, 200, &[0u8; 32]).expect("tip");
 
-        let output = test_wallet_output(value, 1);
-        conn.execute(
-            r#"
-            INSERT INTO outputs (
-                account_id, tx_id, output_hash, mined_in_block_height, mined_in_block_hash,
-                value, mined_timestamp, wallet_output_json, status, confirmed_height,
-                confirmed_hash, is_burn, maturity
-            ) VALUES (
-                :account_id, 1, :hash, 100, :hash, :value, :ts, :json, 'UNSPENT', 100, :hash, 0, 0
+        for (i, value) in values.iter().enumerate() {
+            let seed = u8::try_from(i + 1).expect("few outputs");
+            let output = test_wallet_output(*value, seed);
+            conn.execute(
+                r#"
+                INSERT INTO outputs (
+                    account_id, tx_id, output_hash, mined_in_block_height, mined_in_block_hash,
+                    value, mined_timestamp, wallet_output_json, status, confirmed_height,
+                    confirmed_hash, is_burn, maturity
+                ) VALUES (
+                    :account_id, :tx_id, :hash, 100, :hash, :value, :ts, :json, 'UNSPENT', 100, :hash, 0, 0
+                )
+                "#,
+                named_params! {
+                    ":account_id": account_id,
+                    ":tx_id": i64::from(seed),
+                    ":hash": vec![seed; 32],
+                    ":value": *value as i64,
+                    ":ts": Utc::now(),
+                    ":json": serde_json::to_string(&output).unwrap(),
+                },
             )
-            "#,
-            named_params! {
-                ":account_id": account_id,
-                ":hash": vec![1u8; 32],
-                ":value": value as i64,
-                ":ts": Utc::now(),
-                ":json": serde_json::to_string(&output).unwrap(),
-            },
-        )
-        .expect("insert output");
+            .expect("insert output");
+        }
         drop(conn);
         (pool, account_id, dir)
     }
@@ -703,6 +754,40 @@ mod tests {
             .expect("amount");
         let min_change = selector.min_change(MicroMinotari(5));
         assert_eq!(amount, MicroMinotari(1_000_000) - fee - min_change);
+    }
+
+    /// Outputs worth no more than they cost to spend are left out of a send-all.
+    #[test]
+    fn a_send_all_skips_dust_inputs() {
+        let selector = InputSelector::new(1, 100);
+        let spend_cost = selector.min_change(MicroMinotari(5));
+        let (pool, account_id, _dir) =
+            account_with_outputs(&[300_000, spend_cost.as_u64(), 1_000_000, spend_cost.as_u64() + 1]);
+        let conn = pool.get().expect("conn");
+        let selection = InputSelector::new(account_id, 100)
+            .select_all(&conn, MicroMinotari(5), 1000, 1000)
+            .expect("selection");
+        let values: Vec<u64> = selection.utxos.iter().map(|u| u.output.value().as_u64()).collect();
+        assert_eq!(values, vec![1_000_000, 300_000, spend_cost.as_u64() + 1]);
+        assert_eq!(
+            selection.total_value,
+            MicroMinotari(1_300_000) + spend_cost + MicroMinotari(1)
+        );
+        let (_, fee) = selector.send_all_fees(3, MicroMinotari(5), 1000, 1000).expect("fees");
+        assert_eq!(selection.fee_with_change, fee);
+    }
+
+    /// A send-all takes at most the input cap, largest outputs first.
+    #[test]
+    fn a_send_all_takes_the_largest_inputs_up_to_the_cap() {
+        let (pool, account_id, _dir) = account_with_outputs(&[200_000, 900_000, 500_000, 700_000]);
+        let conn = pool.get().expect("conn");
+        let selection = InputSelector::new(account_id, 100)
+            .select_all_up_to(&conn, MicroMinotari(5), 1000, 1000, 2)
+            .expect("selection");
+        let values: Vec<u64> = selection.utxos.iter().map(|u| u.output.value().as_u64()).collect();
+        assert_eq!(values, vec![900_000, 700_000]);
+        assert_eq!(selection.total_value, MicroMinotari(1_600_000));
     }
 
     #[test]
