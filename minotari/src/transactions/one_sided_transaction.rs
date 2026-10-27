@@ -116,6 +116,26 @@ pub fn recipient_memo(
         .map_err(|e| anyhow!("Payment id does not fit alongside the sender address: {e}"))
 }
 
+/// The sum of `recipients`' amounts.
+///
+/// Fails when the list is empty, any amount is zero, or the sum overflows. The
+/// same address may appear more than once; it receives one output per entry.
+pub fn total_recipient_amount(recipients: &[Recipient]) -> Result<MicroMinotari, anyhow::Error> {
+    if recipients.is_empty() {
+        return Err(anyhow!("No recipients provided"));
+    }
+    let mut total = MicroMinotari::zero();
+    for recipient in recipients {
+        if recipient.amount == MicroMinotari::zero() {
+            return Err(anyhow!("Recipient amount must be greater than zero"));
+        }
+        total = total
+            .checked_add(recipient.amount)
+            .ok_or_else(|| anyhow!("Total amount of the recipients overflows"))?;
+    }
+    Ok(total)
+}
+
 /// Binds an idempotency key to an unsigned-transaction request.
 ///
 /// The recipients are the whole point of the binding. Without them, replaying a
@@ -220,7 +240,7 @@ impl OneSidedTransaction {
     ///
     /// * `account` - The sender's account containing key material
     /// * `locked_funds` - Previously locked UTXOs from [`FundLocker::lock`](super::fund_locker::FundLocker::lock)
-    /// * `recipients` - List of recipients (currently limited to one)
+    /// * `recipients` - List of recipients, one output each
     /// * `fee_per_gram` - Fee rate in MicroMinotari per gram
     ///
     /// # Returns
@@ -233,15 +253,15 @@ impl OneSidedTransaction {
     ///
     /// Returns an error if:
     /// - No recipients are provided
-    /// - More than one recipient is provided (multi-recipient not yet supported)
     /// - Account key manager cannot be decrypted
     /// - Transaction building fails
     /// - Payment ID encoding fails
     ///
-    /// # Limitations
+    /// # Memos
     ///
-    /// Currently only supports single-recipient transactions. Multi-recipient
-    /// support is planned for future releases.
+    /// Each recipient's output carries that recipient's own `payment_id`. The
+    /// transaction-level memo (kept in the change output) is the first
+    /// recipient's `payment_id`.
     ///
     /// # Example
     ///

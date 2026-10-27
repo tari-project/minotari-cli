@@ -326,9 +326,13 @@ impl InputSelector {
         let default_output_fee = self
             .fee_calc
             .calculate(fee_per_gram, 0, 0, 1, features_and_scripts_byte_size);
+        // Every recipient output carries its own features and scripts.
+        let outputs_byte_size = features_and_scripts_byte_size.checked_mul(num_outputs).ok_or_else(|| {
+            UtxoSelectionError::ServiceError("Total output size overflows while selecting inputs".to_string())
+        })?;
         let output_fee = self
             .fee_calc
-            .calculate(fee_per_gram, 0, 0, num_outputs, features_and_scripts_byte_size);
+            .calculate(fee_per_gram, 0, 0, num_outputs, outputs_byte_size);
         let input_fee = self.fee_calc.calculate(fee_per_gram, 0, 1, 0, 0);
 
         // Every send must carry a change output, so the change output's fee is
