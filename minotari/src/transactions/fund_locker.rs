@@ -30,6 +30,7 @@ use chrono::{DateTime, TimeDelta, Utc};
 use log::{error, info, warn};
 use rusqlite::Connection;
 use std::sync::Mutex;
+use tari_common::configuration::Network;
 use tari_transaction_components::tari_amount::MicroMinotari;
 use thiserror::Error;
 use uuid::Uuid;
@@ -390,6 +391,7 @@ impl FundLocker {
         &self,
         conn: &mut Connection,
         account_id: i64,
+        network: Network,
         fee_per_gram: MicroMinotari,
         recipient_output_size: usize,
         change_output_size: usize,
@@ -398,6 +400,7 @@ impl FundLocker {
         confirmation_window: u64,
     ) -> Result<LockFundsResult, anyhow::Error> {
         let selection = Selection::All {
+            network,
             recipient_output_size,
             change_output_size,
         };
@@ -509,9 +512,16 @@ impl FundLocker {
                 estimated_output_size,
             )?,
             Selection::All {
+                network,
                 recipient_output_size,
                 change_output_size,
-            } => input_selector.select_all(&transaction, fee_per_gram, recipient_output_size, change_output_size)?,
+            } => input_selector.select_all(
+                &transaction,
+                network,
+                fee_per_gram,
+                recipient_output_size,
+                change_output_size,
+            )?,
         };
 
         // Already validated above; `lock_expiry_at` is total, so a surprising
@@ -557,15 +567,16 @@ impl FundLocker {
             total_value: utxo_selection.total_value,
             fee_without_change: utxo_selection.fee_without_change,
             fee_with_change: utxo_selection.fee_with_change,
-            created_reservation_id: Some(pending_tx_id),
+            reservation_id: pending_tx_id,
+            created_reservation: true,
         })
     }
 }
 
 /// Hands back the UTXOs of a reservation a send took and then failed to use.
 ///
-/// Only call it with a [`LockFundsResult::created_reservation_id`]: a replayed
-/// reservation belongs to the request that took it. A reservation that is no
+/// Only call it for a [`LockFundsResult`] whose `created_reservation` is set: a
+/// replayed reservation belongs to the request that took it. A reservation that is no
 /// longer pending is left to whoever moved it on.
 pub fn release_reservation(conn: &Connection, reservation_id: &str) {
     match db::expire_and_unlock_pending_transaction(conn, reservation_id) {
@@ -597,6 +608,7 @@ enum Selection {
         estimated_output_size: Option<usize>,
     },
     All {
+        network: Network,
         recipient_output_size: usize,
         change_output_size: usize,
     },
@@ -766,9 +778,11 @@ mod tests {
     fn a_reservation_the_caller_took_can_be_released() {
         let (pool, account_id, _temp) = setup_test_env(3, 500_000);
         let locked = lock_with(&pool, account_id, test_binding(Some("k"), 1)).expect("lock");
-        let id = locked.created_reservation_id.clone().expect("this call took it");
+        assert!(locked.created_reservation, "this call took it");
+        let id = locked.reservation_id.clone();
         let replay = lock_with(&pool, account_id, test_binding(Some("k"), 1)).expect("replay");
-        assert_eq!(replay.created_reservation_id, None);
+        assert!(!replay.created_reservation);
+        assert_eq!(replay.reservation_id, id);
 
         let conn = pool.get().expect("conn");
         release_reservation(&conn, &id);

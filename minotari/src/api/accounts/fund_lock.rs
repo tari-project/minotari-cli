@@ -527,6 +527,7 @@ pub async fn api_create_unsigned_transaction(
             lock_amount.lock_all(
                 &mut conn,
                 account.id,
+                network,
                 fee_per_gram,
                 recipient_output_size,
                 change_output_size,
@@ -549,14 +550,21 @@ pub async fn api_create_unsigned_transaction(
         }
         .map_err(|e| ApiError::from_transaction_error(e, ApiError::FailedToLockFunds))?;
 
-        let reservation_id = locked_funds.created_reservation_id.clone();
+        let reservation_id = locked_funds.reservation_id.clone();
+        let created_reservation = locked_funds.created_reservation;
+        let audit_reservation_id = reservation_id.clone();
         let built = (move || {
             if send_all {
                 let input_selector = InputSelector::new(account.id, confirmation_window);
                 let amount = input_selector
                     .send_all_amount(locked_funds.total_value, locked_funds.fee_with_change, fee_per_gram)
                     .map_err(|e| ApiError::from_transaction_error(e.into(), ApiError::FailedToLockFunds))?;
-                input_selector.audit_send_all(amount, locked_funds.fee_with_change, locked_funds.utxos.len());
+                input_selector.audit_send_all(
+                    &audit_reservation_id,
+                    amount,
+                    locked_funds.fee_with_change,
+                    locked_funds.utxos.len(),
+                );
                 for recipient in &mut recipients {
                     recipient.amount = amount;
                 }
@@ -567,10 +575,8 @@ pub async fn api_create_unsigned_transaction(
                 .map_err(|e| ApiError::FailedCreateUnsignedTx(e.to_string()))
         })();
         // A reservation this request took is no use to anyone once its send failed.
-        if built.is_err()
-            && let Some(id) = &reservation_id
-        {
-            release_reservation(&conn, id);
+        if built.is_err() && created_reservation {
+            release_reservation(&conn, &reservation_id);
         }
         built
     })

@@ -44,9 +44,10 @@
 
 use log::{debug, info, warn};
 use rusqlite::Connection;
+use tari_common::configuration::Network;
 use tari_transaction_components::{
-    TransactionBuilderError, fee::Fee, tari_amount::MicroMinotari, transaction_components::MAX_TRANSACTION_INPUTS,
-    weight::TransactionWeight,
+    TransactionBuilderError, consensus::ConsensusConstantsBuilder, fee::Fee, tari_amount::MicroMinotari,
+    transaction_components::MAX_TRANSACTION_INPUTS, weight::TransactionWeight,
 };
 use thiserror::Error;
 
@@ -484,11 +485,13 @@ impl InputSelector {
         Ok(amount)
     }
 
-    /// Records what a send-all is about to pay, once its amount is known.
-    pub fn audit_send_all(&self, amount: MicroMinotari, fee: MicroMinotari, input_count: usize) {
+    /// Records what the send-all holding `reservation_id` is about to pay, once
+    /// its amount is known.
+    pub fn audit_send_all(&self, reservation_id: &str, amount: MicroMinotari, fee: MicroMinotari, input_count: usize) {
         info!(
             target: "audit",
             account_id = self.account_id,
+            reservation_id = reservation_id,
             amount = &*mask_amount(amount),
             fee = &*mask_amount(fee),
             input_count = input_count;
@@ -499,9 +502,9 @@ impl InputSelector {
     /// Selects the spendable, unlocked outputs for a send-all to one recipient.
     ///
     /// Outputs worth no more than they cost to spend are skipped, and at most
-    /// [`MAX_TRANSACTION_INPUTS`] are taken, largest first: more could not be
-    /// signed. A send-all over a wallet with more outputs than that is a partial
-    /// sweep of its largest ones and can be repeated for the rest.
+    /// [`max_send_all_inputs`] are taken, largest first: more could not be
+    /// signed or mined. A send-all over a wallet with more outputs than that is
+    /// a partial sweep of its largest ones and can be repeated for the rest.
     ///
     /// The fees are for the selected outputs, one recipient output and the
     /// change output. Fails when the recipient's share would be dust (see
@@ -509,6 +512,7 @@ impl InputSelector {
     pub fn select_all(
         &self,
         conn: &Connection,
+        network: Network,
         fee_per_gram: MicroMinotari,
         recipient_output_size: usize,
         change_output_size: usize,
@@ -518,7 +522,7 @@ impl InputSelector {
             fee_per_gram,
             recipient_output_size,
             change_output_size,
-            MAX_TRANSACTION_INPUTS,
+            max_send_all_inputs(network, recipient_output_size, change_output_size),
         )
     }
 
@@ -567,6 +571,26 @@ impl InputSelector {
             fee_with_change,
         })
     }
+}
+
+/// The most inputs a send-all to one recipient may spend on `network`.
+///
+/// Bound by what a block can hold (the kernel, the recipient and change
+/// outputs and the inputs must fit in `max_block_transaction_weight`, which
+/// neither the builder nor the signer checks) and by
+/// [`MAX_TRANSACTION_INPUTS`], which the signer does.
+pub fn max_send_all_inputs(network: Network, recipient_output_size: usize, change_output_size: usize) -> usize {
+    let constants = ConsensusConstantsBuilder::new(network).build();
+    let weight = constants.transaction_weight_params();
+    let fixed_weight = weight.calculate(1, 0, 2, recipient_output_size.saturating_add(change_output_size));
+    let by_weight = constants
+        .max_block_transaction_weight()
+        .saturating_sub(fixed_weight)
+        .checked_div(weight.params().input_weight)
+        .unwrap_or(0);
+    usize::try_from(by_weight)
+        .unwrap_or(usize::MAX)
+        .min(MAX_TRANSACTION_INPUTS)
 }
 
 /// Turns the transaction builder's refusal to build a transaction without a
@@ -741,7 +765,7 @@ mod tests {
         let conn = pool.get().expect("conn");
         let selector = InputSelector::new(account_id, 100);
         let selection = selector
-            .select_all(&conn, MicroMinotari(5), 1000, 1000)
+            .select_all(&conn, Network::LocalNet, MicroMinotari(5), 1000, 1000)
             .expect("selection");
         assert_eq!(selection.utxos.len(), 1);
         assert_eq!(selection.total_value, MicroMinotari(1_000_000));
@@ -765,7 +789,7 @@ mod tests {
             account_with_outputs(&[300_000, spend_cost.as_u64(), 1_000_000, spend_cost.as_u64() + 1]);
         let conn = pool.get().expect("conn");
         let selection = InputSelector::new(account_id, 100)
-            .select_all(&conn, MicroMinotari(5), 1000, 1000)
+            .select_all(&conn, Network::LocalNet, MicroMinotari(5), 1000, 1000)
             .expect("selection");
         let values: Vec<u64> = selection.utxos.iter().map(|u| u.output.value().as_u64()).collect();
         assert_eq!(values, vec![1_000_000, 300_000, spend_cost.as_u64() + 1]);
@@ -788,6 +812,24 @@ mod tests {
         let values: Vec<u64> = selection.utxos.iter().map(|u| u.output.value().as_u64()).collect();
         assert_eq!(values, vec![900_000, 700_000]);
         assert_eq!(selection.total_value, MicroMinotari(1_600_000));
+    }
+
+    /// On mainnet a block holds fewer inputs than a transaction may carry, so
+    /// the send-all cap is the block weight's: exactly as many as still fit.
+    #[test]
+    fn the_send_all_input_cap_is_bound_by_mainnet_block_weight() {
+        let (recipient_size, change_size) = (128, 256);
+        let cap = max_send_all_inputs(Network::MainNet, recipient_size, change_size);
+        assert!(cap < MAX_TRANSACTION_INPUTS, "cap {cap}");
+
+        let constants = ConsensusConstantsBuilder::new(Network::MainNet).build();
+        let weight = |inputs| {
+            constants
+                .transaction_weight_params()
+                .calculate(1, inputs, 2, recipient_size + change_size)
+        };
+        assert!(weight(cap) <= constants.max_block_transaction_weight());
+        assert!(weight(cap + 1) > constants.max_block_transaction_weight());
     }
 
     #[test]
@@ -813,7 +855,7 @@ mod tests {
         let pool = init_db(dir.path().join("empty.db")).expect("init db");
         let conn = pool.get().expect("conn");
         assert!(matches!(
-            selector.select_all(&conn, MicroMinotari(5), 1000, 1000),
+            selector.select_all(&conn, Network::LocalNet, MicroMinotari(5), 1000, 1000),
             Err(UtxoSelectionError::InsufficientFunds { .. })
         ));
     }

@@ -121,11 +121,15 @@ pub struct LockFundsResult {
     #[schema(value_type = u64)]
     pub fee_with_change: MicroMinotari,
 
-    /// The pending transaction this call created, or `None` when it replayed
-    /// an existing reservation. Lets the caller release a reservation it took
-    /// when the send then fails (see `release_reservation`); not sent to clients.
+    /// The pending transaction holding these UTXOs. Not sent to clients.
     #[serde(skip)]
-    pub created_reservation_id: Option<String>,
+    pub reservation_id: String,
+
+    /// Whether this call took the reservation rather than replaying an
+    /// existing one. Only then may the caller release it when the send fails
+    /// (see `release_reservation`). Not sent to clients.
+    #[serde(skip)]
+    pub created_reservation: bool,
 }
 
 pub fn tx_id_schema() -> Schema {

@@ -218,7 +218,10 @@ impl ProcessedTransaction {
     /// Without the recipients in the fingerprint, replaying the key with a
     /// different address would return this transaction's reserved UTXOs and
     /// build a payment to whoever the replay named.
-    fn idempotency_binding(&self, account_id: i64) -> IdempotencyBinding {
+    ///
+    /// A send-all also binds `fee_per_gram`: its amount is worked out at that
+    /// rate, so a replay at another rate would be a different payment.
+    fn idempotency_binding(&self, account_id: i64, fee_per_gram: MicroMinotari) -> IdempotencyBinding {
         let operation = IdempotencyOperation::SendTransaction;
         let mut fingerprint = RequestFingerprint::new(operation).field("account_id", account_id.to_le_bytes());
         // Fields are length-prefixed, so adding or dropping a recipient always changes the hash.
@@ -229,7 +232,9 @@ impl ProcessedTransaction {
                 .optional_field("recipient_payment_id", recipient.payment_id.as_deref());
         }
         if self.send_all {
-            fingerprint = fingerprint.field("send_all", [1u8]);
+            fingerprint = fingerprint
+                .field("send_all", [1u8])
+                .field("fee_per_gram", fee_per_gram.as_u64().to_le_bytes());
         }
         IdempotencyBinding::new(
             Some(self.idempotency_key.clone()),
@@ -422,6 +427,7 @@ impl TransactionSender {
                 one_sided_output_sizes(&processed_transaction.recipients)?;
             return Ok(input_selector.select_all(
                 connection,
+                self.network,
                 self.fee_per_gram,
                 recipient_output_size,
                 change_output_size,
@@ -459,7 +465,7 @@ impl TransactionSender {
         // the checked helper: `Utc::now() + Duration::seconds(..)` panics on
         // overflow. See `MAX_SECONDS_TO_LOCK_UTXOS`.
         let expires_at = lock_expiry_at(Utc::now(), processed_transaction.seconds_to_lock_utxos)?;
-        let binding = processed_transaction.idempotency_binding(self.account.id);
+        let binding = processed_transaction.idempotency_binding(self.account.id, self.fee_per_gram);
         let key = processed_transaction.idempotency_key.clone();
 
         // BEGIN IMMEDIATE takes the database's write lock before we look at any
@@ -729,7 +735,12 @@ impl TransactionSender {
                     change_output_size,
                 )?;
                 let amount = input_selector.send_all_amount(total_value, fee_with_change, self.fee_per_gram)?;
-                input_selector.audit_send_all(amount, fee_with_change, utxo_selection.len());
+                input_selector.audit_send_all(
+                    processed_transaction.id(),
+                    amount,
+                    fee_with_change,
+                    utxo_selection.len(),
+                );
                 for recipient in &mut processed_transaction.recipients {
                     recipient.amount = amount;
                 }
@@ -2719,6 +2730,13 @@ mod tests {
             .start_new_transaction_multi("zero".to_string(), with_zero, 300)
             .expect_err("a zero amount");
 
+        // A payment id that does not fit the change memo is refused, not sent without its memo.
+        let mut too_long = recipients(1);
+        too_long[0].payment_id = Some("x".repeat(200));
+        sender
+            .start_new_transaction_multi("long".to_string(), too_long, 300)
+            .expect_err("a payment id too long for the change memo");
+
         assert_eq!(pending_transaction_count(&pool), 0);
         assert_eq!(locked_output_count(&pool), 0);
     }
@@ -2742,7 +2760,10 @@ mod tests {
                 .optional_field("recipient_payment_id", recipient.payment_id.as_deref())
                 .field("seconds_to_lock_utxos", 3600u64.to_le_bytes()),
         );
-        assert_eq!(processed_transaction.idempotency_binding(sender.account.id), expected);
+        assert_eq!(
+            processed_transaction.idempotency_binding(sender.account.id, sender.fee_per_gram),
+            expected
+        );
     }
 
     #[test]
@@ -2771,7 +2792,14 @@ mod tests {
         let payment_id = "sweep".to_string();
 
         let estimate = crate::transactions::fee_estimator::FeeEstimator::new(pool.clone(), "http://127.0.0.1:1".into())
-            .estimate_fees_send_all("test", &other_address(1), Some(&payment_id), sender.fee_per_gram, 100)
+            .estimate_fees_send_all(
+                "test",
+                Network::LocalNet,
+                &other_address(1),
+                Some(&payment_id),
+                sender.fee_per_gram,
+                100,
+            )
             .expect("estimate");
         assert_eq!(estimate.input_count, 3);
 
@@ -2800,6 +2828,14 @@ mod tests {
             .expect("replay");
         assert_eq!(replay.info.recipients[0].amount, paid.amount);
         assert_eq!(pending_transaction_count(&pool), 1);
+
+        // A replay at another fee per gram would pay another amount.
+        sender.fee_per_gram = MicroMinotari(6);
+        let err = sender
+            .start_new_send_all_transaction("sweep".to_string(), other_address(1), Some("sweep".to_string()), 300)
+            .expect_err("a different fee per gram is a different request");
+        conflict(&err);
+        sender.fee_per_gram = MicroMinotari(5);
 
         // A send-all is not an exact send under the same key.
         let err = sender
@@ -2833,7 +2869,14 @@ mod tests {
             "got: {err}"
         );
         crate::transactions::fee_estimator::FeeEstimator::new(pool.clone(), "http://127.0.0.1:1".into())
-            .estimate_fees_send_all("test", &other_address(1), None, sender.fee_per_gram, 100)
+            .estimate_fees_send_all(
+                "test",
+                Network::LocalNet,
+                &other_address(1),
+                None,
+                sender.fee_per_gram,
+                100,
+            )
             .expect_err("the estimate refuses it too");
         assert_eq!(pending_transaction_count(&pool), 0);
         assert_eq!(locked_output_count(&pool), 0);

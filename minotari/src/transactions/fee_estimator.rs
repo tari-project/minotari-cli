@@ -1,6 +1,10 @@
 use anyhow::{Result, anyhow};
 use log::debug;
-use tari_common_types::{tari_address::TariAddress, types::FixedHash};
+use tari_common::configuration::Network;
+use tari_common_types::{
+    tari_address::{MAX_PAYMENT_ID_SIZE, TariAddress},
+    types::FixedHash,
+};
 use tari_script::{TariScript, script};
 use tari_transaction_components::{
     fee::{Fee, recipient_output_features_and_scripts_size},
@@ -142,10 +146,13 @@ impl FeeEstimator {
     /// computes it.
     ///
     /// The fee is exactly what the offline signer will charge, so only the
-    /// minimum change is left over. Fails when the recipient's share would be dust.
+    /// minimum change is left over. `network` bounds the inputs as for the send
+    /// (see [`max_send_all_inputs`](crate::transactions::input_selector::max_send_all_inputs)).
+    /// Fails when the recipient's share would be dust.
     pub fn estimate_fees_send_all(
         &self,
         account_name: &str,
+        network: Network,
         address: &TariAddress,
         payment_id: Option<&str>,
         fee_per_gram: MicroMinotari,
@@ -162,7 +169,8 @@ impl FeeEstimator {
         };
         let (recipient_output_size, change_output_size) = one_sided_output_sizes(&[recipient])?;
         let input_selector = InputSelector::new(account.id, confirmation_window);
-        let selection = input_selector.select_all(&conn, fee_per_gram, recipient_output_size, change_output_size)?;
+        let selection =
+            input_selector.select_all(&conn, network, fee_per_gram, recipient_output_size, change_output_size)?;
         let amount_after_fee =
             input_selector.send_all_amount(selection.total_value, selection.fee_with_change, fee_per_gram)?;
 
@@ -260,14 +268,22 @@ pub fn estimated_output_size_for_send(payment_id_len: usize, num_recipients: usi
     };
 
     // A memo has a hard 256-byte ceiling, so a payment id past it cannot go in a change memo
-    // at all - upstream's own `change_features_and_scripts_size` measures such a memo as zero
-    // and the send fails when the builder tries to construct it for real. There is no estimate
-    // that saves that transaction, so fall back to the floor rather than refusing to quote.
-    let memo = change_memo(vec![0u8; payment_id_len])
-        .or_else(|_| change_memo(Vec::new()))
-        .map_err(|e| anyhow!("Failed to build the default change memo: {e}"))?;
-
-    measure_output_size(&OutputFeatures::default(), &script, &memo)
+    // at all, and a send carrying one is refused before anything is locked
+    // (`total_recipient_amount`). Quote the ceiling for it, which no real output exceeds,
+    // rather than refusing to quote.
+    match change_memo(vec![0u8; payment_id_len]) {
+        Ok(memo) => measure_output_size(&OutputFeatures::default(), &script, &memo),
+        Err(_) => {
+            let to_err = |e: std::io::Error| anyhow!("Failed to measure the largest output: {e}");
+            let size = OutputFeatures::default()
+                .get_serialized_size()
+                .map_err(to_err)?
+                .saturating_add(script.get_serialized_size().map_err(to_err)?)
+                .saturating_add(Covenant::default().get_serialized_size().map_err(to_err)?)
+                .saturating_add(MAX_PAYMENT_ID_SIZE);
+            Ok(TransactionWeight::latest().round_up_features_and_scripts_size(size))
+        },
+    }
 }
 
 /// The exact features-and-scripts sizes the transaction builder charges a one-sided send to
@@ -396,13 +412,14 @@ mod tests {
         assert!(long > short, "a 100-byte payment id must cost more than an empty one");
     }
     /// A payment id too long for a memo cannot be quoted exactly; the estimate falls back to
-    /// the floor instead of failing the caller's request outright.
+    /// the memo ceiling, which covers any output that can be built, instead of failing.
     #[test]
-    fn an_oversized_payment_id_falls_back_to_the_floor() {
-        assert_eq!(
-            estimated_output_size_for_payment_id(4096).unwrap(),
-            estimated_output_size_for_payment_id(0).unwrap()
-        );
+    fn an_oversized_payment_id_falls_back_to_the_ceiling() {
+        let oversized = estimated_output_size_for_payment_id(4096).unwrap();
+        for payment_id_len in [0, 100, 150] {
+            assert!(oversized >= estimated_output_size_for_payment_id(payment_id_len).unwrap());
+        }
+        assert_eq!(oversized, estimated_output_size_for_payment_id(257).unwrap());
     }
 
     /// The change memo lists a sent-output hash per recipient for up to two recipients, so the

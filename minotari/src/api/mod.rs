@@ -531,7 +531,12 @@ mod tests {
         )
         .unwrap()
         .to_base58();
+        let too_many: Vec<_> = (0..500)
+            .map(|_| serde_json::json!({ "address": address, "amount": 1 }))
+            .collect();
         let bodies = [
+            serde_json::json!({ "recipients": too_many }),
+            serde_json::json!({ "recipients": [{ "address": address, "amount": 1, "payment_id": "x".repeat(300) }] }),
             serde_json::json!({ "recipients": [] }),
             serde_json::json!({ "recipients": [{ "address": address, "amount": 0 }] }),
             serde_json::json!({ "recipients": [{ "address": address, "amount": u64::MAX }, { "address": address, "amount": 1 }] }),

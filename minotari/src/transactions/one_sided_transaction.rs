@@ -41,6 +41,7 @@
 //! ```
 
 use crate::db::SqlitePool;
+use crate::transactions::fee_estimator::one_sided_output_sizes;
 use crate::transactions::fund_locker::validate_fee_per_gram;
 use crate::transactions::idempotency::{IdempotencyBinding, IdempotencyOperation, RequestFingerprint};
 use crate::transactions::input_selector::map_change_required_error;
@@ -55,7 +56,7 @@ use tari_transaction_components::{
     consensus::ConsensusConstantsBuilder,
     offline_signing::{models::PrepareOneSidedTransactionForSigningResult, prepare_one_sided_transaction_for_signing},
     tari_amount::MicroMinotari,
-    transaction_components::{MemoField, OutputFeatures, memo_field::TxType},
+    transaction_components::{MAX_TRANSACTION_OUTPUTS, MemoField, OutputFeatures, memo_field::TxType},
 };
 use zeroize::Zeroizing;
 
@@ -126,13 +127,20 @@ impl Recipient {
     }
 }
 
-/// The sum of `recipients`' amounts.
+/// Checks `recipients` for a send and returns the sum of their amounts.
 ///
-/// Fails when the list is empty, any amount is zero, or the sum overflows. The
+/// Fails when the list is empty or longer than a transaction can carry
+/// alongside its change output, any amount is zero, the sum overflows, or a
+/// payment id does not fit in its recipient's memo or the change memo. The
 /// same address may appear more than once; it receives one output per entry.
 pub fn total_recipient_amount(recipients: &[Recipient]) -> Result<MicroMinotari, anyhow::Error> {
     if recipients.is_empty() {
         return Err(anyhow!("No recipients provided"));
+    }
+    // One output is kept for the change.
+    let max_recipients = MAX_TRANSACTION_OUTPUTS.saturating_sub(1);
+    if recipients.len() > max_recipients {
+        return Err(anyhow!("Too many recipients: at most {max_recipients} are allowed"));
     }
     let mut total = MicroMinotari::zero();
     for recipient in recipients {
@@ -143,6 +151,8 @@ pub fn total_recipient_amount(recipients: &[Recipient]) -> Result<MicroMinotari,
             .checked_add(recipient.amount)
             .ok_or_else(|| anyhow!("Total amount of the recipients overflows"))?;
     }
+    // Builds every memo the send will carry, so a payment id that does not fit fails here.
+    one_sided_output_sizes(recipients)?;
     Ok(total)
 }
 
@@ -330,26 +340,18 @@ impl OneSidedTransaction {
 
         let tx_id = TxId::new_random();
         let output_features = OutputFeatures::default();
-        let base_memo = |r: &Recipient| match &r.payment_id {
-            Some(s) => {
-                MemoField::new_open_from_string(s, TxType::PaymentToOther).unwrap_or_else(|_| MemoField::new_empty())
-            },
-            None => MemoField::new_empty(),
-        };
-        let payment_recipients = recipients
-            .iter()
-            .map(|r| {
-                Ok(PaymentRecipient {
-                    amount: r.amount,
-                    output_features: output_features.clone(),
-                    address: r.address.clone(),
-                    payment_id: recipient_memo(base_memo(r), &sender_address, &r.address)?,
-                })
-            })
-            .collect::<Result<Vec<_>, anyhow::Error>>()?;
+        let mut payment_recipients = Vec::with_capacity(recipients.len());
+        for r in &recipients {
+            payment_recipients.push(PaymentRecipient {
+                amount: r.amount,
+                output_features: output_features.clone(),
+                address: r.address.clone(),
+                payment_id: recipient_memo(r.memo()?, &sender_address, &r.address)?,
+            });
+        }
 
         // Use first recipient's payment_id, without the sender address, as the overall transaction memo
-        let main_payment_id = base_memo(recipients.first().expect("Already checked"));
+        let main_payment_id = recipients.first().expect("Already checked").memo()?;
 
         let result = prepare_one_sided_transaction_for_signing(
             &key_manager,
@@ -362,5 +364,41 @@ impl OneSidedTransaction {
         .map_err(map_change_required_error)?;
 
         Ok(result)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn recipient(payment_id: Option<String>) -> Recipient {
+        Recipient {
+            address: TariAddress::default(),
+            amount: MicroMinotari(1_000),
+            payment_id,
+        }
+    }
+
+    #[test]
+    fn a_send_may_have_one_recipient_fewer_than_a_transaction_has_outputs() {
+        let most = vec![recipient(None); MAX_TRANSACTION_OUTPUTS - 1];
+        assert_eq!(
+            total_recipient_amount(&most).expect("allowed"),
+            MicroMinotari(1_000 * (MAX_TRANSACTION_OUTPUTS as u64 - 1))
+        );
+        let too_many = vec![recipient(None); MAX_TRANSACTION_OUTPUTS];
+        let err = total_recipient_amount(&too_many).expect_err("no room for change");
+        assert!(err.to_string().contains("Too many recipients"), "got: {err}");
+    }
+
+    /// A payment id that fits neither memo is refused, not sent without its memo.
+    #[test]
+    fn a_payment_id_too_long_for_a_memo_is_refused() {
+        total_recipient_amount(&[recipient(Some("invoice-1".to_string()))]).expect("fits");
+        total_recipient_amount(&[recipient(Some("x".repeat(300)))]).expect_err("too long for any memo");
+        // Fits a recipient's open memo, but not the change memo, which also holds an address and a hash.
+        let long = "x".repeat(200);
+        assert!(MemoField::new_open_from_string(&long, TxType::PaymentToOther).is_ok());
+        total_recipient_amount(&[recipient(Some(long))]).expect_err("too long for the change memo");
     }
 }

@@ -862,6 +862,7 @@ fn handle_create_unsigned_transaction(
         lock_amount.lock_all(
             &mut conn,
             account.id,
+            network,
             fee_per_gram,
             recipient_output_size,
             change_output_size,
@@ -884,13 +885,19 @@ fn handle_create_unsigned_transaction(
     }
     .map_err(|e| anyhow!("Failed to lock funds: {}", e))?;
 
-    let reservation_id = locked_funds.created_reservation_id.clone();
+    let reservation_id = locked_funds.reservation_id.clone();
+    let created_reservation = locked_funds.created_reservation;
     let written = (|| -> Result<(), anyhow::Error> {
         if send_all {
             let input_selector = InputSelector::new(account.id, confirmation_window);
             let amount =
                 input_selector.send_all_amount(locked_funds.total_value, locked_funds.fee_with_change, fee_per_gram)?;
-            input_selector.audit_send_all(amount, locked_funds.fee_with_change, locked_funds.utxos.len());
+            input_selector.audit_send_all(
+                &reservation_id,
+                amount,
+                locked_funds.fee_with_change,
+                locked_funds.utxos.len(),
+            );
             for recipient in &mut recipients {
                 recipient.amount = amount;
             }
@@ -901,15 +908,15 @@ fn handle_create_unsigned_transaction(
             .create_unsigned_transaction(&account, locked_funds, recipients, fee_per_gram)
             .map_err(|e| anyhow!("Failed to create an unsigned transaction: {}", e))?;
 
-        create_dir_all(Path::new(&output_file).parent().unwrap())?;
-        fs::write(output_file, serde_json::to_string_pretty(&result)?)?;
+        if let Some(parent) = Path::new(&output_file).parent() {
+            create_dir_all(parent)?;
+        }
+        fs::write(&output_file, serde_json::to_string_pretty(&result)?)?;
         Ok(())
     })();
     // A reservation this command took is no use to anyone once its send failed.
-    if written.is_err()
-        && let Some(id) = &reservation_id
-    {
-        release_reservation(&conn, id);
+    if written.is_err() && created_reservation {
+        release_reservation(&conn, &reservation_id);
     }
     written?;
 

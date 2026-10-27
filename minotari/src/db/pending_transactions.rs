@@ -392,7 +392,8 @@ pub fn locked_funds_for_pending_transaction(
         total_value: record.total_value,
         fee_without_change: record.fee_without_change,
         fee_with_change: record.fee_with_change,
-        created_reservation_id: None,
+        reservation_id: record.id.clone(),
+        created_reservation: false,
     })
 }
 
