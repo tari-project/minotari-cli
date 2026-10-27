@@ -116,6 +116,16 @@ pub fn recipient_memo(
         .map_err(|e| anyhow!("Payment id does not fit alongside the sender address: {e}"))
 }
 
+impl Recipient {
+    /// Its payment id as a plain memo, the transaction-level memo.
+    pub fn memo(&self) -> Result<MemoField, anyhow::Error> {
+        match &self.payment_id {
+            Some(s) => MemoField::new_open_from_string(s, TxType::PaymentToOther).map_err(|e| anyhow!(e)),
+            None => Ok(MemoField::new_empty()),
+        }
+    }
+}
+
 /// The sum of `recipients`' amounts.
 ///
 /// Fails when the list is empty, any amount is zero, or the sum overflows. The

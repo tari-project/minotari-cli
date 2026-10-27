@@ -52,7 +52,7 @@ use thiserror::Error;
 use crate::{
     db::{DbWalletOutput, WalletDbError, get_latest_scanned_tip_block_by_account},
     log::mask_amount,
-    transactions::fee_estimator::get_default_features_and_scripts_size,
+    transactions::fee_estimator::estimated_output_size_for_send,
 };
 use tari_transaction_components::utxo_selection::branch_and_bound::branch_bound_builder::BranchAndBoundUtxoSelectionBuilder;
 /// Errors that can occur during UTXO selection.
@@ -318,7 +318,7 @@ impl InputSelector {
 
         let features_and_scripts_byte_size = match estimated_output_size {
             Some(sz) => sz,
-            None => get_default_features_and_scripts_size()
+            None => estimated_output_size_for_send(0, num_outputs)
                 .map_err(|err| UtxoSelectionError::SerializationError(err.to_string()))?,
         };
 
@@ -438,17 +438,22 @@ impl InputSelector {
     }
 
     /// The fees, without and with the change output, of a send-all spending
-    /// `input_count` inputs to one recipient output of `output_size`.
+    /// `input_count` inputs to one recipient output, given the exact sizes the
+    /// builder charges (see
+    /// [`one_sided_output_sizes`](crate::transactions::fee_estimator::one_sided_output_sizes)).
     pub fn send_all_fees(
         &self,
         input_count: usize,
         fee_per_gram: MicroMinotari,
-        output_size: usize,
+        recipient_output_size: usize,
+        change_output_size: usize,
     ) -> Result<(MicroMinotari, MicroMinotari), UtxoSelectionError> {
-        let outputs_size = output_size
-            .checked_mul(2)
+        let outputs_size = recipient_output_size
+            .checked_add(change_output_size)
             .ok_or_else(|| UtxoSelectionError::ServiceError("Total output size overflows".to_string()))?;
-        let fee_without_change = self.fee_calc.calculate(fee_per_gram, 1, input_count, 1, output_size);
+        let fee_without_change = self
+            .fee_calc
+            .calculate(fee_per_gram, 1, input_count, 1, recipient_output_size);
         let fee_with_change = self.fee_calc.calculate(fee_per_gram, 1, input_count, 2, outputs_size);
         Ok((fee_without_change, fee_with_change))
     }
@@ -487,7 +492,8 @@ impl InputSelector {
         &self,
         conn: &Connection,
         fee_per_gram: MicroMinotari,
-        estimated_output_size: Option<usize>,
+        recipient_output_size: usize,
+        change_output_size: usize,
     ) -> Result<UtxoSelection, UtxoSelectionError> {
         let tip_height = get_latest_scanned_tip_block_by_account(conn, self.account_id)?
             .map(|b| b.height)
@@ -501,12 +507,8 @@ impl InputSelector {
                 .checked_add(utxo.output.value())
                 .ok_or_else(|| UtxoSelectionError::ServiceError("Total value of the outputs overflows".to_string()))?;
         }
-        let output_size = match estimated_output_size {
-            Some(sz) => sz,
-            None => get_default_features_and_scripts_size()
-                .map_err(|err| UtxoSelectionError::SerializationError(err.to_string()))?,
-        };
-        let (fee_without_change, fee_with_change) = self.send_all_fees(utxos.len(), fee_per_gram, output_size)?;
+        let (fee_without_change, fee_with_change) =
+            self.send_all_fees(utxos.len(), fee_per_gram, recipient_output_size, change_output_size)?;
         self.send_all_amount(total_value, fee_with_change, fee_per_gram)?;
 
         debug!(
@@ -688,7 +690,7 @@ mod tests {
         let conn = pool.get().expect("conn");
         let selector = InputSelector::new(account_id, 100);
         let selection = selector
-            .select_all(&conn, MicroMinotari(5), Some(1000))
+            .select_all(&conn, MicroMinotari(5), 1000, 1000)
             .expect("selection");
         assert_eq!(selection.utxos.len(), 1);
         assert_eq!(selection.total_value, MicroMinotari(1_000_000));
@@ -707,7 +709,7 @@ mod tests {
     fn a_send_all_of_dust_is_refused() {
         let selector = InputSelector::new(1, 100);
         let min_change = selector.min_change(MicroMinotari(5));
-        let (_, fee) = selector.send_all_fees(1, MicroMinotari(5), 1000).expect("fees");
+        let (_, fee) = selector.send_all_fees(1, MicroMinotari(5), 1000, 1000).expect("fees");
         // Leaves exactly the dust threshold for the recipient.
         let total = fee + min_change + min_change;
         assert!(matches!(
@@ -726,7 +728,7 @@ mod tests {
         let pool = init_db(dir.path().join("empty.db")).expect("init db");
         let conn = pool.get().expect("conn");
         assert!(matches!(
-            selector.select_all(&conn, MicroMinotari(5), Some(1000)),
+            selector.select_all(&conn, MicroMinotari(5), 1000, 1000),
             Err(UtxoSelectionError::InsufficientFunds { .. })
         ));
     }

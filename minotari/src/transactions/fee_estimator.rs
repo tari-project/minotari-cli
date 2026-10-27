@@ -4,6 +4,7 @@ use tari_common_types::{tari_address::TariAddress, types::FixedHash};
 use tari_script::{TariScript, script};
 use tari_transaction_components::{
     fee::{Fee, recipient_output_features_and_scripts_size},
+    helpers::borsh::SerializedSize,
     tari_amount::MicroMinotari,
     transaction_components::{
         OutputFeatures,
@@ -16,7 +17,7 @@ use tari_transaction_components::{
 use crate::http::WalletHttpClient;
 use crate::{
     db::{self, AccountRow, SqlitePool},
-    transactions::{fund_locker::MIN_FEE_PER_GRAM, input_selector::InputSelector},
+    transactions::{fund_locker::MIN_FEE_PER_GRAM, input_selector::InputSelector, one_sided_transaction::Recipient},
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -113,7 +114,7 @@ impl FeeEstimator {
 
         let output_size = match estimated_output_size {
             Some(sz) => sz,
-            None => get_default_features_and_scripts_size()?,
+            None => estimated_output_size_for_send(0, num_outputs)?,
         };
 
         let results = [
@@ -140,22 +141,28 @@ impl FeeEstimator {
     /// [`TransactionSender::start_new_send_all_transaction`](crate::transactions::manager::TransactionSender::start_new_send_all_transaction)
     /// computes it.
     ///
-    /// `estimated_output_size` must be what the send will charge: use
-    /// [`estimated_output_size_for_payment_id`] with its payment id's length (`None`
-    /// means no payment id). Fails when the recipient's share would be dust.
+    /// The fee is exactly what the offline signer will charge, so only the
+    /// minimum change is left over. Fails when the recipient's share would be dust.
     pub fn estimate_fees_send_all(
         &self,
         account_name: &str,
+        address: &TariAddress,
+        payment_id: Option<&str>,
         fee_per_gram: MicroMinotari,
         confirmation_window: u64,
-        estimated_output_size: Option<usize>,
     ) -> Result<SendAllEstimate> {
         let conn = self.db_pool.get()?;
         let account: AccountRow = db::get_account_by_name(&conn, account_name)?
             .ok_or_else(|| anyhow!("Account with name '{}' not found", account_name))?;
 
+        let recipient = Recipient {
+            address: address.clone(),
+            amount: MicroMinotari::zero(),
+            payment_id: payment_id.map(str::to_string),
+        };
+        let (recipient_output_size, change_output_size) = one_sided_output_sizes(&[recipient])?;
         let input_selector = InputSelector::new(account.id, confirmation_window);
-        let selection = input_selector.select_all(&conn, fee_per_gram, estimated_output_size)?;
+        let selection = input_selector.select_all(&conn, fee_per_gram, recipient_output_size, change_output_size)?;
         let amount_after_fee =
             input_selector.send_all_amount(selection.total_value, selection.fee_with_change, fee_per_gram)?;
 
@@ -225,6 +232,16 @@ pub fn measure_output_size(features: &OutputFeatures, script: &TariScript, memo:
 /// account: a `PushPubKey` script and a `TransactionInfo` memo holding the recipient address,
 /// one sent-output hash and the caller's payment id, padded to a 130-byte floor.
 pub fn estimated_output_size_for_payment_id(payment_id_len: usize) -> Result<usize> {
+    estimated_output_size_for_send(payment_id_len, 1)
+}
+
+/// [`estimated_output_size_for_payment_id`] for a send to `num_recipients` recipients.
+///
+/// The builder lists one sent-output hash per recipient in the change memo when there are at
+/// most two, and none beyond that, so two recipients are measured with two hashes and any
+/// other count with one.
+pub fn estimated_output_size_for_send(payment_id_len: usize, num_recipients: usize) -> Result<usize> {
+    let hash_count = num_recipients.clamp(1, 2);
     // The script the builder derives for a recipient, and for its own change output.
     let script = script!(PushPubKey(Box::default())).map_err(|e| anyhow!("Failed to build the default script: {e}"))?;
 
@@ -237,7 +254,7 @@ pub fn estimated_output_size_for_payment_id(payment_id_len: usize) -> Result<usi
             MicroMinotari::zero(),
             true,
             TxType::PaymentToOther,
-            vec![FixedHash::zero()],
+            vec![FixedHash::zero(); hash_count],
             payment_id,
         )
     };
@@ -251,6 +268,52 @@ pub fn estimated_output_size_for_payment_id(payment_id_len: usize) -> Result<usi
         .map_err(|e| anyhow!("Failed to build the default change memo: {e}"))?;
 
     measure_output_size(&OutputFeatures::default(), &script, &memo)
+}
+
+/// The exact features-and-scripts sizes the transaction builder charges a one-sided send to
+/// `recipients`: the total of the recipients' own outputs, and the change output.
+///
+/// Each recipient output carries its own memo. The change memo names the first recipient,
+/// carries its payment id and, for up to two recipients, every sent-output hash; its size does
+/// not depend on any amount, so the sizes are known before the amounts are.
+pub fn one_sided_output_sizes(recipients: &[Recipient]) -> Result<(usize, usize)> {
+    let script = script!(PushPubKey(Box::default())).map_err(|e| anyhow!("Failed to build the default script: {e}"))?;
+    let mut recipients_size = 0usize;
+    for recipient in recipients {
+        let size = measure_output_size(&OutputFeatures::default(), &script, &recipient.memo()?)?;
+        recipients_size = recipients_size
+            .checked_add(size)
+            .ok_or_else(|| anyhow!("Total output size overflows"))?;
+    }
+
+    let first = recipients.first().ok_or_else(|| anyhow!("No recipients provided"))?;
+    let hash_count = if recipients.len() <= 2 { recipients.len() } else { 0 };
+    let change_memo = MemoField::new_transaction_info(
+        first.address.clone(),
+        MicroMinotari::zero(),
+        MicroMinotari::zero(),
+        true,
+        TxType::PaymentToOther,
+        vec![FixedHash::zero(); hash_count],
+        first
+            .payment_id
+            .as_deref()
+            .map(|s| s.as_bytes().to_vec())
+            .unwrap_or_default(),
+    )
+    .map_err(|e| anyhow!("Failed to build the change memo: {e}"))?;
+    // Measured as the builder measures change: no covenant.
+    let features_size = OutputFeatures::default()
+        .get_serialized_size()
+        .map_err(|e| anyhow!("Failed to measure the change output: {e}"))?;
+    let script_size = script
+        .get_serialized_size()
+        .map_err(|e| anyhow!("Failed to measure the change output: {e}"))?;
+    let change_size = features_size
+        .saturating_add(script_size)
+        .saturating_add(change_memo.get_size());
+    let change_size = TransactionWeight::latest().round_up_features_and_scripts_size(change_size);
+    Ok((recipients_size, change_size))
 }
 
 /// The per-output size to assume when even the payment id is unknown.
@@ -340,6 +403,27 @@ mod tests {
             estimated_output_size_for_payment_id(4096).unwrap(),
             estimated_output_size_for_payment_id(0).unwrap()
         );
+    }
+
+    /// The change memo lists a sent-output hash per recipient for up to two recipients, so the
+    /// per-output estimate must cover that change output, which one hash does not.
+    #[test]
+    fn the_estimate_covers_the_change_output_for_any_recipient_count() {
+        let recipient = Recipient {
+            address: TariAddress::default(),
+            amount: MicroMinotari(1_000),
+            payment_id: Some("invoice".to_string()),
+        };
+        for n in 1..=3 {
+            let recipients = vec![recipient.clone(); n];
+            let (_, change_size) = one_sided_output_sizes(&recipients).unwrap();
+            assert!(
+                estimated_output_size_for_send("invoice".len(), n).unwrap() >= change_size,
+                "{n} recipients"
+            );
+        }
+        let (_, two_recipient_change) = one_sided_output_sizes(&[recipient.clone(), recipient]).unwrap();
+        assert!(estimated_output_size_for_payment_id("invoice".len()).unwrap() < two_recipient_change);
     }
 
     fn test_estimator() -> (FeeEstimator, tempfile::TempDir) {

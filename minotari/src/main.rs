@@ -72,7 +72,7 @@ use minotari::{
     scan::{self, reorg::rollback_from_height},
     signing,
     transactions::{
-        fee_estimator::estimated_output_size_for_payment_id,
+        fee_estimator::{estimated_output_size_for_send, one_sided_output_sizes},
         fund_locker::FundLocker,
         idempotency::{IdempotencyBinding, IdempotencyOperation, RequestFingerprint},
         input_selector::InputSelector,
@@ -831,12 +831,13 @@ fn handle_create_unsigned_transaction(
     let fee_per_gram = MicroMinotari(5);
     // One size is charged for every output, so quote the largest memo in the batch rather than
     // the default: anything smaller reserves inputs that cannot pay the fee the builder lands on.
-    let estimated_output_size = Some(estimated_output_size_for_payment_id(
+    let estimated_output_size = Some(estimated_output_size_for_send(
         recipients
             .iter()
             .map(|r| r.payment_id.as_ref().map_or(0, String::len))
             .max()
             .unwrap_or(0),
+        num_outputs,
     )?);
 
     // Same binding the REST endpoint builds, so a key means the same thing
@@ -852,11 +853,13 @@ fn handle_create_unsigned_transaction(
     );
     let lock_amount = FundLocker::new();
     let locked_funds = if send_all {
+        let (recipient_output_size, change_output_size) = one_sided_output_sizes(&recipients)?;
         lock_amount.lock_all(
             &mut conn,
             account.id,
             fee_per_gram,
-            estimated_output_size,
+            recipient_output_size,
+            change_output_size,
             idempotency,
             seconds_to_lock,
             confirmation_window,

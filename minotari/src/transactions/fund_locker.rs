@@ -362,13 +362,16 @@ impl FundLocker {
         seconds_to_lock_utxos: u64,
         confirmation_window: u64,
     ) -> Result<LockFundsResult, anyhow::Error> {
-        Self::lock_amount_or_all(
+        let selection = Selection::Amount {
+            amount,
+            num_outputs,
+            estimated_output_size,
+        };
+        Self::lock_selection(
             conn,
             account_id,
-            Some(amount),
-            num_outputs,
+            selection,
             fee_per_gram,
-            estimated_output_size,
             idempotency,
             seconds_to_lock_utxos,
             confirmation_window,
@@ -380,50 +383,54 @@ impl FundLocker {
     /// The same as [`lock`](Self::lock), but selects with
     /// [`InputSelector::select_all`]; the recipient's amount is then
     /// [`InputSelector::send_all_amount`] of the result's `total_value` and
-    /// `fee_with_change`.
+    /// `fee_with_change`. The output sizes are the exact ones from
+    /// [`one_sided_output_sizes`](crate::transactions::fee_estimator::one_sided_output_sizes).
     #[allow(clippy::too_many_arguments)]
     pub fn lock_all(
         &self,
         conn: &mut Connection,
         account_id: i64,
         fee_per_gram: MicroMinotari,
-        estimated_output_size: Option<usize>,
+        recipient_output_size: usize,
+        change_output_size: usize,
         idempotency: IdempotencyBinding,
         seconds_to_lock_utxos: u64,
         confirmation_window: u64,
     ) -> Result<LockFundsResult, anyhow::Error> {
-        Self::lock_amount_or_all(
+        let selection = Selection::All {
+            recipient_output_size,
+            change_output_size,
+        };
+        Self::lock_selection(
             conn,
             account_id,
-            None,
-            1,
+            selection,
             fee_per_gram,
-            estimated_output_size,
             idempotency,
             seconds_to_lock_utxos,
             confirmation_window,
         )
     }
 
-    /// Locks for `amount`, or everything spendable when `amount` is `None`.
-    #[allow(clippy::too_many_arguments)]
-    fn lock_amount_or_all(
+    fn lock_selection(
         conn: &mut Connection,
         account_id: i64,
-        amount: Option<MicroMinotari>,
-        num_outputs: usize,
+        selection: Selection,
         fee_per_gram: MicroMinotari,
-        estimated_output_size: Option<usize>,
         idempotency: IdempotencyBinding,
         seconds_to_lock_utxos: u64,
         confirmation_window: u64,
     ) -> Result<LockFundsResult, anyhow::Error> {
+        let amount = match selection {
+            Selection::Amount { amount, .. } => amount,
+            Selection::All { .. } => MicroMinotari::zero(),
+        };
         info!(
             target: "audit",
             account_id = account_id,
             operation = idempotency.operation().as_str(),
-            amount = &*mask_amount(amount.unwrap_or_default()),
-            send_all = amount.is_none();
+            amount = &*mask_amount(amount),
+            send_all = matches!(selection, Selection::All { .. });
             "Locking funds"
         );
         // Reject an out-of-range lock duration before touching the database or
@@ -489,15 +496,22 @@ impl FundLocker {
         }
 
         let input_selector = InputSelector::new(account_id, confirmation_window);
-        let utxo_selection = match amount {
-            Some(amount) => input_selector.fetch_unspent_outputs(
+        let utxo_selection = match selection {
+            Selection::Amount {
+                amount,
+                num_outputs,
+                estimated_output_size,
+            } => input_selector.fetch_unspent_outputs(
                 &transaction,
                 amount,
                 num_outputs,
                 fee_per_gram,
                 estimated_output_size,
             )?,
-            None => input_selector.select_all(&transaction, fee_per_gram, estimated_output_size)?,
+            Selection::All {
+                recipient_output_size,
+                change_output_size,
+            } => input_selector.select_all(&transaction, fee_per_gram, recipient_output_size, change_output_size)?,
         };
 
         // Already validated above; `lock_expiry_at` is total, so a surprising
@@ -545,6 +559,20 @@ impl FundLocker {
             fee_with_change: utxo_selection.fee_with_change,
         })
     }
+}
+
+/// What [`FundLocker`] selects: enough for an amount, or everything spendable.
+#[derive(Debug, Clone, Copy)]
+enum Selection {
+    Amount {
+        amount: MicroMinotari,
+        num_outputs: usize,
+        estimated_output_size: Option<usize>,
+    },
+    All {
+        recipient_output_size: usize,
+        change_output_size: usize,
+    },
 }
 
 #[cfg(test)]

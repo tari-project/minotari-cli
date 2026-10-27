@@ -18,6 +18,7 @@ use crate::{
     db::get_account_by_name,
     log::mask_amount,
     transactions::{
+        fee_estimator::{estimated_output_size_for_send, one_sided_output_sizes},
         fund_locker::{FundLocker, MAX_SECONDS_TO_LOCK_UTXOS, validate_fee_per_gram, validate_seconds_to_lock},
         idempotency::{IdempotencyBinding, IdempotencyOperation, RequestFingerprint},
         input_selector::InputSelector,
@@ -488,7 +489,16 @@ pub async fn api_create_unsigned_transaction(
         let amount = recipients.iter().map(|r| r.amount).sum();
         let num_outputs = recipients.len();
         let fee_per_gram = DEFAULT_FEE_PER_GRAM;
-        let estimated_output_size = None;
+        // Charge for the memos this send will carry; see `estimated_output_size_for_send`.
+        let largest_payment_id = recipients
+            .iter()
+            .map(|r| r.payment_id.as_ref().map_or(0, String::len))
+            .max()
+            .unwrap_or(0);
+        let estimated_output_size = Some(
+            estimated_output_size_for_send(largest_payment_id, num_outputs)
+                .map_err(|e| ApiError::InternalServerError(e.to_string()))?,
+        );
 
         let confirmation_window = resolve_confirmation_window(body.confirmation_window, default_confirmations)?;
         // Bind the key to the recipients this request names. A replay carrying
@@ -505,11 +515,14 @@ pub async fn api_create_unsigned_transaction(
         );
         let lock_amount = FundLocker::new();
         let locked_funds = if send_all {
+            let (recipient_output_size, change_output_size) =
+                one_sided_output_sizes(&recipients).map_err(|e| ApiError::BadRequest(e.to_string()))?;
             lock_amount.lock_all(
                 &mut conn,
                 account.id,
                 fee_per_gram,
-                estimated_output_size,
+                recipient_output_size,
+                change_output_size,
                 idempotency,
                 seconds_to_lock_utxos,
                 confirmation_window,

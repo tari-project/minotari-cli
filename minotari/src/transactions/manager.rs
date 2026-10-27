@@ -97,7 +97,7 @@ use tari_transaction_components::{
         models::{PrepareOneSidedTransactionForSigningResult, SignedOneSidedTransactionResult},
         prepare_one_sided_transaction_for_signing,
     },
-    transaction_components::{MemoField, OutputFeatures, WalletOutput, memo_field::TxType},
+    transaction_components::{OutputFeatures, WalletOutput},
 };
 use tari_utilities::ByteArray;
 
@@ -114,7 +114,7 @@ use crate::{
             DisplayedTransaction, DisplayedTransactionBuilder, TransactionDirection, TransactionDisplayStatus,
             TransactionInput, TransactionSource,
         },
-        fee_estimator::estimated_output_size_for_payment_id,
+        fee_estimator::{estimated_output_size_for_send, one_sided_output_sizes},
         fund_locker::{check_replay_allowed, lock_expiry_at, validate_fee_per_gram},
         idempotency::{IdempotencyBinding, IdempotencyConflict, IdempotencyOperation, RequestFingerprint},
         input_selector::{InputSelector, UtxoSelection, map_change_required_error},
@@ -416,12 +416,19 @@ impl TransactionSender {
         connection: &Connection,
         processed_transaction: &ProcessedTransaction,
     ) -> Result<UtxoSelection, anyhow::Error> {
-        let estimated_output_size = Some(estimated_output_size_for_recipients(&processed_transaction.recipients)?);
         let input_selector = InputSelector::new(self.account.id, self.confirmation_window);
         if processed_transaction.send_all {
-            return Ok(input_selector.select_all(connection, self.fee_per_gram, estimated_output_size)?);
+            let (recipient_output_size, change_output_size) =
+                one_sided_output_sizes(&processed_transaction.recipients)?;
+            return Ok(input_selector.select_all(
+                connection,
+                self.fee_per_gram,
+                recipient_output_size,
+                change_output_size,
+            )?);
         }
 
+        let estimated_output_size = Some(estimated_output_size_for_recipients(&processed_transaction.recipients)?);
         let amount = total_recipient_amount(&processed_transaction.recipients)?;
         let num_outputs = processed_transaction.recipients.len();
         let utxo_selection = input_selector.fetch_unspent_outputs(
@@ -708,9 +715,14 @@ impl TransactionSender {
                         .ok_or_else(|| anyhow!("Total value of selected inputs overflows"))?;
                 }
                 let input_selector = InputSelector::new(self.account.id, self.confirmation_window);
-                let output_size = estimated_output_size_for_recipients(&processed_transaction.recipients)?;
-                let (_, fee_with_change) =
-                    input_selector.send_all_fees(utxo_selection.len(), self.fee_per_gram, output_size)?;
+                let (recipient_output_size, change_output_size) =
+                    one_sided_output_sizes(&processed_transaction.recipients)?;
+                let (_, fee_with_change) = input_selector.send_all_fees(
+                    utxo_selection.len(),
+                    self.fee_per_gram,
+                    recipient_output_size,
+                    change_output_size,
+                )?;
                 let amount = input_selector.send_all_amount(total_value, fee_with_change, self.fee_per_gram)?;
                 for recipient in &mut processed_transaction.recipients {
                     recipient.amount = amount;
@@ -725,22 +737,19 @@ impl TransactionSender {
 
             let mut payment_recipients = Vec::with_capacity(processed_transaction.recipients.len());
             for recipient in &processed_transaction.recipients {
-                let payment_id = match &recipient.payment_id {
-                    Some(s) => MemoField::new_open_from_string(s, TxType::PaymentToOther).map_err(|e| anyhow!(e))?,
-                    None => MemoField::new_empty(),
-                };
                 payment_recipients.push(PaymentRecipient {
                     amount: recipient.amount,
                     output_features: OutputFeatures::default(),
                     address: recipient.address.clone(),
-                    payment_id: recipient_memo(payment_id, &sender_address, &recipient.address)?,
+                    payment_id: recipient_memo(recipient.memo()?, &sender_address, &recipient.address)?,
                 });
             }
             // The transaction-level memo is the first recipient's payment id, without the sender address.
-            let main_payment_id = match recipients.first().and_then(|r| r.payment_id.as_ref()) {
-                Some(s) => MemoField::new_open_from_string(s, TxType::PaymentToOther).map_err(|e| anyhow!(e))?,
-                None => MemoField::new_empty(),
-            };
+            let main_payment_id = processed_transaction
+                .recipients
+                .first()
+                .ok_or_else(|| anyhow!("No recipients provided"))?
+                .memo()?;
 
             let res = prepare_one_sided_transaction_for_signing(
                 &key_manager,
@@ -1139,12 +1148,13 @@ impl TransactionSender {
 /// at build time with the funds already locked. One size is charged for every output,
 /// so quote the largest memo.
 fn estimated_output_size_for_recipients(recipients: &[Recipient]) -> Result<usize, anyhow::Error> {
-    estimated_output_size_for_payment_id(
+    estimated_output_size_for_send(
         recipients
             .iter()
             .map(|r| r.payment_id.as_ref().map_or(0, String::len))
             .max()
             .unwrap_or(0),
+        recipients.len(),
     )
 }
 
@@ -1347,11 +1357,15 @@ mod tests {
     };
     use tari_script::{ExecutionStack, TariScript};
     use tari_transaction_components::{
+        TransactionBuilder,
+        consensus::ConsensusConstantsBuilder,
         key_manager::{
-            TariKeyId,
+            KeyManager, TariKeyId,
             wallet_types::{SeedWordsWallet, WalletType},
         },
-        transaction_components::{EncryptedData, TransactionOutputVersion, covenants::Covenant},
+        transaction_components::{
+            EncryptedData, MemoField, TransactionOutputVersion, covenants::Covenant, memo_field::TxType,
+        },
     };
     use tempfile::tempdir;
 
@@ -2545,6 +2559,46 @@ mod tests {
         .expect("address")
     }
 
+    /// The fee and change the offline signer settles on for `prepared`: it
+    /// rebuilds the transaction from the payload and decides them as below.
+    fn signer_fee_and_change(
+        prepared: &PrepareOneSidedTransactionForSigningResult,
+    ) -> (MicroMinotari, Option<MicroMinotari>) {
+        let consensus_constants = ConsensusConstantsBuilder::new(Network::LocalNet).build();
+        let key_manager = KeyManager::new_random().expect("key manager");
+        let mut builder =
+            TransactionBuilder::new(consensus_constants, key_manager, Network::LocalNet).expect("builder");
+        builder.with_fee_per_gram(prepared.info.fee_per_gram);
+        // As the signer does.
+        builder.with_change_required();
+        let mut total_in = MicroMinotari::zero();
+        for input in &prepared.info.inputs {
+            total_in += input.value();
+            builder.with_input(input.clone()).expect("input");
+        }
+        let mut sent = MicroMinotari::zero();
+        for recipient in &prepared.info.recipients {
+            sent += recipient.amount;
+            builder
+                .add_stealth_recipient(
+                    recipient.address.clone(),
+                    recipient.amount,
+                    recipient.output_features.clone(),
+                    recipient.payment_id.clone(),
+                )
+                .expect("recipient");
+        }
+        builder.with_memo(prepared.info.payment_id.clone());
+        let fee_without_change = builder.get_fee_estimate_without_change().expect("fee");
+        let change_fee = builder.get_change_output_fee(&[]).expect("change fee");
+        let remainder = total_in - sent - fee_without_change;
+        if remainder > change_fee {
+            (fee_without_change + change_fee, Some(remainder - change_fee))
+        } else {
+            (fee_without_change + remainder, None)
+        }
+    }
+
     fn recipients(n: u64) -> Vec<Recipient> {
         (1..=n)
             .map(|i| Recipient {
@@ -2580,7 +2634,7 @@ mod tests {
                     MicroMinotari(wanted.iter().map(|r| r.amount.as_u64()).sum()),
                     wanted.len(),
                     100,
-                    Some(estimated_output_size_for_payment_id("invoice-1".len()).expect("size")),
+                    Some(estimated_output_size_for_send("invoice-1".len(), wanted.len()).expect("size")),
                 )
                 .await
                 .expect("estimate")
@@ -2602,6 +2656,7 @@ mod tests {
             assert_eq!(prepared.info.payment_id, prepared.info.recipients[0].payment_id);
             assert_eq!(sender.processed_transactions.recipients.len(), wanted.len());
 
+            // The reservation is sized exactly as `estimate_fees` quotes it.
             let reserved_fee: i64 = pool
                 .get()
                 .expect("conn")
@@ -2612,6 +2667,29 @@ mod tests {
                 MicroMinotari(reserved_fee as u64),
                 "{n} recipients"
             );
+
+            // That quote charges every output the largest (change) shape, so it may only exceed
+            // what the signer charges; the excess stays in the change. The exact sizes give
+            // the signer's fee to the µT.
+            let (signer_fee, change) = signer_fee_and_change(&prepared);
+            assert!(change.is_some(), "{n} recipients");
+            assert!(
+                signer_fee <= estimate.estimated_fee,
+                "{n} recipients: {signer_fee} > {}",
+                estimate.estimated_fee
+            );
+            let (recipients_size, change_size) = one_sided_output_sizes(&wanted).expect("sizes");
+            let exact_fee = tari_transaction_components::fee::Fee::new(
+                tari_transaction_components::weight::TransactionWeight::latest(),
+            )
+            .calculate(
+                sender.fee_per_gram,
+                1,
+                prepared.info.inputs.len(),
+                wanted.len() + 1,
+                recipients_size + change_size,
+            );
+            assert_eq!(exact_fee, signer_fee, "{n} recipients");
             assert_eq!(
                 estimate.input_count as i64,
                 locked_output_count(&pool),
@@ -2687,12 +2765,7 @@ mod tests {
         let payment_id = "sweep".to_string();
 
         let estimate = crate::transactions::fee_estimator::FeeEstimator::new(pool.clone(), "http://127.0.0.1:1".into())
-            .estimate_fees_send_all(
-                "test",
-                sender.fee_per_gram,
-                100,
-                Some(estimated_output_size_for_payment_id(payment_id.len()).expect("size")),
-            )
+            .estimate_fees_send_all("test", &other_address(1), Some(&payment_id), sender.fee_per_gram, 100)
             .expect("estimate");
         assert_eq!(estimate.input_count, 3);
 
@@ -2704,18 +2777,16 @@ mod tests {
         let paid = &prepared.info.recipients[0];
         assert_eq!(paid.address, other_address(1));
         assert_eq!(paid.amount, estimate.amount_after_fee);
-        let reserved_fee: i64 = pool
-            .get()
-            .expect("conn")
-            .query_row("SELECT fee_with_change FROM pending_transactions", [], |row| row.get(0))
-            .expect("reserved fee");
-        assert_eq!(MicroMinotari(reserved_fee as u64), estimate.fee);
+        // The signer charges exactly the quoted fee, so only the minimum change comes back.
+        let min_change = InputSelector::new(sender.account.id, 100).min_change(sender.fee_per_gram);
+        let (signer_fee, change) = signer_fee_and_change(&prepared);
+        assert_eq!(signer_fee, estimate.fee);
+        assert_eq!(change, Some(min_change));
+        assert_eq!(paid.amount, MicroMinotari(6_000_000) - estimate.fee - min_change);
 
-        // Nothing spendable is left; only the minimum change comes back.
+        // Nothing spendable is left.
         assert_eq!(locked_output_count(&pool), 3);
         assert_eq!(count(&pool, "SELECT COUNT(*) FROM outputs WHERE status = 'UNSPENT'"), 0);
-        let min_change = InputSelector::new(sender.account.id, 100).min_change(sender.fee_per_gram);
-        assert_eq!(paid.amount, MicroMinotari(6_000_000) - estimate.fee - min_change);
 
         // A retry replays onto the same reservation and pays the same amount.
         let replay = sender
@@ -2756,7 +2827,7 @@ mod tests {
             "got: {err}"
         );
         crate::transactions::fee_estimator::FeeEstimator::new(pool.clone(), "http://127.0.0.1:1".into())
-            .estimate_fees_send_all("test", sender.fee_per_gram, 100, None)
+            .estimate_fees_send_all("test", &other_address(1), None, sender.fee_per_gram, 100)
             .expect_err("the estimate refuses it too");
         assert_eq!(pending_transaction_count(&pool), 0);
         assert_eq!(locked_output_count(&pool), 0);
