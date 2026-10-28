@@ -56,8 +56,11 @@
 //!    `ReorgDetected`: blocks from `reorg_from_height` were rolled back, the
 //!    `cancelled_transaction_ids` and `reorganized_displayed_transactions` are
 //!    affected, and scanning resumes at `new_height`, mid-pass included. A
-//!    reorg below every stored block resumes at the account's birthday. A
-//!    reorg found when the scan starts is reported the same way.
+//!    reorg below every stored block resumes at the account's birthday; if
+//!    looking up the birthday fails, `new_height` is 0, meaning the scan stopped
+//!    (with that error) before choosing a resume height, and the next run
+//!    resumes from the birthday. A reorg found when the scan starts is reported
+//!    the same way.
 //!
 //! `Started` is not sent. Cancelling the token stops the scan without waiting
 //! on the node: the startup reorg checks and birthday lookups, block
