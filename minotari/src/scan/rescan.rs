@@ -2,13 +2,15 @@
 
 use std::path::PathBuf;
 
+use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
 use crate::{
     WalletEvent,
     config::defaults::WalletConfig,
     db::{self, WalletDbError, init_db},
-    scan::{ScanError, ScanMode, Scanner, reorg::rollback_from_height},
+    scan::{ProcessingEvent, ScanError, ScanMode, Scanner, reorg::rollback_from_height},
     webhooks::WebhookTriggerConfig,
 };
 
@@ -16,14 +18,51 @@ use crate::{
 ///
 /// Every block, output and input the account recorded at or above `from_height` is rolled
 /// back first, so the scan finds them again. With [`ScanMode::Continuous`] the scan keeps
-/// following the chain once it has caught up.
+/// following the chain once it has caught up, until `cancel_token` is cancelled; use
+/// [`rescan_with_events`] to see its progress as it happens.
 pub async fn rescan(
     password: &str,
     config: &WalletConfig,
     account_name: &str,
     from_height: u64,
     mode: ScanMode,
+    cancel_token: Option<CancellationToken>,
 ) -> Result<(Vec<WalletEvent>, bool), ScanError> {
+    let scanner = rollback_and_build_scanner(password, config, account_name, from_height, mode, cancel_token).await?;
+    scanner.run().await
+}
+
+/// Like [`rescan`], but streams the scan's events as they happen.
+///
+/// The rollback runs before this returns. Drive the returned future to scan, and read the
+/// receiver alongside it.
+#[allow(clippy::type_complexity)]
+pub async fn rescan_with_events(
+    password: &str,
+    config: &WalletConfig,
+    account_name: &str,
+    from_height: u64,
+    mode: ScanMode,
+    cancel_token: Option<CancellationToken>,
+) -> Result<
+    (
+        mpsc::UnboundedReceiver<ProcessingEvent>,
+        impl Future<Output = Result<(Vec<WalletEvent>, bool), ScanError>> + use<>,
+    ),
+    ScanError,
+> {
+    let scanner = rollback_and_build_scanner(password, config, account_name, from_height, mode, cancel_token).await?;
+    Ok(scanner.run_with_events())
+}
+
+async fn rollback_and_build_scanner(
+    password: &str,
+    config: &WalletConfig,
+    account_name: &str,
+    from_height: u64,
+    mode: ScanMode,
+    cancel_token: Option<CancellationToken>,
+) -> Result<Scanner, ScanError> {
     let webhook_config = config.webhook.url.clone().map(|url| WebhookTriggerConfig {
         url,
         send_only_event_types: config.webhook.send_only_event_types.clone(),
@@ -50,7 +89,10 @@ pub async fn rescan(
     if let Some(cfg) = webhook_config {
         scanner = scanner.webhook_config(cfg);
     }
-    scanner.run().await
+    if let Some(token) = cancel_token {
+        scanner = scanner.cancel_token(token);
+    }
+    Ok(scanner)
 }
 
 /// Rolls `account_name` back so its next scan starts at `from_height`.
@@ -91,6 +133,7 @@ pub async fn rollback_account_to_height(
 mod tests {
     use super::*;
     use crate::db::{create_account, get_account_by_name};
+    use crate::scan::ScanStatusEvent;
     use std::time::Duration;
     use tari_common_types::seeds::cipher_seed::CipherSeed;
     use tari_script::script;
@@ -284,12 +327,12 @@ mod tests {
     #[tokio::test]
     async fn outputs_above_the_rescan_height_are_rolled_back_and_found_again() {
         let setup = setup().await;
-        rescan(PASSWORD, &setup.config, "default", 0, full_rescan())
+        rescan(PASSWORD, &setup.config, "default", 0, full_rescan(), None)
             .await
             .expect("first scan");
         assert_eq!(output_rows(&setup.config, &setup.output_hash), (1, 0));
 
-        rescan(PASSWORD, &setup.config, "default", 10, full_rescan())
+        rescan(PASSWORD, &setup.config, "default", 10, full_rescan(), None)
             .await
             .expect("rescan");
         assert_eq!(
@@ -299,52 +342,74 @@ mod tests {
         );
 
         // Rescanning above the output leaves it alone.
-        rescan(PASSWORD, &setup.config, "default", OUTPUT_HEIGHT + 1, full_rescan())
-            .await
-            .expect("rescan above the output");
+        rescan(
+            PASSWORD,
+            &setup.config,
+            "default",
+            OUTPUT_HEIGHT + 1,
+            full_rescan(),
+            None,
+        )
+        .await
+        .expect("rescan above the output");
         assert_eq!(output_rows(&setup.config, &setup.output_hash), (1, 1));
     }
 
     #[tokio::test]
     async fn a_wrong_password_rolls_nothing_back() {
         let setup = setup().await;
-        rescan(PASSWORD, &setup.config, "default", 0, full_rescan())
+        rescan(PASSWORD, &setup.config, "default", 0, full_rescan(), None)
             .await
             .expect("first scan");
 
-        rescan("wrong", &setup.config, "default", 10, full_rescan())
+        rescan("wrong", &setup.config, "default", 10, full_rescan(), None)
             .await
             .expect_err("wrong password");
         assert_eq!(output_rows(&setup.config, &setup.output_hash), (1, 0));
     }
 
     #[tokio::test]
-    async fn a_continuous_rescan_catches_up_and_keeps_running() {
+    async fn a_continuous_rescan_streams_events_and_stops_on_its_cancel_token() {
         let setup = setup().await;
-        let config = setup.config.clone();
-        let scan = tokio::spawn(async move {
-            rescan(
-                PASSWORD,
-                &config,
-                "default",
-                0,
-                ScanMode::Continuous {
-                    poll_interval: Duration::from_millis(100),
-                },
-            )
-            .await
-        });
+        let cancel_token = CancellationToken::new();
+        let (mut events, scan) = rescan_with_events(
+            PASSWORD,
+            &setup.config,
+            "default",
+            0,
+            ScanMode::Continuous {
+                poll_interval: Duration::from_millis(100),
+            },
+            Some(cancel_token.clone()),
+        )
+        .await
+        .expect("rollback");
+        let scan = tokio::spawn(scan);
 
-        let mut found = false;
-        for _ in 0..100 {
-            if output_rows(&setup.config, &setup.output_hash) == (1, 0) {
-                found = true;
-                break;
+        // The output is reported as found, then the caught-up scan waits for the next poll.
+        let mut output_found = false;
+        while let Some(event) = tokio::time::timeout(Duration::from_secs(10), events.recv())
+            .await
+            .expect("an event within 10 s")
+        {
+            match event {
+                ProcessingEvent::BlockProcessed(block) if !block.outputs_detected.is_empty() => {
+                    assert_eq!(block.height, OUTPUT_HEIGHT);
+                    output_found = true;
+                },
+                ProcessingEvent::ScanStatus(ScanStatusEvent::Waiting { .. }) => break,
+                _ => {},
             }
-            tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        assert!(found, "the continuous rescan finds the output");
+        assert!(output_found, "the rescan streams the found output");
+        assert_eq!(output_rows(&setup.config, &setup.output_hash), (1, 0));
         assert!(!scan.is_finished(), "a continuous rescan keeps following the chain");
-        scan.abort();
+
+        cancel_token.cancel();
+        tokio::time::timeout(Duration::from_secs(10), scan)
+            .await
+            .expect("the scan stops once cancelled")
+            .expect("task joins")
+            .expect("a cancelled scan ends cleanly");
     }
 }

@@ -102,7 +102,7 @@ pub use config::DEFAULT_FAST_SYNC_SAFETY_BUFFER;
 pub use config::ScanMode;
 pub use config::ScanRetryConfig;
 pub use config::ScanTimeoutConfig;
-pub use rescan::{rescan, rollback_account_to_height};
+pub use rescan::{rescan, rescan_with_events, rollback_account_to_height};
 pub use types::ScanError;
 
 pub use block_processor::MemoInfo;

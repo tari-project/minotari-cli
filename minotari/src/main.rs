@@ -362,6 +362,7 @@ async fn main() -> Result<(), anyhow::Error> {
                 &account_name,
                 rescan_from_height,
                 scan::ScanMode::Partial { max_blocks: u64::MAX },
+                None,
             )
             .await?;
             info!(event_count = events.len(); "Re-scan complete");

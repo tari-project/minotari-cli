@@ -44,8 +44,10 @@ pub fn birthday_from_time(epoch_secs: u64) -> u16 {
 
 /// The account birthday (days since the birthday genesis) for a wallet whose first block is `height`.
 ///
-/// The block time is estimated offline at [`TARGET_BLOCK_TIME_SECS`] per block. Real blocks run
-/// slightly slower, so the birthday errs early and the scan never starts after `height`.
+/// The block time is estimated offline at [`TARGET_BLOCK_TIME_SECS`] per block. Real blocks have
+/// mostly run slower, which makes the birthday early, but early mainnet blocks ran slightly
+/// faster, so it can land up to about a day late. The scanner starts a couple of days before
+/// the birthday, which absorbs that.
 pub fn birthday_from_height(network: Network, height: u64) -> u16 {
     let estimated_time = genesis_timestamp(network).saturating_add(height.saturating_mul(TARGET_BLOCK_TIME_SECS));
     birthday_from_time(estimated_time)
@@ -95,7 +97,7 @@ mod tests {
     }
 
     #[test]
-    fn birthday_from_height_never_falls_after_the_blocks_real_date() {
+    fn birthday_from_height_is_not_after_the_real_date_of_known_mainnet_blocks() {
         assert_eq!(
             birthday_from_height(Network::MainNet, 0),
             birthday_from_time(genesis_timestamp(Network::MainNet))
