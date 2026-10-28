@@ -118,6 +118,10 @@ pub fn init_with_spend_and_view_keys(
     if is_identity_public_key(&wallet.get_public_view_key()) || is_identity_public_key(&wallet.get_public_spend_key()) {
         return Err(anyhow::anyhow!("A private key of zero is not a usable wallet key"));
     }
+    // With equal keys, whoever holds the view key can also spend.
+    if wallet.get_public_view_key() == wallet.get_public_spend_key() {
+        return Err(anyhow::anyhow!("The view key and the spend key must differ"));
+    }
     let address = TariAddress::new_dual_address(
         wallet.get_public_view_key(),
         wallet.get_public_spend_key(),
@@ -289,13 +293,18 @@ mod tests {
     }
 
     #[test]
-    fn a_zero_private_key_is_refused() {
+    fn a_zero_or_repeated_private_key_is_refused() {
         let temp = tempfile::tempdir().unwrap();
         let database_file = temp.path().join("keys.db");
         let (view_key, spend_key) = keys_of(&CipherSeed::random());
         let zero = "00".repeat(32);
 
-        for (name, view, spend) in [("zero-view", &zero, &spend_key), ("zero-spend", &view_key, &zero)] {
+        let cases = [
+            ("zero-view", &zero, &spend_key),
+            ("zero-spend", &view_key, &zero),
+            ("same-keys", &spend_key, &spend_key),
+        ];
+        for (name, view, spend) in cases {
             let result = init_with_spend_and_view_keys(
                 view,
                 spend,

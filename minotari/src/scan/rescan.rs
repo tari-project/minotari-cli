@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 
+use log::info;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
@@ -140,6 +141,12 @@ pub async fn rollback_account_to_height(
             .ok_or_else(|| WalletDbError::InvalidInput(format!("Account not found: {}", account_name)))?;
         account.decrypt_wallet_type(&password)?;
 
+        info!(
+            target: "audit",
+            account = &*account_name,
+            from_height = from_height;
+            "Rolling account back for a rescan"
+        );
         let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         rollback_from_height(&tx, account.id, from_height, webhook_config)
             .map_err(|e| WalletDbError::Unexpected(format!("Rollback failed: {}", e)))?;

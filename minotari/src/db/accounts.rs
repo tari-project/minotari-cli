@@ -514,6 +514,8 @@ pub fn update_account_name(conn: &Connection, current_name: &str, new_name: &str
 /// A wrong `old_password` returns [`WalletDbError::DecryptionFailed`] and writes nothing.
 ///
 /// Copies or backups of the database made before the change still open with the old passphrase.
+/// Any daemon, scanner or other process using the old passphrase on this database must be
+/// stopped and restarted with the new one, or its decrypts will fail.
 pub fn change_passphrase(
     conn: &mut Connection,
     account_name: &str,
