@@ -99,6 +99,7 @@ pub fn init_with_view_key(
 /// [`crate::utils::height`] to convert a height or date.
 ///
 /// Returns the account's one-sided address on `network`.
+#[allow(clippy::too_many_arguments)]
 pub fn init_with_spend_and_view_keys(
     view_private_key: &str,
     spend_private_key: &str,

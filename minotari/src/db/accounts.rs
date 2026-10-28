@@ -526,9 +526,21 @@ pub fn change_passphrase(
         "DB: Changing account passphrase"
     );
 
-    // Overwrite the freed pages that held the old ciphertext instead of leaving them in the file.
-    conn.pragma_update(None, "secure_delete", true)?;
+    // `secure_delete` is turned on for the rewrite only; put the connection back as it was.
+    let previous_secure_delete: i64 = conn.pragma_query_value(None, "secure_delete", |row| row.get(0))?;
+    let result = rewrite_encrypted_wallet(conn, account_name, old_password, new_password);
+    if let Err(e) = conn.pragma_update(None, "secure_delete", previous_secure_delete) {
+        warn!(error:% = e; "DB: Failed to restore secure_delete after passphrase change");
+    }
+    result
+}
 
+fn rewrite_encrypted_wallet(
+    conn: &mut Connection,
+    account_name: &str,
+    old_password: &str,
+    new_password: &str,
+) -> WalletDbResult<()> {
     // The encrypted wallet is the only field `encrypt_data` writes. Read and rewrite it under
     // the write lock so a concurrent change cannot be lost.
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -543,6 +555,8 @@ pub fn change_passphrase(
     let encrypted_data = encrypt_data(&wallet_json, new_password)
         .map_err(|e| WalletDbError::Unexpected(format!("Encryption failed: {}", e)))?;
 
+    // Overwrite the freed pages that held the old ciphertext instead of leaving them in the file.
+    tx.pragma_update(None, "secure_delete", true)?;
     tx.execute(
         "UPDATE accounts SET encrypted_wallet = :enc_wallet, cipher_nonce = :nonce, salt = :salt WHERE id = :id",
         named_params! {
@@ -682,6 +696,8 @@ mod tests {
         let address = before.get_address(Network::LocalNet, "password").unwrap();
 
         change_passphrase(&mut conn, "main", "password", "new password").expect("passphrase changes");
+        let secure_delete: i64 = conn.pragma_query_value(None, "secure_delete", |r| r.get(0)).unwrap();
+        assert_eq!(secure_delete, 0, "secure_delete is restored after the change");
 
         let after = get_account_by_name(&conn, "main").unwrap().unwrap();
         assert_ne!(after.salt, before.salt, "a fresh salt is drawn");
@@ -706,6 +722,8 @@ mod tests {
 
         let err = change_passphrase(&mut conn, "main", "wrong", "new password").expect_err("wrong old password");
         assert!(matches!(err, WalletDbError::DecryptionFailed(_)), "got: {err}");
+        let secure_delete: i64 = conn.pragma_query_value(None, "secure_delete", |r| r.get(0)).unwrap();
+        assert_eq!(secure_delete, 0, "the connection's secure_delete is left as it was");
 
         let after = get_account_by_name(&conn, "main").unwrap().unwrap();
         assert_eq!(after.encrypted_wallet, before.encrypted_wallet);
