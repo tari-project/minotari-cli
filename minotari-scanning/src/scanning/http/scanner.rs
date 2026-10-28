@@ -643,6 +643,8 @@ where
                 Ok(tip) => tip,
                 Err(e) => {
                     error!("Failed to get tip info: {}", e);
+                    // An error, not an empty result, so the consumer does not take it as caught up.
+                    let _unused = send_scan_result.send(Err(e)).await;
                     return;
                 },
             };

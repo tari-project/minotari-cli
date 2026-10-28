@@ -56,26 +56,27 @@
 //!    `ReorgDetected`: blocks from `reorg_from_height` were rolled back, the
 //!    `cancelled_transaction_ids` and `reorganized_displayed_transactions` are
 //!    affected, and scanning resumes at `new_height`, mid-pass included. A
-//!    reorg below every stored block resumes at the account's birthday; if
-//!    looking up the birthday fails, `new_height` is 0, meaning the scan stopped
-//!    (with that error) before choosing a resume height, and the next run
-//!    resumes from the birthday. A reorg found when the scan starts is reported
-//!    the same way.
+//!    reorg below every stored block resumes at the account's birthday. If the
+//!    birthday lookup fails, returns a height above the chain tip, or is
+//!    cancelled, `new_height` is 0: the scan stopped (with that error, or
+//!    cancelled) before choosing a resume height, and the next run resumes from
+//!    the birthday. A reorg found when the scan starts is reported the same
+//!    way. A node that keeps reporting reorgs without letting the scan get
+//!    further fails the scan with `ScanError::Intermittent`.
 //!
 //! `Started` is not sent. Cancelling the token stops the scan without waiting
 //! on the node: the startup reorg checks and birthday lookups, block
 //! downloads, tip reads, reorg checks and the poll sleep are all interrupted.
 //! It sends `Paused { reason: Cancelled }` for every account prepared so far
 //! (none if it is cancelled during startup) and returns `more_blocks == true`.
-//! Two waits are not interrupted, so their results are always reported: the
-//! end-of-pass transaction monitor (a cancel that arrives first skips it), and
-//! the birthday lookup after a reorg that rolled back every stored block. Their
-//! node requests are bounded by the HTTP client's timeout and retries. Blocks are only written after a whole
-//! batch arrives, and a reorg rollback is a single database transaction, so a
-//! cancelled scan leaves the database at the last fully processed batch. The
-//! scanner's background download tasks stop as soon as the scan drops its
-//! stream. Dropping the scan future stops it the same way, without the
-//! `Paused` event.
+//! The one wait that is not interrupted is the end-of-pass transaction monitor,
+//! so its updates are always reported; a cancel that arrives first skips it,
+//! and its node requests are bounded by the HTTP client's timeout and retries.
+//! Blocks are only written after a whole batch arrives, and a reorg rollback is
+//! a single database transaction, so a cancelled scan leaves the database at
+//! the last fully processed batch. The scanner's background download tasks
+//! stop as soon as the scan drops its stream. Dropping the scan future stops it
+//! the same way, without the `Paused` event.
 //!
 //! # Example Usage
 //!
