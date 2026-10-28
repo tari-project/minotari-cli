@@ -116,7 +116,8 @@ pub enum UtxoSelectionError {
     TooManyInputs {
         /// How many inputs the selection needed.
         selected: usize,
-        /// How many fit, by count and weight; the byte budget may allow fewer.
+        /// How many of them fit: the fewer of the count and weight cap and what
+        /// the relay byte budget holds.
         limit: usize,
     },
 
@@ -706,27 +707,24 @@ fn take_inputs_within_limits(
 }
 
 /// Fails with [`UtxoSelectionError::TooManyInputs`] when `utxos` are more than
-/// `max_inputs` or their hydrated size is over `byte_budget`.
+/// `max_inputs` or their hydrated size is over `byte_budget`, naming how many
+/// of them do fit.
 fn check_input_limits(
     utxos: &[DbWalletOutput],
     max_inputs: usize,
     byte_budget: usize,
 ) -> Result<(), UtxoSelectionError> {
-    let mut body_bytes = 0usize;
-    for utxo in utxos {
-        body_bytes = body_bytes.saturating_add(hydrated_input_size(&utxo.output)?);
-    }
-    if utxos.len() > max_inputs || body_bytes > byte_budget {
+    let fitting = take_inputs_within_limits(utxos.to_vec(), max_inputs, byte_budget)?.len();
+    if fitting < utxos.len() {
         warn!(
             target: "audit",
             selected = utxos.len(),
-            limit = max_inputs,
-            body_bytes = body_bytes;
+            limit = fitting;
             "Selected inputs do not fit in one transaction"
         );
         return Err(UtxoSelectionError::TooManyInputs {
             selected: utxos.len(),
-            limit: max_inputs,
+            limit: fitting,
         });
     }
     Ok(())
@@ -1003,11 +1001,18 @@ mod tests {
         let utxos = vec![db_output(1, 1_000), db_output(2, 1_000), db_output(3, 1_000)];
         let per_input = hydrated_input_size(&test_wallet_output(1_000, 1)).unwrap();
         check_input_limits(&utxos, 3, 3 * per_input).expect("within the limits");
-        for (max_inputs, byte_budget) in [(2, 3 * per_input), (3, 3 * per_input - 1)] {
-            match check_input_limits(&utxos, max_inputs, byte_budget) {
-                Err(UtxoSelectionError::TooManyInputs { selected: 3, limit }) => assert_eq!(limit, max_inputs),
-                other => panic!("expected TooManyInputs, got {other:?}"),
-            }
+        // Over the count cap: the cap is what fits.
+        match check_input_limits(&utxos, 2, 3 * per_input) {
+            Err(UtxoSelectionError::TooManyInputs { selected: 3, limit: 2 }) => {},
+            other => panic!("expected TooManyInputs, got {other:?}"),
+        }
+        // Over the byte budget, under the count cap: the budget is what fits, not the cap.
+        match check_input_limits(&utxos, 10, 2 * per_input + 1) {
+            Err(UtxoSelectionError::TooManyInputs { selected, limit }) => {
+                assert_eq!((selected, limit), (3, 2));
+                assert!(limit < selected);
+            },
+            other => panic!("expected TooManyInputs, got {other:?}"),
         }
         // More outputs leave room for fewer inputs.
         assert!(
