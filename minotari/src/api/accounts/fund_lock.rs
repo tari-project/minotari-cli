@@ -18,7 +18,7 @@ use crate::{
     db::get_account_by_name,
     log::mask_amount,
     transactions::{
-        fee_estimator::{estimated_output_size_for_send, one_sided_output_sizes},
+        fee_estimator::{estimated_output_size_for_recipients, one_sided_output_sizes},
         fund_locker::{
             FundLocker, MAX_SECONDS_TO_LOCK_UTXOS, release_reservation, validate_fee_per_gram, validate_seconds_to_lock,
         },
@@ -501,14 +501,9 @@ pub async fn api_create_unsigned_transaction(
 
         let num_outputs = recipients.len();
         let fee_per_gram = DEFAULT_FEE_PER_GRAM;
-        // Charge for the memos this send will carry; see `estimated_output_size_for_send`.
-        let largest_payment_id = recipients
-            .iter()
-            .map(|r| r.payment_id.as_ref().map_or(0, String::len))
-            .max()
-            .unwrap_or(0);
+        // Charge for the memos this send will carry.
         let estimated_output_size = Some(
-            estimated_output_size_for_send(largest_payment_id, num_outputs)
+            estimated_output_size_for_recipients(&recipients)
                 .map_err(|e| ApiError::InternalServerError(e.to_string()))?,
         );
 

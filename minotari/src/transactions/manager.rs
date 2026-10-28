@@ -114,7 +114,7 @@ use crate::{
             DisplayedTransaction, DisplayedTransactionBuilder, TransactionDirection, TransactionDisplayStatus,
             TransactionInput, TransactionSource,
         },
-        fee_estimator::{estimated_output_size_for_send, one_sided_output_sizes},
+        fee_estimator::{estimated_output_size_for_recipients, one_sided_output_sizes},
         fund_locker::{check_replay_allowed, lock_expiry_at, validate_fee_per_gram},
         idempotency::{IdempotencyBinding, IdempotencyConflict, IdempotencyOperation, RequestFingerprint},
         input_selector::{InputSelector, UtxoSelection, map_change_required_error},
@@ -425,13 +425,15 @@ impl TransactionSender {
         if processed_transaction.send_all {
             let (recipient_output_size, change_output_size) =
                 one_sided_output_sizes(&processed_transaction.recipients, self.network)?;
-            return Ok(input_selector.select_all(
+            let all = input_selector.select_all(
                 connection,
                 self.network,
                 self.fee_per_gram,
                 recipient_output_size,
                 change_output_size,
-            )?);
+            )?;
+            all.audit_if_partial(self.account.id);
+            return Ok(all.selection);
         }
 
         let estimated_output_size = Some(estimated_output_size_for_recipients(&processed_transaction.recipients)?);
@@ -1161,23 +1163,6 @@ impl TransactionSender {
             },
         }
     }
-}
-
-/// The per-output size to charge for `recipients`.
-///
-/// Selection has to charge for the memo this send will actually carry. Left at the
-/// default, a long payment id is weight nobody reserved inputs for, and the send fails
-/// at build time with the funds already locked. One size is charged for every output,
-/// so quote the largest memo.
-fn estimated_output_size_for_recipients(recipients: &[Recipient]) -> Result<usize, anyhow::Error> {
-    estimated_output_size_for_send(
-        recipients
-            .iter()
-            .map(|r| r.payment_id.as_ref().map_or(0, String::len))
-            .max()
-            .unwrap_or(0),
-        recipients.len(),
-    )
 }
 
 /// Records what the node answered to a send's first broadcast.
@@ -2656,7 +2641,7 @@ mod tests {
                     MicroMinotari(wanted.iter().map(|r| r.amount.as_u64()).sum()),
                     wanted.len(),
                     100,
-                    Some(estimated_output_size_for_send("invoice-1".len(), wanted.len()).expect("size")),
+                    Some(estimated_output_size_for_recipients(&wanted).expect("size")),
                 )
                 .await
                 .expect("estimate")
@@ -2724,6 +2709,45 @@ mod tests {
                 "{n} recipients"
             );
         }
+    }
+
+    /// The change memo names the first recipient, whose address can embed a
+    /// payment id of its own; the reservation must cover the change output
+    /// that memo makes, so the signer still finds room for change.
+    #[test]
+    fn a_send_to_an_address_with_an_embedded_payment_id_reserves_enough() {
+        let (pool, _temp) = setup_funded_wallet(3);
+        let mut sender = sender_for(&pool);
+        let plain = other_address(1);
+        let embedded = TariAddress::new_dual_address(
+            plain.public_view_key().expect("view key").clone(),
+            plain.public_spend_key().clone(),
+            Network::LocalNet,
+            TariAddressFeatures::create_one_sided_only(),
+            Some(vec![b'x'; 100]),
+        )
+        .expect("address");
+        let recipient = Recipient {
+            address: embedded,
+            amount: MicroMinotari(10_000),
+            payment_id: Some("invoice-1".to_string()),
+        };
+
+        let prepared = sender
+            .start_new_transaction("embedded".to_string(), recipient, 300)
+            .expect("prepare");
+
+        let reserved_fee: i64 = pool
+            .get()
+            .expect("conn")
+            .query_row("SELECT fee_with_change FROM pending_transactions", [], |row| row.get(0))
+            .expect("reserved fee");
+        let (signer_fee, change) = signer_fee_and_change(&prepared);
+        assert!(change.is_some());
+        assert!(
+            signer_fee <= MicroMinotari(reserved_fee as u64),
+            "reserved {reserved_fee}, the signer charges {signer_fee}"
+        );
     }
 
     #[test]
@@ -2818,6 +2842,8 @@ mod tests {
         let (pool, _temp) = setup_funded_wallet(3);
         let mut sender = sender_for(&pool);
         let payment_id = "sweep".to_string();
+        // A dust output is left behind, and the estimate says so.
+        insert_test_output(&pool.get().expect("conn"), sender.account.id, 9, 10, 100);
 
         let estimate = crate::transactions::fee_estimator::FeeEstimator::new(pool.clone(), "http://127.0.0.1:1".into())
             .estimate_fees_send_all(
@@ -2830,6 +2856,7 @@ mod tests {
             )
             .expect("estimate");
         assert_eq!(estimate.input_count, 3);
+        assert_eq!((estimate.skipped_dust, estimate.skipped_over_cap), (1, 0));
 
         let prepared = sender
             .start_new_send_all_transaction("sweep".to_string(), other_address(1), Some(payment_id), 300)
@@ -2846,9 +2873,9 @@ mod tests {
         assert_eq!(change, Some(min_change));
         assert_eq!(paid.amount, MicroMinotari(6_000_000) - estimate.fee - min_change);
 
-        // Nothing spendable is left.
+        // Nothing spendable is left but the dust.
         assert_eq!(locked_output_count(&pool), 3);
-        assert_eq!(count(&pool, "SELECT COUNT(*) FROM outputs WHERE status = 'UNSPENT'"), 0);
+        assert_eq!(count(&pool, "SELECT COUNT(*) FROM outputs WHERE status = 'UNSPENT'"), 1);
 
         // A retry replays onto the same reservation and pays the same amount.
         let replay = sender

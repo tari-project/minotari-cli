@@ -342,8 +342,10 @@ impl InputSelector {
 
         let features_and_scripts_byte_size = match estimated_output_size {
             Some(sz) => sz,
-            None => estimated_output_size_for_send(0, num_outputs)
-                .map_err(|err| UtxoSelectionError::SerializationError(err.to_string()))?,
+            None => {
+                estimated_output_size_for_send(0, num_outputs, &tari_common_types::tari_address::TariAddress::default())
+                    .map_err(|err| UtxoSelectionError::SerializationError(err.to_string()))?
+            },
         };
 
         let kernel_fee = self.fee_calc.calculate(fee_per_gram, 1, 0, 0, 0);
@@ -548,7 +550,7 @@ impl InputSelector {
         fee_per_gram: MicroMinotari,
         recipient_output_size: usize,
         change_output_size: usize,
-    ) -> Result<UtxoSelection, UtxoSelectionError> {
+    ) -> Result<SendAllSelection, UtxoSelectionError> {
         self.select_all_up_to(
             conn,
             fee_per_gram,
@@ -565,19 +567,23 @@ impl InputSelector {
         recipient_output_size: usize,
         change_output_size: usize,
         max_inputs: usize,
-    ) -> Result<UtxoSelection, UtxoSelectionError> {
+    ) -> Result<SendAllSelection, UtxoSelectionError> {
         let tip_height = get_latest_scanned_tip_block_by_account(conn, self.account_id)?
             .map(|b| b.height)
             .unwrap_or(0);
         let min_height = tip_height.saturating_sub(self.confirmation_window);
         let spend_cost = self.min_change(fee_per_gram);
-        let mut candidates: Vec<DbWalletOutput> =
-            crate::db::fetch_unspent_outputs(conn, self.account_id, min_height, tip_height)?
-                .into_iter()
-                .filter(|utxo| utxo.output.value() > spend_cost)
-                .collect();
+        let spendable = crate::db::fetch_unspent_outputs(conn, self.account_id, min_height, tip_height)?;
+        let spendable_count = spendable.len();
+        let mut candidates: Vec<DbWalletOutput> = spendable
+            .into_iter()
+            .filter(|utxo| utxo.output.value() > spend_cost)
+            .collect();
+        let skipped_dust = spendable_count.saturating_sub(candidates.len());
         candidates.sort_by_key(|utxo| std::cmp::Reverse(utxo.output.value()));
+        let candidate_count = candidates.len();
         let utxos = take_inputs_within_limits(candidates, max_inputs, input_body_byte_budget(2))?;
+        let skipped_over_cap = candidate_count.saturating_sub(utxos.len());
 
         let mut total_value = MicroMinotari::zero();
         for utxo in &utxos {
@@ -595,13 +601,46 @@ impl InputSelector {
             "All spendable UTXOs selected"
         );
 
-        Ok(UtxoSelection {
-            utxos,
-            requires_change_output: true,
-            total_value,
-            fee_without_change,
-            fee_with_change,
+        Ok(SendAllSelection {
+            selection: UtxoSelection {
+                utxos,
+                requires_change_output: true,
+                total_value,
+                fee_without_change,
+                fee_with_change,
+            },
+            skipped_dust,
+            skipped_over_cap,
         })
+    }
+}
+
+/// What [`InputSelector::select_all`] spends, and how many spendable outputs it
+/// leaves behind.
+#[derive(Debug)]
+pub struct SendAllSelection {
+    /// The outputs spent, with the send-all's fees.
+    pub selection: UtxoSelection,
+    /// Spendable outputs left out for being worth no more than they cost to spend.
+    pub skipped_dust: usize,
+    /// Spendable outputs left out for not fitting the count, weight or byte cap.
+    pub skipped_over_cap: usize,
+}
+
+impl SendAllSelection {
+    /// Warns on the audit target when the send-all leaves spendable outputs
+    /// behind, so a partial sweep is never silent.
+    pub fn audit_if_partial(&self, account_id: i64) {
+        if self.skipped_dust > 0 || self.skipped_over_cap > 0 {
+            warn!(
+                target: "audit",
+                account_id = account_id,
+                spent = self.selection.utxos.len(),
+                skipped_dust = self.skipped_dust,
+                skipped_over_cap = self.skipped_over_cap;
+                "Send-all leaves spendable outputs behind"
+            );
+        }
     }
 }
 
@@ -904,7 +943,8 @@ mod tests {
         let selector = InputSelector::new(account_id, 100);
         let selection = selector
             .select_all(&conn, Network::LocalNet, MicroMinotari(5), 1000, 1000)
-            .expect("selection");
+            .expect("selection")
+            .selection;
         assert_eq!(selection.utxos.len(), 1);
         assert_eq!(selection.total_value, MicroMinotari(1_000_000));
         // Charged as the regular selector charges one recipient and change.
@@ -926,9 +966,11 @@ mod tests {
         let (pool, account_id, _dir) =
             account_with_outputs(&[300_000, spend_cost.as_u64(), 1_000_000, spend_cost.as_u64() + 1]);
         let conn = pool.get().expect("conn");
-        let selection = InputSelector::new(account_id, 100)
+        let all = InputSelector::new(account_id, 100)
             .select_all(&conn, Network::LocalNet, MicroMinotari(5), 1000, 1000)
             .expect("selection");
+        assert_eq!((all.skipped_dust, all.skipped_over_cap), (1, 0));
+        let selection = all.selection;
         let values: Vec<u64> = selection.utxos.iter().map(|u| u.output.value().as_u64()).collect();
         assert_eq!(values, vec![1_000_000, 300_000, spend_cost.as_u64() + 1]);
         assert_eq!(
@@ -939,14 +981,17 @@ mod tests {
         assert_eq!(selection.fee_with_change, fee);
     }
 
-    /// A send-all takes at most the input cap, largest outputs first.
+    /// A send-all takes at most the input cap, largest outputs first, and says
+    /// how many it left behind.
     #[test]
     fn a_send_all_takes_the_largest_inputs_up_to_the_cap() {
-        let (pool, account_id, _dir) = account_with_outputs(&[200_000, 900_000, 500_000, 700_000]);
+        let (pool, account_id, _dir) = account_with_outputs(&[200_000, 900_000, 500_000, 700_000, 1]);
         let conn = pool.get().expect("conn");
-        let selection = InputSelector::new(account_id, 100)
+        let all = InputSelector::new(account_id, 100)
             .select_all_up_to(&conn, MicroMinotari(5), 1000, 1000, 2)
             .expect("selection");
+        assert_eq!((all.skipped_dust, all.skipped_over_cap), (1, 2));
+        let selection = all.selection;
         let values: Vec<u64> = selection.utxos.iter().map(|u| u.output.value().as_u64()).collect();
         assert_eq!(values, vec![900_000, 700_000]);
         assert_eq!(selection.total_value, MicroMinotari(1_600_000));

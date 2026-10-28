@@ -53,6 +53,11 @@ pub struct SendAllEstimate {
     pub amount_after_fee: MicroMinotari,
     /// How many inputs the send-all spends (the selection of [`InputSelector::select_all`](crate::transactions::input_selector::InputSelector::select_all)).
     pub input_count: usize,
+    /// Spendable outputs left behind for being worth no more than they cost to spend.
+    pub skipped_dust: usize,
+    /// Spendable outputs left behind for not fitting one transaction (count, weight or
+    /// bytes); another send-all can sweep them.
+    pub skipped_over_cap: usize,
 }
 
 pub struct FeeEstimator {
@@ -122,7 +127,7 @@ impl FeeEstimator {
 
         let output_size = match estimated_output_size {
             Some(sz) => sz,
-            None => estimated_output_size_for_send(0, num_outputs)?,
+            None => estimated_output_size_for_send(0, num_outputs, &TariAddress::default())?,
         };
 
         let results = [
@@ -175,13 +180,18 @@ impl FeeEstimator {
         let input_selector = InputSelector::new(account.id, confirmation_window);
         let selection =
             input_selector.select_all(&conn, network, fee_per_gram, recipient_output_size, change_output_size)?;
-        let amount_after_fee =
-            input_selector.send_all_amount(selection.total_value, selection.fee_with_change, fee_per_gram)?;
+        let amount_after_fee = input_selector.send_all_amount(
+            selection.selection.total_value,
+            selection.selection.fee_with_change,
+            fee_per_gram,
+        )?;
 
         Ok(SendAllEstimate {
-            fee: selection.fee_with_change,
+            fee: selection.selection.fee_with_change,
             amount_after_fee,
-            input_count: selection.utxos.len(),
+            input_count: selection.selection.utxos.len(),
+            skipped_dust: selection.skipped_dust,
+            skipped_over_cap: selection.skipped_over_cap,
         })
     }
 
@@ -244,24 +254,30 @@ pub fn measure_output_size(features: &OutputFeatures, script: &TariScript, memo:
 /// account: a `PushPubKey` script and a `TransactionInfo` memo holding the recipient address,
 /// one sent-output hash and the caller's payment id, padded to a 130-byte floor.
 pub fn estimated_output_size_for_payment_id(payment_id_len: usize) -> Result<usize> {
-    estimated_output_size_for_send(payment_id_len, 1)
+    estimated_output_size_for_send(payment_id_len, 1, &TariAddress::default())
 }
 
-/// [`estimated_output_size_for_payment_id`] for a send to `num_recipients` recipients.
+/// [`estimated_output_size_for_payment_id`] for a send to `num_recipients` recipients, the
+/// first of them `first_recipient`.
 ///
 /// The builder lists one sent-output hash per recipient in the change memo when there are at
 /// most two, and none beyond that, so two recipients are measured with two hashes and any
-/// other count with one.
-pub fn estimated_output_size_for_send(payment_id_len: usize, num_recipients: usize) -> Result<usize> {
+/// other count with one. The change memo names the first recipient, and an address can embed
+/// a payment id of its own, so it is measured with that address. `TariAddress::default()`
+/// measures as a plain dual address, the larger plain form.
+pub fn estimated_output_size_for_send(
+    payment_id_len: usize,
+    num_recipients: usize,
+    first_recipient: &TariAddress,
+) -> Result<usize> {
     let hash_count = num_recipients.clamp(1, 2);
     // The script the builder derives for a recipient, and for its own change output.
     let script = script!(PushPubKey(Box::default())).map_err(|e| anyhow!("Failed to build the default script: {e}"))?;
 
-    // A change memo: a dual address, one sent-output hash and the payment id. `TariAddress`
-    // defaults to the dual form, which is the larger of the two it can take.
+    // A change memo: the first recipient's address, the sent-output hashes and the payment id.
     let change_memo = |payment_id: Vec<u8>| {
         MemoField::new_transaction_info(
-            TariAddress::default(),
+            first_recipient.clone(),
             MicroMinotari::zero(),
             MicroMinotari::zero(),
             true,
@@ -288,6 +304,23 @@ pub fn estimated_output_size_for_send(payment_id_len: usize, num_recipients: usi
             Ok(TransactionWeight::latest().round_up_features_and_scripts_size(size))
         },
     }
+}
+
+/// The per-output size to charge an exact send to `recipients`.
+///
+/// Selection has to charge for the memo this send will actually carry. Left at the
+/// default, a long payment id is weight nobody reserved inputs for, and the send fails
+/// at build time with the funds already locked. One size is charged for every output,
+/// so quote the largest memo, and the change memo with the first recipient's address.
+pub fn estimated_output_size_for_recipients(recipients: &[Recipient]) -> Result<usize> {
+    let largest_payment_id = recipients
+        .iter()
+        .map(|r| r.payment_id.as_ref().map_or(0, String::len))
+        .max()
+        .unwrap_or(0);
+    let default_address = TariAddress::default();
+    let first_recipient = recipients.first().map_or(&default_address, |r| &r.address);
+    estimated_output_size_for_send(largest_payment_id, recipients.len(), first_recipient)
 }
 
 /// The exact features-and-scripts sizes the transaction builder charges a one-sided send to
@@ -442,7 +475,7 @@ mod tests {
             let recipients = vec![recipient.clone(); n];
             let (_, change_size) = one_sided_output_sizes(&recipients, Network::MainNet).unwrap();
             assert!(
-                estimated_output_size_for_send("invoice".len(), n).unwrap() >= change_size,
+                estimated_output_size_for_send("invoice".len(), n, &TariAddress::default()).unwrap() >= change_size,
                 "{n} recipients"
             );
         }

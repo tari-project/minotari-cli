@@ -515,13 +515,17 @@ impl FundLocker {
                 network,
                 recipient_output_size,
                 change_output_size,
-            } => input_selector.select_all(
-                &transaction,
-                network,
-                fee_per_gram,
-                recipient_output_size,
-                change_output_size,
-            )?,
+            } => {
+                let all = input_selector.select_all(
+                    &transaction,
+                    network,
+                    fee_per_gram,
+                    recipient_output_size,
+                    change_output_size,
+                )?;
+                all.audit_if_partial(account_id);
+                all.selection
+            },
         };
 
         // Already validated above; `lock_expiry_at` is total, so a surprising

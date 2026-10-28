@@ -72,7 +72,7 @@ use minotari::{
     scan::{self, reorg::rollback_from_height},
     signing,
     transactions::{
-        fee_estimator::{estimated_output_size_for_send, one_sided_output_sizes},
+        fee_estimator::{estimated_output_size_for_recipients, one_sided_output_sizes},
         fund_locker::{FundLocker, release_reservation},
         idempotency::{IdempotencyBinding, IdempotencyOperation, RequestFingerprint},
         input_selector::InputSelector,
@@ -838,16 +838,9 @@ fn handle_create_unsigned_transaction(
     };
     let num_outputs = recipients.len();
     let fee_per_gram = MicroMinotari(5);
-    // One size is charged for every output, so quote the largest memo in the batch rather than
-    // the default: anything smaller reserves inputs that cannot pay the fee the builder lands on.
-    let estimated_output_size = Some(estimated_output_size_for_send(
-        recipients
-            .iter()
-            .map(|r| r.payment_id.as_ref().map_or(0, String::len))
-            .max()
-            .unwrap_or(0),
-        num_outputs,
-    )?);
+    // Charge for the memos this send will carry; anything smaller reserves inputs that cannot
+    // pay the fee the builder lands on.
+    let estimated_output_size = Some(estimated_output_size_for_recipients(&recipients)?);
 
     // Same binding the REST endpoint builds, so a key means the same thing
     // whichever way the request arrives.
