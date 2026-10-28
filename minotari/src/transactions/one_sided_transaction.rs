@@ -156,6 +156,20 @@ pub fn total_recipient_amount(recipients: &[Recipient]) -> Result<MicroMinotari,
     Ok(total)
 }
 
+/// Fails when any recipient's address is for a network other than `network`:
+/// a payment there could never be received.
+pub fn check_recipient_networks(recipients: &[Recipient], network: Network) -> Result<(), anyhow::Error> {
+    for recipient in recipients {
+        let address_network = recipient.address.network();
+        if address_network != network {
+            return Err(anyhow!(
+                "Recipient address is for {address_network}, but this wallet is on {network}"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Binds an idempotency key to an unsigned-transaction request.
 ///
 /// The recipients are the whole point of the binding. Without them, replaying a
@@ -389,6 +403,26 @@ mod tests {
         let too_many = vec![recipient(None); MAX_TRANSACTION_OUTPUTS];
         let err = total_recipient_amount(&too_many).expect_err("no room for change");
         assert!(err.to_string().contains("Too many recipients"), "got: {err}");
+    }
+
+    #[test]
+    fn a_recipient_on_another_network_is_refused() {
+        let on = |network| Recipient {
+            address: TariAddress::new_dual_address(
+                tari_common_types::types::CompressedPublicKey::default(),
+                tari_common_types::types::CompressedPublicKey::default(),
+                network,
+                tari_common_types::tari_address::TariAddressFeatures::create_one_sided_only(),
+                None,
+            )
+            .expect("address"),
+            amount: MicroMinotari(1_000),
+            payment_id: None,
+        };
+        check_recipient_networks(&[on(Network::LocalNet)], Network::LocalNet).expect("same network");
+        let err = check_recipient_networks(&[on(Network::LocalNet), on(Network::MainNet)], Network::LocalNet)
+            .expect_err("another network");
+        assert!(err.to_string().contains("this wallet is on"), "got: {err}");
     }
 
     /// A payment id that fits neither memo is refused, not sent without its memo.

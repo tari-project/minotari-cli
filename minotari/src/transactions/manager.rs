@@ -118,7 +118,7 @@ use crate::{
         fund_locker::{check_replay_allowed, lock_expiry_at, validate_fee_per_gram},
         idempotency::{IdempotencyBinding, IdempotencyConflict, IdempotencyOperation, RequestFingerprint},
         input_selector::{InputSelector, UtxoSelection, map_change_required_error},
-        one_sided_transaction::{Recipient, recipient_memo, total_recipient_amount},
+        one_sided_transaction::{Recipient, check_recipient_networks, recipient_memo, total_recipient_amount},
     },
 };
 use zeroize::Zeroizing;
@@ -652,7 +652,7 @@ impl TransactionSender {
     ///
     /// Inputs worth no more than they cost to spend are skipped, and at most
     /// [`max_send_all_inputs`](crate::transactions::input_selector::max_send_all_inputs)
-    /// are spent, largest first; on a wallet with more
+    /// are spent, largest first and within the relay byte budget; on a wallet with more
     /// this is a partial sweep and can be repeated
     /// ([`InputSelector::select_all`]).
     ///
@@ -700,6 +700,7 @@ impl TransactionSender {
         // `create_or_find_pending_transaction`, a third in `create_pending_transaction` — so
         // concurrent senders deadlocked on a pool smaller than three times their number, each
         // holding connections it could not finish without one more.
+        check_recipient_networks(&recipients, self.network)?;
         let mut connection = self.get_connection()?;
 
         let mut processed_transaction =
@@ -2730,6 +2731,23 @@ mod tests {
         sender
             .start_new_transaction_multi("zero".to_string(), with_zero, 300)
             .expect_err("a zero amount");
+
+        // An address on another network is refused, for an exact send and a send-all.
+        let mut mainnet = recipients(1);
+        mainnet[0].address = TariAddress::new_dual_address(
+            mainnet[0].address.public_view_key().expect("view key").clone(),
+            mainnet[0].address.public_spend_key().clone(),
+            Network::MainNet,
+            TariAddressFeatures::create_one_sided_only(),
+            None,
+        )
+        .expect("address");
+        sender
+            .start_new_transaction_multi("mainnet".to_string(), mainnet.clone(), 300)
+            .expect_err("another network");
+        sender
+            .start_new_send_all_transaction("mainnet-all".to_string(), mainnet[0].address.clone(), None, 300)
+            .expect_err("another network");
 
         // A payment id that does not fit the change memo is refused, not sent without its memo.
         let mut too_long = recipients(1);

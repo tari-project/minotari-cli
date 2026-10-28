@@ -24,7 +24,10 @@ use crate::{
         },
         idempotency::{IdempotencyBinding, IdempotencyOperation, RequestFingerprint},
         input_selector::InputSelector,
-        one_sided_transaction::{OneSidedTransaction, Recipient, total_recipient_amount, unsigned_transaction_binding},
+        one_sided_transaction::{
+            OneSidedTransaction, Recipient, check_recipient_networks, total_recipient_amount,
+            unsigned_transaction_binding,
+        },
     },
 };
 
@@ -475,6 +478,7 @@ pub async fn api_create_unsigned_transaction(
         });
     }
     let send_all = body.send_all;
+    check_recipient_networks(&recipients, network).map_err(|e| ApiError::BadRequest(e.to_string()))?;
     // Refuse an empty list, a zero amount or an overflowing total before anything is locked.
     let amount = if send_all {
         MicroMinotari::zero()

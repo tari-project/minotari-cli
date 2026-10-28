@@ -76,7 +76,10 @@ use minotari::{
         fund_locker::{FundLocker, release_reservation},
         idempotency::{IdempotencyBinding, IdempotencyOperation, RequestFingerprint},
         input_selector::InputSelector,
-        one_sided_transaction::{OneSidedTransaction, Recipient, total_recipient_amount, unsigned_transaction_binding},
+        one_sided_transaction::{
+            OneSidedTransaction, Recipient, check_recipient_networks, total_recipient_amount,
+            unsigned_transaction_binding,
+        },
     },
     utils::{self, crypto::PasswordCipher},
     webhooks::WebhookTriggerConfig,
@@ -819,6 +822,7 @@ fn handle_create_unsigned_transaction(
         })
         .collect();
     let mut recipients = recipients?;
+    check_recipient_networks(&recipients, network)?;
     let pool = init_db(database_file)?;
     // One connection for the whole command; `lock` uses this one rather than taking a
     // second from the pool.

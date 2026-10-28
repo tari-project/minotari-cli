@@ -534,7 +534,18 @@ mod tests {
         let too_many: Vec<_> = (0..500)
             .map(|_| serde_json::json!({ "address": address, "amount": 1 }))
             .collect();
+        let mainnet_address = TariAddress::new_dual_address(
+            CompressedPublicKey::from_secret_key(&PrivateKey::from(7u64)),
+            CompressedPublicKey::from_secret_key(&PrivateKey::from(9u64)),
+            Network::MainNet,
+            TariAddressFeatures::create_one_sided_only(),
+            None,
+        )
+        .unwrap()
+        .to_base58();
         let bodies = [
+            serde_json::json!({ "recipients": [{ "address": mainnet_address, "amount": 1 }] }),
+            serde_json::json!({ "send_all": true, "recipients": [{ "address": mainnet_address }] }),
             serde_json::json!({ "recipients": too_many }),
             serde_json::json!({ "recipients": [{ "address": address, "amount": 1, "payment_id": "x".repeat(300) }] }),
             serde_json::json!({ "recipients": [] }),

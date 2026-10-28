@@ -45,9 +45,17 @@
 use log::{debug, info, warn};
 use rusqlite::Connection;
 use tari_common::configuration::Network;
+use tari_common_types::types::{ComAndPubSignature, FixedHash};
 use tari_transaction_components::{
-    TransactionBuilderError, consensus::ConsensusConstantsBuilder, fee::Fee, tari_amount::MicroMinotari,
-    transaction_components::MAX_TRANSACTION_INPUTS, weight::TransactionWeight,
+    TransactionBuilderError,
+    consensus::ConsensusConstantsBuilder,
+    fee::Fee,
+    helpers::borsh::SerializedSize,
+    tari_amount::MicroMinotari,
+    transaction_components::{
+        MAX_TRANSACTION_INPUTS, SpentOutput, TransactionInput, TransactionInputVersion, WalletOutput,
+    },
+    weight::TransactionWeight,
 };
 use thiserror::Error;
 
@@ -97,6 +105,19 @@ pub enum UtxoSelectionError {
     ChangeNotAffordable {
         /// How much more is needed, on top of what was available, to create a change output.
         shortfall: MicroMinotari,
+    },
+
+    /// The inputs the payment needs do not fit in one transaction the network
+    /// will relay and mine (too many, too heavy, or too many bytes).
+    #[error(
+        "The payment needs {selected} inputs, more than one transaction can hold (at most {limit}). Send a smaller \
+         amount, or consolidate the wallet's outputs first"
+    )]
+    TooManyInputs {
+        /// How many inputs the selection needed.
+        selected: usize,
+        /// How many fit, by count and weight; the byte budget may allow fewer.
+        limit: usize,
     },
 
     /// DB execution failed
@@ -416,6 +437,14 @@ impl InputSelector {
             .ok_or_else(|| UtxoSelectionError::ServiceError("Transaction fee overflows".to_string()))?;
         let fee_without_change = fee_with_change.saturating_sub(default_output_fee);
         let utxos = selection.selected_utxos;
+        // Charged per output as above: the recipients and the change.
+        let total_outputs = num_outputs.saturating_add(1);
+        let outputs_size = features_and_scripts_byte_size.saturating_mul(total_outputs);
+        check_input_limits(
+            &utxos,
+            max_transaction_inputs(STRICTEST_NETWORK, total_outputs, outputs_size),
+            input_body_byte_budget(total_outputs),
+        )?;
 
         debug!(
             count = utxos.len(),
@@ -502,8 +531,9 @@ impl InputSelector {
     /// Selects the spendable, unlocked outputs for a send-all to one recipient.
     ///
     /// Outputs worth no more than they cost to spend are skipped, and at most
-    /// [`max_send_all_inputs`] are taken, largest first: more could not be
-    /// signed or mined. A send-all over a wallet with more outputs than that is
+    /// [`max_send_all_inputs`] are taken, largest first, and only as many as
+    /// fit the base node's relay byte budget: more could not be signed, relayed
+    /// or mined. A send-all over a wallet with more outputs than that is
     /// a partial sweep of its largest ones and can be repeated for the rest.
     ///
     /// The fees are for the selected outputs, one recipient output and the
@@ -539,13 +569,13 @@ impl InputSelector {
             .unwrap_or(0);
         let min_height = tip_height.saturating_sub(self.confirmation_window);
         let spend_cost = self.min_change(fee_per_gram);
-        let mut utxos: Vec<DbWalletOutput> =
+        let mut candidates: Vec<DbWalletOutput> =
             crate::db::fetch_unspent_outputs(conn, self.account_id, min_height, tip_height)?
                 .into_iter()
                 .filter(|utxo| utxo.output.value() > spend_cost)
                 .collect();
-        utxos.sort_by_key(|utxo| std::cmp::Reverse(utxo.output.value()));
-        utxos.truncate(max_inputs);
+        candidates.sort_by_key(|utxo| std::cmp::Reverse(utxo.output.value()));
+        let utxos = take_inputs_within_limits(candidates, max_inputs, input_body_byte_budget(2))?;
 
         let mut total_value = MicroMinotari::zero();
         for utxo in &utxos {
@@ -578,11 +608,20 @@ impl InputSelector {
 /// Bound by what a block can hold (the kernel, the recipient and change
 /// outputs and the inputs must fit in `max_block_transaction_weight`, which
 /// neither the builder nor the signer checks) and by
-/// [`MAX_TRANSACTION_INPUTS`], which the signer does.
+/// [`MAX_TRANSACTION_INPUTS`], which the signer does. Selection also keeps
+/// the inputs within the relay byte budget, which may allow fewer.
 pub fn max_send_all_inputs(network: Network, recipient_output_size: usize, change_output_size: usize) -> usize {
+    max_transaction_inputs(network, 2, recipient_output_size.saturating_add(change_output_size))
+}
+
+/// The most inputs a transaction with `num_outputs` outputs, whose features
+/// and scripts total `outputs_size`, may spend on `network`: as many as still
+/// fit in `max_block_transaction_weight` next to the kernel and the outputs,
+/// and no more than [`MAX_TRANSACTION_INPUTS`].
+pub fn max_transaction_inputs(network: Network, num_outputs: usize, outputs_size: usize) -> usize {
     let constants = ConsensusConstantsBuilder::new(network).build();
     let weight = constants.transaction_weight_params();
-    let fixed_weight = weight.calculate(1, 0, 2, recipient_output_size.saturating_add(change_output_size));
+    let fixed_weight = weight.calculate(1, 0, num_outputs, outputs_size);
     let by_weight = constants
         .max_block_transaction_weight()
         .saturating_sub(fixed_weight)
@@ -591,6 +630,106 @@ pub fn max_send_all_inputs(network: Network, recipient_output_size: usize, chang
     usize::try_from(by_weight)
         .unwrap_or(usize::MAX)
         .min(MAX_TRANSACTION_INPUTS)
+}
+
+/// The network with the smallest block weight. Exact sends are bounded by it,
+/// so the bound holds on every network without the selector knowing which.
+const STRICTEST_NETWORK: Network = Network::MainNet;
+
+/// The largest transaction body, borsh-serialized with hydrated inputs, a base
+/// node relays: tari's `MAX_BLOCK_TEMPLATE_BODY_BYTES` (base_layer/core
+/// mempool, checked by `check_body_size`), 5 MiB. Larger is never mined.
+const MAX_RELAYED_BODY_BYTES: usize = 5 * 1024 * 1024;
+
+/// Room kept in that budget per output. An output with its range proof and a
+/// full memo serializes to well under this.
+const BODY_BYTES_PER_OUTPUT: usize = 2 * 1024;
+
+/// Room kept for the kernel, the encoding and headroom.
+const BODY_BYTES_MARGIN: usize = 64 * 1024;
+
+/// The body bytes left for the inputs of a transaction with `num_outputs` outputs.
+fn input_body_byte_budget(num_outputs: usize) -> usize {
+    MAX_RELAYED_BODY_BYTES
+        .saturating_sub(BODY_BYTES_PER_OUTPUT.saturating_mul(num_outputs))
+        .saturating_sub(BODY_BYTES_MARGIN)
+}
+
+/// The serialized size `output` will have as a hydrated transaction input.
+///
+/// The commitment, range proof hash and script signature are fixed-size, so
+/// placeholders measure the same as the values the signer fills in.
+pub fn hydrated_input_size(output: &WalletOutput) -> Result<usize, UtxoSelectionError> {
+    let input = TransactionInput::new(
+        TransactionInputVersion::get_current_version(),
+        SpentOutput::OutputData {
+            version: output.version(),
+            features: output.features().clone(),
+            commitment: output.commitment().clone(),
+            script: output.script().clone(),
+            sender_offset_public_key: output.sender_offset_public_key().clone(),
+            covenant: output.covenant().clone(),
+            encrypted_data: output.encrypted_data().clone(),
+            metadata_signature: output.metadata_signature().clone(),
+            rangeproof_hash: FixedHash::zero(),
+            minimum_value_promise: output.minimum_value_promise(),
+        },
+        output.input_data().clone(),
+        ComAndPubSignature::default(),
+    );
+    input
+        .get_serialized_size()
+        .map_err(|e| UtxoSelectionError::SerializationError(e.to_string()))
+}
+
+/// Takes `candidates` in order while there are fewer than `max_inputs` and
+/// their hydrated size stays within `byte_budget`.
+fn take_inputs_within_limits(
+    candidates: Vec<DbWalletOutput>,
+    max_inputs: usize,
+    byte_budget: usize,
+) -> Result<Vec<DbWalletOutput>, UtxoSelectionError> {
+    let mut taken = Vec::new();
+    let mut body_bytes = 0usize;
+    for utxo in candidates {
+        if taken.len() >= max_inputs {
+            break;
+        }
+        let next = body_bytes.saturating_add(hydrated_input_size(&utxo.output)?);
+        if next > byte_budget {
+            break;
+        }
+        body_bytes = next;
+        taken.push(utxo);
+    }
+    Ok(taken)
+}
+
+/// Fails with [`UtxoSelectionError::TooManyInputs`] when `utxos` are more than
+/// `max_inputs` or their hydrated size is over `byte_budget`.
+fn check_input_limits(
+    utxos: &[DbWalletOutput],
+    max_inputs: usize,
+    byte_budget: usize,
+) -> Result<(), UtxoSelectionError> {
+    let mut body_bytes = 0usize;
+    for utxo in utxos {
+        body_bytes = body_bytes.saturating_add(hydrated_input_size(&utxo.output)?);
+    }
+    if utxos.len() > max_inputs || body_bytes > byte_budget {
+        warn!(
+            target: "audit",
+            selected = utxos.len(),
+            limit = max_inputs,
+            body_bytes = body_bytes;
+            "Selected inputs do not fit in one transaction"
+        );
+        return Err(UtxoSelectionError::TooManyInputs {
+            selected: utxos.len(),
+            limit: max_inputs,
+        });
+    }
+    Ok(())
 }
 
 /// Turns the transaction builder's refusal to build a transaction without a
@@ -830,6 +969,51 @@ mod tests {
         };
         assert!(weight(cap) <= constants.max_block_transaction_weight());
         assert!(weight(cap + 1) > constants.max_block_transaction_weight());
+    }
+
+    fn db_output(id: i64, value: u64) -> DbWalletOutput {
+        DbWalletOutput {
+            id,
+            tx_id: tari_common_types::transaction::TxId::from(id as u64),
+            output: test_wallet_output(value, 1),
+        }
+    }
+
+    /// The relay byte budget binds before the mainnet weight cap: a send-all
+    /// takes as many inputs as fit in it, and its body stays within it.
+    #[test]
+    fn the_send_all_input_cap_is_bound_by_the_relay_byte_budget() {
+        let per_input = hydrated_input_size(&test_wallet_output(1_000, 1)).unwrap();
+        let budget = input_body_byte_budget(2);
+        let byte_cap = budget / per_input;
+        let weight_cap = max_send_all_inputs(Network::MainNet, 128, 256);
+        assert!(byte_cap < weight_cap, "byte cap {byte_cap}, weight cap {weight_cap}");
+
+        let candidates: Vec<DbWalletOutput> = (0..weight_cap as i64).map(|id| db_output(id, 1_000)).collect();
+        let taken = take_inputs_within_limits(candidates, weight_cap, budget).unwrap();
+        assert_eq!(taken.len(), byte_cap);
+        // The inputs, the two outputs and the kernel are within what a base node relays.
+        assert!(taken.len() * per_input + 2 * BODY_BYTES_PER_OUTPUT + BODY_BYTES_MARGIN <= MAX_RELAYED_BODY_BYTES);
+    }
+
+    /// An exact send whose inputs do not fit one transaction is refused with a
+    /// typed error; one within the limits is untouched.
+    #[test]
+    fn an_exact_send_over_the_input_limits_is_refused() {
+        let utxos = vec![db_output(1, 1_000), db_output(2, 1_000), db_output(3, 1_000)];
+        let per_input = hydrated_input_size(&test_wallet_output(1_000, 1)).unwrap();
+        check_input_limits(&utxos, 3, 3 * per_input).expect("within the limits");
+        for (max_inputs, byte_budget) in [(2, 3 * per_input), (3, 3 * per_input - 1)] {
+            match check_input_limits(&utxos, max_inputs, byte_budget) {
+                Err(UtxoSelectionError::TooManyInputs { selected: 3, limit }) => assert_eq!(limit, max_inputs),
+                other => panic!("expected TooManyInputs, got {other:?}"),
+            }
+        }
+        // More outputs leave room for fewer inputs.
+        assert!(
+            max_transaction_inputs(Network::MainNet, 500, 500 * 128) < max_transaction_inputs(Network::MainNet, 2, 256)
+        );
+        assert!(input_body_byte_budget(500) < input_body_byte_budget(2));
     }
 
     #[test]
