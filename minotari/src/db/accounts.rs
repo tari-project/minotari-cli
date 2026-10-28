@@ -509,6 +509,49 @@ pub fn update_account_name(conn: &Connection, current_name: &str, new_name: &str
     Ok(())
 }
 
+/// Re-encrypts an account's key material under `new_password`, with a fresh salt and nonce.
+///
+/// A wrong `old_password` returns [`WalletDbError::DecryptionFailed`] and writes nothing.
+pub fn change_passphrase(
+    conn: &mut Connection,
+    account_name: &str,
+    old_password: &str,
+    new_password: &str,
+) -> WalletDbResult<()> {
+    info!(
+        target: "audit",
+        account = account_name;
+        "DB: Changing account passphrase"
+    );
+
+    // The encrypted wallet is the only field `encrypt_data` writes. Read and rewrite it under
+    // the write lock so a concurrent change cannot be lost.
+    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+
+    let account = get_account_by_name(&tx, account_name)?
+        .ok_or_else(|| WalletDbError::InvalidInput(format!("Account '{}' not found", account_name)))?;
+    let wallet = account.decrypt_wallet_type(old_password)?;
+    let wallet_json = Zeroizing::new(
+        serde_json::to_string(&wallet)
+            .map_err(|e| WalletDbError::Unexpected(format!("Serialization failed: {}", e)))?,
+    );
+    let encrypted_data = encrypt_data(wallet_json.as_bytes(), new_password)
+        .map_err(|e| WalletDbError::Unexpected(format!("Encryption failed: {}", e)))?;
+
+    tx.execute(
+        "UPDATE accounts SET encrypted_wallet = :enc_wallet, cipher_nonce = :nonce, salt = :salt WHERE id = :id",
+        named_params! {
+            ":enc_wallet": encrypted_data.ciphertext,
+            ":nonce": encrypted_data.nonce,
+            ":salt": encrypted_data.salt_bytes,
+            ":id": account.id,
+        },
+    )?;
+    tx.commit()?;
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -609,6 +652,47 @@ mod tests {
             matches!(&err, WalletDbError::DecryptionFailed(m) if m.contains("fingerprint")),
             "expected a fingerprint mismatch, got: {err}"
         );
+    }
+
+    #[test]
+    fn change_passphrase_re_encrypts_under_the_new_password_only() {
+        let temp = tempdir().expect("temp dir");
+        let pool = init_db(temp.path().join("passphrase.db")).expect("init db");
+        let mut conn = pool.get().expect("conn");
+        let before = new_account(&conn, "main");
+        let address = before.get_address(Network::LocalNet, "password").unwrap();
+
+        change_passphrase(&mut conn, "main", "password", "new password").expect("passphrase changes");
+
+        let after = get_account_by_name(&conn, "main").unwrap().unwrap();
+        assert_ne!(after.salt, before.salt, "a fresh salt is drawn");
+        assert_ne!(after.cipher_nonce, before.cipher_nonce, "a fresh nonce is drawn");
+        assert!(matches!(
+            after.decrypt_wallet_type("password"),
+            Err(WalletDbError::DecryptionFailed(_))
+        ));
+        assert_eq!(after.get_address(Network::LocalNet, "new password").unwrap(), address);
+
+        // The account can still sign with the new password.
+        let signature = crate::signing::sign_message(&after, "new password", "hello").expect("signs");
+        assert!(crate::signing::verify_message(&address, "hello", &signature).unwrap());
+    }
+
+    #[test]
+    fn change_passphrase_with_a_wrong_old_password_changes_nothing() {
+        let temp = tempdir().expect("temp dir");
+        let pool = init_db(temp.path().join("passphrase.db")).expect("init db");
+        let mut conn = pool.get().expect("conn");
+        let before = new_account(&conn, "main");
+
+        let err = change_passphrase(&mut conn, "main", "wrong", "new password").expect_err("wrong old password");
+        assert!(matches!(err, WalletDbError::DecryptionFailed(_)), "got: {err}");
+
+        let after = get_account_by_name(&conn, "main").unwrap().unwrap();
+        assert_eq!(after.encrypted_wallet, before.encrypted_wallet);
+        assert_eq!(after.cipher_nonce, before.cipher_nonce);
+        assert_eq!(after.salt, before.salt);
+        after.decrypt_wallet_type("password").expect("old password still works");
     }
 
     #[test]

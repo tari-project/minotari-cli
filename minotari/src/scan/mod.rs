@@ -94,6 +94,7 @@ pub mod types;
 mod builder;
 mod config;
 mod coordinator;
+mod rescan;
 mod scanner_state_manager;
 
 pub use builder::Scanner;
@@ -101,6 +102,7 @@ pub use config::DEFAULT_FAST_SYNC_SAFETY_BUFFER;
 pub use config::ScanMode;
 pub use config::ScanRetryConfig;
 pub use config::ScanTimeoutConfig;
+pub use rescan::{rescan, rollback_account_to_height};
 pub use types::ScanError;
 
 pub use block_processor::MemoInfo;
