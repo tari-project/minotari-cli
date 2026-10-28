@@ -120,6 +120,34 @@ pub struct LockFundsResult {
     /// `requires_change_output` is `true`.
     #[schema(value_type = u64)]
     pub fee_with_change: MicroMinotari,
+
+    /// The pending transaction holding these UTXOs. Not sent to clients.
+    #[serde(skip)]
+    pub reservation_id: String,
+
+    /// Whether this call took the reservation rather than replaying an
+    /// existing one. Only then may the caller release it when the send fails
+    /// (see `release_reservation`). Not sent to clients.
+    #[serde(skip)]
+    pub created_reservation: bool,
+
+    /// For a send-all reservation this call took, how many spendable outputs
+    /// it left behind. `None` for an exact send, and on a replay: the counts
+    /// are not stored, and recounting now could describe other outputs. Not
+    /// sent to clients as part of this type.
+    #[serde(skip)]
+    pub send_all_skipped: Option<SendAllSkipped>,
+}
+
+/// How many spendable outputs a send-all left behind: the `send_all` field of
+/// a send-all's `create_unsigned_transaction` response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, utoipa::ToSchema)]
+pub struct SendAllSkipped {
+    /// Outputs worth no more than they cost to spend; never worth spending.
+    pub skipped_dust: usize,
+    /// Outputs that did not fit one transaction (count, weight or bytes);
+    /// another send-all can sweep them.
+    pub skipped_over_cap: usize,
 }
 
 pub fn tx_id_schema() -> Schema {

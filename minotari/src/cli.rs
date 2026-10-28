@@ -417,6 +417,10 @@ pub enum Commands {
     /// - `amount`: Amount in microTari
     /// - `payment_id`: Optional memo/reference (max 48 characters)
     ///
+    /// With `--send-all`, give exactly one recipient as `address` or
+    /// `address::payment_id`: every spendable UTXO is spent to it, less the fee
+    /// and a minimum change output (the offline signer requires change).
+    ///
     /// # UTXO Locking
     ///
     /// Input UTXOs are automatically locked to prevent double-spending. If the
@@ -443,12 +447,19 @@ pub enum Commands {
         #[arg(short, long, help = "Name of the account to send from")]
         account_name: String,
         /// Recipients in `address::amount[::payment_id]` format. Repeatable.
+        /// With `--send-all`, exactly one, in `address[::payment_id]` format.
         #[arg(
             short,
             long,
-            help = "Recipient address, amount and optional payment id (e.g., address::amount or address::amount::payment_id). Can be specified multiple times."
+            help = "Recipient address, amount and optional payment id (e.g., address::amount or address::amount::payment_id). Can be specified multiple times. With --send-all, give exactly one recipient as address or address::payment_id (no amount)."
         )]
         recipient: Vec<String>,
+        /// Spend every spendable UTXO to the single recipient, fee deducted.
+        #[arg(
+            long,
+            help = "Send the whole spendable balance, less the fee and a minimum change output, to exactly one --recipient given as address or address::payment_id (no amount). Spending every output in one transaction links them on chain."
+        )]
+        send_all: bool,
         /// Path to write the unsigned transaction JSON.
         #[arg(
             short,

@@ -42,17 +42,27 @@
 //! println!("Fee: {}", selection.fee());
 //! ```
 
-use log::{debug, warn};
+use log::{debug, info, warn};
 use rusqlite::Connection;
+use tari_common::configuration::Network;
+use tari_common_types::types::{ComAndPubSignature, FixedHash};
 use tari_transaction_components::{
-    TransactionBuilderError, fee::Fee, tari_amount::MicroMinotari, weight::TransactionWeight,
+    TransactionBuilderError,
+    consensus::ConsensusConstantsBuilder,
+    fee::Fee,
+    helpers::borsh::SerializedSize,
+    tari_amount::MicroMinotari,
+    transaction_components::{
+        MAX_TRANSACTION_INPUTS, SpentOutput, TransactionInput, TransactionInputVersion, WalletOutput,
+    },
+    weight::TransactionWeight,
 };
 use thiserror::Error;
 
 use crate::{
     db::{DbWalletOutput, WalletDbError, get_latest_scanned_tip_block_by_account},
     log::mask_amount,
-    transactions::fee_estimator::get_default_features_and_scripts_size,
+    transactions::fee_estimator::estimated_output_size_for_send,
 };
 use tari_transaction_components::utxo_selection::branch_and_bound::branch_bound_builder::BranchAndBoundUtxoSelectionBuilder;
 /// Errors that can occur during UTXO selection.
@@ -95,6 +105,20 @@ pub enum UtxoSelectionError {
     ChangeNotAffordable {
         /// How much more is needed, on top of what was available, to create a change output.
         shortfall: MicroMinotari,
+    },
+
+    /// The inputs the payment needs do not fit in one transaction the network
+    /// will relay and mine (too many, too heavy, or too many bytes).
+    #[error(
+        "The payment needs {selected} inputs, more than one transaction can hold (at most {limit}). Send a smaller \
+         amount, or consolidate the wallet's outputs first"
+    )]
+    TooManyInputs {
+        /// How many inputs the selection needed.
+        selected: usize,
+        /// How many of them fit: the fewer of the count and weight cap and what
+        /// the relay byte budget holds.
+        limit: usize,
     },
 
     /// DB execution failed
@@ -318,17 +342,23 @@ impl InputSelector {
 
         let features_and_scripts_byte_size = match estimated_output_size {
             Some(sz) => sz,
-            None => get_default_features_and_scripts_size()
-                .map_err(|err| UtxoSelectionError::SerializationError(err.to_string()))?,
+            None => {
+                estimated_output_size_for_send(0, num_outputs, &tari_common_types::tari_address::TariAddress::default())
+                    .map_err(|err| UtxoSelectionError::SerializationError(err.to_string()))?
+            },
         };
 
         let kernel_fee = self.fee_calc.calculate(fee_per_gram, 1, 0, 0, 0);
         let default_output_fee = self
             .fee_calc
             .calculate(fee_per_gram, 0, 0, 1, features_and_scripts_byte_size);
+        // Every recipient output carries its own features and scripts.
+        let outputs_byte_size = features_and_scripts_byte_size.checked_mul(num_outputs).ok_or_else(|| {
+            UtxoSelectionError::ServiceError("Total output size overflows while selecting inputs".to_string())
+        })?;
         let output_fee = self
             .fee_calc
-            .calculate(fee_per_gram, 0, 0, num_outputs, features_and_scripts_byte_size);
+            .calculate(fee_per_gram, 0, 0, num_outputs, outputs_byte_size);
         let input_fee = self.fee_calc.calculate(fee_per_gram, 0, 1, 0, 0);
 
         // Every send must carry a change output, so the change output's fee is
@@ -339,7 +369,7 @@ impl InputSelector {
         // The builder refuses (`with_change_required`) a transaction without
         // change, which it only does with less than 1 µT left, so it agrees. An
         // amount so large that the target overflows can never be funded.
-        let min_change = input_fee.max(MicroMinotari(1));
+        let min_change = self.min_change(fee_per_gram);
         let target_amount = amount
             .checked_add(kernel_fee)
             .and_then(|target| target.checked_add(min_change))
@@ -410,6 +440,14 @@ impl InputSelector {
             .ok_or_else(|| UtxoSelectionError::ServiceError("Transaction fee overflows".to_string()))?;
         let fee_without_change = fee_with_change.saturating_sub(default_output_fee);
         let utxos = selection.selected_utxos;
+        // Charged per output as above: the recipients and the change.
+        let total_outputs = num_outputs.saturating_add(1);
+        let outputs_size = features_and_scripts_byte_size.saturating_mul(total_outputs);
+        check_input_limits(
+            &utxos,
+            max_transaction_inputs(STRICTEST_NETWORK, total_outputs, outputs_size),
+            input_body_byte_budget(total_outputs),
+        )?;
 
         debug!(
             count = utxos.len(),
@@ -426,6 +464,310 @@ impl InputSelector {
             fee_with_change,
         })
     }
+
+    /// The smallest change worth keeping: what spending it as an input later
+    /// costs, and at least 1 µT. An output worth no more than this is dust.
+    pub fn min_change(&self, fee_per_gram: MicroMinotari) -> MicroMinotari {
+        self.fee_calc.calculate(fee_per_gram, 0, 1, 0, 0).max(MicroMinotari(1))
+    }
+
+    /// The fees, without and with the change output, of a send-all spending
+    /// `input_count` inputs to one recipient output, given the exact sizes the
+    /// builder charges (see
+    /// [`one_sided_output_sizes`](crate::transactions::fee_estimator::one_sided_output_sizes)).
+    pub fn send_all_fees(
+        &self,
+        input_count: usize,
+        fee_per_gram: MicroMinotari,
+        recipient_output_size: usize,
+        change_output_size: usize,
+    ) -> Result<(MicroMinotari, MicroMinotari), UtxoSelectionError> {
+        let outputs_size = recipient_output_size
+            .checked_add(change_output_size)
+            .ok_or_else(|| UtxoSelectionError::ServiceError("Total output size overflows".to_string()))?;
+        let fee_without_change = self
+            .fee_calc
+            .calculate(fee_per_gram, 1, input_count, 1, recipient_output_size);
+        let fee_with_change = self.fee_calc.calculate(fee_per_gram, 1, input_count, 2, outputs_size);
+        Ok((fee_without_change, fee_with_change))
+    }
+
+    /// What a send-all pays its recipient: everything selected less the fee
+    /// with change and the minimum change.
+    ///
+    /// Every send carries a change output (the upstream offline signer sets
+    /// `with_change_required` and refuses to sign without one), so a send-all
+    /// keeps the minimum change rather than sweeping to zero. Fails when what
+    /// is left for the recipient would be dust.
+    pub fn send_all_amount(
+        &self,
+        total_value: MicroMinotari,
+        fee_with_change: MicroMinotari,
+        fee_per_gram: MicroMinotari,
+    ) -> Result<MicroMinotari, UtxoSelectionError> {
+        let min_change = self.min_change(fee_per_gram);
+        let kept = fee_with_change.saturating_add(min_change);
+        let amount = total_value.saturating_sub(kept);
+        if amount <= min_change {
+            return Err(UtxoSelectionError::InsufficientFunds {
+                available: total_value,
+                required: kept.saturating_add(min_change).saturating_add(MicroMinotari(1)),
+            });
+        }
+        Ok(amount)
+    }
+
+    /// Records what the send-all holding `reservation_id` is about to pay, once
+    /// its amount is known.
+    pub fn audit_send_all(&self, reservation_id: &str, amount: MicroMinotari, fee: MicroMinotari, input_count: usize) {
+        info!(
+            target: "audit",
+            account_id = self.account_id,
+            reservation_id = reservation_id,
+            amount = &*mask_amount(amount),
+            fee = &*mask_amount(fee),
+            input_count = input_count;
+            "Send-all amount worked out"
+        );
+    }
+
+    /// Selects the spendable, unlocked outputs for a send-all to one recipient.
+    ///
+    /// Outputs worth no more than they cost to spend are skipped, and at most
+    /// [`max_send_all_inputs`] are taken, largest first, and only as many as
+    /// fit the base node's relay byte budget: more could not be signed, relayed
+    /// or mined. A send-all over a wallet with more outputs than that is
+    /// a partial sweep of its largest ones and can be repeated for the rest.
+    /// Spending them together links them on chain.
+    ///
+    /// The fees are for the selected outputs, one recipient output and the
+    /// change output. Fails when the recipient's share would be dust (see
+    /// [`send_all_amount`](Self::send_all_amount)).
+    pub fn select_all(
+        &self,
+        conn: &Connection,
+        network: Network,
+        fee_per_gram: MicroMinotari,
+        recipient_output_size: usize,
+        change_output_size: usize,
+    ) -> Result<SendAllSelection, UtxoSelectionError> {
+        self.select_all_up_to(
+            conn,
+            fee_per_gram,
+            recipient_output_size,
+            change_output_size,
+            max_send_all_inputs(network, recipient_output_size, change_output_size),
+        )
+    }
+
+    fn select_all_up_to(
+        &self,
+        conn: &Connection,
+        fee_per_gram: MicroMinotari,
+        recipient_output_size: usize,
+        change_output_size: usize,
+        max_inputs: usize,
+    ) -> Result<SendAllSelection, UtxoSelectionError> {
+        let tip_height = get_latest_scanned_tip_block_by_account(conn, self.account_id)?
+            .map(|b| b.height)
+            .unwrap_or(0);
+        let min_height = tip_height.saturating_sub(self.confirmation_window);
+        let spend_cost = self.min_change(fee_per_gram);
+        let spendable = crate::db::fetch_unspent_outputs(conn, self.account_id, min_height, tip_height)?;
+        let spendable_count = spendable.len();
+        let mut candidates: Vec<DbWalletOutput> = spendable
+            .into_iter()
+            .filter(|utxo| utxo.output.value() > spend_cost)
+            .collect();
+        let skipped_dust = spendable_count.saturating_sub(candidates.len());
+        candidates.sort_by_key(|utxo| std::cmp::Reverse(utxo.output.value()));
+        let candidate_count = candidates.len();
+        let utxos = take_inputs_within_limits(candidates, max_inputs, input_body_byte_budget(2))?;
+        let skipped_over_cap = candidate_count.saturating_sub(utxos.len());
+
+        let mut total_value = MicroMinotari::zero();
+        for utxo in &utxos {
+            total_value = total_value
+                .checked_add(utxo.output.value())
+                .ok_or_else(|| UtxoSelectionError::ServiceError("Total value of the outputs overflows".to_string()))?;
+        }
+        let (fee_without_change, fee_with_change) =
+            self.send_all_fees(utxos.len(), fee_per_gram, recipient_output_size, change_output_size)?;
+        self.send_all_amount(total_value, fee_with_change, fee_per_gram)?;
+
+        debug!(
+            count = utxos.len(),
+            total = &*mask_amount(total_value);
+            "All spendable UTXOs selected"
+        );
+
+        Ok(SendAllSelection {
+            selection: UtxoSelection {
+                utxos,
+                requires_change_output: true,
+                total_value,
+                fee_without_change,
+                fee_with_change,
+            },
+            skipped_dust,
+            skipped_over_cap,
+        })
+    }
+}
+
+/// What [`InputSelector::select_all`] spends, and how many spendable outputs it
+/// leaves behind.
+#[derive(Debug)]
+pub struct SendAllSelection {
+    /// The outputs spent, with the send-all's fees.
+    pub selection: UtxoSelection,
+    /// Spendable outputs left out for being worth no more than they cost to spend.
+    pub skipped_dust: usize,
+    /// Spendable outputs left out for not fitting the count, weight or byte cap.
+    pub skipped_over_cap: usize,
+}
+
+impl SendAllSelection {
+    /// Warns on the audit target when the send-all leaves spendable outputs
+    /// behind, so a partial sweep is never silent.
+    pub fn audit_if_partial(&self, account_id: i64) {
+        if self.skipped_dust > 0 || self.skipped_over_cap > 0 {
+            warn!(
+                target: "audit",
+                account_id = account_id,
+                spent = self.selection.utxos.len(),
+                skipped_dust = self.skipped_dust,
+                skipped_over_cap = self.skipped_over_cap;
+                "Send-all leaves spendable outputs behind"
+            );
+        }
+    }
+}
+
+/// The most inputs a send-all to one recipient may spend on `network`.
+///
+/// Bound by what a block can hold (the kernel, the recipient and change
+/// outputs and the inputs must fit in `max_block_transaction_weight`, which
+/// neither the builder nor the signer checks) and by
+/// [`MAX_TRANSACTION_INPUTS`], which the signer does. Selection also keeps
+/// the inputs within the relay byte budget, which may allow fewer.
+pub fn max_send_all_inputs(network: Network, recipient_output_size: usize, change_output_size: usize) -> usize {
+    max_transaction_inputs(network, 2, recipient_output_size.saturating_add(change_output_size))
+}
+
+/// The most inputs a transaction with `num_outputs` outputs, whose features
+/// and scripts total `outputs_size`, may spend on `network`: as many as still
+/// fit in `max_block_transaction_weight` next to the kernel and the outputs,
+/// and no more than [`MAX_TRANSACTION_INPUTS`].
+pub fn max_transaction_inputs(network: Network, num_outputs: usize, outputs_size: usize) -> usize {
+    let constants = ConsensusConstantsBuilder::new(network).build();
+    let weight = constants.transaction_weight_params();
+    let fixed_weight = weight.calculate(1, 0, num_outputs, outputs_size);
+    let by_weight = constants
+        .max_block_transaction_weight()
+        .saturating_sub(fixed_weight)
+        .checked_div(weight.params().input_weight)
+        .unwrap_or(0);
+    usize::try_from(by_weight)
+        .unwrap_or(usize::MAX)
+        .min(MAX_TRANSACTION_INPUTS)
+}
+
+/// The network with the smallest block weight. Exact sends are bounded by it,
+/// so the bound holds on every network without the selector knowing which.
+const STRICTEST_NETWORK: Network = Network::MainNet;
+
+/// The largest transaction body, borsh-serialized with hydrated inputs, a base
+/// node relays: tari's `MAX_BLOCK_TEMPLATE_BODY_BYTES` (base_layer/core
+/// mempool, checked by `check_body_size`), 5 MiB. Larger is never mined.
+const MAX_RELAYED_BODY_BYTES: usize = 5 * 1024 * 1024;
+
+/// Room kept in that budget per output. An output with its range proof and a
+/// full memo serializes to well under this.
+const BODY_BYTES_PER_OUTPUT: usize = 2 * 1024;
+
+/// Room kept for the kernel, the encoding and headroom.
+const BODY_BYTES_MARGIN: usize = 64 * 1024;
+
+/// The body bytes left for the inputs of a transaction with `num_outputs` outputs.
+fn input_body_byte_budget(num_outputs: usize) -> usize {
+    MAX_RELAYED_BODY_BYTES
+        .saturating_sub(BODY_BYTES_PER_OUTPUT.saturating_mul(num_outputs))
+        .saturating_sub(BODY_BYTES_MARGIN)
+}
+
+/// The serialized size `output` will have as a hydrated transaction input.
+///
+/// The commitment, range proof hash and script signature are fixed-size, so
+/// placeholders measure the same as the values the signer fills in.
+pub fn hydrated_input_size(output: &WalletOutput) -> Result<usize, UtxoSelectionError> {
+    let input = TransactionInput::new(
+        TransactionInputVersion::get_current_version(),
+        SpentOutput::OutputData {
+            version: output.version(),
+            features: output.features().clone(),
+            commitment: output.commitment().clone(),
+            script: output.script().clone(),
+            sender_offset_public_key: output.sender_offset_public_key().clone(),
+            covenant: output.covenant().clone(),
+            encrypted_data: output.encrypted_data().clone(),
+            metadata_signature: output.metadata_signature().clone(),
+            rangeproof_hash: FixedHash::zero(),
+            minimum_value_promise: output.minimum_value_promise(),
+        },
+        output.input_data().clone(),
+        ComAndPubSignature::default(),
+    );
+    input
+        .get_serialized_size()
+        .map_err(|e| UtxoSelectionError::SerializationError(e.to_string()))
+}
+
+/// Takes `candidates` in order while there are fewer than `max_inputs` and
+/// their hydrated size stays within `byte_budget`.
+fn take_inputs_within_limits(
+    candidates: Vec<DbWalletOutput>,
+    max_inputs: usize,
+    byte_budget: usize,
+) -> Result<Vec<DbWalletOutput>, UtxoSelectionError> {
+    let mut taken = Vec::new();
+    let mut body_bytes = 0usize;
+    for utxo in candidates {
+        if taken.len() >= max_inputs {
+            break;
+        }
+        let next = body_bytes.saturating_add(hydrated_input_size(&utxo.output)?);
+        if next > byte_budget {
+            break;
+        }
+        body_bytes = next;
+        taken.push(utxo);
+    }
+    Ok(taken)
+}
+
+/// Fails with [`UtxoSelectionError::TooManyInputs`] when `utxos` are more than
+/// `max_inputs` or their hydrated size is over `byte_budget`, naming how many
+/// of them do fit.
+fn check_input_limits(
+    utxos: &[DbWalletOutput],
+    max_inputs: usize,
+    byte_budget: usize,
+) -> Result<(), UtxoSelectionError> {
+    let fitting = take_inputs_within_limits(utxos.to_vec(), max_inputs, byte_budget)?.len();
+    if fitting < utxos.len() {
+        warn!(
+            target: "audit",
+            selected = utxos.len(),
+            limit = fitting;
+            "Selected inputs do not fit in one transaction"
+        );
+        return Err(UtxoSelectionError::TooManyInputs {
+            selected: utxos.len(),
+            limit: fitting,
+        });
+    }
+    Ok(())
 }
 
 /// Turns the transaction builder's refusal to build a transaction without a
@@ -488,6 +830,11 @@ mod tests {
 
     /// An account holding one confirmed, spendable output of `value`.
     fn account_with_one_output(value: u64) -> (SqlitePool, i64, TempDir) {
+        account_with_outputs(&[value])
+    }
+
+    /// An account holding a confirmed, spendable output of each of `values`.
+    fn account_with_outputs(values: &[u64]) -> (SqlitePool, i64, TempDir) {
         let dir = tempfile::tempdir().expect("temp dir");
         let pool = init_db(dir.path().join("selector.db")).expect("init db");
         let conn = pool.get().expect("conn");
@@ -496,26 +843,30 @@ mod tests {
         let account_id = get_account_by_name(&conn, "default").unwrap().unwrap().id;
         insert_scanned_tip_block(&conn, account_id, 200, &[0u8; 32]).expect("tip");
 
-        let output = test_wallet_output(value, 1);
-        conn.execute(
-            r#"
-            INSERT INTO outputs (
-                account_id, tx_id, output_hash, mined_in_block_height, mined_in_block_hash,
-                value, mined_timestamp, wallet_output_json, status, confirmed_height,
-                confirmed_hash, is_burn, maturity
-            ) VALUES (
-                :account_id, 1, :hash, 100, :hash, :value, :ts, :json, 'UNSPENT', 100, :hash, 0, 0
+        for (i, value) in values.iter().enumerate() {
+            let seed = u8::try_from(i + 1).expect("few outputs");
+            let output = test_wallet_output(*value, seed);
+            conn.execute(
+                r#"
+                INSERT INTO outputs (
+                    account_id, tx_id, output_hash, mined_in_block_height, mined_in_block_hash,
+                    value, mined_timestamp, wallet_output_json, status, confirmed_height,
+                    confirmed_hash, is_burn, maturity
+                ) VALUES (
+                    :account_id, :tx_id, :hash, 100, :hash, :value, :ts, :json, 'UNSPENT', 100, :hash, 0, 0
+                )
+                "#,
+                named_params! {
+                    ":account_id": account_id,
+                    ":tx_id": i64::from(seed),
+                    ":hash": vec![seed; 32],
+                    ":value": *value as i64,
+                    ":ts": Utc::now(),
+                    ":json": serde_json::to_string(&output).unwrap(),
+                },
             )
-            "#,
-            named_params! {
-                ":account_id": account_id,
-                ":hash": vec![1u8; 32],
-                ":value": value as i64,
-                ":ts": Utc::now(),
-                ":json": serde_json::to_string(&output).unwrap(),
-            },
-        )
-        .expect("insert output");
+            .expect("insert output");
+        }
         drop(conn);
         (pool, account_id, dir)
     }
@@ -583,6 +934,165 @@ mod tests {
             change >= input_fee,
             "change must be worth at least the {input_fee} it costs to spend, got {change}"
         );
+    }
+
+    #[test]
+    fn a_send_all_takes_everything_but_the_fee_and_the_minimum_change() {
+        let (pool, account_id, _dir) = account_with_one_output(1_000_000);
+        let conn = pool.get().expect("conn");
+        let selector = InputSelector::new(account_id, 100);
+        let selection = selector
+            .select_all(&conn, Network::LocalNet, MicroMinotari(5), 1000, 1000)
+            .expect("selection")
+            .selection;
+        assert_eq!(selection.utxos.len(), 1);
+        assert_eq!(selection.total_value, MicroMinotari(1_000_000));
+        // Charged as the regular selector charges one recipient and change.
+        let fee = Fee::new(TransactionWeight::latest()).calculate(MicroMinotari(5), 1, 1, 2, 2000);
+        assert_eq!(selection.fee_with_change, fee);
+
+        let amount = selector
+            .send_all_amount(selection.total_value, selection.fee_with_change, MicroMinotari(5))
+            .expect("amount");
+        let min_change = selector.min_change(MicroMinotari(5));
+        assert_eq!(amount, MicroMinotari(1_000_000) - fee - min_change);
+    }
+
+    /// Outputs worth no more than they cost to spend are left out of a send-all.
+    #[test]
+    fn a_send_all_skips_dust_inputs() {
+        let selector = InputSelector::new(1, 100);
+        let spend_cost = selector.min_change(MicroMinotari(5));
+        let (pool, account_id, _dir) =
+            account_with_outputs(&[300_000, spend_cost.as_u64(), 1_000_000, spend_cost.as_u64() + 1]);
+        let conn = pool.get().expect("conn");
+        let all = InputSelector::new(account_id, 100)
+            .select_all(&conn, Network::LocalNet, MicroMinotari(5), 1000, 1000)
+            .expect("selection");
+        assert_eq!((all.skipped_dust, all.skipped_over_cap), (1, 0));
+        let selection = all.selection;
+        let values: Vec<u64> = selection.utxos.iter().map(|u| u.output.value().as_u64()).collect();
+        assert_eq!(values, vec![1_000_000, 300_000, spend_cost.as_u64() + 1]);
+        assert_eq!(
+            selection.total_value,
+            MicroMinotari(1_300_000) + spend_cost + MicroMinotari(1)
+        );
+        let (_, fee) = selector.send_all_fees(3, MicroMinotari(5), 1000, 1000).expect("fees");
+        assert_eq!(selection.fee_with_change, fee);
+    }
+
+    /// A send-all takes at most the input cap, largest outputs first, and says
+    /// how many it left behind.
+    #[test]
+    fn a_send_all_takes_the_largest_inputs_up_to_the_cap() {
+        let (pool, account_id, _dir) = account_with_outputs(&[200_000, 900_000, 500_000, 700_000, 1]);
+        let conn = pool.get().expect("conn");
+        let all = InputSelector::new(account_id, 100)
+            .select_all_up_to(&conn, MicroMinotari(5), 1000, 1000, 2)
+            .expect("selection");
+        assert_eq!((all.skipped_dust, all.skipped_over_cap), (1, 2));
+        let selection = all.selection;
+        let values: Vec<u64> = selection.utxos.iter().map(|u| u.output.value().as_u64()).collect();
+        assert_eq!(values, vec![900_000, 700_000]);
+        assert_eq!(selection.total_value, MicroMinotari(1_600_000));
+    }
+
+    /// On mainnet a block holds fewer inputs than a transaction may carry, so
+    /// the send-all cap is the block weight's: exactly as many as still fit.
+    #[test]
+    fn the_send_all_input_cap_is_bound_by_mainnet_block_weight() {
+        let (recipient_size, change_size) = (128, 256);
+        let cap = max_send_all_inputs(Network::MainNet, recipient_size, change_size);
+        assert!(cap < MAX_TRANSACTION_INPUTS, "cap {cap}");
+
+        let constants = ConsensusConstantsBuilder::new(Network::MainNet).build();
+        let weight = |inputs| {
+            constants
+                .transaction_weight_params()
+                .calculate(1, inputs, 2, recipient_size + change_size)
+        };
+        assert!(weight(cap) <= constants.max_block_transaction_weight());
+        assert!(weight(cap + 1) > constants.max_block_transaction_weight());
+    }
+
+    fn db_output(id: i64, value: u64) -> DbWalletOutput {
+        DbWalletOutput {
+            id,
+            tx_id: tari_common_types::transaction::TxId::from(id as u64),
+            output: test_wallet_output(value, 1),
+        }
+    }
+
+    /// The relay byte budget binds before the mainnet weight cap: a send-all
+    /// takes as many inputs as fit in it, and its body stays within it.
+    #[test]
+    fn the_send_all_input_cap_is_bound_by_the_relay_byte_budget() {
+        let per_input = hydrated_input_size(&test_wallet_output(1_000, 1)).unwrap();
+        let budget = input_body_byte_budget(2);
+        let byte_cap = budget / per_input;
+        let weight_cap = max_send_all_inputs(Network::MainNet, 128, 256);
+        assert!(byte_cap < weight_cap, "byte cap {byte_cap}, weight cap {weight_cap}");
+
+        let candidates: Vec<DbWalletOutput> = (0..weight_cap as i64).map(|id| db_output(id, 1_000)).collect();
+        let taken = take_inputs_within_limits(candidates, weight_cap, budget).unwrap();
+        assert_eq!(taken.len(), byte_cap);
+        // The inputs, the two outputs and the kernel are within what a base node relays.
+        assert!(taken.len() * per_input + 2 * BODY_BYTES_PER_OUTPUT + BODY_BYTES_MARGIN <= MAX_RELAYED_BODY_BYTES);
+    }
+
+    /// An exact send whose inputs do not fit one transaction is refused with a
+    /// typed error; one within the limits is untouched.
+    #[test]
+    fn an_exact_send_over_the_input_limits_is_refused() {
+        let utxos = vec![db_output(1, 1_000), db_output(2, 1_000), db_output(3, 1_000)];
+        let per_input = hydrated_input_size(&test_wallet_output(1_000, 1)).unwrap();
+        check_input_limits(&utxos, 3, 3 * per_input).expect("within the limits");
+        // Over the count cap: the cap is what fits.
+        match check_input_limits(&utxos, 2, 3 * per_input) {
+            Err(UtxoSelectionError::TooManyInputs { selected: 3, limit: 2 }) => {},
+            other => panic!("expected TooManyInputs, got {other:?}"),
+        }
+        // Over the byte budget, under the count cap: the budget is what fits, not the cap.
+        match check_input_limits(&utxos, 10, 2 * per_input + 1) {
+            Err(UtxoSelectionError::TooManyInputs { selected, limit }) => {
+                assert_eq!((selected, limit), (3, 2));
+                assert!(limit < selected);
+            },
+            other => panic!("expected TooManyInputs, got {other:?}"),
+        }
+        // More outputs leave room for fewer inputs.
+        assert!(
+            max_transaction_inputs(Network::MainNet, 500, 500 * 128) < max_transaction_inputs(Network::MainNet, 2, 256)
+        );
+        assert!(input_body_byte_budget(500) < input_body_byte_budget(2));
+    }
+
+    #[test]
+    fn a_send_all_of_dust_is_refused() {
+        let selector = InputSelector::new(1, 100);
+        let min_change = selector.min_change(MicroMinotari(5));
+        let (_, fee) = selector.send_all_fees(1, MicroMinotari(5), 1000, 1000).expect("fees");
+        // Leaves exactly the dust threshold for the recipient.
+        let total = fee + min_change + min_change;
+        assert!(matches!(
+            selector.send_all_amount(total, fee, MicroMinotari(5)),
+            Err(UtxoSelectionError::InsufficientFunds { .. })
+        ));
+        assert_eq!(
+            selector
+                .send_all_amount(total + MicroMinotari(1), fee, MicroMinotari(5))
+                .expect("amount"),
+            min_change + MicroMinotari(1)
+        );
+
+        // Nothing to spend at all.
+        let dir = tempfile::tempdir().expect("temp dir");
+        let pool = init_db(dir.path().join("empty.db")).expect("init db");
+        let conn = pool.get().expect("conn");
+        assert!(matches!(
+            selector.select_all(&conn, Network::LocalNet, MicroMinotari(5), 1000, 1000),
+            Err(UtxoSelectionError::InsufficientFunds { .. })
+        ));
     }
 
     #[test]

@@ -72,10 +72,14 @@ use minotari::{
     scan::{self, reorg::rollback_from_height},
     signing,
     transactions::{
-        fee_estimator::estimated_output_size_for_payment_id,
-        fund_locker::FundLocker,
+        fee_estimator::{estimated_output_size_for_recipients, one_sided_output_sizes},
+        fund_locker::{FundLocker, release_reservation},
         idempotency::{IdempotencyBinding, IdempotencyOperation, RequestFingerprint},
-        one_sided_transaction::{OneSidedTransaction, Recipient, unsigned_transaction_binding},
+        input_selector::InputSelector,
+        one_sided_transaction::{
+            OneSidedTransaction, Recipient, check_recipient_networks, total_recipient_amount,
+            unsigned_transaction_binding,
+        },
     },
     utils::{self, crypto::PasswordCipher},
     webhooks::WebhookTriggerConfig,
@@ -464,6 +468,7 @@ async fn main() -> Result<(), anyhow::Error> {
         Commands::CreateUnsignedTransaction {
             account_name,
             recipient,
+            send_all,
             output_file,
             security,
             db,
@@ -477,6 +482,7 @@ async fn main() -> Result<(), anyhow::Error> {
 
             handle_create_unsigned_transaction(
                 recipient,
+                send_all,
                 wallet_config.database_path.clone(),
                 account_name,
                 wallet_config.network,
@@ -766,6 +772,7 @@ fn handle_balance(config: &WalletConfig) -> Result<(), anyhow::Error> {
 #[allow(clippy::too_many_arguments)]
 fn handle_create_unsigned_transaction(
     recipient: Vec<String>,
+    send_all: bool,
     database_file: PathBuf,
     account_name: String,
     network: Network,
@@ -775,10 +782,26 @@ fn handle_create_unsigned_transaction(
     confirmation_window: u64,
     output_file: String,
 ) -> Result<(), anyhow::Error> {
+    if send_all && recipient.len() != 1 {
+        return Err(anyhow!("--send-all takes exactly one recipient"));
+    }
     let recipients: Result<Vec<Recipient>, anyhow::Error> = recipient
         .into_iter()
         .map(|r_str| {
             let parts: Vec<&str> = r_str.split("::").collect();
+            if send_all {
+                // The amount is worked out from the inputs once they are locked.
+                if parts.len() > 2 {
+                    return Err(anyhow!(
+                        "Invalid recipient format for --send-all. Expected 'address' or 'address::payment_id'"
+                    ));
+                }
+                return Ok(Recipient {
+                    address: TariAddress::from_str(parts.first().expect("split yields at least one part"))?,
+                    amount: MicroMinotari::zero(),
+                    payment_id: parts.get(1).map(|s| s.to_string()),
+                });
+            }
             if parts.len() < 2 || parts.len() > 3 {
                 return Err(anyhow!(
                     "Invalid recipient format. Expected 'address::amount' or 'address::amount::payment_id'"
@@ -798,7 +821,8 @@ fn handle_create_unsigned_transaction(
             })
         })
         .collect();
-    let recipients = recipients?;
+    let mut recipients = recipients?;
+    check_recipient_networks(&recipients, network)?;
     let pool = init_db(database_file)?;
     // One connection for the whole command; `lock` uses this one rather than taking a
     // second from the pool.
@@ -806,18 +830,17 @@ fn handle_create_unsigned_transaction(
     let account =
         db::get_account_by_name(&conn, &account_name)?.ok_or_else(|| anyhow!("Account not found: {}", account_name))?;
 
-    let amount = recipients.iter().map(|r| r.amount).sum();
+    // Refuse an empty list, a zero amount or an overflowing total before anything is locked.
+    let amount = if send_all {
+        MicroMinotari::zero()
+    } else {
+        total_recipient_amount(&recipients, network)?
+    };
     let num_outputs = recipients.len();
     let fee_per_gram = MicroMinotari(5);
-    // One size is charged for every output, so quote the largest memo in the batch rather than
-    // the default: anything smaller reserves inputs that cannot pay the fee the builder lands on.
-    let estimated_output_size = Some(estimated_output_size_for_payment_id(
-        recipients
-            .iter()
-            .map(|r| r.payment_id.as_ref().map_or(0, String::len))
-            .max()
-            .unwrap_or(0),
-    )?);
+    // Charge for the memos this send will carry; anything smaller reserves inputs that cannot
+    // pay the fee the builder lands on.
+    let estimated_output_size = Some(estimated_output_size_for_recipients(&recipients)?);
 
     // Same binding the REST endpoint builds, so a key means the same thing
     // whichever way the request arrives.
@@ -828,10 +851,24 @@ fn handle_create_unsigned_transaction(
         fee_per_gram,
         seconds_to_lock,
         confirmation_window,
+        send_all,
     );
     let lock_amount = FundLocker::new();
-    let locked_funds = lock_amount
-        .lock(
+    let locked_funds = if send_all {
+        let (recipient_output_size, change_output_size) = one_sided_output_sizes(&recipients, network)?;
+        lock_amount.lock_all(
+            &mut conn,
+            account.id,
+            network,
+            fee_per_gram,
+            recipient_output_size,
+            change_output_size,
+            idempotency,
+            seconds_to_lock,
+            confirmation_window,
+        )
+    } else {
+        lock_amount.lock(
             &mut conn,
             account.id,
             amount,
@@ -842,15 +879,56 @@ fn handle_create_unsigned_transaction(
             seconds_to_lock,
             confirmation_window,
         )
-        .map_err(|e| anyhow!("Failed to lock funds: {}", e))?;
+    }
+    .map_err(|e| anyhow!("Failed to lock funds: {}", e))?;
 
-    let one_sided_tx = OneSidedTransaction::new(pool.clone(), network, Zeroizing::new(password.clone()));
-    let result = one_sided_tx
-        .create_unsigned_transaction(&account, locked_funds, recipients, fee_per_gram)
-        .map_err(|e| anyhow!("Failed to create an unsigned transaction: {}", e))?;
+    let reservation_id = locked_funds.reservation_id.clone();
+    let created_reservation = locked_funds.created_reservation;
+    // Not known on a replay: the counts are not stored.
+    let send_all_skipped = locked_funds.send_all_skipped;
+    let written = (|| -> Result<(), anyhow::Error> {
+        if send_all {
+            let input_selector = InputSelector::new(account.id, confirmation_window);
+            let amount =
+                input_selector.send_all_amount(locked_funds.total_value, locked_funds.fee_with_change, fee_per_gram)?;
+            input_selector.audit_send_all(
+                &reservation_id,
+                amount,
+                locked_funds.fee_with_change,
+                locked_funds.utxos.len(),
+            );
+            for recipient in &mut recipients {
+                recipient.amount = amount;
+            }
+        }
 
-    create_dir_all(Path::new(&output_file).parent().unwrap())?;
-    fs::write(output_file, serde_json::to_string_pretty(&result)?)?;
+        let one_sided_tx = OneSidedTransaction::new(pool.clone(), network, Zeroizing::new(password.clone()));
+        let result = one_sided_tx
+            .create_unsigned_transaction(&account, locked_funds, recipients, fee_per_gram)
+            .map_err(|e| anyhow!("Failed to create an unsigned transaction: {}", e))?;
+
+        if let Some(parent) = Path::new(&output_file).parent() {
+            create_dir_all(parent)?;
+        }
+        fs::write(&output_file, serde_json::to_string_pretty(&result)?)?;
+        Ok(())
+    })();
+    // A reservation this command took is no use to anyone once its send failed.
+    if written.is_err() && created_reservation {
+        release_reservation(&conn, &reservation_id);
+    }
+    written?;
+
+    if let Some(skipped) = send_all_skipped
+        && (skipped.skipped_dust > 0 || skipped.skipped_over_cap > 0)
+    {
+        eprintln!(
+            "Warning: this send-all left spendable outputs behind. {} did not fit in one transaction; \
+             run send-all again to sweep them. {} are dust, worth less than they cost to spend, and are \
+             never worth sending.",
+            skipped.skipped_over_cap, skipped.skipped_dust
+        );
+    }
 
     info!(target:"audit", "Unsigned transaction written to file.");
     Ok(())

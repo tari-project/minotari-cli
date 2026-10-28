@@ -503,7 +503,7 @@
           "accounts"
         ],
         "summary": "Creates an unsigned one-sided transaction for external signing.",
-        "description": "This endpoint constructs a complete transaction ready for signing, including\ninput selection, output creation, and fee calculation. The transaction is\nreturned in an unsigned state, allowing it to be signed by an external\nkey management system or hardware wallet.\n\n# Path Parameters\n\n- `name`: The account name to send funds from\n\n# Request Body\n\nSee [`CreateTransactionRequest`] for the complete request schema.\n\n# Response\n\nReturns a JSON object containing the unsigned transaction data, including:\n- Transaction inputs (selected UTXOs)\n- Transaction outputs (recipient outputs and change)\n- Fee information\n- Data required for signing\n\n# Errors\n\n- [`ApiError::AccountNotFound`]: The specified account does not exist\n- [`ApiError::FailedToLockFunds`]: Insufficient funds or UTXO selection failure\n- [`ApiError::FailedCreateUnsignedTx`]: Transaction construction failure\n- [`ApiError::DbError`]: Database connection or query failure\n\n# Example\n\n```bash\ncurl -X POST http://127.0.0.1:9000/accounts/default/create_unsigned_transaction \\\n  -H \"Authorization: Bearer $MINOTARI_API_TOKEN\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\n    \"recipients\": [\n      {\"address\": \"f4FxMqKAPDMqAjh6hTpC...\", \"amount\": 1000000}\n    ]\n  }'\n```\n\n# Workflow\n\n1. Client calls this endpoint to create an unsigned transaction\n2. Server locks required UTXOs and constructs the transaction\n3. Client signs the transaction externally\n4. Client broadcasts the signed transaction to the network\n\n# Notes\n\n- This creates a one-sided transaction (no recipient interaction required)\n- UTXOs are automatically locked for the configured duration\n- Fee is calculated at 5 MicroMinotari per gram\n- Change outputs are created automatically when necessary",
+        "description": "This endpoint constructs a complete transaction ready for signing, including\ninput selection, output creation, and fee calculation. The transaction is\nreturned in an unsigned state, allowing it to be signed by an external\nkey management system or hardware wallet.\n\n# Path Parameters\n\n- `name`: The account name to send funds from\n\n# Request Body\n\nSee [`CreateTransactionRequest`] for the complete request schema.\n\n# Response\n\nReturns a JSON object containing the unsigned transaction data, including:\n- Transaction inputs (selected UTXOs)\n- Transaction outputs (recipient outputs and change)\n- Fee information\n- Data required for signing\n\n# Errors\n\n- [`ApiError::AccountNotFound`]: The specified account does not exist\n- [`ApiError::FailedToLockFunds`]: Insufficient funds or UTXO selection failure\n- [`ApiError::FailedCreateUnsignedTx`]: Transaction construction failure\n- [`ApiError::DbError`]: Database connection or query failure\n\n# Example\n\n```bash\ncurl -X POST http://127.0.0.1:9000/accounts/default/create_unsigned_transaction \\\n  -H \"Authorization: Bearer $MINOTARI_API_TOKEN\" \\\n  -H \"Content-Type: application/json\" \\\n  -d '{\n    \"recipients\": [\n      {\"address\": \"f4FxMqKAPDMqAjh6hTpC...\", \"amount\": 1000000}\n    ]\n  }'\n```\n\n# Workflow\n\n1. Client calls this endpoint to create an unsigned transaction\n2. Server locks required UTXOs and constructs the transaction\n3. Client signs the transaction externally\n4. Client broadcasts the signed transaction to the network\n\n# Notes\n\n- This creates a one-sided transaction (no recipient interaction required)\n- UTXOs are automatically locked for the configured duration\n- Fee is calculated at 5 MicroMinotari per gram\n- Change outputs are created automatically when necessary\n- A send-all's response also has a `send_all` field (schema `SendAllSkipped`):\n  how many spendable outputs it left behind, as dust and over the per-transaction\n  limit. It is left out on an idempotent replay, whose counts are not stored.",
         "operationId": "api_create_unsigned_transaction",
         "parameters": [
           {
@@ -1612,6 +1612,10 @@
             "default": 86400,
             "maximum": 31536000,
             "minimum": 0
+          },
+          "send_all": {
+            "type": "boolean",
+            "description": "Spend every spendable UTXO to the single recipient, whose `amount` is\nomitted: it receives their total less the fee and a minimum change\noutput (the offline signer requires change). Spending every output in\none transaction links them on chain."
           }
         }
       },
@@ -1958,8 +1962,7 @@
         "type": "object",
         "description": "Represents a single recipient in a transaction request.\n\nEach recipient specifies a destination address and the amount to send.\nAn optional payment ID can be included for tracking or identification\npurposes.\n\n# JSON Example\n\n```json\n{\n  \"address\": \"f4FxMqKAPDMqAjh6hTpC...\",\n  \"amount\": 500000,\n  \"payment_id\": \"invoice-2024-001\"\n}\n```",
         "required": [
-          "address",
-          "amount"
+          "address"
         ],
         "properties": {
           "address": {
@@ -1967,9 +1970,12 @@
             "description": "The recipient's Tari address in Base58 encoding.\n\nMust be a valid Tari address for the current network (mainnet, testnet, etc.)."
           },
           "amount": {
-            "type": "integer",
+            "type": [
+              "integer",
+              "null"
+            ],
             "format": "int64",
-            "description": "The amount to send to this recipient in MicroMinotari.",
+            "description": "The amount to send to this recipient in MicroMinotari.\n\nRequired, except with `send_all`, where it must be omitted.",
             "minimum": 0
           },
           "payment_id": {
@@ -2003,6 +2009,26 @@
           "scanned_at": {
             "type": "string",
             "description": "Timestamp when this block was scanned"
+          }
+        }
+      },
+      "SendAllSkipped": {
+        "type": "object",
+        "description": "How many spendable outputs a send-all left behind: the `send_all` field of\na send-all's `create_unsigned_transaction` response.",
+        "required": [
+          "skipped_dust",
+          "skipped_over_cap"
+        ],
+        "properties": {
+          "skipped_dust": {
+            "type": "integer",
+            "description": "Outputs worth no more than they cost to spend; never worth spending.",
+            "minimum": 0
+          },
+          "skipped_over_cap": {
+            "type": "integer",
+            "description": "Outputs that did not fit one transaction (count, weight or bytes);\nanother send-all can sweep them.",
+            "minimum": 0
           }
         }
       },

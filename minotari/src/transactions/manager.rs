@@ -81,7 +81,10 @@ use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::Connection;
 use tari_common::configuration::Network;
 use tari_common_types::types::FixedHash;
-use tari_common_types::{tari_address::TariAddressFeatures, transaction::TxId};
+use tari_common_types::{
+    tari_address::{TariAddress, TariAddressFeatures},
+    transaction::TxId,
+};
 use tari_transaction_components::offline_signing::models::SignedTransaction;
 use tari_transaction_components::rpc::models::{TxSubmissionRejectionReason, TxSubmissionResponse};
 use tari_transaction_components::transaction_components::OutputType;
@@ -94,7 +97,7 @@ use tari_transaction_components::{
         models::{PrepareOneSidedTransactionForSigningResult, SignedOneSidedTransactionResult},
         prepare_one_sided_transaction_for_signing,
     },
-    transaction_components::{MemoField, OutputFeatures, WalletOutput, memo_field::TxType},
+    transaction_components::{OutputFeatures, WalletOutput},
 };
 use tari_utilities::ByteArray;
 
@@ -111,11 +114,11 @@ use crate::{
             DisplayedTransaction, DisplayedTransactionBuilder, TransactionDirection, TransactionDisplayStatus,
             TransactionInput, TransactionSource,
         },
-        fee_estimator::estimated_output_size_for_payment_id,
+        fee_estimator::{estimated_output_size_for_recipients, one_sided_output_sizes},
         fund_locker::{check_replay_allowed, lock_expiry_at, validate_fee_per_gram},
         idempotency::{IdempotencyBinding, IdempotencyConflict, IdempotencyOperation, RequestFingerprint},
         input_selector::{InputSelector, UtxoSelection, map_change_required_error},
-        one_sided_transaction::{Recipient, recipient_memo},
+        one_sided_transaction::{Recipient, check_recipient_networks, total_recipient_amount},
     },
 };
 use zeroize::Zeroizing;
@@ -140,7 +143,7 @@ enum Reservation {
 ///
 /// `ProcessedTransaction` tracks the state of a transaction as it moves
 /// through the creation, signing, and broadcast phases. It holds the
-/// idempotency key, recipient details, and selected UTXOs.
+/// idempotency key, recipients, and selected UTXOs.
 ///
 /// # Lifecycle
 ///
@@ -154,14 +157,16 @@ pub struct ProcessedTransaction {
     id: Option<String>,
     /// Unique key for idempotent transaction handling.
     idempotency_key: String,
-    /// The recipient of this transaction.
-    recipient: Recipient,
+    /// The recipients of this transaction, one output each.
+    recipients: Vec<Recipient>,
     /// How long to lock UTXOs before they expire.
     seconds_to_lock_utxos: u64,
     /// The UTXOs selected for this transaction.
     selected_utxos: Vec<DbWalletOutput>,
     /// Whether this send took the reservation or replayed onto an existing one.
     reservation: Reservation,
+    /// Whether this send spends every spendable UTXO to its one recipient.
+    send_all: bool,
 }
 
 impl ProcessedTransaction {
@@ -171,16 +176,22 @@ impl ProcessedTransaction {
     ///
     /// * `id` - Optional existing transaction ID (for resuming)
     /// * `idempotency_key` - Unique key for this transaction
-    /// * `recipient` - The transaction recipient
+    /// * `recipients` - The transaction recipients
     /// * `seconds_to_lock_utxos` - Lock duration for selected UTXOs
-    pub fn new(id: Option<String>, idempotency_key: String, recipient: Recipient, seconds_to_lock_utxos: u64) -> Self {
+    pub fn new(
+        id: Option<String>,
+        idempotency_key: String,
+        recipients: Vec<Recipient>,
+        seconds_to_lock_utxos: u64,
+    ) -> Self {
         Self {
             id,
             idempotency_key,
-            recipient,
+            recipients,
             seconds_to_lock_utxos,
             selected_utxos: Vec::new(),
             reservation: Reservation::Created,
+            send_all: false,
         }
     }
 
@@ -204,20 +215,31 @@ impl ProcessedTransaction {
 
     /// Binds this transaction's idempotency key to the payment it describes.
     ///
-    /// Without the recipient in the fingerprint, replaying the key with a
+    /// Without the recipients in the fingerprint, replaying the key with a
     /// different address would return this transaction's reserved UTXOs and
     /// build a payment to whoever the replay named.
-    fn idempotency_binding(&self, account_id: i64) -> IdempotencyBinding {
+    ///
+    /// A send-all also binds `fee_per_gram`: its amount is worked out at that
+    /// rate, so a replay at another rate would be a different payment.
+    fn idempotency_binding(&self, account_id: i64, fee_per_gram: MicroMinotari) -> IdempotencyBinding {
         let operation = IdempotencyOperation::SendTransaction;
+        let mut fingerprint = RequestFingerprint::new(operation).field("account_id", account_id.to_le_bytes());
+        // Fields are length-prefixed, so adding or dropping a recipient always changes the hash.
+        for recipient in &self.recipients {
+            fingerprint = fingerprint
+                .field("recipient_address", recipient.address.to_base58())
+                .field("recipient_amount", recipient.amount.as_u64().to_le_bytes())
+                .optional_field("recipient_payment_id", recipient.payment_id.as_deref());
+        }
+        if self.send_all {
+            fingerprint = fingerprint
+                .field("send_all", [1u8])
+                .field("fee_per_gram", fee_per_gram.as_u64().to_le_bytes());
+        }
         IdempotencyBinding::new(
             Some(self.idempotency_key.clone()),
             operation,
-            RequestFingerprint::new(operation)
-                .field("account_id", account_id.to_le_bytes())
-                .field("recipient_address", self.recipient.address.to_base58())
-                .field("recipient_amount", self.recipient.amount.as_u64().to_le_bytes())
-                .optional_field("recipient_payment_id", self.recipient.payment_id.as_deref())
-                .field("seconds_to_lock_utxos", self.seconds_to_lock_utxos.to_le_bytes()),
+            fingerprint.field("seconds_to_lock_utxos", self.seconds_to_lock_utxos.to_le_bytes()),
         )
     }
 }
@@ -399,20 +421,24 @@ impl TransactionSender {
         connection: &Connection,
         processed_transaction: &ProcessedTransaction,
     ) -> Result<UtxoSelection, anyhow::Error> {
-        let amount = processed_transaction.recipient.amount;
-        let num_outputs = 1;
-        // Selection has to charge for the memo this send will actually carry. Left at the
-        // default, a long payment id is weight nobody reserved inputs for, and the send fails
-        // at build time with the funds already locked.
-        let estimated_output_size = Some(estimated_output_size_for_payment_id(
-            processed_transaction
-                .recipient
-                .payment_id
-                .as_ref()
-                .map_or(0, String::len),
-        )?);
-
         let input_selector = InputSelector::new(self.account.id, self.confirmation_window);
+        if processed_transaction.send_all {
+            let (recipient_output_size, change_output_size) =
+                one_sided_output_sizes(&processed_transaction.recipients, self.network)?;
+            let all = input_selector.select_all(
+                connection,
+                self.network,
+                self.fee_per_gram,
+                recipient_output_size,
+                change_output_size,
+            )?;
+            all.audit_if_partial(self.account.id);
+            return Ok(all.selection);
+        }
+
+        let estimated_output_size = Some(estimated_output_size_for_recipients(&processed_transaction.recipients)?);
+        let amount = total_recipient_amount(&processed_transaction.recipients, self.network)?;
+        let num_outputs = processed_transaction.recipients.len();
         let utxo_selection = input_selector.fetch_unspent_outputs(
             connection,
             amount,
@@ -441,7 +467,7 @@ impl TransactionSender {
         // the checked helper: `Utc::now() + Duration::seconds(..)` panics on
         // overflow. See `MAX_SECONDS_TO_LOCK_UTXOS`.
         let expires_at = lock_expiry_at(Utc::now(), processed_transaction.seconds_to_lock_utxos)?;
-        let binding = processed_transaction.idempotency_binding(self.account.id);
+        let binding = processed_transaction.idempotency_binding(self.account.id, self.fee_per_gram);
         let key = processed_transaction.idempotency_key.clone();
 
         // BEGIN IMMEDIATE takes the database's write lock before we look at any
@@ -529,7 +555,11 @@ impl TransactionSender {
         Ok((tx_builder, key_manager))
     }
 
-    /// Starts a new transaction and returns an unsigned transaction for signing.
+    /// Starts a new single-recipient transaction and returns an unsigned
+    /// transaction for signing.
+    ///
+    /// The same as [`start_new_transaction_multi`](Self::start_new_transaction_multi)
+    /// with one recipient.
     ///
     /// This method performs the complete preparation phase:
     /// 1. Validates the transaction request (idempotency, address capabilities)
@@ -576,21 +606,111 @@ impl TransactionSender {
         recipient: Recipient,
         seconds_to_lock_utxo: u64,
     ) -> Result<PrepareOneSidedTransactionForSigningResult, anyhow::Error> {
+        self.start_new_transaction_multi(idempotency_key, vec![recipient], seconds_to_lock_utxo)
+    }
+
+    /// Starts a new transaction paying every recipient in `recipients`, one
+    /// output each, and returns an unsigned transaction for signing.
+    ///
+    /// Inputs are selected and locked for the sum of the amounts plus the fee
+    /// for one output per recipient and the change output. The idempotency key
+    /// is bound to the whole list, in order.
+    ///
+    /// # Memos
+    ///
+    /// Each recipient's output carries that recipient's own `payment_id`. The
+    /// transaction-level memo (kept in the change output and the history entry)
+    /// is the first recipient's `payment_id`.
+    ///
+    /// # Errors
+    ///
+    /// As [`start_new_transaction`](Self::start_new_transaction), and also when
+    /// `recipients` is empty or any amount is zero. The same address may appear
+    /// more than once; it receives one output per entry.
+    pub fn start_new_transaction_multi(
+        &mut self,
+        idempotency_key: String,
+        recipients: Vec<Recipient>,
+        seconds_to_lock_utxo: u64,
+    ) -> Result<PrepareOneSidedTransactionForSigningResult, anyhow::Error> {
+        let total_amount = total_recipient_amount(&recipients, self.network)?;
         info!(
             target: "audit",
             idempotency_key = idempotency_key.as_str(),
-            amount = &*mask_amount(recipient.amount);
+            recipient_count = recipients.len(),
+            amount = &*mask_amount(total_amount);
             "Starting new transaction"
         );
+        self.start_transaction(idempotency_key, recipients, false, seconds_to_lock_utxo)
+    }
+
+    /// Starts a send-all: every spendable, unlocked UTXO is spent to `address`,
+    /// with the fee deducted from what it receives.
+    ///
+    /// The recipient gets the inputs' total less the fee (for all the inputs,
+    /// one recipient output and the change output) and less the minimum change
+    /// ([`InputSelector::send_all_amount`]). [`FeeEstimator::estimate_fees_send_all`]
+    /// quotes the same numbers beforehand.
+    ///
+    /// Inputs worth no more than they cost to spend are skipped, and at most
+    /// [`max_send_all_inputs`](crate::transactions::input_selector::max_send_all_inputs)
+    /// are spent, largest first and within the relay byte budget; on a wallet with more
+    /// this is a partial sweep and can be repeated
+    /// ([`InputSelector::select_all`]).
+    ///
+    /// Spending every output in one transaction links them on chain, so outputs
+    /// a third party sent (dust tagging) can tie the rest to one owner.
+    ///
+    /// The minimum change stays behind as a change output: the upstream offline
+    /// signer requires change (`with_change_required`) and refuses to sign
+    /// without it. That change is also how the scan confirms the send, as for
+    /// any other.
+    ///
+    /// # Errors
+    ///
+    /// As [`start_new_transaction`](Self::start_new_transaction), and when what
+    /// is left for the recipient would be dust.
+    ///
+    /// [`FeeEstimator::estimate_fees_send_all`]: crate::transactions::fee_estimator::FeeEstimator::estimate_fees_send_all
+    pub fn start_new_send_all_transaction(
+        &mut self,
+        idempotency_key: String,
+        address: TariAddress,
+        payment_id: Option<String>,
+        seconds_to_lock_utxo: u64,
+    ) -> Result<PrepareOneSidedTransactionForSigningResult, anyhow::Error> {
+        info!(
+            target: "audit",
+            idempotency_key = idempotency_key.as_str();
+            "Starting new send-all transaction"
+        );
+        // The amount is filled in once the inputs are known.
+        let recipient = Recipient {
+            address,
+            amount: MicroMinotari::zero(),
+            payment_id,
+        };
+        self.start_transaction(idempotency_key, vec![recipient], true, seconds_to_lock_utxo)
+    }
+
+    fn start_transaction(
+        &mut self,
+        idempotency_key: String,
+        recipients: Vec<Recipient>,
+        send_all: bool,
+        seconds_to_lock_utxo: u64,
+    ) -> Result<PrepareOneSidedTransactionForSigningResult, anyhow::Error> {
         // One connection for the whole flow. Taking a fresh one at each step instead meant a
         // single send held three at once — this one, another in
         // `create_or_find_pending_transaction`, a third in `create_pending_transaction` — so
         // concurrent senders deadlocked on a pool smaller than three times their number, each
         // holding connections it could not finish without one more.
+        check_recipient_networks(&recipients, self.network)?;
         let mut connection = self.get_connection()?;
 
         let mut processed_transaction =
-            ProcessedTransaction::new(None, idempotency_key, recipient.clone(), seconds_to_lock_utxo);
+            ProcessedTransaction::new(None, idempotency_key, recipients, seconds_to_lock_utxo);
+        processed_transaction.send_all = send_all;
 
         self.validate_transaction_creation_request()?;
 
@@ -604,6 +724,34 @@ impl TransactionSender {
                 let db_utxo_selection = db::fetch_outputs_by_lock_request_id(&connection, processed_transaction.id())?;
                 utxo_selection = db_utxo_selection;
             }
+            if processed_transaction.send_all {
+                // Recomputed from the locked inputs, so a replay pays the same amount.
+                let mut total_value = MicroMinotari::zero();
+                for utxo in &utxo_selection {
+                    total_value = total_value
+                        .checked_add(utxo.output.value())
+                        .ok_or_else(|| anyhow!("Total value of selected inputs overflows"))?;
+                }
+                let input_selector = InputSelector::new(self.account.id, self.confirmation_window);
+                let (recipient_output_size, change_output_size) =
+                    one_sided_output_sizes(&processed_transaction.recipients, self.network)?;
+                let (_, fee_with_change) = input_selector.send_all_fees(
+                    utxo_selection.len(),
+                    self.fee_per_gram,
+                    recipient_output_size,
+                    change_output_size,
+                )?;
+                let amount = input_selector.send_all_amount(total_value, fee_with_change, self.fee_per_gram)?;
+                input_selector.audit_send_all(
+                    processed_transaction.id(),
+                    amount,
+                    fee_with_change,
+                    utxo_selection.len(),
+                );
+                for recipient in &mut processed_transaction.recipients {
+                    recipient.amount = amount;
+                }
+            }
             let utxos = utxo_selection.into_iter().map(|db_out| db_out.output).collect();
 
             let (tx_builder, key_manager) = self.prepare_transaction_builder(utxos)?;
@@ -611,25 +759,28 @@ impl TransactionSender {
             let sender_address = self.account.get_address(self.network, &self.password)?;
             let tx_id = TxId::new_random();
 
-            let payment_id = match &recipient.payment_id {
-                Some(s) => MemoField::new_open_from_string(s, TxType::PaymentToOther).map_err(|e| anyhow!(e))?,
-                None => MemoField::new_empty(),
-            };
-            let output_features = OutputFeatures::default();
-
-            let payment_recipient = PaymentRecipient {
-                amount: recipient.amount,
-                output_features: output_features.clone(),
-                address: recipient.address.clone(),
-                payment_id: recipient_memo(payment_id.clone(), &sender_address, &recipient.address)?,
-            };
+            let mut payment_recipients = Vec::with_capacity(processed_transaction.recipients.len());
+            for recipient in &processed_transaction.recipients {
+                payment_recipients.push(PaymentRecipient {
+                    amount: recipient.amount,
+                    output_features: OutputFeatures::default(),
+                    address: recipient.address.clone(),
+                    payment_id: recipient.output_memo(&sender_address)?,
+                });
+            }
+            // The transaction-level memo is the first recipient's payment id, without the sender address.
+            let main_payment_id = processed_transaction
+                .recipients
+                .first()
+                .ok_or_else(|| anyhow!("No recipients provided"))?
+                .payment_memo()?;
 
             let res = prepare_one_sided_transaction_for_signing(
                 &key_manager,
                 tx_id,
                 tx_builder,
-                &[payment_recipient],
-                payment_id,
+                &payment_recipients,
+                main_payment_id,
                 sender_address,
             )
             .map_err(map_change_required_error)?;
@@ -862,7 +1013,11 @@ impl TransactionSender {
         signed_transaction: &SignedTransaction,
         fee: MicroMinotari,
     ) -> Result<DisplayedTransaction, anyhow::Error> {
-        let recipient = &processed_tx.recipient;
+        // The history entry shows the first recipient, as the transaction memo does.
+        let recipient = processed_tx
+            .recipients
+            .first()
+            .ok_or_else(|| anyhow!("Transaction has no recipients"))?;
         let now = Utc::now().naive_utc();
 
         // Build inputs from selected UTXOs
@@ -1209,11 +1364,15 @@ mod tests {
     };
     use tari_script::{ExecutionStack, TariScript};
     use tari_transaction_components::{
+        TransactionBuilder,
+        consensus::ConsensusConstantsBuilder,
         key_manager::{
-            TariKeyId,
+            KeyManager, TariKeyId,
             wallet_types::{SeedWordsWallet, WalletType},
         },
-        transaction_components::{EncryptedData, TransactionOutputVersion, covenants::Covenant},
+        transaction_components::{
+            EncryptedData, MemoField, TransactionOutputVersion, covenants::Covenant, memo_field::TxType,
+        },
     };
     use tempfile::tempdir;
 
@@ -1386,11 +1545,11 @@ mod tests {
         ProcessedTransaction::new(
             None,
             key.to_string(),
-            Recipient {
+            vec![Recipient {
                 address,
                 amount: MicroMinotari(amount),
                 payment_id: None,
-            },
+            }],
             3600,
         )
     }
@@ -2388,5 +2547,393 @@ mod tests {
         // The send itself is recorded, inputs still locked.
         assert_eq!(count(&pool, "SELECT COUNT(*) FROM completed_transactions"), 1);
         assert_eq!(count(&pool, "SELECT COUNT(*) FROM outputs WHERE status = 'LOCKED'"), 1);
+    }
+
+    // -----------------------------------------------------------------------
+    // Multiple recipients
+    // -----------------------------------------------------------------------
+
+    /// A one-sided address on LocalNet that this wallet does not own.
+    fn other_address(seed: u64) -> tari_common_types::tari_address::TariAddress {
+        use tari_common_types::types::PrivateKey;
+        tari_common_types::tari_address::TariAddress::new_dual_address(
+            CompressedPublicKey::from_secret_key(&PrivateKey::from(seed)),
+            CompressedPublicKey::from_secret_key(&PrivateKey::from(seed + 1_000)),
+            Network::LocalNet,
+            TariAddressFeatures::create_one_sided_only(),
+            None,
+        )
+        .expect("address")
+    }
+
+    /// The fee and change the offline signer settles on for `prepared`: it
+    /// rebuilds the transaction from the payload and decides them as below.
+    fn signer_fee_and_change(
+        prepared: &PrepareOneSidedTransactionForSigningResult,
+    ) -> (MicroMinotari, Option<MicroMinotari>) {
+        let consensus_constants = ConsensusConstantsBuilder::new(Network::LocalNet).build();
+        let key_manager = KeyManager::new_random().expect("key manager");
+        let mut builder =
+            TransactionBuilder::new(consensus_constants, key_manager, Network::LocalNet).expect("builder");
+        builder.with_fee_per_gram(prepared.info.fee_per_gram);
+        // As the signer does.
+        builder.with_change_required();
+        let mut total_in = MicroMinotari::zero();
+        for input in &prepared.info.inputs {
+            total_in += input.value();
+            builder.with_input(input.clone()).expect("input");
+        }
+        let mut sent = MicroMinotari::zero();
+        for recipient in &prepared.info.recipients {
+            sent += recipient.amount;
+            builder
+                .add_stealth_recipient(
+                    recipient.address.clone(),
+                    recipient.amount,
+                    recipient.output_features.clone(),
+                    recipient.payment_id.clone(),
+                )
+                .expect("recipient");
+        }
+        builder.with_memo(prepared.info.payment_id.clone());
+        let fee_without_change = builder.get_fee_estimate_without_change().expect("fee");
+        let change_fee = builder.get_change_output_fee(&[]).expect("change fee");
+        let remainder = total_in - sent - fee_without_change;
+        if remainder > change_fee {
+            (fee_without_change + change_fee, Some(remainder - change_fee))
+        } else {
+            (fee_without_change + remainder, None)
+        }
+    }
+
+    fn recipients(n: u64) -> Vec<Recipient> {
+        (1..=n)
+            .map(|i| Recipient {
+                address: other_address(i),
+                amount: MicroMinotari(10_000 * i),
+                payment_id: Some(format!("invoice-{i}")),
+            })
+            .collect()
+    }
+
+    /// Every recipient gets its own output with its own memo, the transaction
+    /// memo is the first recipient's, and the reserved fee is the one
+    /// `estimate_fees` quotes for that many outputs.
+    #[tokio::test]
+    async fn a_send_to_several_recipients_pays_each_of_them() {
+        for n in [2u64, 3] {
+            let (pool, _temp) = setup_funded_wallet(3);
+            let mut sender = sender_for(&pool);
+            let wanted = recipients(n);
+
+            // Quoted before the send, at its fee per gram, for its outputs and memo size.
+            let server = wiremock::MockServer::start().await;
+            wiremock::Mock::given(wiremock::matchers::method("GET"))
+                .and(wiremock::matchers::path("/get_mempool_fee_per_gram_stats"))
+                .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "stats": [{ "order": 0, "min_fee_per_gram": 5, "avg_fee_per_gram": 5, "max_fee_per_gram": 5 }]
+                })))
+                .mount(&server)
+                .await;
+            let estimate = crate::transactions::fee_estimator::FeeEstimator::new(pool.clone(), server.uri())
+                .estimate_fees(
+                    "test",
+                    MicroMinotari(wanted.iter().map(|r| r.amount.as_u64()).sum()),
+                    wanted.len(),
+                    100,
+                    Some(estimated_output_size_for_recipients(&wanted).expect("size")),
+                )
+                .await
+                .expect("estimate")
+                .remove(0);
+
+            let prepared = sender
+                .start_new_transaction_multi(format!("multi-{n}"), wanted.clone(), 300)
+                .expect("prepare");
+
+            // Each output memo is its recipient's payment id with the sender's address on it;
+            // the transaction memo is the first recipient's plain payment id.
+            let sender_address = sender
+                .account
+                .get_address(Network::LocalNet, &sender.password)
+                .expect("address");
+            assert_eq!(prepared.info.recipients.len(), wanted.len());
+            for (paid, recipient) in prepared.info.recipients.iter().zip(&wanted) {
+                assert_eq!(paid.address, recipient.address);
+                assert_eq!(paid.amount, recipient.amount);
+                assert_eq!(paid.payment_id, recipient.output_memo(&sender_address).expect("memo"));
+                assert_eq!(paid.payment_id.claimed_sender_address(), Some(sender_address.clone()));
+                let pid = recipient.payment_id.as_deref().unwrap().as_bytes().to_vec();
+                assert_eq!(paid.payment_id.payment_id_as_bytes(), pid);
+            }
+            assert_eq!(prepared.info.payment_id, wanted[0].payment_memo().expect("memo"));
+            assert_eq!(sender.processed_transactions.recipients.len(), wanted.len());
+
+            // The reservation is sized exactly as `estimate_fees` quotes it.
+            let reserved_fee: i64 = pool
+                .get()
+                .expect("conn")
+                .query_row("SELECT fee_with_change FROM pending_transactions", [], |row| row.get(0))
+                .expect("reserved fee");
+            assert_eq!(
+                estimate.estimated_fee,
+                MicroMinotari(reserved_fee as u64),
+                "{n} recipients"
+            );
+
+            // That quote charges every output the largest (change) shape, so it may only exceed
+            // what the signer charges; the excess stays in the change. The exact sizes give
+            // the signer's fee to the µT.
+            let (signer_fee, change) = signer_fee_and_change(&prepared);
+            assert!(change.is_some(), "{n} recipients");
+            assert!(
+                signer_fee <= estimate.estimated_fee,
+                "{n} recipients: {signer_fee} > {}",
+                estimate.estimated_fee
+            );
+            let (recipients_size, change_size) = one_sided_output_sizes(&wanted, Network::LocalNet).expect("sizes");
+            let exact_fee = tari_transaction_components::fee::Fee::new(
+                tari_transaction_components::weight::TransactionWeight::latest(),
+            )
+            .calculate(
+                sender.fee_per_gram,
+                1,
+                prepared.info.inputs.len(),
+                wanted.len() + 1,
+                recipients_size + change_size,
+            );
+            assert_eq!(exact_fee, signer_fee, "{n} recipients");
+            assert_eq!(
+                estimate.input_count as i64,
+                locked_output_count(&pool),
+                "{n} recipients"
+            );
+        }
+    }
+
+    /// The change memo names the first recipient, whose address can embed a
+    /// payment id of its own; the reservation must cover the change output
+    /// that memo makes, so the signer still finds room for change.
+    #[test]
+    fn a_send_to_an_address_with_an_embedded_payment_id_reserves_enough() {
+        let (pool, _temp) = setup_funded_wallet(3);
+        let mut sender = sender_for(&pool);
+        let plain = other_address(1);
+        let embedded = TariAddress::new_dual_address(
+            plain.public_view_key().expect("view key").clone(),
+            plain.public_spend_key().clone(),
+            Network::LocalNet,
+            TariAddressFeatures::create_one_sided_only(),
+            Some(vec![b'x'; 100]),
+        )
+        .expect("address");
+        let recipient = Recipient {
+            address: embedded,
+            amount: MicroMinotari(10_000),
+            payment_id: Some("invoice-1".to_string()),
+        };
+
+        let prepared = sender
+            .start_new_transaction("embedded".to_string(), recipient, 300)
+            .expect("prepare");
+
+        let reserved_fee: i64 = pool
+            .get()
+            .expect("conn")
+            .query_row("SELECT fee_with_change FROM pending_transactions", [], |row| row.get(0))
+            .expect("reserved fee");
+        let (signer_fee, change) = signer_fee_and_change(&prepared);
+        assert!(change.is_some());
+        assert!(
+            signer_fee <= MicroMinotari(reserved_fee as u64),
+            "reserved {reserved_fee}, the signer charges {signer_fee}"
+        );
+    }
+
+    #[test]
+    fn a_send_with_no_recipients_or_a_zero_amount_is_refused() {
+        let (pool, _temp) = setup_funded_wallet(3);
+        let mut sender = sender_for(&pool);
+
+        sender
+            .start_new_transaction_multi("empty".to_string(), Vec::new(), 300)
+            .expect_err("no recipients");
+
+        let mut with_zero = recipients(2);
+        with_zero[1].amount = MicroMinotari(0);
+        sender
+            .start_new_transaction_multi("zero".to_string(), with_zero, 300)
+            .expect_err("a zero amount");
+
+        // An address on another network is refused, for an exact send and a send-all.
+        let mut mainnet = recipients(1);
+        mainnet[0].address = TariAddress::new_dual_address(
+            mainnet[0].address.public_view_key().expect("view key").clone(),
+            mainnet[0].address.public_spend_key().clone(),
+            Network::MainNet,
+            TariAddressFeatures::create_one_sided_only(),
+            None,
+        )
+        .expect("address");
+        sender
+            .start_new_transaction_multi("mainnet".to_string(), mainnet.clone(), 300)
+            .expect_err("another network");
+        sender
+            .start_new_send_all_transaction("mainnet-all".to_string(), mainnet[0].address.clone(), None, 300)
+            .expect_err("another network");
+
+        // A payment id that does not fit the change memo is refused, not sent without its memo.
+        let mut too_long = recipients(1);
+        too_long[0].payment_id = Some("x".repeat(200));
+        sender
+            .start_new_transaction_multi("long".to_string(), too_long, 300)
+            .expect_err("a payment id too long for the change memo");
+
+        assert_eq!(pending_transaction_count(&pool), 0);
+        assert_eq!(locked_output_count(&pool), 0);
+    }
+
+    /// A one-recipient send hashes exactly these fields, so its stored
+    /// reservations still replay.
+    #[test]
+    fn a_single_recipient_binding_is_unchanged() {
+        let (pool, _temp) = setup_funded_wallet(1);
+        let sender = sender_for(&pool);
+        let processed_transaction = request(&sender, "k", 1_000);
+        let recipient = &processed_transaction.recipients[0];
+        let operation = IdempotencyOperation::SendTransaction;
+        let expected = IdempotencyBinding::new(
+            Some("k".to_string()),
+            operation,
+            RequestFingerprint::new(operation)
+                .field("account_id", sender.account.id.to_le_bytes())
+                .field("recipient_address", recipient.address.to_base58())
+                .field("recipient_amount", recipient.amount.as_u64().to_le_bytes())
+                .optional_field("recipient_payment_id", recipient.payment_id.as_deref())
+                .field("seconds_to_lock_utxos", 3600u64.to_le_bytes()),
+        );
+        assert_eq!(
+            processed_transaction.idempotency_binding(sender.account.id, sender.fee_per_gram),
+            expected
+        );
+    }
+
+    #[test]
+    fn a_replay_with_another_recipient_list_is_refused() {
+        let (pool, _temp) = setup_funded_wallet(3);
+        let mut sender = sender_for(&pool);
+        sender
+            .start_new_transaction_multi("k".to_string(), recipients(2), 300)
+            .expect("first send");
+        let err = sender
+            .start_new_transaction_multi("k".to_string(), recipients(3), 300)
+            .expect_err("a different list is a different request");
+        conflict(&err);
+    }
+
+    // -----------------------------------------------------------------------
+    // Send-all
+    // -----------------------------------------------------------------------
+
+    /// A send-all locks every spendable UTXO and pays the recipient their total
+    /// less the fee and the minimum change, exactly as the estimate quoted.
+    #[test]
+    fn a_send_all_spends_everything_but_the_minimum_change() {
+        let (pool, _temp) = setup_funded_wallet(3);
+        let mut sender = sender_for(&pool);
+        let payment_id = "sweep".to_string();
+        // A dust output is left behind, and the estimate says so.
+        insert_test_output(&pool.get().expect("conn"), sender.account.id, 9, 10, 100);
+
+        let estimate = crate::transactions::fee_estimator::FeeEstimator::new(pool.clone(), "http://127.0.0.1:1".into())
+            .estimate_fees_send_all(
+                "test",
+                Network::LocalNet,
+                &other_address(1),
+                Some(&payment_id),
+                sender.fee_per_gram,
+                100,
+            )
+            .expect("estimate");
+        assert_eq!(estimate.input_count, 3);
+        assert_eq!((estimate.skipped_dust, estimate.skipped_over_cap), (1, 0));
+
+        let prepared = sender
+            .start_new_send_all_transaction("sweep".to_string(), other_address(1), Some(payment_id), 300)
+            .expect("prepare");
+
+        assert_eq!(prepared.info.recipients.len(), 1);
+        let paid = &prepared.info.recipients[0];
+        assert_eq!(paid.address, other_address(1));
+        assert_eq!(paid.amount, estimate.amount_after_fee);
+        // The signer charges exactly the quoted fee, so only the minimum change comes back.
+        let min_change = InputSelector::new(sender.account.id, 100).min_change(sender.fee_per_gram);
+        let (signer_fee, change) = signer_fee_and_change(&prepared);
+        assert_eq!(signer_fee, estimate.fee);
+        assert_eq!(change, Some(min_change));
+        assert_eq!(paid.amount, MicroMinotari(6_000_000) - estimate.fee - min_change);
+
+        // Nothing spendable is left but the dust.
+        assert_eq!(locked_output_count(&pool), 3);
+        assert_eq!(count(&pool, "SELECT COUNT(*) FROM outputs WHERE status = 'UNSPENT'"), 1);
+
+        // A retry replays onto the same reservation and pays the same amount.
+        let replay = sender
+            .start_new_send_all_transaction("sweep".to_string(), other_address(1), Some("sweep".to_string()), 300)
+            .expect("replay");
+        assert_eq!(replay.info.recipients[0].amount, paid.amount);
+        assert_eq!(pending_transaction_count(&pool), 1);
+
+        // A replay at another fee per gram would pay another amount.
+        sender.fee_per_gram = MicroMinotari(6);
+        let err = sender
+            .start_new_send_all_transaction("sweep".to_string(), other_address(1), Some("sweep".to_string()), 300)
+            .expect_err("a different fee per gram is a different request");
+        conflict(&err);
+        sender.fee_per_gram = MicroMinotari(5);
+
+        // A send-all is not an exact send under the same key.
+        let err = sender
+            .start_new_transaction(
+                "sweep".to_string(),
+                Recipient {
+                    address: other_address(1),
+                    amount: MicroMinotari(1_000),
+                    payment_id: Some("sweep".to_string()),
+                },
+                300,
+            )
+            .expect_err("a different request");
+        conflict(&err);
+    }
+
+    #[test]
+    fn a_send_all_of_only_dust_is_refused() {
+        let (pool, _temp) = setup_funded_wallet(0);
+        let mut sender = sender_for(&pool);
+        insert_test_output(&pool.get().expect("conn"), sender.account.id, 1, 500, 100);
+
+        let err = sender
+            .start_new_send_all_transaction("dust".to_string(), other_address(1), None, 300)
+            .expect_err("only dust");
+        assert!(
+            matches!(
+                err.downcast_ref::<crate::transactions::input_selector::UtxoSelectionError>(),
+                Some(crate::transactions::input_selector::UtxoSelectionError::InsufficientFunds { .. })
+            ),
+            "got: {err}"
+        );
+        crate::transactions::fee_estimator::FeeEstimator::new(pool.clone(), "http://127.0.0.1:1".into())
+            .estimate_fees_send_all(
+                "test",
+                Network::LocalNet,
+                &other_address(1),
+                None,
+                sender.fee_per_gram,
+                100,
+            )
+            .expect_err("the estimate refuses it too");
+        assert_eq!(pending_transaction_count(&pool), 0);
+        assert_eq!(locked_output_count(&pool), 0);
     }
 }

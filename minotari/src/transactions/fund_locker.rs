@@ -27,15 +27,16 @@
 //! [`crate::transactions::idempotency`] for what that prevents.
 
 use chrono::{DateTime, TimeDelta, Utc};
-use log::{info, warn};
+use log::{error, info, warn};
 use rusqlite::Connection;
 use std::sync::Mutex;
+use tari_common::configuration::Network;
 use tari_transaction_components::tari_amount::MicroMinotari;
 use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
-    api::types::LockFundsResult,
+    api::types::{LockFundsResult, SendAllSkipped},
     db::{self, PendingTransactionRecord},
     log::mask_amount,
     models::PendingTransactionStatus,
@@ -362,11 +363,77 @@ impl FundLocker {
         seconds_to_lock_utxos: u64,
         confirmation_window: u64,
     ) -> Result<LockFundsResult, anyhow::Error> {
+        let selection = Selection::Amount {
+            amount,
+            num_outputs,
+            estimated_output_size,
+        };
+        Self::lock_selection(
+            conn,
+            account_id,
+            selection,
+            fee_per_gram,
+            idempotency,
+            seconds_to_lock_utxos,
+            confirmation_window,
+        )
+    }
+
+    /// Locks every spendable, unlocked UTXO for a send-all to one recipient.
+    ///
+    /// The same as [`lock`](Self::lock), but selects with
+    /// [`InputSelector::select_all`]; the recipient's amount is then
+    /// [`InputSelector::send_all_amount`] of the result's `total_value` and
+    /// `fee_with_change`. The output sizes are the exact ones from
+    /// [`one_sided_output_sizes`](crate::transactions::fee_estimator::one_sided_output_sizes).
+    #[allow(clippy::too_many_arguments)]
+    pub fn lock_all(
+        &self,
+        conn: &mut Connection,
+        account_id: i64,
+        network: Network,
+        fee_per_gram: MicroMinotari,
+        recipient_output_size: usize,
+        change_output_size: usize,
+        idempotency: IdempotencyBinding,
+        seconds_to_lock_utxos: u64,
+        confirmation_window: u64,
+    ) -> Result<LockFundsResult, anyhow::Error> {
+        let selection = Selection::All {
+            network,
+            recipient_output_size,
+            change_output_size,
+        };
+        Self::lock_selection(
+            conn,
+            account_id,
+            selection,
+            fee_per_gram,
+            idempotency,
+            seconds_to_lock_utxos,
+            confirmation_window,
+        )
+    }
+
+    fn lock_selection(
+        conn: &mut Connection,
+        account_id: i64,
+        selection: Selection,
+        fee_per_gram: MicroMinotari,
+        idempotency: IdempotencyBinding,
+        seconds_to_lock_utxos: u64,
+        confirmation_window: u64,
+    ) -> Result<LockFundsResult, anyhow::Error> {
+        let amount = match selection {
+            Selection::Amount { amount, .. } => amount,
+            Selection::All { .. } => MicroMinotari::zero(),
+        };
         info!(
             target: "audit",
             account_id = account_id,
             operation = idempotency.operation().as_str(),
-            amount = &*mask_amount(amount);
+            amount = &*mask_amount(amount),
+            send_all = matches!(selection, Selection::All { .. });
             "Locking funds"
         );
         // Reject an out-of-range lock duration before touching the database or
@@ -432,13 +499,41 @@ impl FundLocker {
         }
 
         let input_selector = InputSelector::new(account_id, confirmation_window);
-        let utxo_selection = input_selector.fetch_unspent_outputs(
-            &transaction,
-            amount,
-            num_outputs,
-            fee_per_gram,
-            estimated_output_size,
-        )?;
+        let (utxo_selection, send_all_skipped) = match selection {
+            Selection::Amount {
+                amount,
+                num_outputs,
+                estimated_output_size,
+            } => (
+                input_selector.fetch_unspent_outputs(
+                    &transaction,
+                    amount,
+                    num_outputs,
+                    fee_per_gram,
+                    estimated_output_size,
+                )?,
+                None,
+            ),
+            Selection::All {
+                network,
+                recipient_output_size,
+                change_output_size,
+            } => {
+                let all = input_selector.select_all(
+                    &transaction,
+                    network,
+                    fee_per_gram,
+                    recipient_output_size,
+                    change_output_size,
+                )?;
+                all.audit_if_partial(account_id);
+                let skipped = SendAllSkipped {
+                    skipped_dust: all.skipped_dust,
+                    skipped_over_cap: all.skipped_over_cap,
+                };
+                (all.selection, Some(skipped))
+            },
+        };
 
         // Already validated above; `lock_expiry_at` is total, so a surprising
         // value returns an error rather than panicking under the held mutex.
@@ -483,8 +578,52 @@ impl FundLocker {
             total_value: utxo_selection.total_value,
             fee_without_change: utxo_selection.fee_without_change,
             fee_with_change: utxo_selection.fee_with_change,
+            reservation_id: pending_tx_id,
+            created_reservation: true,
+            send_all_skipped,
         })
     }
+}
+
+/// Hands back the UTXOs of a reservation a send took and then failed to use.
+///
+/// Only call it for a [`LockFundsResult`] whose `created_reservation` is set: a
+/// replayed reservation belongs to the request that took it. A reservation that is no
+/// longer pending is left to whoever moved it on.
+pub fn release_reservation(conn: &Connection, reservation_id: &str) {
+    match db::expire_and_unlock_pending_transaction(conn, reservation_id) {
+        Ok(true) => info!(
+            target: "audit",
+            id = reservation_id;
+            "Released the reservation of a failed send"
+        ),
+        Ok(false) => warn!(
+            target: "audit",
+            id = reservation_id;
+            "Leaving a reservation that is no longer pending to whoever claimed it"
+        ),
+        Err(e) => error!(
+            target: "audit",
+            id = reservation_id,
+            error:% = e;
+            "Failed to release the reservation of a failed send"
+        ),
+    }
+}
+
+/// What [`FundLocker`] selects: enough for an amount, or everything spendable.
+#[derive(Debug, Clone, Copy)]
+enum Selection {
+    Amount {
+        amount: MicroMinotari,
+        num_outputs: usize,
+        estimated_output_size: Option<usize>,
+    },
+    All {
+        network: Network,
+        recipient_output_size: usize,
+        change_output_size: usize,
+    },
 }
 
 #[cfg(test)]
@@ -643,6 +782,32 @@ mod tests {
             3600,
             100,
         )
+    }
+
+    /// Only the call that took a reservation is told its id, and releasing it
+    /// hands its UTXOs back; a replay is never told it.
+    #[test]
+    fn a_reservation_the_caller_took_can_be_released() {
+        let (pool, account_id, _temp) = setup_test_env(3, 500_000);
+        let locked = lock_with(&pool, account_id, test_binding(Some("k"), 1)).expect("lock");
+        assert!(locked.created_reservation, "this call took it");
+        let id = locked.reservation_id.clone();
+        let replay = lock_with(&pool, account_id, test_binding(Some("k"), 1)).expect("replay");
+        assert!(!replay.created_reservation);
+        assert_eq!(replay.reservation_id, id);
+
+        let conn = pool.get().expect("conn");
+        release_reservation(&conn, &id);
+        let locked_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM outputs WHERE status = 'LOCKED'", [], |row| {
+                row.get(0)
+            })
+            .expect("count");
+        assert_eq!(locked_count, 0);
+        let status: String = conn
+            .query_row("SELECT status FROM pending_transactions", [], |row| row.get(0))
+            .expect("status");
+        assert_eq!(status, "EXPIRED");
     }
 
     /// Callers in the shape of every real one: hold a connection, then lock.
