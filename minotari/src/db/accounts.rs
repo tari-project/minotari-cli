@@ -516,6 +516,10 @@ pub fn update_account_name(conn: &Connection, current_name: &str, new_name: &str
 /// Copies or backups of the database made before the change still open with the old passphrase.
 /// Any daemon, scanner or other process using the old passphrase on this database must be
 /// stopped and restarted with the new one, or its decrypts will fail.
+///
+/// Only `account_name` is re-encrypted; other accounts in the database keep their own
+/// passphrase. Scanners and daemons that open every account with one password need all of
+/// them on the same passphrase, so call this once per account.
 pub fn change_passphrase(
     conn: &mut Connection,
     account_name: &str,

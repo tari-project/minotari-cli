@@ -22,6 +22,9 @@ use crate::{
 /// following the chain once it has caught up, until `cancel_token` is cancelled; use
 /// [`rescan_with_events`] to see its progress as it happens.
 ///
+/// The rollback is committed before the scan runs. If the scan fails, or the future is dropped,
+/// the account stays rolled back until a later scan covers that range again.
+///
 /// Stop any other scanner on this account (another `Scanner`, the daemon, or another process)
 /// before calling this: a running scanner keeps its own next height and will not rescan the
 /// rolled-back range. To turn the rescan into the live sync, use [`rescan_with_events`] with
@@ -42,6 +45,9 @@ pub async fn rescan(
 ///
 /// The rollback runs before this returns. Drive the returned future to scan, and read the
 /// receiver alongside it.
+///
+/// The rollback is committed before the scan runs. If the scan fails, or the future is dropped,
+/// the account stays rolled back until a later scan covers that range again.
 ///
 /// Stop any other scanner on this account (another `Scanner`, the daemon, or another process)
 /// before calling this: a running scanner keeps its own next height and will not rescan the
@@ -111,6 +117,9 @@ async fn rollback_and_build_scanner(
 /// The password is checked first, so a wrong one leaves the account untouched. Use this
 /// instead of [`rescan`] to drive the scan yourself, e.g. with [`Scanner::run_with_events`].
 ///
+/// The rollback is committed when this returns. If the scan that follows fails or never runs,
+/// the account stays rolled back until a later scan covers that range again.
+///
 /// Stop any other scanner on this account (another `Scanner`, the daemon, or another process)
 /// before calling this: a running scanner keeps its own next height and will not rescan the
 /// rolled-back range. To turn the rescan into the live sync, use [`rescan_with_events`] with
@@ -137,7 +146,10 @@ pub async fn rollback_account_to_height(
         let pool = init_db(database_path)?;
         let mut conn = pool.get()?;
 
-        let account = db::get_account_by_name(&conn, &account_name)?
+        // Check the password inside the write transaction, so a concurrent passphrase change
+        // cannot slip in between the check and the rollback.
+        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let account = db::get_account_by_name(&tx, &account_name)?
             .ok_or_else(|| WalletDbError::InvalidInput(format!("Account not found: {}", account_name)))?;
         account.decrypt_wallet_type(&password)?;
 
@@ -147,7 +159,6 @@ pub async fn rollback_account_to_height(
             from_height = from_height;
             "Rolling account back for a rescan"
         );
-        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         rollback_from_height(&tx, account.id, from_height, webhook_config)
             .map_err(|e| WalletDbError::Unexpected(format!("Rollback failed: {}", e)))?;
         tx.commit()?;
