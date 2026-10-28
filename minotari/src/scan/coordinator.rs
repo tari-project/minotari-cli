@@ -277,8 +277,9 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
                 .map(|h| h.saturating_sub(global_next_block).min(self.batch_size))
                 .unwrap_or(self.batch_size);
 
-            let (scanner, scanner_config) = state_manager
-                .get_scanner_and_config(
+            let scanner_and_config = unless_cancelled(
+                &cancel_token,
+                state_manager.get_scanner_and_config(
                     &active_account_ids,
                     global_next_block,
                     end_height,
@@ -287,12 +288,18 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
                     &self.base_url,
                     self.processing_threads,
                     &self.retry_config,
-                )
-                .await?;
+                ),
+            )
+            .await;
+            let Some(scanner_and_config) = scanner_and_config else {
+                return self.handle_pause(&targets, PauseReason::Cancelled, all_events);
+            };
+            let (scanner, scanner_config) = scanner_and_config?;
             if refresh_tip {
-                tip_height = scanner
-                    .get_tip_info()
-                    .await
+                let Some(tip) = unless_cancelled(&cancel_token, scanner.get_tip_info()).await else {
+                    return self.handle_pause(&targets, PauseReason::Cancelled, all_events);
+                };
+                tip_height = tip
                     .map_err(|e| ScanError::Intermittent(e.to_string()))?
                     .best_block_height;
                 refresh_tip = false;
@@ -305,12 +312,8 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
             let mut max_new_height_in_batch = 0;
             loop {
                 // Cancelling must not wait for a slow or retrying block download.
-                let response = match &cancel_token {
-                    Some(token) => tokio::select! {
-                        response = utxo_stream.recv() => response,
-                        _ = token.cancelled() => return self.handle_pause(&targets, PauseReason::Cancelled, all_events),
-                    },
-                    None => utxo_stream.recv().await,
+                let Some(response) = unless_cancelled(&cancel_token, utxo_stream.recv()).await else {
+                    return self.handle_pause(&targets, PauseReason::Cancelled, all_events);
                 };
                 let Some(response) = response else {
                     break;
@@ -380,8 +383,19 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
                 total_scanned_globally = total_scanned_globally.saturating_add(new_blocks_count);
 
                 if blocks_since_reorg_check >= self.reorg_check_interval {
-                    self.check_global_reorgs(&mut targets, &db_handler, scanner).await?;
+                    let reorg_check = unless_cancelled(
+                        &cancel_token,
+                        self.check_global_reorgs(&mut targets, &db_handler, scanner),
+                    )
+                    .await;
+                    let Some(reorg_check) = reorg_check else {
+                        return self.handle_pause(&targets, PauseReason::Cancelled, all_events);
+                    };
                     blocks_since_reorg_check = 0;
+                    // The stream still continues from the old heights: rescan from the fork.
+                    if reorg_check? {
+                        break;
+                    }
                 }
 
                 if let Some(token) = &cancel_token
@@ -404,6 +418,11 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
                 );
             }
             if is_batch_empty {
+                if let Some(token) = &cancel_token
+                    && token.is_cancelled()
+                {
+                    return self.handle_pause(&targets, PauseReason::Cancelled, all_events);
+                }
                 // Settle pending transactions before reporting completion, and
                 // before `wait_for_next_poll_cycle` moves the cursor back a block.
                 self.finish_pass(&targets, &ScanStop::CaughtUp, &mut all_events, max_buffered_events)
@@ -454,9 +473,10 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
         targets: &mut [AccountSyncTarget],
         db_handler: &ScanDbHandler<E>,
         scanner: &mut HttpBlockchainScanner<KeyManager>,
-    ) -> Result<(), ScanError> {
+    ) -> Result<bool, ScanError> {
+        let mut rewound = false;
         if targets.is_empty() {
-            return Ok(());
+            return Ok(rewound);
         }
 
         let mut conn = db_handler.get_connection().await?;
@@ -468,9 +488,10 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
             if let Some(info) = res.reorg_information {
                 self.emit_reorg_event(target.account.id, info, res.resume_height);
                 target.next_block_to_scan = res.resume_height;
+                rewound = true;
             }
         }
-        Ok(())
+        Ok(rewound)
     }
 
     async fn wait_for_next_poll_cycle(
@@ -491,16 +512,16 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
                 }));
         }
 
-        if let Some(token) = cancel {
-            tokio::select! {
-                _ = tokio::time::sleep(interval) => {},
-                _ = token.cancelled() => return Ok(()),
-            }
-        } else {
-            tokio::time::sleep(interval).await;
+        // A cancel here is picked up at the top of the scan loop.
+        if unless_cancelled(cancel, tokio::time::sleep(interval)).await.is_none() {
+            return Ok(());
         }
-
-        self.check_global_reorgs(targets, db_handler, scanner).await
+        if let Some(reorg_check) =
+            unless_cancelled(cancel, self.check_global_reorgs(targets, db_handler, scanner)).await
+        {
+            reorg_check?;
+        }
+        Ok(())
     }
 
     fn handle_pause(
@@ -1298,6 +1319,17 @@ fn birthday_timestamp(birthday_days: u64, scanning_offset: u64) -> Result<u64, S
 /// Height of the block after `height`.
 ///
 /// Returns an error instead of overflowing if a base node reports a block at `u64::MAX`.
+/// Awaits `future`, or returns `None` if `cancel` fires first.
+async fn unless_cancelled<T>(cancel: &Option<CancellationToken>, future: impl Future<Output = T>) -> Option<T> {
+    match cancel {
+        Some(token) => tokio::select! {
+            output = future => Some(output),
+            () = token.cancelled() => None,
+        },
+        None => Some(future.await),
+    }
+}
+
 fn next_block_height(height: u64) -> Result<u64, ScanError> {
     height
         .checked_add(1)
@@ -1317,7 +1349,7 @@ mod tests {
         BlockchainInfo, DisplayedTransaction, TransactionDetails, TransactionDirection, TransactionDisplayStatus,
         TransactionSource,
     };
-    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
     use std::time::Duration;
     use tari_common_types::seeds::cipher_seed::CipherSeed;
     use tari_common_types::transaction::TxId;
@@ -1399,14 +1431,28 @@ mod tests {
     }
 
     /// A base node whose chain has empty blocks up to `tip`. Blocks at or above
-    /// `fork_from` have forked hashes, and block downloads take `download_delay`.
+    /// `fork_from` have forked hashes. `fork_on_header: Some((height, from))`
+    /// forks from `from` when the header at `height` is first asked for. Block
+    /// downloads take `download_delay`, and tip requests hang while `slow_tip`.
     struct MockChain {
         tip: u64,
         fork_from: Arc<AtomicU64>,
+        fork_on_header: Option<(u64, u64)>,
         download_delay: Duration,
+        slow_tip: Arc<AtomicBool>,
     }
 
     impl MockChain {
+        fn new(tip: u64) -> Self {
+            Self {
+                tip,
+                fork_from: Arc::new(AtomicU64::new(u64::MAX)),
+                fork_on_header: None,
+                download_delay: Duration::ZERO,
+                slow_tip: Arc::new(AtomicBool::new(false)),
+            }
+        }
+
         fn hash(&self, height: u64) -> Vec<u8> {
             if height >= self.fork_from.load(Ordering::SeqCst) {
                 forked_block_hash(height)
@@ -1419,17 +1465,31 @@ mod tests {
     impl Respond for MockChain {
         fn respond(&self, request: &Request) -> ResponseTemplate {
             match request.url.path() {
-                "/get_tip_info" => ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                    "metadata": {
-                        "best_block_height": self.tip,
-                        "best_block_hash": self.hash(self.tip),
-                        "accumulated_difficulty": "0",
-                        "pruned_height": 0,
-                        "timestamp": 0,
-                    }
-                })),
+                "/get_tip_info" => {
+                    let delay = if self.slow_tip.load(Ordering::SeqCst) {
+                        Duration::from_secs(20)
+                    } else {
+                        Duration::ZERO
+                    };
+                    ResponseTemplate::new(200)
+                        .set_body_json(serde_json::json!({
+                            "metadata": {
+                                "best_block_height": self.tip,
+                                "best_block_hash": self.hash(self.tip),
+                                "accumulated_difficulty": "0",
+                                "pruned_height": 0,
+                                "timestamp": 0,
+                            }
+                        }))
+                        .set_delay(delay)
+                },
                 "/get_header_by_height" => {
                     let height: u64 = query_param(request, "height").parse().expect("height");
+                    if let Some((trigger, from)) = self.fork_on_header
+                        && height == trigger
+                    {
+                        self.fork_from.store(from, Ordering::SeqCst);
+                    }
                     if height > self.tip {
                         return ResponseTemplate::new(404);
                     }
@@ -1485,18 +1545,10 @@ mod tests {
     /// that pruning should remove) on a chain whose tip is `tip`, holding a
     /// displayed send mined at `scanned_to - 100` that is still `Pending`.
     async fn setup(scanned_to: u64, tip: u64) -> Setup {
-        setup_chain(
-            scanned_to,
-            MockChain {
-                tip,
-                fork_from: Arc::new(AtomicU64::new(u64::MAX)),
-                download_delay: Duration::ZERO,
-            },
-        )
-        .await
+        setup_chain(scanned_to, MockChain::new(tip), 1_000).await
     }
 
-    async fn setup_chain(scanned_to: u64, chain: MockChain) -> Setup {
+    async fn setup_chain(scanned_to: u64, chain: MockChain, reorg_check_interval: u64) -> Setup {
         let server = MockServer::start().await;
         wiremock::Mock::given(wiremock::matchers::any())
             .respond_with(chain)
@@ -1530,7 +1582,7 @@ mod tests {
             3,
             None,
             1,
-            1_000,
+            reorg_check_interval,
             10,
         )
         .expect("coordinator");
@@ -1861,16 +1913,9 @@ mod tests {
 
     #[tokio::test]
     async fn a_continuous_scan_reports_a_reorg_found_between_polls_and_rescans_the_new_block() {
-        let fork_from = Arc::new(AtomicU64::new(u64::MAX));
-        let mut setup = setup_chain(
-            1500,
-            MockChain {
-                tip: 1505,
-                fork_from: fork_from.clone(),
-                download_delay: Duration::ZERO,
-            },
-        )
-        .await;
+        let chain = MockChain::new(1505);
+        let fork_from = chain.fork_from.clone();
+        let mut setup = setup_chain(1500, chain, 1_000).await;
 
         // Fork the tip block while the scan waits for its first poll, and stop
         // at the wait that follows the reorg.
@@ -1905,48 +1950,63 @@ mod tests {
         assert_eq!(tip.hash, forked_block_hash(1505), "the rescanned tip is the new block");
     }
 
-    #[tokio::test]
-    async fn cancelling_a_continuous_scan_mid_batch_stops_without_waiting_for_the_download() {
-        let mut setup = setup_chain(
-            1500,
-            MockChain {
-                tip: 1505,
-                fork_from: Arc::new(AtomicU64::new(u64::MAX)),
-                download_delay: Duration::from_secs(20),
-            },
-        )
-        .await;
+    async fn count_requests(server: &MockServer, path: &str) -> usize {
+        let requests = server.received_requests().await.unwrap_or_default();
+        requests.iter().filter(|r| r.url.path() == path).count()
+    }
 
-        let token = CancellationToken::new();
-        let scan = setup.coordinator.run(
-            vec![account(&setup.pool)],
+    /// Cancels `token` once the server has had more than `seen` requests for
+    /// `path`, and returns when it did.
+    async fn cancel_once_requested(
+        server: &MockServer,
+        path: &str,
+        seen: usize,
+        token: &CancellationToken,
+    ) -> std::time::Instant {
+        while count_requests(server, path).await <= seen {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        token.cancel();
+        std::time::Instant::now()
+    }
+
+    fn continuous_scan<'a>(
+        coordinator: &'a ScanCoordinator<ChannelEventSender>,
+        pool: &SqlitePool,
+        token: &CancellationToken,
+    ) -> impl Future<Output = Result<(Vec<WalletEvent>, bool), ScanError>> + 'a {
+        coordinator.run(
+            vec![account(pool)],
             "password",
             ScanMode::Continuous {
                 poll_interval: POLL_INTERVAL,
             },
             0,
             Some(token.clone()),
-        );
-        // Cancel once the block download is in flight.
-        let server = &setup.server;
-        let cancel = async {
-            loop {
-                let requests = server.received_requests().await.unwrap_or_default();
-                if requests.iter().any(|r| r.url.path() == "/sync_utxos_by_block") {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(20)).await;
-            }
-            token.cancel();
-            std::time::Instant::now()
-        };
+        )
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_continuous_scan_mid_batch_stops_it_and_its_download_tasks() {
+        let mut chain = MockChain::new(1600);
+        chain.download_delay = Duration::from_secs(3);
+        let mut setup = setup_chain(1500, chain, 1_000).await;
+
+        let token = CancellationToken::new();
+        let scan = continuous_scan(&setup.coordinator, &setup.pool, &token);
+        let cancel = cancel_once_requested(&setup.server, "/sync_utxos_by_block", 0, &token);
         let (result, cancelled_at) = tokio::join!(scan, cancel);
         let (_, more_blocks) = result.expect("a cancelled scan is not an error");
         assert!(more_blocks);
         assert!(
-            cancelled_at.elapsed() < Duration::from_secs(2),
+            cancelled_at.elapsed() < Duration::from_secs(1),
             "cancelling must not wait for the block download"
         );
+
+        // Had the download task outlived the scan, it would ask for the next page
+        // once the slow one answered.
+        tokio::time::sleep(Duration::from_secs(4)).await;
+        assert_eq!(count_requests(&setup.server, "/sync_utxos_by_block").await, 1);
 
         let events = drain(&mut setup.events);
         assert!(events.iter().any(is_cancelled));
@@ -1957,5 +2017,81 @@ mod tests {
             Some(1500),
             "nothing from the cancelled batch is written"
         );
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_continuous_scan_while_it_reads_the_tip_stops_it() {
+        let chain = MockChain::new(1505);
+        let slow_tip = chain.slow_tip.clone();
+        let mut setup = setup_chain(1500, chain, 1_000).await;
+
+        let token = CancellationToken::new();
+        let scan = continuous_scan(&setup.coordinator, &setup.pool, &token);
+        let server = &setup.server;
+        let events = &mut setup.events;
+        // Make the tip read after the first poll hang, and cancel while it does.
+        let cancel = async {
+            while let Some(event) = events.recv().await {
+                if is_waiting(&event) {
+                    break;
+                }
+            }
+            slow_tip.store(true, Ordering::SeqCst);
+            let seen = count_requests(server, "/get_tip_info").await;
+            cancel_once_requested(server, "/get_tip_info", seen, &token).await
+        };
+        let (result, cancelled_at) =
+            tokio::time::timeout(Duration::from_secs(30), async { tokio::join!(scan, cancel) })
+                .await
+                .expect("the scan stops when cancelled");
+        let (_, more_blocks) = result.expect("a cancelled scan is not an error");
+        assert!(more_blocks);
+        assert!(
+            cancelled_at.elapsed() < Duration::from_secs(2),
+            "cancelling must not wait for the tip"
+        );
+        assert!(drain(events).iter().any(is_cancelled));
+    }
+
+    #[tokio::test]
+    async fn a_reorg_found_mid_pass_rescans_from_the_fork_and_the_scan_completes() {
+        // Reorg checks run after every 10-block page. The one after the page
+        // ending at 1530 finds the chain forked from 1525.
+        let mut chain = MockChain::new(1560);
+        chain.fork_on_header = Some((1530, 1525));
+        let mut setup = setup_chain(1500, chain, 10).await;
+
+        let (_, more_blocks) = setup
+            .coordinator
+            .run(vec![account(&setup.pool)], "password", ScanMode::Full, 0, None)
+            .await
+            .expect("the scan survives the reorg");
+        assert!(!more_blocks);
+        let events = drain(&mut setup.events);
+
+        let reorg = events
+            .iter()
+            .find_map(|e| match e {
+                ProcessingEvent::ReorgDetected(reorg) => Some(reorg),
+                _ => None,
+            })
+            .expect("a ReorgDetected event");
+        assert_eq!(reorg.reorg_from_height, 1525);
+        assert_eq!(reorg.new_height, 1525);
+        assert!(events.iter().any(|e| matches!(
+            e,
+            ProcessingEvent::ScanStatus(ScanStatusEvent::Completed { final_height: 1560, .. })
+        )));
+
+        let conn = setup.pool.get().expect("conn");
+        let tips = get_scanned_tip_blocks_by_account(&conn, setup.account_id).expect("tips");
+        for height in [1525, 1560] {
+            let tip = tips.iter().find(|t| t.height == height).expect("scanned tip");
+            assert_eq!(
+                tip.hash,
+                forked_block_hash(height),
+                "block {height} is from the new chain"
+            );
+        }
     }
 }

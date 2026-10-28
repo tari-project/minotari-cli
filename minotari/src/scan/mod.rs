@@ -55,15 +55,21 @@
 //!    the stored tip blocks are checked against the chain. A reorg sends
 //!    `ReorgDetected`: blocks from `reorg_from_height` were rolled back, the
 //!    `cancelled_transaction_ids` and `reorganized_displayed_transactions` are
-//!    affected, and scanning resumes at `new_height`. A reorg found when the
-//!    scan starts is reported the same way.
+//!    affected, and scanning resumes at `new_height`, mid-pass included. A
+//!    reorg found when the scan starts is reported the same way.
 //!
-//! `Started` is not sent. Cancelling the token stops the scan within a batch or
-//! poll interval, including while a block download is in flight: it sends
-//! `Paused { reason: Cancelled }` and returns `more_blocks == true`. Blocks are
-//! only written after a whole batch arrives, so a cancelled batch leaves the
-//! database at the last fully processed batch. Dropping the scan future stops
-//! it the same way, without the `Paused` event.
+//! `Started` is not sent. Cancelling the token stops the scan without waiting
+//! on the node: block downloads, tip reads, reorg checks and the poll sleep are
+//! all interrupted. It sends `Paused { reason: Cancelled }` and returns
+//! `more_blocks == true`. The one exception is the end-of-pass transaction
+//! monitor, which runs to completion (its node requests are bounded by the
+//! HTTP client's timeout and retries) so its updates are always reported; a
+//! cancel that arrives first skips it. Blocks are only written after a whole
+//! batch arrives, and a reorg rollback is a single database transaction, so a
+//! cancelled scan leaves the database at the last fully processed batch. The
+//! scanner's background download tasks stop as soon as the scan drops its
+//! stream. Dropping the scan future stops it the same way, without the
+//! `Paused` event.
 //!
 //! # Example Usage
 //!

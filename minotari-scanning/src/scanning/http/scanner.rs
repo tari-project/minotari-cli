@@ -633,8 +633,13 @@ where
         // slower processing task's results on that shared channel and truncate
         // the scan. When this task finishes it simply drops `send_scan_result`,
         // which the processing task observes as end-of-input.
+        // Both tasks stop as soon as the receiver of their output is dropped.
         tokio::spawn(async move {
-            let tip = match download_scanner.get_tip_info().await {
+            let tip_res = tokio::select! {
+                tip_res = download_scanner.get_tip_info() => tip_res,
+                () = send_scan_result.closed() => return,
+            };
+            let tip = match tip_res {
                 Ok(tip) => tip,
                 Err(e) => {
                     error!("Failed to get tip info: {}", e);
@@ -651,7 +656,11 @@ where
                 return;
             }
             loop {
-                let more_blocks = match download_scanner.fetch_block_range().await {
+                let fetch_res = tokio::select! {
+                    fetch_res = download_scanner.fetch_block_range() => fetch_res,
+                    () = send_scan_result.closed() => return,
+                };
+                let more_blocks = match fetch_res {
                     Ok((http_blocks, more_blocks)) => {
                         if let Err(e) = send_scan_result.send(Ok(http_blocks)).await {
                             error!("Failed to send download result with error: {}", e);
@@ -693,7 +702,14 @@ where
                     return;
                 },
             };
-            while let Some(http_blocks_res) = rec_scan_result.recv().await {
+            loop {
+                let http_blocks_res = tokio::select! {
+                    http_blocks_res = rec_scan_result.recv() => match http_blocks_res {
+                        Some(http_blocks_res) => http_blocks_res,
+                        None => break,
+                    },
+                    () = send_download.closed() => return,
+                };
                 let errors = RwLock::new(Vec::new());
                 let results = RwLock::new(Vec::new());
                 let http_blocks = match http_blocks_res {
@@ -801,8 +817,11 @@ where
                         }
                     })
                     .collect::<FuturesUnordered<_>>()  // concurrent, not sequential
-                    .collect::<Vec<_>>()
-                    .await;
+                    .collect::<Vec<_>>();
+                let network_results = tokio::select! {
+                    network_results = network_results => network_results,
+                    () = send_download.closed() => return,
+                };
                 let mut final_results = Vec::new();
                 for r in network_results {
                     match r {
