@@ -422,6 +422,9 @@ pub async fn api_lock_funds(
 /// - UTXOs are automatically locked for the configured duration
 /// - Fee is calculated at 5 MicroMinotari per gram
 /// - Change outputs are created automatically when necessary
+/// - A send-all's response also has a `send_all` field (schema `SendAllSkipped`):
+///   how many spendable outputs it left behind, as dust and over the per-transaction
+///   limit. It is left out on an idempotent replay, whose counts are not stored.
 #[utoipa::path(
     post,
     path = "/accounts/{name}/create_unsigned_transaction",
@@ -552,6 +555,7 @@ pub async fn api_create_unsigned_transaction(
 
         let reservation_id = locked_funds.reservation_id.clone();
         let created_reservation = locked_funds.created_reservation;
+        let send_all_skipped = locked_funds.send_all_skipped;
         let audit_reservation_id = reservation_id.clone();
         let built = (move || {
             if send_all {
@@ -578,10 +582,17 @@ pub async fn api_create_unsigned_transaction(
         if built.is_err() && created_reservation {
             release_reservation(&conn, &reservation_id);
         }
-        built
+        built.map(|result| (result, send_all_skipped))
     })
     .await
     .map_err(|e| ApiError::InternalServerError(format!("Task join error: {}", e)))??;
 
-    Ok(Json(serde_json::to_value(result)?))
+    let (result, send_all_skipped) = result;
+    let mut response = serde_json::to_value(result)?;
+    // Only a send-all that took its reservation says what it left behind; an
+    // exact send's response is unchanged.
+    if let (Some(skipped), Some(object)) = (send_all_skipped, response.as_object_mut()) {
+        object.insert("send_all".to_string(), serde_json::to_value(skipped)?);
+    }
+    Ok(Json(response))
 }

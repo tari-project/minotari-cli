@@ -190,6 +190,7 @@ impl FromRef<AppState> for SqlitePool {
             accounts::RecipientRequest,
             accounts::EstimateFeeRequest,
             crate::api::types::LockFundsResult,
+            crate::api::types::SendAllSkipped,
             crate::api::types::TariAddressBase58,
             crate::api::types::CompletedTransactionResponse,
             crate::api::types::ScanStatusResponse,
@@ -570,5 +571,146 @@ mod tests {
                 .unwrap();
             assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{body}");
         }
+    }
+
+    /// A router over a wallet "default" (password "password") holding a
+    /// spendable output of each of `values`.
+    fn funded_router(values: &[u64]) -> (Router, tempfile::TempDir) {
+        use rusqlite::named_params;
+        use tari_common_types::{
+            seeds::cipher_seed::CipherSeed,
+            types::{ComAndPubSignature, CompressedPublicKey, FixedHash},
+        };
+        use tari_script::{ExecutionStack, TariScript};
+        use tari_transaction_components::{
+            MicroMinotari,
+            key_manager::{
+                TariKeyId,
+                wallet_types::{SeedWordsWallet, WalletType},
+            },
+            transaction_components::{
+                EncryptedData, MemoField, OutputFeatures, TransactionOutputVersion, WalletOutput, covenants::Covenant,
+            },
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let db_pool = crate::db::init_db(dir.path().join("wallet.db")).unwrap();
+        {
+            let conn = db_pool.get().unwrap();
+            let wallet = WalletType::SeedWords(SeedWordsWallet::construct_new(CipherSeed::random()).unwrap());
+            crate::db::create_account(&conn, "default", &wallet, "password").unwrap();
+            let account_id = crate::db::get_account_by_name(&conn, "default").unwrap().unwrap().id;
+            crate::db::insert_scanned_tip_block(&conn, account_id, 200, &[0u8; 32]).unwrap();
+            for (i, value) in values.iter().enumerate() {
+                let seed = u8::try_from(i + 1).unwrap();
+                let output = WalletOutput::new_from_parts(
+                    TransactionOutputVersion::default(),
+                    MicroMinotari::from(*value),
+                    TariKeyId::default(),
+                    OutputFeatures::default(),
+                    TariScript::default(),
+                    ExecutionStack::default(),
+                    TariKeyId::default(),
+                    CompressedPublicKey::default(),
+                    ComAndPubSignature::default(),
+                    0,
+                    Covenant::default(),
+                    EncryptedData::default(),
+                    MicroMinotari::from(0),
+                    None,
+                    MemoField::new_empty(),
+                    FixedHash::from([seed; 32]),
+                    Default::default(),
+                );
+                conn.execute(
+                    r#"
+                    INSERT INTO outputs (
+                        account_id, tx_id, output_hash, mined_in_block_height, mined_in_block_hash, value,
+                        mined_timestamp, wallet_output_json, status, confirmed_height, confirmed_hash, is_burn, maturity
+                    ) VALUES (:account_id, :tx_id, :hash, 100, :hash, :value, :ts, :json, 'UNSPENT', 100, :hash, 0, 0)
+                    "#,
+                    named_params! {
+                        ":account_id": account_id,
+                        ":tx_id": i64::from(seed),
+                        ":hash": vec![seed; 32],
+                        ":value": i64::try_from(*value).unwrap(),
+                        ":ts": chrono::Utc::now(),
+                        ":json": serde_json::to_string(&output).unwrap(),
+                    },
+                )
+                .unwrap();
+            }
+        }
+        let router = create_router(
+            db_pool,
+            Network::LocalNet,
+            Zeroizing::new("password".to_string()),
+            3,
+            "http://127.0.0.1:9999".to_string(),
+            ApiAuth::Disabled,
+        );
+        (router, dir)
+    }
+
+    async fn create_unsigned_transaction(router: Router, body: serde_json::Value) -> serde_json::Value {
+        let response = router
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/accounts/default/create_unsigned_transaction")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&bytes));
+        serde_json::from_slice(&bytes).unwrap()
+    }
+
+    /// A send-all response says how many spendable outputs it left behind; an
+    /// exact send's response has no such field.
+    #[tokio::test]
+    async fn a_send_all_response_reports_the_outputs_it_left_behind() {
+        use tari_common_types::{
+            tari_address::{TariAddress, TariAddressFeatures},
+            types::{CompressedPublicKey, PrivateKey},
+        };
+        let address = TariAddress::new_dual_address(
+            CompressedPublicKey::from_secret_key(&PrivateKey::from(7u64)),
+            CompressedPublicKey::from_secret_key(&PrivateKey::from(9u64)),
+            Network::LocalNet,
+            TariAddressFeatures::create_one_sided_only(),
+            None,
+        )
+        .unwrap()
+        .to_base58();
+
+        // A 10 µT output is dust at 5 µT/g.
+        let (router, _dir) = funded_router(&[1_000_000, 2_000_000, 10]);
+        let send_all = serde_json::json!({
+            "send_all": true,
+            "idempotency_key": "sweep",
+            "recipients": [{ "address": address }],
+        });
+        let response = create_unsigned_transaction(router.clone(), send_all.clone()).await;
+        assert_eq!(
+            response.get("send_all"),
+            Some(&serde_json::json!({ "skipped_dust": 1, "skipped_over_cap": 0 }))
+        );
+        // A replay is not told counts that were never stored.
+        let replay = create_unsigned_transaction(router, send_all).await;
+        assert!(replay.get("send_all").is_none(), "{replay}");
+
+        let (router, _dir) = funded_router(&[1_000_000, 2_000_000, 10]);
+        let response = create_unsigned_transaction(
+            router,
+            serde_json::json!({ "recipients": [{ "address": address, "amount": 1000 }] }),
+        )
+        .await;
+        assert!(response.get("send_all").is_none(), "{response}");
+        assert!(response.get("tx_id").is_some(), "{response}");
     }
 }

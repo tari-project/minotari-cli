@@ -884,6 +884,8 @@ fn handle_create_unsigned_transaction(
 
     let reservation_id = locked_funds.reservation_id.clone();
     let created_reservation = locked_funds.created_reservation;
+    // Not known on a replay: the counts are not stored.
+    let send_all_skipped = locked_funds.send_all_skipped;
     let written = (|| -> Result<(), anyhow::Error> {
         if send_all {
             let input_selector = InputSelector::new(account.id, confirmation_window);
@@ -916,6 +918,17 @@ fn handle_create_unsigned_transaction(
         release_reservation(&conn, &reservation_id);
     }
     written?;
+
+    if let Some(skipped) = send_all_skipped
+        && (skipped.skipped_dust > 0 || skipped.skipped_over_cap > 0)
+    {
+        eprintln!(
+            "Warning: this send-all left spendable outputs behind. {} did not fit in one transaction; \
+             run send-all again to sweep them. {} are dust, worth less than they cost to spend, and are \
+             never worth sending.",
+            skipped.skipped_over_cap, skipped.skipped_dust
+        );
+    }
 
     info!(target:"audit", "Unsigned transaction written to file.");
     Ok(())

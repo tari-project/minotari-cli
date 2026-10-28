@@ -36,7 +36,7 @@ use thiserror::Error;
 use uuid::Uuid;
 
 use crate::{
-    api::types::LockFundsResult,
+    api::types::{LockFundsResult, SendAllSkipped},
     db::{self, PendingTransactionRecord},
     log::mask_amount,
     models::PendingTransactionStatus,
@@ -499,18 +499,21 @@ impl FundLocker {
         }
 
         let input_selector = InputSelector::new(account_id, confirmation_window);
-        let utxo_selection = match selection {
+        let (utxo_selection, send_all_skipped) = match selection {
             Selection::Amount {
                 amount,
                 num_outputs,
                 estimated_output_size,
-            } => input_selector.fetch_unspent_outputs(
-                &transaction,
-                amount,
-                num_outputs,
-                fee_per_gram,
-                estimated_output_size,
-            )?,
+            } => (
+                input_selector.fetch_unspent_outputs(
+                    &transaction,
+                    amount,
+                    num_outputs,
+                    fee_per_gram,
+                    estimated_output_size,
+                )?,
+                None,
+            ),
             Selection::All {
                 network,
                 recipient_output_size,
@@ -524,7 +527,11 @@ impl FundLocker {
                     change_output_size,
                 )?;
                 all.audit_if_partial(account_id);
-                all.selection
+                let skipped = SendAllSkipped {
+                    skipped_dust: all.skipped_dust,
+                    skipped_over_cap: all.skipped_over_cap,
+                };
+                (all.selection, Some(skipped))
             },
         };
 
@@ -573,6 +580,7 @@ impl FundLocker {
             fee_with_change: utxo_selection.fee_with_change,
             reservation_id: pending_tx_id,
             created_reservation: true,
+            send_all_skipped,
         })
     }
 }
