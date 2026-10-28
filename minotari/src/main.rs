@@ -65,12 +65,11 @@ use minotari::{
     commands::{abandon_send, burn::handle_burn_funds, validator_nodes},
     config::{defaults::WalletConfig, loader::load_configuration},
     daemon::{self, ApiServerConfig},
-    db::{self, WalletDbError, get_accounts, get_balance, init_db},
+    db::{self, get_accounts, get_balance, init_db},
     log::{init_logging, mask_string},
     migrate::{MigrationOptions, run_migration},
     models::WalletEvent,
-    scan::{self, reorg::rollback_from_height},
-    signing,
+    scan, signing,
     transactions::{
         fee_estimator::{estimated_output_size_for_recipients, one_sided_output_sizes},
         fund_locker::{FundLocker, release_reservation},
@@ -357,19 +356,13 @@ async fn main() -> Result<(), anyhow::Error> {
             wallet_config.apply_node(&node);
             wallet_config.apply_database(&db);
 
-            let webhook_url = wallet_config.webhook.url.clone();
-            let send_only_event_types = wallet_config.webhook.send_only_event_types.clone();
-            let webhook_trigger_config = webhook_url.map(|url| WebhookTriggerConfig {
-                url,
-                send_only_event_types: send_only_event_types.clone(),
-            });
-
-            let (events, _more_blocks_to_scan) = rescan(
+            let (events, _more_blocks_to_scan) = scan::rescan(
                 &security.password,
                 &wallet_config,
                 &account_name,
                 rescan_from_height,
-                webhook_trigger_config,
+                scan::ScanMode::Partial { max_blocks: u64::MAX },
+                None,
             )
             .await?;
             info!(event_count = events.len(); "Re-scan complete");
@@ -1017,53 +1010,6 @@ async fn scan(
         scanner = scanner.webhook_config(trigger_config);
     }
 
-    scanner.run().await
-}
-
-async fn rescan(
-    password: &str,
-    config: &WalletConfig,
-    account_name: &str,
-    rescan_from_height: u64,
-    webhook_config: Option<WebhookTriggerConfig>,
-) -> Result<(Vec<WalletEvent>, bool), ScanError> {
-    let db_file_clone = config.database_path.clone();
-    let account_name_clone = account_name.to_string();
-
-    let webhook_config_cloned = webhook_config.clone();
-    tokio::task::spawn_blocking(move || {
-        let pool = init_db(db_file_clone).map_err(|e| format!("Failed to init db: {}", e))?;
-
-        let conn = pool.get().map_err(|e| format!("Failed to get connection: {}", e))?;
-
-        let account = db::get_account_by_name(&conn, &account_name_clone)
-            .map_err(|e| format!("DB error querying account: {}", e))?
-            .ok_or_else(|| format!("Account not found: {}", account_name_clone))?;
-
-        rollback_from_height(&conn, account.id, rescan_from_height, webhook_config_cloned)
-            .map_err(|e| format!("Rollback failed: {}", e))?;
-
-        Ok::<(), String>(())
-    })
-    .await
-    .map_err(|e| ScanError::DbError(WalletDbError::Unexpected(format!("Task join error: {}", e))))?
-    .map_err(|e| ScanError::DbError(WalletDbError::Unexpected(e)))?;
-
-    let max_blocks_to_scan = u64::MAX;
-    let mut scanner = scan::Scanner::new(
-        password,
-        &config.base_url,
-        config.database_path.clone(),
-        config.batch_size,
-        config.confirmation_window,
-    )
-    .mode(scan::ScanMode::Partial {
-        max_blocks: max_blocks_to_scan,
-    });
-    if let Some(cfg) = webhook_config {
-        scanner = scanner.webhook_config(cfg);
-    }
-    scanner = scanner.account(account_name);
     scanner.run().await
 }
 
