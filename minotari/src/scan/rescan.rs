@@ -20,6 +20,11 @@ use crate::{
 /// back first, so the scan finds them again. With [`ScanMode::Continuous`] the scan keeps
 /// following the chain once it has caught up, until `cancel_token` is cancelled; use
 /// [`rescan_with_events`] to see its progress as it happens.
+///
+/// Stop any other scanner on this account (another `Scanner`, the daemon, or another process)
+/// before calling this: a running scanner keeps its own next height and will not rescan the
+/// rolled-back range. To turn the rescan into the live sync, use [`rescan_with_events`] with
+/// [`ScanMode::Continuous`].
 pub async fn rescan(
     password: &str,
     config: &WalletConfig,
@@ -36,6 +41,11 @@ pub async fn rescan(
 ///
 /// The rollback runs before this returns. Drive the returned future to scan, and read the
 /// receiver alongside it.
+///
+/// Stop any other scanner on this account (another `Scanner`, the daemon, or another process)
+/// before calling this: a running scanner keeps its own next height and will not rescan the
+/// rolled-back range. To turn the rescan into the live sync, use [`rescan_with_events`] with
+/// [`ScanMode::Continuous`].
 #[allow(clippy::type_complexity)]
 pub async fn rescan_with_events(
     password: &str,
@@ -99,6 +109,11 @@ async fn rollback_and_build_scanner(
 ///
 /// The password is checked first, so a wrong one leaves the account untouched. Use this
 /// instead of [`rescan`] to drive the scan yourself, e.g. with [`Scanner::run_with_events`].
+///
+/// Stop any other scanner on this account (another `Scanner`, the daemon, or another process)
+/// before calling this: a running scanner keeps its own next height and will not rescan the
+/// rolled-back range. To turn the rescan into the live sync, use [`rescan_with_events`] with
+/// [`ScanMode::Continuous`].
 pub async fn rollback_account_to_height(
     database_path: PathBuf,
     password: &str,
@@ -106,6 +121,14 @@ pub async fn rollback_account_to_height(
     from_height: u64,
     webhook_config: Option<WebhookTriggerConfig>,
 ) -> Result<(), ScanError> {
+    // The DB stores heights as i64; a larger height would wrap negative and roll back everything.
+    if i64::try_from(from_height).is_err() {
+        return Err(ScanError::DbError(WalletDbError::InvalidInput(format!(
+            "Rescan height {} is out of range",
+            from_height
+        ))));
+    }
+
     let password = Zeroizing::new(password.to_string());
     let account_name = account_name.to_string();
 
@@ -353,6 +376,23 @@ mod tests {
         .await
         .expect("rescan above the output");
         assert_eq!(output_rows(&setup.config, &setup.output_hash), (1, 1));
+    }
+
+    #[tokio::test]
+    async fn a_height_beyond_i64_is_refused_without_rolling_anything_back() {
+        let setup = setup().await;
+        rescan(PASSWORD, &setup.config, "default", 0, full_rescan(), None)
+            .await
+            .expect("first scan");
+
+        let err = rescan(PASSWORD, &setup.config, "default", u64::MAX, full_rescan(), None)
+            .await
+            .expect_err("out-of-range height");
+        assert!(
+            matches!(err, ScanError::DbError(WalletDbError::InvalidInput(_))),
+            "got: {err}"
+        );
+        assert_eq!(output_rows(&setup.config, &setup.output_hash), (1, 0));
     }
 
     #[tokio::test]

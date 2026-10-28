@@ -6,6 +6,7 @@
 
 use std::{path::Path, str::FromStr};
 
+use crate::utils::crypto::{is_identity_public_key, parse_private_key_hex};
 use crate::{db, init_db};
 use anyhow::Context;
 use tari_common::configuration::Network;
@@ -108,11 +109,14 @@ pub fn init_with_spend_and_view_keys(
     expected_address: Option<&str>,
     friendly_name: Option<&str>,
 ) -> Result<TariAddress, anyhow::Error> {
-    let view_key = PrivateKey::from_hex(view_private_key).map_err(|_| anyhow::anyhow!("Invalid hex for view key"))?;
-    let spend_key =
-        PrivateKey::from_hex(spend_private_key).map_err(|_| anyhow::anyhow!("Invalid hex for spend key"))?;
+    let view_key = parse_private_key_hex(view_private_key).context("Invalid view key")?;
+    let spend_key = parse_private_key_hex(spend_private_key).context("Invalid spend key")?;
 
     let wallet = WalletType::SpendWallet(SpendWallet::new(spend_key, view_key, Some(birthday)));
+    // A zero private key gives the identity public key, which anyone can view or spend with.
+    if is_identity_public_key(&wallet.get_public_view_key()) || is_identity_public_key(&wallet.get_public_spend_key()) {
+        return Err(anyhow::anyhow!("A private key of zero is not a usable wallet key"));
+    }
     let address = TariAddress::new_dual_address(
         wallet.get_public_view_key(),
         wallet.get_public_spend_key(),
@@ -281,6 +285,32 @@ mod tests {
         };
         let result = create_burn_tx(&restored, &mut conn, Network::LocalNet, "pass", params).expect("builds");
         assert_eq!(result.transaction.body.inputs().len(), 1);
+    }
+
+    #[test]
+    fn a_zero_private_key_is_refused() {
+        let temp = tempfile::tempdir().unwrap();
+        let database_file = temp.path().join("keys.db");
+        let (view_key, spend_key) = keys_of(&CipherSeed::random());
+        let zero = "00".repeat(32);
+
+        for (name, view, spend) in [("zero-view", &zero, &spend_key), ("zero-spend", &view_key, &zero)] {
+            let result = init_with_spend_and_view_keys(
+                view,
+                spend,
+                "pass",
+                &database_file,
+                0,
+                Network::LocalNet,
+                None,
+                Some(name),
+            );
+            assert!(result.is_err(), "{name} must be refused");
+        }
+
+        let pool = init_db(database_file).unwrap();
+        let conn = pool.get().unwrap();
+        assert!(db::get_accounts(&conn, None).unwrap().is_empty());
     }
 
     #[test]

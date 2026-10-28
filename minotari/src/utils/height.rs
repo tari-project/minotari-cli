@@ -31,7 +31,9 @@ pub async fn height_at_time(base_url: &str, epoch_secs: u64) -> Result<u64, anyh
 /// Estimates the height of the block mined at `epoch_secs` without asking a node.
 ///
 /// Assumes every block took [`TARGET_BLOCK_TIME_SECS`]. Real blocks run slightly slower, so the
-/// estimate drifts above the real height by a few percent over time.
+/// estimate drifts above the real height by a few percent over time. Before using it as a
+/// restore or rescan start, subtract a margin (or ask the node with [`height_at_time`]), or
+/// blocks with incoming outputs may be skipped.
 pub fn estimate_height_at_time(network: Network, epoch_secs: u64) -> u64 {
     epoch_secs.saturating_sub(genesis_timestamp(network)) / TARGET_BLOCK_TIME_SECS
 }

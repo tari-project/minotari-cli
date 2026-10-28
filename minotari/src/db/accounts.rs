@@ -512,6 +512,8 @@ pub fn update_account_name(conn: &Connection, current_name: &str, new_name: &str
 /// Re-encrypts an account's key material under `new_password`, with a fresh salt and nonce.
 ///
 /// A wrong `old_password` returns [`WalletDbError::DecryptionFailed`] and writes nothing.
+///
+/// Copies or backups of the database made before the change still open with the old passphrase.
 pub fn change_passphrase(
     conn: &mut Connection,
     account_name: &str,
@@ -524,6 +526,9 @@ pub fn change_passphrase(
         "DB: Changing account passphrase"
     );
 
+    // Overwrite the freed pages that held the old ciphertext instead of leaving them in the file.
+    conn.pragma_update(None, "secure_delete", true)?;
+
     // The encrypted wallet is the only field `encrypt_data` writes. Read and rewrite it under
     // the write lock so a concurrent change cannot be lost.
     let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
@@ -531,11 +536,11 @@ pub fn change_passphrase(
     let account = get_account_by_name(&tx, account_name)?
         .ok_or_else(|| WalletDbError::InvalidInput(format!("Account '{}' not found", account_name)))?;
     let wallet = account.decrypt_wallet_type(old_password)?;
-    let wallet_json = Zeroizing::new(
-        serde_json::to_string(&wallet)
-            .map_err(|e| WalletDbError::Unexpected(format!("Serialization failed: {}", e)))?,
-    );
-    let encrypted_data = encrypt_data(wallet_json.as_bytes(), new_password)
+    // Sized well above any wallet's JSON so the buffer never reallocates and leaves a copy behind.
+    let mut wallet_json = Zeroizing::new(Vec::with_capacity(16 * 1024));
+    serde_json::to_writer(&mut *wallet_json, &wallet)
+        .map_err(|e| WalletDbError::Unexpected(format!("Serialization failed: {}", e)))?;
+    let encrypted_data = encrypt_data(&wallet_json, new_password)
         .map_err(|e| WalletDbError::Unexpected(format!("Encryption failed: {}", e)))?;
 
     tx.execute(
@@ -548,6 +553,20 @@ pub fn change_passphrase(
         },
     )?;
     tx.commit()?;
+
+    info!(
+        target: "audit",
+        account = account_name;
+        "DB: Account passphrase changed"
+    );
+
+    // Move the old ciphertext out of the WAL. The change is already committed, so a checkpoint
+    // that is busy or fails only delays this.
+    match conn.query_row("PRAGMA wal_checkpoint(TRUNCATE)", [], |row| row.get::<_, i64>(0)) {
+        Ok(0) => {},
+        Ok(_) => warn!("DB: WAL checkpoint after passphrase change was busy"),
+        Err(e) => warn!(error:% = e; "DB: WAL checkpoint after passphrase change failed"),
+    }
 
     Ok(())
 }
