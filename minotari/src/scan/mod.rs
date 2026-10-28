@@ -37,6 +37,34 @@
 //! - [`ProcessingEvent::TransactionsReady`] - Newly detected transactions
 //! - [`ProcessingEvent::ReorgDetected`] - Chain reorganization detected and handled
 //!
+//! # Continuous Mode Event Contract
+//!
+//! Events are per account (`account_id`). A Continuous scan repeats one cycle
+//! until it is cancelled:
+//!
+//! 1. While blocks remain, for every batch: `MoreBlocksAvailable`, then
+//!    `BlockProcessed` / `TransactionsReady` for wallet activity, then
+//!    `Progress { current_height, tip_height, .. }`. The tip is read once per
+//!    pass, so `current_height / tip_height` drives a progress bar; `tip_height`
+//!    is never below `current_height`.
+//! 2. Caught up: post-scan `TransactionsUpdated` / `TransactionsReady`
+//!    (`is_initial_sync: false`) for confirmation and status changes, then
+//!    `Completed { final_height, .. }`, then `Waiting { resume_in }` (the poll
+//!    interval). The scanner is idle until the next poll.
+//! 3. After each poll, and every `reorg_check_interval` blocks while scanning,
+//!    the stored tip blocks are checked against the chain. A reorg sends
+//!    `ReorgDetected`: blocks from `reorg_from_height` were rolled back, the
+//!    `cancelled_transaction_ids` and `reorganized_displayed_transactions` are
+//!    affected, and scanning resumes at `new_height`. A reorg found when the
+//!    scan starts is reported the same way.
+//!
+//! `Started` is not sent. Cancelling the token stops the scan within a batch or
+//! poll interval, including while a block download is in flight: it sends
+//! `Paused { reason: Cancelled }` and returns `more_blocks == true`. Blocks are
+//! only written after a whole batch arrives, so a cancelled batch leaves the
+//! database at the last fully processed batch. Dropping the scan future stops
+//! it the same way, without the `Paused` event.
+//!
 //! # Example Usage
 //!
 //! ```rust,ignore

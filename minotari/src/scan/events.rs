@@ -130,6 +130,10 @@ pub enum ScanStatusEvent {
     Progress {
         account_id: i64,
         current_height: u64,
+        /// The height this pass scans towards: the chain tip read when the pass
+        /// started (a backfill's end height for a history backfill). Never below
+        /// `current_height`.
+        tip_height: u64,
         blocks_scanned: u64,
     },
     MoreBlocksAvailable {
