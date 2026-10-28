@@ -483,7 +483,7 @@ pub async fn api_create_unsigned_transaction(
     let amount = if send_all {
         MicroMinotari::zero()
     } else {
-        total_recipient_amount(&recipients).map_err(|e| ApiError::BadRequest(e.to_string()))?
+        total_recipient_amount(&recipients, network).map_err(|e| ApiError::BadRequest(e.to_string()))?
     };
 
     let seconds_to_lock_utxos = body.seconds_to_lock_utxos.unwrap_or(DEFAULT_SECONDS_TO_LOCK_UTXOS);
@@ -527,7 +527,7 @@ pub async fn api_create_unsigned_transaction(
         let lock_amount = FundLocker::new();
         let locked_funds = if send_all {
             let (recipient_output_size, change_output_size) =
-                one_sided_output_sizes(&recipients).map_err(|e| ApiError::BadRequest(e.to_string()))?;
+                one_sided_output_sizes(&recipients, network).map_err(|e| ApiError::BadRequest(e.to_string()))?;
             lock_amount.lock_all(
                 &mut conn,
                 account.id,

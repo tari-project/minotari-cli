@@ -49,7 +49,11 @@ use crate::{api::types::LockFundsResult, db::AccountRow};
 use anyhow::anyhow;
 use log::info;
 use tari_common::configuration::Network;
-use tari_common_types::{tari_address::TariAddress, transaction::TxId};
+use tari_common_types::{
+    tari_address::{TariAddress, TariAddressFeatures},
+    transaction::TxId,
+    types::CompressedPublicKey,
+};
 use tari_transaction_components::offline_signing::models::PaymentRecipient;
 use tari_transaction_components::{
     TransactionBuilder,
@@ -118,13 +122,35 @@ pub fn recipient_memo(
 }
 
 impl Recipient {
-    /// Its payment id as a plain memo, the transaction-level memo.
-    pub fn memo(&self) -> Result<MemoField, anyhow::Error> {
+    /// Its payment id as a plain memo: the transaction-level memo, which the
+    /// change memo carries.
+    pub fn payment_memo(&self) -> Result<MemoField, anyhow::Error> {
         match &self.payment_id {
             Some(s) => MemoField::new_open_from_string(s, TxType::PaymentToOther).map_err(|e| anyhow!(e)),
             None => Ok(MemoField::new_empty()),
         }
     }
+
+    /// The memo this recipient's output carries: its payment id with the
+    /// sender's address on it ([`recipient_memo`]).
+    pub fn output_memo(&self, sender_address: &TariAddress) -> Result<MemoField, anyhow::Error> {
+        recipient_memo(self.payment_memo()?, sender_address, &self.address)
+    }
+}
+
+/// An address shaped like every account's own on `network` (dual, one-sided,
+/// no payment id; see `AccountRow::get_address`), for measuring the memos that
+/// carry the sender's address without decrypting the wallet. An address's size
+/// does not depend on its keys.
+pub fn sender_address_for_sizing(network: Network) -> Result<TariAddress, anyhow::Error> {
+    TariAddress::new_dual_address(
+        CompressedPublicKey::default(),
+        CompressedPublicKey::default(),
+        network,
+        TariAddressFeatures::create_one_sided_only(),
+        None,
+    )
+    .map_err(|e| anyhow!("Failed to build an address for sizing: {e}"))
 }
 
 /// Checks `recipients` for a send and returns the sum of their amounts.
@@ -133,7 +159,7 @@ impl Recipient {
 /// alongside its change output, any amount is zero, the sum overflows, or a
 /// payment id does not fit in its recipient's memo or the change memo. The
 /// same address may appear more than once; it receives one output per entry.
-pub fn total_recipient_amount(recipients: &[Recipient]) -> Result<MicroMinotari, anyhow::Error> {
+pub fn total_recipient_amount(recipients: &[Recipient], network: Network) -> Result<MicroMinotari, anyhow::Error> {
     if recipients.is_empty() {
         return Err(anyhow!("No recipients provided"));
     }
@@ -152,7 +178,7 @@ pub fn total_recipient_amount(recipients: &[Recipient]) -> Result<MicroMinotari,
             .ok_or_else(|| anyhow!("Total amount of the recipients overflows"))?;
     }
     // Builds every memo the send will carry, so a payment id that does not fit fails here.
-    one_sided_output_sizes(recipients)?;
+    one_sided_output_sizes(recipients, network)?;
     Ok(total)
 }
 
@@ -360,12 +386,12 @@ impl OneSidedTransaction {
                 amount: r.amount,
                 output_features: output_features.clone(),
                 address: r.address.clone(),
-                payment_id: recipient_memo(r.memo()?, &sender_address, &r.address)?,
+                payment_id: r.output_memo(&sender_address)?,
             });
         }
 
         // Use first recipient's payment_id, without the sender address, as the overall transaction memo
-        let main_payment_id = recipients.first().expect("Already checked").memo()?;
+        let main_payment_id = recipients.first().expect("Already checked").payment_memo()?;
 
         let result = prepare_one_sided_transaction_for_signing(
             &key_manager,
@@ -397,11 +423,11 @@ mod tests {
     fn a_send_may_have_one_recipient_fewer_than_a_transaction_has_outputs() {
         let most = vec![recipient(None); MAX_TRANSACTION_OUTPUTS - 1];
         assert_eq!(
-            total_recipient_amount(&most).expect("allowed"),
+            total_recipient_amount(&most, Network::MainNet).expect("allowed"),
             MicroMinotari(1_000 * (MAX_TRANSACTION_OUTPUTS as u64 - 1))
         );
         let too_many = vec![recipient(None); MAX_TRANSACTION_OUTPUTS];
-        let err = total_recipient_amount(&too_many).expect_err("no room for change");
+        let err = total_recipient_amount(&too_many, Network::MainNet).expect_err("no room for change");
         assert!(err.to_string().contains("Too many recipients"), "got: {err}");
     }
 
@@ -425,14 +451,41 @@ mod tests {
         assert!(err.to_string().contains("this wallet is on"), "got: {err}");
     }
 
+    /// Sizing with the stand-in sender address measures the same memo size as
+    /// the account's real address, for a send to another wallet and to itself.
+    #[test]
+    fn the_sizing_sender_address_measures_like_a_real_one() {
+        let real = TariAddress::new_dual_address(
+            CompressedPublicKey::from_secret_key(&tari_common_types::types::PrivateKey::from(7u64)),
+            CompressedPublicKey::from_secret_key(&tari_common_types::types::PrivateKey::from(9u64)),
+            Network::MainNet,
+            TariAddressFeatures::create_one_sided_only(),
+            None,
+        )
+        .expect("address");
+        let stand_in = sender_address_for_sizing(Network::MainNet).expect("stand-in");
+        for to in [TariAddress::default(), real.clone()] {
+            let recipient = Recipient {
+                address: to,
+                amount: MicroMinotari(1_000),
+                payment_id: Some("invoice-1".to_string()),
+            };
+            assert_eq!(
+                recipient.output_memo(&stand_in).unwrap().get_size(),
+                recipient.output_memo(&real).unwrap().get_size()
+            );
+        }
+    }
+
     /// A payment id that fits neither memo is refused, not sent without its memo.
     #[test]
     fn a_payment_id_too_long_for_a_memo_is_refused() {
-        total_recipient_amount(&[recipient(Some("invoice-1".to_string()))]).expect("fits");
-        total_recipient_amount(&[recipient(Some("x".repeat(300)))]).expect_err("too long for any memo");
+        total_recipient_amount(&[recipient(Some("invoice-1".to_string()))], Network::MainNet).expect("fits");
+        total_recipient_amount(&[recipient(Some("x".repeat(300)))], Network::MainNet)
+            .expect_err("too long for any memo");
         // Fits a recipient's open memo, but not the change memo, which also holds an address and a hash.
         let long = "x".repeat(200);
         assert!(MemoField::new_open_from_string(&long, TxType::PaymentToOther).is_ok());
-        total_recipient_amount(&[recipient(Some(long))]).expect_err("too long for the change memo");
+        total_recipient_amount(&[recipient(Some(long))], Network::MainNet).expect_err("too long for the change memo");
     }
 }

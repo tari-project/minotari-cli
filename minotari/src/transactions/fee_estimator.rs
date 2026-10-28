@@ -21,7 +21,11 @@ use tari_transaction_components::{
 use crate::http::WalletHttpClient;
 use crate::{
     db::{self, AccountRow, SqlitePool},
-    transactions::{fund_locker::MIN_FEE_PER_GRAM, input_selector::InputSelector, one_sided_transaction::Recipient},
+    transactions::{
+        fund_locker::MIN_FEE_PER_GRAM,
+        input_selector::InputSelector,
+        one_sided_transaction::{Recipient, sender_address_for_sizing},
+    },
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -167,7 +171,7 @@ impl FeeEstimator {
             amount: MicroMinotari::zero(),
             payment_id: payment_id.map(str::to_string),
         };
-        let (recipient_output_size, change_output_size) = one_sided_output_sizes(&[recipient])?;
+        let (recipient_output_size, change_output_size) = one_sided_output_sizes(&[recipient], network)?;
         let input_selector = InputSelector::new(account.id, confirmation_window);
         let selection =
             input_selector.select_all(&conn, network, fee_per_gram, recipient_output_size, change_output_size)?;
@@ -289,14 +293,17 @@ pub fn estimated_output_size_for_send(payment_id_len: usize, num_recipients: usi
 /// The exact features-and-scripts sizes the transaction builder charges a one-sided send to
 /// `recipients`: the total of the recipients' own outputs, and the change output.
 ///
-/// Each recipient output carries its own memo. The change memo names the first recipient,
+/// Each recipient output carries its own memo with the sender's address on it
+/// ([`Recipient::output_memo`], measured with [`sender_address_for_sizing`]). The change memo names the first recipient,
 /// carries its payment id and, for up to two recipients, every sent-output hash; its size does
 /// not depend on any amount, so the sizes are known before the amounts are.
-pub fn one_sided_output_sizes(recipients: &[Recipient]) -> Result<(usize, usize)> {
+pub fn one_sided_output_sizes(recipients: &[Recipient], network: Network) -> Result<(usize, usize)> {
     let script = script!(PushPubKey(Box::default())).map_err(|e| anyhow!("Failed to build the default script: {e}"))?;
+    let sender_address = sender_address_for_sizing(network)?;
     let mut recipients_size = 0usize;
     for recipient in recipients {
-        let size = measure_output_size(&OutputFeatures::default(), &script, &recipient.memo()?)?;
+        let memo = recipient.output_memo(&sender_address)?;
+        let size = measure_output_size(&OutputFeatures::default(), &script, &memo)?;
         recipients_size = recipients_size
             .checked_add(size)
             .ok_or_else(|| anyhow!("Total output size overflows"))?;
@@ -361,19 +368,19 @@ mod tests {
     }
 
     /// Recipient memos carry the sender's address (`recipient_memo`), and the estimate for every
-    /// payment id length has to cover that larger memo too.
+    /// payment id length such a memo can hold has to cover that larger memo too.
     #[test]
     fn the_estimate_covers_a_recipient_memo_carrying_the_sender_address() {
         let sender = TariAddress::default();
         let recipient = TariAddress::default();
-        for len in [0usize, 13, 48, 100] {
+        for len in 0usize..=256 {
             let payment_id = "x".repeat(len);
-            let memo = crate::transactions::one_sided_transaction::recipient_memo(
-                MemoField::new_open_from_string(&payment_id, TxType::PaymentToOther).unwrap(),
-                &sender,
-                &recipient,
-            )
-            .unwrap();
+            let Ok(open) = MemoField::new_open_from_string(&payment_id, TxType::PaymentToOther) else {
+                continue;
+            };
+            let Ok(memo) = crate::transactions::one_sided_transaction::recipient_memo(open, &sender, &recipient) else {
+                continue;
+            };
             let output = measure_output_size(
                 &OutputFeatures::default(),
                 &script!(PushPubKey(Box::default())).unwrap(),
@@ -433,13 +440,14 @@ mod tests {
         };
         for n in 1..=3 {
             let recipients = vec![recipient.clone(); n];
-            let (_, change_size) = one_sided_output_sizes(&recipients).unwrap();
+            let (_, change_size) = one_sided_output_sizes(&recipients, Network::MainNet).unwrap();
             assert!(
                 estimated_output_size_for_send("invoice".len(), n).unwrap() >= change_size,
                 "{n} recipients"
             );
         }
-        let (_, two_recipient_change) = one_sided_output_sizes(&[recipient.clone(), recipient]).unwrap();
+        let (_, two_recipient_change) =
+            one_sided_output_sizes(&[recipient.clone(), recipient], Network::MainNet).unwrap();
         assert!(estimated_output_size_for_payment_id("invoice".len()).unwrap() < two_recipient_change);
     }
 

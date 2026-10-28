@@ -118,7 +118,7 @@ use crate::{
         fund_locker::{check_replay_allowed, lock_expiry_at, validate_fee_per_gram},
         idempotency::{IdempotencyBinding, IdempotencyConflict, IdempotencyOperation, RequestFingerprint},
         input_selector::{InputSelector, UtxoSelection, map_change_required_error},
-        one_sided_transaction::{Recipient, check_recipient_networks, recipient_memo, total_recipient_amount},
+        one_sided_transaction::{Recipient, check_recipient_networks, total_recipient_amount},
     },
 };
 use zeroize::Zeroizing;
@@ -424,7 +424,7 @@ impl TransactionSender {
         let input_selector = InputSelector::new(self.account.id, self.confirmation_window);
         if processed_transaction.send_all {
             let (recipient_output_size, change_output_size) =
-                one_sided_output_sizes(&processed_transaction.recipients)?;
+                one_sided_output_sizes(&processed_transaction.recipients, self.network)?;
             return Ok(input_selector.select_all(
                 connection,
                 self.network,
@@ -435,7 +435,7 @@ impl TransactionSender {
         }
 
         let estimated_output_size = Some(estimated_output_size_for_recipients(&processed_transaction.recipients)?);
-        let amount = total_recipient_amount(&processed_transaction.recipients)?;
+        let amount = total_recipient_amount(&processed_transaction.recipients, self.network)?;
         let num_outputs = processed_transaction.recipients.len();
         let utxo_selection = input_selector.fetch_unspent_outputs(
             connection,
@@ -631,7 +631,7 @@ impl TransactionSender {
         recipients: Vec<Recipient>,
         seconds_to_lock_utxo: u64,
     ) -> Result<PrepareOneSidedTransactionForSigningResult, anyhow::Error> {
-        let total_amount = total_recipient_amount(&recipients)?;
+        let total_amount = total_recipient_amount(&recipients, self.network)?;
         info!(
             target: "audit",
             idempotency_key = idempotency_key.as_str(),
@@ -729,7 +729,7 @@ impl TransactionSender {
                 }
                 let input_selector = InputSelector::new(self.account.id, self.confirmation_window);
                 let (recipient_output_size, change_output_size) =
-                    one_sided_output_sizes(&processed_transaction.recipients)?;
+                    one_sided_output_sizes(&processed_transaction.recipients, self.network)?;
                 let (_, fee_with_change) = input_selector.send_all_fees(
                     utxo_selection.len(),
                     self.fee_per_gram,
@@ -760,7 +760,7 @@ impl TransactionSender {
                     amount: recipient.amount,
                     output_features: OutputFeatures::default(),
                     address: recipient.address.clone(),
-                    payment_id: recipient_memo(recipient.memo()?, &sender_address, &recipient.address)?,
+                    payment_id: recipient.output_memo(&sender_address)?,
                 });
             }
             // The transaction-level memo is the first recipient's payment id, without the sender address.
@@ -768,7 +768,7 @@ impl TransactionSender {
                 .recipients
                 .first()
                 .ok_or_else(|| anyhow!("No recipients provided"))?
-                .memo()?;
+                .payment_memo()?;
 
             let res = prepare_one_sided_transaction_for_signing(
                 &key_manager,
@@ -2663,16 +2663,22 @@ mod tests {
                 .start_new_transaction_multi(format!("multi-{n}"), wanted.clone(), 300)
                 .expect("prepare");
 
+            // Each output memo is its recipient's payment id with the sender's address on it;
+            // the transaction memo is the first recipient's plain payment id.
+            let sender_address = sender
+                .account
+                .get_address(Network::LocalNet, &sender.password)
+                .expect("address");
             assert_eq!(prepared.info.recipients.len(), wanted.len());
             for (paid, recipient) in prepared.info.recipients.iter().zip(&wanted) {
                 assert_eq!(paid.address, recipient.address);
                 assert_eq!(paid.amount, recipient.amount);
-                let memo =
-                    MemoField::new_open_from_string(recipient.payment_id.as_deref().unwrap(), TxType::PaymentToOther)
-                        .expect("memo");
-                assert_eq!(paid.payment_id, memo);
+                assert_eq!(paid.payment_id, recipient.output_memo(&sender_address).expect("memo"));
+                assert_eq!(paid.payment_id.claimed_sender_address(), Some(sender_address.clone()));
+                let pid = recipient.payment_id.as_deref().unwrap().as_bytes().to_vec();
+                assert_eq!(paid.payment_id.payment_id_as_bytes(), pid);
             }
-            assert_eq!(prepared.info.payment_id, prepared.info.recipients[0].payment_id);
+            assert_eq!(prepared.info.payment_id, wanted[0].payment_memo().expect("memo"));
             assert_eq!(sender.processed_transactions.recipients.len(), wanted.len());
 
             // The reservation is sized exactly as `estimate_fees` quotes it.
@@ -2697,7 +2703,7 @@ mod tests {
                 "{n} recipients: {signer_fee} > {}",
                 estimate.estimated_fee
             );
-            let (recipients_size, change_size) = one_sided_output_sizes(&wanted).expect("sizes");
+            let (recipients_size, change_size) = one_sided_output_sizes(&wanted, Network::LocalNet).expect("sizes");
             let exact_fee = tari_transaction_components::fee::Fee::new(
                 tari_transaction_components::weight::TransactionWeight::latest(),
             )

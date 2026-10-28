@@ -834,7 +834,7 @@ fn handle_create_unsigned_transaction(
     let amount = if send_all {
         MicroMinotari::zero()
     } else {
-        total_recipient_amount(&recipients)?
+        total_recipient_amount(&recipients, network)?
     };
     let num_outputs = recipients.len();
     let fee_per_gram = MicroMinotari(5);
@@ -862,7 +862,7 @@ fn handle_create_unsigned_transaction(
     );
     let lock_amount = FundLocker::new();
     let locked_funds = if send_all {
-        let (recipient_output_size, change_output_size) = one_sided_output_sizes(&recipients)?;
+        let (recipient_output_size, change_output_size) = one_sided_output_sizes(&recipients, network)?;
         lock_amount.lock_all(
             &mut conn,
             account.id,
