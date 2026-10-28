@@ -226,7 +226,8 @@ pub struct CreateTransactionRequest {
 
     /// Spend every spendable UTXO to the single recipient, whose `amount` is
     /// omitted: it receives their total less the fee and a minimum change
-    /// output (the offline signer requires change).
+    /// output (the offline signer requires change). Spending every output in
+    /// one transaction links them on chain.
     #[serde(default)]
     send_all: bool,
 }

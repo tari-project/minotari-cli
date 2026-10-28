@@ -457,7 +457,7 @@ pub enum Commands {
         /// Spend every spendable UTXO to the single recipient, fee deducted.
         #[arg(
             long,
-            help = "Send the whole spendable balance, less the fee and a minimum change output, to exactly one --recipient given as address or address::payment_id (no amount)"
+            help = "Send the whole spendable balance, less the fee and a minimum change output, to exactly one --recipient given as address or address::payment_id (no amount). Spending every output in one transaction links them on chain."
         )]
         send_all: bool,
         /// Path to write the unsigned transaction JSON.

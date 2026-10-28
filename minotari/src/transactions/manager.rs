@@ -656,6 +656,9 @@ impl TransactionSender {
     /// this is a partial sweep and can be repeated
     /// ([`InputSelector::select_all`]).
     ///
+    /// Spending every output in one transaction links them on chain, so outputs
+    /// a third party sent (dust tagging) can tie the rest to one owner.
+    ///
     /// The minimum change stays behind as a change output: the upstream offline
     /// signer requires change (`with_change_required`) and refuses to sign
     /// without it. That change is also how the scan confirms the send, as for

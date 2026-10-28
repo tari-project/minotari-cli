@@ -536,6 +536,7 @@ impl InputSelector {
     /// fit the base node's relay byte budget: more could not be signed, relayed
     /// or mined. A send-all over a wallet with more outputs than that is
     /// a partial sweep of its largest ones and can be repeated for the rest.
+    /// Spending them together links them on chain.
     ///
     /// The fees are for the selected outputs, one recipient output and the
     /// change output. Fails when the recipient's share would be dust (see
