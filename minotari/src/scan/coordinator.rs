@@ -127,7 +127,11 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
             .first()
             .expect("is already checked")
             .get_key_manager(password)?;
-        let mut shared_reorg_scanner = self.create_reorg_scanner(first_km).await?;
+        let Some(shared_reorg_scanner) = unless_cancelled(&cancel_token, self.create_reorg_scanner(first_km)).await
+        else {
+            return self.handle_pause(&[], PauseReason::Cancelled, VecDeque::new());
+        };
+        let mut shared_reorg_scanner = shared_reorg_scanner?;
 
         let mut sync_targets = Vec::with_capacity(accounts.len());
 
@@ -140,14 +144,22 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
                     scanning_offset,
                     &mut conn,
                     &mut shared_reorg_scanner,
+                    &cancel_token,
                 )
                 .await?;
+            // Only the accounts prepared so far have a known height to report.
+            let Some(target) = target else {
+                return self.handle_pause(&sync_targets, PauseReason::Cancelled, VecDeque::new());
+            };
             sync_targets.push(target);
         }
 
         match mode {
             ScanMode::FastSync { safety_buffer } => self.run_fast_sync(sync_targets, safety_buffer, cancel_token).await,
-            _ => self.unified_scan_loop(sync_targets, mode, cancel_token).await,
+            _ => {
+                self.unified_scan_loop(sync_targets, mode, scanning_offset, cancel_token)
+                    .await
+            },
         }
     }
 
@@ -169,7 +181,8 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
             .map_err(ScanError::Fatal)
     }
 
-    /// Prepares a scan context for an account.
+    /// Prepares a scan context for an account, or returns `None` if `cancel` fires first.
+    #[allow(clippy::too_many_arguments)]
     async fn prepare_target(
         &self,
         account: AccountRow,
@@ -178,21 +191,36 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
         scanning_offset: u64,
         conn: &mut rusqlite::Connection,
         scanner: &mut HttpBlockchainScanner<KeyManager>,
-    ) -> Result<AccountSyncTarget, ScanError> {
+        cancel: &Option<CancellationToken>,
+    ) -> Result<Option<AccountSyncTarget>, ScanError> {
         let key_manager = account.get_key_manager(password)?;
         let view_key = key_manager.get_private_view_key();
-        let reorg_result = reorg::handle_reorgs(scanner, conn, account.id, self.webhook_config.clone())
-            .await
-            .map_err(ScanError::Fatal)?;
+        let reorg_result = unless_cancelled(
+            cancel,
+            reorg::handle_reorgs(scanner, conn, account.id, self.webhook_config.clone()),
+        )
+        .await;
+        let Some(reorg_result) = reorg_result else {
+            return Ok(None);
+        };
+        let reorg_result = reorg_result.map_err(ScanError::Fatal)?;
 
         let mut next_block = reorg_result.resume_height;
+        if next_block == 0 {
+            // Use birthday logic. After a rollback this is not interrupted, so the
+            // committed reorg is always reported.
+            let birthday = self.birthday_height(&account, scanning_offset, wallet_client);
+            next_block = if reorg_result.reorg_information.is_some() {
+                birthday.await?
+            } else {
+                let Some(birthday) = unless_cancelled(cancel, birthday).await else {
+                    return Ok(None);
+                };
+                birthday?
+            };
+        }
         if let Some(info) = reorg_result.reorg_information {
             self.emit_reorg_event(account.id, info, next_block);
-        }
-
-        if next_block == 0 {
-            // Use birthday logic
-            next_block = self.birthday_height(&account, scanning_offset, wallet_client).await?;
         }
 
         let monitor_state = MonitoringState::new();
@@ -201,13 +229,13 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
         let transaction_monitor =
             TransactionMonitor::new(monitor_state, self.required_confirmations, self.webhook_config.clone());
 
-        Ok(AccountSyncTarget {
+        Ok(Some(AccountSyncTarget {
             account,
             key_manager,
             view_key,
             next_block_to_scan: next_block,
             transaction_monitor,
-        })
+        }))
     }
 
     #[allow(clippy::too_many_lines)]
@@ -215,6 +243,7 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
         &self,
         mut targets: Vec<AccountSyncTarget>,
         mode: ScanMode,
+        scanning_offset: u64,
         cancel_token: Option<CancellationToken>,
     ) -> Result<(Vec<WalletEvent>, bool), ScanError> {
         let mut all_events = VecDeque::new();
@@ -383,17 +412,12 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
                 total_scanned_globally = total_scanned_globally.saturating_add(new_blocks_count);
 
                 if blocks_since_reorg_check >= self.reorg_check_interval {
-                    let reorg_check = unless_cancelled(
-                        &cancel_token,
-                        self.check_global_reorgs(&mut targets, &db_handler, scanner),
-                    )
-                    .await;
-                    let Some(reorg_check) = reorg_check else {
-                        return self.handle_pause(&targets, PauseReason::Cancelled, all_events);
-                    };
+                    let rewound = self
+                        .check_global_reorgs(&mut targets, &db_handler, scanner, scanning_offset, &cancel_token)
+                        .await?;
                     blocks_since_reorg_check = 0;
                     // The stream still continues from the old heights: rescan from the fork.
-                    if reorg_check? {
+                    if rewound {
                         break;
                     }
                 }
@@ -444,8 +468,15 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
                 }
 
                 if let ScanMode::Continuous { poll_interval } = mode {
-                    self.wait_for_next_poll_cycle(&mut targets, &db_handler, poll_interval, &cancel_token, scanner)
-                        .await?;
+                    self.wait_for_next_poll_cycle(
+                        &mut targets,
+                        &db_handler,
+                        poll_interval,
+                        &cancel_token,
+                        scanner,
+                        scanning_offset,
+                    )
+                    .await?;
                     refresh_tip = true;
                     continue;
                 }
@@ -468,11 +499,16 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
         }
     }
 
+    /// Rolls back reorged accounts and moves their cursors to the fork. Returns
+    /// whether any cursor moved. A cancel stops the check; the caller then sees
+    /// the cancelled token.
     async fn check_global_reorgs(
         &self,
         targets: &mut [AccountSyncTarget],
         db_handler: &ScanDbHandler<E>,
         scanner: &mut HttpBlockchainScanner<KeyManager>,
+        scanning_offset: u64,
+        cancel: &Option<CancellationToken>,
     ) -> Result<bool, ScanError> {
         let mut rewound = false;
         if targets.is_empty() {
@@ -481,13 +517,27 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
 
         let mut conn = db_handler.get_connection().await?;
         for target in targets {
-            let res = reorg::handle_reorgs(scanner, &mut conn, target.account.id, self.webhook_config.clone())
-                .await
-                .map_err(ScanError::Fatal)?;
+            let res = unless_cancelled(
+                cancel,
+                reorg::handle_reorgs(scanner, &mut conn, target.account.id, self.webhook_config.clone()),
+            )
+            .await;
+            let Some(res) = res else {
+                return Ok(rewound);
+            };
+            let res = res.map_err(ScanError::Fatal)?;
 
             if let Some(info) = res.reorg_information {
-                self.emit_reorg_event(target.account.id, info, res.resume_height);
-                target.next_block_to_scan = res.resume_height;
+                let mut resume_height = res.resume_height;
+                if resume_height == 0 {
+                    // The fork is below every stored tip block. Not interrupted:
+                    // the rollback is committed and must be reported.
+                    resume_height = self
+                        .birthday_height(&target.account, scanning_offset, &self.client)
+                        .await?;
+                }
+                self.emit_reorg_event(target.account.id, info, resume_height);
+                target.next_block_to_scan = resume_height;
                 rewound = true;
             }
         }
@@ -501,6 +551,7 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
         interval: std::time::Duration,
         cancel: &Option<CancellationToken>,
         scanner: &mut HttpBlockchainScanner<KeyManager>,
+        scanning_offset: u64,
     ) -> Result<(), ScanError> {
         for target in targets.iter_mut() {
             target.next_block_to_scan = target.next_block_to_scan.saturating_sub(1);
@@ -516,11 +567,8 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
         if unless_cancelled(cancel, tokio::time::sleep(interval)).await.is_none() {
             return Ok(());
         }
-        if let Some(reorg_check) =
-            unless_cancelled(cancel, self.check_global_reorgs(targets, db_handler, scanner)).await
-        {
-            reorg_check?;
-        }
+        self.check_global_reorgs(targets, db_handler, scanner, scanning_offset, cancel)
+            .await?;
         Ok(())
     }
 
@@ -755,7 +803,7 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
 
         let mut targets = Vec::with_capacity(accounts.len());
         for account in accounts {
-            let mut target = self
+            let target = self
                 .prepare_target(
                     account,
                     password,
@@ -763,8 +811,12 @@ impl<E: EventSender + Clone + Send + 'static> ScanCoordinator<E> {
                     scanning_offset,
                     &mut conn,
                     &mut shared_reorg_scanner,
+                    &cancel_token,
                 )
                 .await?;
+            let Some(mut target) = target else {
+                return Ok((Vec::new(), true));
+            };
 
             // Backfill always rescans from the account birthday. prepare_target
             // resumes from the last scanned tip block, which after a fast sync
@@ -1433,13 +1485,25 @@ mod tests {
     /// A base node whose chain has empty blocks up to `tip`. Blocks at or above
     /// `fork_from` have forked hashes. `fork_on_header: Some((height, from))`
     /// forks from `from` when the header at `height` is first asked for. Block
-    /// downloads take `download_delay`, and tip requests hang while `slow_tip`.
+    /// downloads take `download_delay`, tip requests hang while `slow_tip` and
+    /// header requests while `slow_headers`. The birthday is at `BIRTHDAY_HEIGHT`.
     struct MockChain {
         tip: u64,
         fork_from: Arc<AtomicU64>,
         fork_on_header: Option<(u64, u64)>,
         download_delay: Duration,
         slow_tip: Arc<AtomicBool>,
+        slow_headers: Arc<AtomicBool>,
+    }
+
+    const BIRTHDAY_HEIGHT: u64 = 1450;
+
+    fn hang_while(flag: &AtomicBool) -> Duration {
+        if flag.load(Ordering::SeqCst) {
+            Duration::from_secs(20)
+        } else {
+            Duration::ZERO
+        }
     }
 
     impl MockChain {
@@ -1450,6 +1514,7 @@ mod tests {
                 fork_on_header: None,
                 download_delay: Duration::ZERO,
                 slow_tip: Arc::new(AtomicBool::new(false)),
+                slow_headers: Arc::new(AtomicBool::new(false)),
             }
         }
 
@@ -1465,12 +1530,9 @@ mod tests {
     impl Respond for MockChain {
         fn respond(&self, request: &Request) -> ResponseTemplate {
             match request.url.path() {
+                "/get_height_at_time" => ResponseTemplate::new(200).set_body_json(BIRTHDAY_HEIGHT),
                 "/get_tip_info" => {
-                    let delay = if self.slow_tip.load(Ordering::SeqCst) {
-                        Duration::from_secs(20)
-                    } else {
-                        Duration::ZERO
-                    };
+                    let delay = hang_while(&self.slow_tip);
                     ResponseTemplate::new(200)
                         .set_body_json(serde_json::json!({
                             "metadata": {
@@ -1493,11 +1555,13 @@ mod tests {
                     if height > self.tip {
                         return ResponseTemplate::new(404);
                     }
-                    ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                        "height": height,
-                        "hash": self.hash(height),
-                        "timestamp": 1_700_000_000u64,
-                    }))
+                    ResponseTemplate::new(200)
+                        .set_body_json(serde_json::json!({
+                            "height": height,
+                            "hash": self.hash(height),
+                            "timestamp": 1_700_000_000u64,
+                        }))
+                        .set_delay(hang_while(&self.slow_headers))
                 },
                 "/sync_utxos_by_block" => {
                     let start = height_of(&query_param(request, "start_header_hash"));
@@ -2093,5 +2157,91 @@ mod tests {
                 "block {height} is from the new chain"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn cancelling_a_scan_while_its_startup_reorg_check_hangs_stops_it() {
+        let chain = MockChain::new(1505);
+        chain.slow_headers.store(true, Ordering::SeqCst);
+        let mut setup = setup_chain(1500, chain, 1_000).await;
+
+        let token = CancellationToken::new();
+        let scan = continuous_scan(&setup.coordinator, &setup.pool, &token);
+        let cancel = cancel_once_requested(&setup.server, "/get_header_by_height", 0, &token);
+        let (result, cancelled_at) =
+            tokio::time::timeout(Duration::from_secs(30), async { tokio::join!(scan, cancel) })
+                .await
+                .expect("the scan stops when cancelled");
+        let (_, more_blocks) = result.expect("a cancelled scan is not an error");
+        assert!(more_blocks);
+        assert!(
+            cancelled_at.elapsed() < Duration::from_secs(2),
+            "cancelling must not wait for the startup reorg check"
+        );
+        // No account was prepared, so none has a height to report.
+        assert!(!drain(&mut setup.events).iter().any(is_cancelled));
+    }
+
+    fn first_reorg(events: &[ProcessingEvent]) -> &ReorgDetectedEvent {
+        events
+            .iter()
+            .find_map(|e| match e {
+                ProcessingEvent::ReorgDetected(reorg) => Some(reorg),
+                _ => None,
+            })
+            .expect("a ReorgDetected event")
+    }
+
+    /// Asserts a scan of a chain with its tip at 1500 rolled every stored block
+    /// back and rescanned from the birthday.
+    fn assert_rescanned_from_birthday(setup: &Setup, events: &[ProcessingEvent]) {
+        let reorg = first_reorg(events);
+        assert_eq!(reorg.reorg_from_height, 0, "every stored block was reorged out");
+        assert_eq!(reorg.new_height, BIRTHDAY_HEIGHT, "the scan resumes at the birthday");
+        assert!(events.iter().any(|e| matches!(
+            e,
+            ProcessingEvent::ScanStatus(ScanStatusEvent::Completed { final_height: 1500, .. })
+        )));
+        let conn = setup.pool.get().expect("conn");
+        let tips = get_scanned_tip_blocks_by_account(&conn, setup.account_id).expect("tips");
+        assert!(
+            tips.iter().all(|t| t.height >= BIRTHDAY_HEIGHT),
+            "nothing below the birthday is scanned"
+        );
+        let birthday = tips
+            .iter()
+            .find(|t| t.height == BIRTHDAY_HEIGHT)
+            .expect("birthday block");
+        assert_eq!(birthday.hash, forked_block_hash(BIRTHDAY_HEIGHT));
+    }
+
+    #[tokio::test]
+    async fn a_reorg_below_every_stored_block_mid_pass_rescans_from_the_birthday() {
+        let mut chain = MockChain::new(1500);
+        chain.fork_on_header = Some((1490, 0));
+        let mut setup = setup_chain(1480, chain, 10).await;
+
+        setup
+            .coordinator
+            .run(vec![account(&setup.pool)], "password", ScanMode::Full, 0, None)
+            .await
+            .expect("the scan survives the reorg");
+        let events = drain(&mut setup.events);
+        assert_rescanned_from_birthday(&setup, &events);
+    }
+
+    #[tokio::test]
+    async fn a_reorg_below_every_stored_block_at_startup_rescans_from_the_birthday() {
+        let chain = MockChain::new(1500);
+        chain.fork_from.store(0, Ordering::SeqCst);
+        let mut setup = setup_chain(1480, chain, 1_000).await;
+
+        setup
+            .coordinator
+            .run(vec![account(&setup.pool)], "password", ScanMode::Full, 0, None)
+            .await
+            .expect("scan");
+        let events = drain(&mut setup.events);
+        assert_rescanned_from_birthday(&setup, &events);
     }
 }

@@ -56,15 +56,18 @@
 //!    `ReorgDetected`: blocks from `reorg_from_height` were rolled back, the
 //!    `cancelled_transaction_ids` and `reorganized_displayed_transactions` are
 //!    affected, and scanning resumes at `new_height`, mid-pass included. A
+//!    reorg below every stored block resumes at the account's birthday. A
 //!    reorg found when the scan starts is reported the same way.
 //!
 //! `Started` is not sent. Cancelling the token stops the scan without waiting
-//! on the node: block downloads, tip reads, reorg checks and the poll sleep are
-//! all interrupted. It sends `Paused { reason: Cancelled }` and returns
-//! `more_blocks == true`. The one exception is the end-of-pass transaction
-//! monitor, which runs to completion (its node requests are bounded by the
-//! HTTP client's timeout and retries) so its updates are always reported; a
-//! cancel that arrives first skips it. Blocks are only written after a whole
+//! on the node: the startup reorg checks and birthday lookups, block
+//! downloads, tip reads, reorg checks and the poll sleep are all interrupted.
+//! It sends `Paused { reason: Cancelled }` for every account prepared so far
+//! (none if it is cancelled during startup) and returns `more_blocks == true`.
+//! Two waits are not interrupted, so their results are always reported: the
+//! end-of-pass transaction monitor (a cancel that arrives first skips it), and
+//! the birthday lookup after a reorg that rolled back every stored block. Their
+//! node requests are bounded by the HTTP client's timeout and retries. Blocks are only written after a whole
 //! batch arrives, and a reorg rollback is a single database transaction, so a
 //! cancelled scan leaves the database at the last fully processed batch. The
 //! scanner's background download tasks stop as soon as the scan drops its
