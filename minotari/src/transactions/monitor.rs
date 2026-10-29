@@ -774,7 +774,15 @@ impl TransactionMonitor {
                 // does not count towards the stall limit.
                 let mut conn = Self::get_connection(db_pool)?;
                 let db_tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-                mark_completed_transaction_as_broadcasted(&db_tx, tx.id, 0)?;
+                if !mark_completed_transaction_as_broadcasted(&db_tx, tx.id, 0)? {
+                    // Abandoned (or otherwise settled) while the node was answering.
+                    info!(
+                        target: "audit",
+                        id = tx.id.to_string().as_str();
+                        "Transaction changed during rebroadcast; leaving it as it is"
+                    );
+                    return Ok(());
+                }
                 self.persist_event(&db_tx, account_id, &event)?;
                 db_tx.commit()?;
                 result.wallet_events.push(event);
