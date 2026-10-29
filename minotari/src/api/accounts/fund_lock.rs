@@ -152,7 +152,8 @@ pub struct RecipientRequest {
     ///
     /// This can be used to associate the payment with an invoice, order, or
     /// other business reference. The payment ID is included in the transaction
-    /// metadata.
+    /// metadata, unless the address embeds a payment ID of its own: that one is
+    /// sent instead, as the console wallet does.
     payment_id: Option<String>,
 }
 
@@ -467,13 +468,13 @@ pub async fn api_create_unsigned_transaction(
         let num_outputs = recipients.len();
         let fee_per_gram = DEFAULT_FEE_PER_GRAM;
         // Checked before locking: a payment id that cannot fit would otherwise fail the build
-        // with the funds reserved.
+        // with the funds reserved. It is the request's payment id or address at fault, so a 400.
         let sender_address = account
             .get_address(network, &password)
             .map_err(|e| ApiError::FailedCreateUnsignedTx(e.to_string()))?;
         let estimated_output_size = Some(
             check_memos_and_estimate_output_size(&recipients, &sender_address)
-                .map_err(|e| ApiError::FailedCreateUnsignedTx(e.to_string()))?,
+                .map_err(|e| ApiError::BadRequest(e.to_string()))?,
         );
 
         let confirmation_window = resolve_confirmation_window(body.confirmation_window, default_confirmations)?;

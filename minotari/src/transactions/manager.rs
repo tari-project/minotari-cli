@@ -81,7 +81,10 @@ use r2d2_sqlite::SqliteConnectionManager;
 use rusqlite::Connection;
 use tari_common::configuration::Network;
 use tari_common_types::types::FixedHash;
-use tari_common_types::{tari_address::TariAddressFeatures, transaction::TxId};
+use tari_common_types::{
+    tari_address::{TariAddress, TariAddressFeatures},
+    transaction::TxId,
+};
 use tari_transaction_components::offline_signing::models::SignedTransaction;
 use tari_transaction_components::rpc::models::{TxSubmissionRejectionReason, TxSubmissionResponse};
 use tari_transaction_components::transaction_components::OutputType;
@@ -348,7 +351,7 @@ impl TransactionSender {
     /// That read is now part of `create_or_find_pending_transaction`'s write
     /// transaction, because a check outside it can be overtaken between the read
     /// and the insert that acts on it.
-    fn validate_transaction_creation_request(&self) -> Result<(), anyhow::Error> {
+    fn validate_transaction_creation_request(&self) -> Result<TariAddress, anyhow::Error> {
         validate_fee_per_gram(self.fee_per_gram)?;
         let sender_address = self.account.get_address(self.network, &self.password)?;
         if !sender_address
@@ -358,7 +361,7 @@ impl TransactionSender {
             return Err(anyhow!("The sender address does not support one-sided transactions."));
         }
 
-        Ok(())
+        Ok(sender_address)
     }
 
     /// Fails when this send's reservation has outlived its lock.
@@ -397,18 +400,10 @@ impl TransactionSender {
         &self,
         connection: &Connection,
         processed_transaction: &ProcessedTransaction,
+        estimated_output_size: Option<usize>,
     ) -> Result<UtxoSelection, anyhow::Error> {
         let amount = processed_transaction.recipient.amount;
         let num_outputs = 1;
-        // Selection has to charge for the memo this send will actually carry. Left at the
-        // default, a long payment id is weight nobody reserved inputs for, and the send fails
-        // at build time with the funds already locked. A payment id that cannot fit at all is
-        // refused here, before anything is locked.
-        let sender_address = self.account.get_address(self.network, &self.password)?;
-        let estimated_output_size = Some(check_memos_and_estimate_output_size(
-            std::slice::from_ref(&processed_transaction.recipient),
-            &sender_address,
-        )?);
 
         let input_selector = InputSelector::new(self.account.id, self.confirmation_window);
         let utxo_selection = input_selector.fetch_unspent_outputs(
@@ -434,6 +429,7 @@ impl TransactionSender {
         &self,
         connection: &mut Connection,
         processed_transaction: &mut ProcessedTransaction,
+        estimated_output_size: Option<usize>,
     ) -> Result<String, anyhow::Error> {
         // `seconds_to_lock_utxos` is untrusted (JSON body / CLI argument), so use
         // the checked helper: `Utc::now() + Duration::seconds(..)` panics on
@@ -462,7 +458,7 @@ impl TransactionSender {
             return Ok(record.id);
         }
 
-        let utxo_selection = self.create_utxo_selection(&transaction, processed_transaction)?;
+        let utxo_selection = self.create_utxo_selection(&transaction, processed_transaction, estimated_output_size)?;
 
         let pending_tx_id = match db::create_pending_transaction(
             &transaction,
@@ -590,10 +586,19 @@ impl TransactionSender {
         let mut processed_transaction =
             ProcessedTransaction::new(None, idempotency_key, recipient.clone(), seconds_to_lock_utxo);
 
-        self.validate_transaction_creation_request()?;
+        let sender_address = self.validate_transaction_creation_request()?;
+        // Selection has to charge for the memo this send will actually carry. Left at the
+        // default, a long payment id is weight nobody reserved inputs for, and the send fails
+        // at build time with the funds already locked. A payment id that cannot fit at all is
+        // refused here, before anything is locked and outside the write lock.
+        let estimated_output_size =
+            check_memos_and_estimate_output_size(std::slice::from_ref(&recipient), &sender_address)?;
 
-        let pending_transaction_id =
-            self.create_or_find_pending_transaction(&mut connection, &mut processed_transaction)?;
+        let pending_transaction_id = self.create_or_find_pending_transaction(
+            &mut connection,
+            &mut processed_transaction,
+            Some(estimated_output_size),
+        )?;
         processed_transaction.update_id(pending_transaction_id);
 
         let result: Result<PrepareOneSidedTransactionForSigningResult, anyhow::Error> = (|| {
@@ -606,7 +611,6 @@ impl TransactionSender {
 
             let (tx_builder, key_manager) = self.prepare_transaction_builder(utxos)?;
 
-            let sender_address = self.account.get_address(self.network, &self.password)?;
             let tx_id = TxId::new_random();
 
             let payment_id = recipient.memo()?;
@@ -906,6 +910,11 @@ impl TransactionSender {
             credit = change.value();
         }
 
+        // Record the bytes the output carries, which an address's embedded id may have replaced,
+        // not what was typed. The scan keeps this row, so it is what the history shows for good.
+        let sent_memo = recipient.payment_id_bytes().filter(|bytes| !bytes.is_empty());
+        let message = sent_memo.clone().and_then(|bytes| String::from_utf8(bytes).ok());
+        let memo_hex = sent_memo.map(hex::encode);
         let tx = DisplayedTransactionBuilder::new()
             .account_id(self.account.id)
             .direction(TransactionDirection::Outgoing)
@@ -913,7 +922,8 @@ impl TransactionSender {
             .lock_height(lock_height)
             .source(TransactionSource::OneSided)
             .credits_and_debits(credit, debit)
-            .message(recipient.payment_id.clone())
+            .message(message)
+            .memo_hex(memo_hex)
             .counterparty(Some(recipient.address.clone()))
             .blockchain_info(0, FixedHash::default(), now, 0) // No block height yet
             .fee(Some(fee))
@@ -1395,7 +1405,7 @@ mod tests {
     fn reserve(sender: &TransactionSender, pool: &SqlitePool, key: &str, amount: u64) -> Result<String, anyhow::Error> {
         let mut processed_transaction = request(sender, key, amount);
         let mut connection = pool.get().expect("conn");
-        sender.create_or_find_pending_transaction(&mut connection, &mut processed_transaction)
+        sender.create_or_find_pending_transaction(&mut connection, &mut processed_transaction, None)
     }
 
     fn conflict(err: &anyhow::Error) -> &IdempotencyConflict {
@@ -1492,7 +1502,7 @@ mod tests {
                     // database's write lock and not over the pool.
                     let mut connection = pool.get().expect("conn");
                     barrier.wait();
-                    sender.create_or_find_pending_transaction(&mut connection, &mut processed_transaction)
+                    sender.create_or_find_pending_transaction(&mut connection, &mut processed_transaction, None)
                 })
             })
             .collect();
@@ -1596,7 +1606,7 @@ mod tests {
 
         let mut owner = request(&sender, "k", 1_000);
         let reservation_id = sender
-            .create_or_find_pending_transaction(&mut pool.get().expect("conn"), &mut owner)
+            .create_or_find_pending_transaction(&mut pool.get().expect("conn"), &mut owner, None)
             .expect("original reservation");
         owner.update_id(reservation_id.clone());
         let locked = locked_output_count(&pool);
@@ -1605,7 +1615,7 @@ mod tests {
 
         let mut replayer = request(&sender, "k", 1_000);
         let replayed_id = sender
-            .create_or_find_pending_transaction(&mut pool.get().expect("conn"), &mut replayer)
+            .create_or_find_pending_transaction(&mut pool.get().expect("conn"), &mut replayer, None)
             .expect("replay");
         replayer.update_id(replayed_id.clone());
         assert_eq!(replayed_id, reservation_id);
@@ -1645,7 +1655,7 @@ mod tests {
 
         let mut processed_transaction = request(&sender, "k", 1_000);
         let id = sender
-            .create_or_find_pending_transaction(&mut pool.get().expect("conn"), &mut processed_transaction)
+            .create_or_find_pending_transaction(&mut pool.get().expect("conn"), &mut processed_transaction, None)
             .expect("reservation");
         processed_transaction.update_id(id);
 
@@ -1676,7 +1686,7 @@ mod tests {
 
             let mut processed_transaction = request(&sender, "k", 1_000);
             let id = sender
-                .create_or_find_pending_transaction(&mut pool.get().expect("conn"), &mut processed_transaction)
+                .create_or_find_pending_transaction(&mut pool.get().expect("conn"), &mut processed_transaction, None)
                 .expect("reservation");
             processed_transaction.update_id(id);
             set_status(&pool, "k", status.clone());
@@ -1709,7 +1719,7 @@ mod tests {
 
         let mut processed_transaction = request(&sender, "k", 1_000);
         let id = sender
-            .create_or_find_pending_transaction(&mut pool.get().expect("conn"), &mut processed_transaction)
+            .create_or_find_pending_transaction(&mut pool.get().expect("conn"), &mut processed_transaction, None)
             .expect("reservation");
         processed_transaction.update_id(id);
 
@@ -1743,7 +1753,7 @@ mod tests {
             let sender = sender_for(&pool);
             let mut processed_transaction = request(&sender, "k", 1_000);
             sender
-                .create_or_find_pending_transaction(&mut pool.get().expect("conn"), &mut processed_transaction)
+                .create_or_find_pending_transaction(&mut pool.get().expect("conn"), &mut processed_transaction, None)
                 .expect("reservation")
         };
 
@@ -1793,7 +1803,7 @@ mod tests {
 
         let mut owner = request(&sender, "k", 1_000);
         let id = sender
-            .create_or_find_pending_transaction(&mut pool.get().expect("conn"), &mut owner)
+            .create_or_find_pending_transaction(&mut pool.get().expect("conn"), &mut owner, None)
             .expect("reservation");
         owner.update_id(id);
         let locked = locked_output_count(&pool);
@@ -1804,7 +1814,7 @@ mod tests {
 
         let mut replayer = request(&sender, "k", 1_000);
         let replayed_id = sender
-            .create_or_find_pending_transaction(&mut pool.get().expect("conn"), &mut replayer)
+            .create_or_find_pending_transaction(&mut pool.get().expect("conn"), &mut replayer, None)
             .expect("replay");
         replayer.update_id(replayed_id);
         assert!(!replayer.owns_reservation());
@@ -1852,7 +1862,7 @@ mod tests {
 
         let mut processed_transaction = request(&sender, "k", 1_000);
         let id = sender
-            .create_or_find_pending_transaction(&mut pool.get().expect("conn"), &mut processed_transaction)
+            .create_or_find_pending_transaction(&mut pool.get().expect("conn"), &mut processed_transaction, None)
             .expect("reservation");
         processed_transaction.update_id(id);
         let locked = locked_output_count(&pool);
@@ -1901,7 +1911,7 @@ mod tests {
 
         let mut creator = request(&sender, "k", 1_000);
         let id = sender
-            .create_or_find_pending_transaction(&mut pool.get().expect("conn"), &mut creator)
+            .create_or_find_pending_transaction(&mut pool.get().expect("conn"), &mut creator, None)
             .expect("reservation");
         creator.update_id(id);
         let locked = locked_output_count(&pool);
@@ -1909,7 +1919,7 @@ mod tests {
 
         let mut replayer = request(&sender, "k", 1_000);
         let replayed_id = sender
-            .create_or_find_pending_transaction(&mut pool.get().expect("conn"), &mut replayer)
+            .create_or_find_pending_transaction(&mut pool.get().expect("conn"), &mut replayer, None)
             .expect("replay");
         replayer.update_id(replayed_id);
         assert!(creator.owns_reservation(), "the creator still reads as the owner");
@@ -2277,6 +2287,64 @@ mod tests {
 
         assert_eq!(prepared.info.recipients[0].payment_id.payment_id_as_bytes(), embedded);
         assert_eq!(prepared.info.payment_id.payment_id_as_bytes(), embedded);
+    }
+
+    /// The history row records the bytes that went on chain: the scan keeps this row, so a
+    /// typed message an address's embedded id replaced would otherwise show for good.
+    #[test]
+    fn the_pending_record_shows_the_payment_id_that_was_sent() {
+        let (pool, _temp) = setup_funded_wallet(3);
+        let sender = sender_for(&pool);
+        let address = TariAddress::new_dual_address_with_default_features(
+            CompressedPublicKey::from_secret_key(&PrivateKey::from(7u64)),
+            CompressedPublicKey::from_secret_key(&PrivateKey::from(9u64)),
+            Network::LocalNet,
+        )
+        .expect("address");
+        let signed = SignedTransaction {
+            transaction: tari_transaction_components::transaction_components::Transaction::new(
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                tari_common_types::types::PrivateKey::default(),
+                tari_common_types::types::PrivateKey::default(),
+            ),
+            sent_hashes: Vec::new(),
+            outputs: Vec::new(),
+            change_hashes: Vec::new(),
+            change_output: None,
+            tx_id: TxId::new_random(),
+        };
+        let record = |address: TariAddress| {
+            let recipient = Recipient {
+                address,
+                amount: MicroMinotari(1_000),
+                payment_id: Some("typed message".to_string()),
+            };
+            let processed = ProcessedTransaction::new(None, "history".to_string(), recipient, 300);
+            let tx = sender
+                .build_pending_displayed_transaction(&processed, &signed, MicroMinotari(10))
+                .expect("record");
+            (tx.message, tx.details.memo_hex)
+        };
+
+        let binary = vec![0x9c, 0xf1, 0x03, 0xff];
+        assert_eq!(
+            record(address.with_memo_field_payment_id(binary.clone()).expect("payment id")),
+            (None, Some(hex::encode(&binary)))
+        );
+        assert_eq!(
+            record(
+                address
+                    .with_memo_field_payment_id(b"DEP-42".to_vec())
+                    .expect("payment id")
+            ),
+            (Some("DEP-42".to_string()), Some(hex::encode(b"DEP-42")))
+        );
+        assert_eq!(
+            record(address),
+            (Some("typed message".to_string()), Some(hex::encode(b"typed message")))
+        );
     }
 
     /// An embedded id too long for the memos is refused before any UTXO is locked.

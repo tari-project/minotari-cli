@@ -49,7 +49,11 @@ use crate::{api::types::LockFundsResult, db::AccountRow};
 use anyhow::anyhow;
 use log::info;
 use tari_common::configuration::Network;
-use tari_common_types::{tari_address::TariAddress, transaction::TxId, types::FixedHash};
+use tari_common_types::{
+    tari_address::{TariAddress, TariAddressFeatures},
+    transaction::TxId,
+    types::FixedHash,
+};
 use tari_script::script;
 use tari_transaction_components::offline_signing::models::PaymentRecipient;
 use tari_transaction_components::{
@@ -95,15 +99,14 @@ pub struct Recipient {
 }
 
 impl Recipient {
-    /// The payment id bytes the output carries. An id embedded in the address wins over
-    /// `payment_id`, as the console wallet does: exchanges put the deposit reference in the
-    /// address, and it can be any bytes, not only text.
+    /// The payment id bytes the output carries. When the address has the payment id feature,
+    /// its embedded id replaces `payment_id`, as the console wallet does: exchanges put the
+    /// deposit reference in the address, and it can be any bytes, not only text.
     pub fn payment_id_bytes(&self) -> Option<Vec<u8>> {
-        let embedded = self.address.get_memo_field_payment_id_bytes();
-        if embedded.is_empty() {
-            self.payment_id.as_ref().map(|s| s.as_bytes().to_vec())
+        if self.address.features().contains(TariAddressFeatures::PAYMENT_ID) {
+            Some(self.address.get_memo_field_payment_id_bytes())
         } else {
-            Some(embedded)
+            self.payment_id.as_ref().map(|s| s.as_bytes().to_vec())
         }
     }
 
