@@ -94,7 +94,7 @@ use tari_transaction_components::{
         models::{PrepareOneSidedTransactionForSigningResult, SignedOneSidedTransactionResult},
         prepare_one_sided_transaction_for_signing,
     },
-    transaction_components::{MemoField, OutputFeatures, WalletOutput, memo_field::TxType},
+    transaction_components::{OutputFeatures, WalletOutput},
 };
 use tari_utilities::ByteArray;
 
@@ -407,9 +407,8 @@ impl TransactionSender {
         let estimated_output_size = Some(estimated_output_size_for_payment_id(
             processed_transaction
                 .recipient
-                .payment_id
-                .as_ref()
-                .map_or(0, String::len),
+                .payment_id_bytes()
+                .map_or(0, |bytes| bytes.len()),
         )?);
 
         let input_selector = InputSelector::new(self.account.id, self.confirmation_window);
@@ -611,10 +610,7 @@ impl TransactionSender {
             let sender_address = self.account.get_address(self.network, &self.password)?;
             let tx_id = TxId::new_random();
 
-            let payment_id = match &recipient.payment_id {
-                Some(s) => MemoField::new_open_from_string(s, TxType::PaymentToOther).map_err(|e| anyhow!(e))?,
-                None => MemoField::new_empty(),
-            };
+            let payment_id = recipient.memo()?;
             let output_features = OutputFeatures::default();
 
             let payment_recipient = PaymentRecipient {
@@ -1208,6 +1204,7 @@ mod tests {
         types::{ComAndPubSignature, CompressedPublicKey, PrivateKey},
     };
     use tari_script::{ExecutionStack, TariScript};
+    use tari_transaction_components::transaction_components::{MemoField, memo_field::TxType};
     use tari_transaction_components::{
         key_manager::{
             TariKeyId,
@@ -2253,6 +2250,34 @@ mod tests {
         assert_eq!(memo.payment_id_as_bytes(), b"invoice-42".to_vec());
         assert_eq!(memo.get_type(), TxType::PaymentToOther);
         assert_eq!(prepared.info.payment_id.claimed_sender_address(), None);
+    }
+
+    /// An exchange deposit address embeds its reference as raw bytes, which need not be text.
+    /// The output must carry those exact bytes, whatever message the sender typed.
+    #[test]
+    fn an_address_payment_id_is_sent_as_its_bytes() {
+        let (pool, _temp) = setup_funded_wallet(3);
+        let mut sender = sender_for(&pool);
+        let embedded = vec![0x9c, 0xf1, 0x03, 0x00, 0xff, 0x80, 0x01, 0x00];
+        let deposit = TariAddress::new_dual_address_with_default_features(
+            CompressedPublicKey::from_secret_key(&PrivateKey::from(7u64)),
+            CompressedPublicKey::from_secret_key(&PrivateKey::from(9u64)),
+            Network::LocalNet,
+        )
+        .expect("address")
+        .with_memo_field_payment_id(embedded.clone())
+        .expect("payment id");
+        let recipient = Recipient {
+            address: deposit,
+            amount: MicroMinotari(1_000),
+            payment_id: Some("typed message".to_string()),
+        };
+        let prepared = sender
+            .start_new_transaction("binary-payment-id".to_string(), recipient, 300)
+            .expect("prepare");
+
+        assert_eq!(prepared.info.recipients[0].payment_id.payment_id_as_bytes(), embedded);
+        assert_eq!(prepared.info.payment_id.payment_id_as_bytes(), embedded);
     }
 
     #[tokio::test]

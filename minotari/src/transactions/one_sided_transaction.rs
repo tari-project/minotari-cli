@@ -92,6 +92,28 @@ pub struct Recipient {
     pub payment_id: Option<String>,
 }
 
+impl Recipient {
+    /// The payment id bytes the output carries. An id embedded in the address wins over
+    /// `payment_id`, as the console wallet does: exchanges put the deposit reference in the
+    /// address, and it can be any bytes, not only text.
+    pub fn payment_id_bytes(&self) -> Option<Vec<u8>> {
+        let embedded = self.address.get_memo_field_payment_id_bytes();
+        if embedded.is_empty() {
+            self.payment_id.as_ref().map(|s| s.as_bytes().to_vec())
+        } else {
+            Some(embedded)
+        }
+    }
+
+    /// The plain memo for this recipient, before [`recipient_memo`] adds the sender address.
+    pub fn memo(&self) -> Result<MemoField, anyhow::Error> {
+        match self.payment_id_bytes() {
+            Some(bytes) => MemoField::new_open(bytes, TxType::PaymentToOther).map_err(|e| anyhow!(e)),
+            None => Ok(MemoField::new_empty()),
+        }
+    }
+}
+
 /// The memo a recipient's output carries: the payment id, with the sender's address on it.
 ///
 /// A one-sided payment has no handshake, so the encrypted memo is the only place the recipient's
@@ -296,12 +318,6 @@ impl OneSidedTransaction {
 
         let tx_id = TxId::new_random();
         let output_features = OutputFeatures::default();
-        let base_memo = |r: &Recipient| match &r.payment_id {
-            Some(s) => {
-                MemoField::new_open_from_string(s, TxType::PaymentToOther).unwrap_or_else(|_| MemoField::new_empty())
-            },
-            None => MemoField::new_empty(),
-        };
         let payment_recipients = recipients
             .iter()
             .map(|r| {
@@ -309,13 +325,13 @@ impl OneSidedTransaction {
                     amount: r.amount,
                     output_features: output_features.clone(),
                     address: r.address.clone(),
-                    payment_id: recipient_memo(base_memo(r), &sender_address, &r.address)?,
+                    payment_id: recipient_memo(r.memo()?, &sender_address, &r.address)?,
                 })
             })
             .collect::<Result<Vec<_>, anyhow::Error>>()?;
 
         // Use first recipient's payment_id, without the sender address, as the overall transaction memo
-        let main_payment_id = base_memo(recipients.first().expect("Already checked"));
+        let main_payment_id = recipients.first().expect("Already checked").memo()?;
 
         let result = prepare_one_sided_transaction_for_signing(
             &key_manager,
