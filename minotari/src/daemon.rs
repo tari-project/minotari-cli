@@ -363,7 +363,8 @@ impl Daemon {
         )
         .mode(ScanMode::Partial {
             max_blocks: self.max_blocks,
-        });
+        })
+        .burn_proofs_dir(self.burn_proofs_dir.clone());
         if let Some(cfg) = &self.webhook_trigger_config {
             scanner = scanner.webhook_config(cfg.clone());
         }

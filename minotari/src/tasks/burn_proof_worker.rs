@@ -12,7 +12,7 @@
 //! 4. Write `{claim_public_key}-{commitment_hex}.json` to `burn_proofs_dir`
 //! 5. Mark the DB record as `complete`
 
-use std::{path::PathBuf, time::Duration};
+use std::{io::ErrorKind, path::PathBuf, time::Duration};
 
 use log::{error, info, warn};
 use reqwest::StatusCode;
@@ -27,7 +27,9 @@ use tari_utilities::byte_array::ByteArray;
 use tokio::{fs, sync::broadcast, task::JoinHandle, time::interval};
 
 use crate::{
-    db::{DbBurnProof, SqlitePool, get_pending_burn_proofs, mark_burn_proof_complete},
+    db::{
+        DbBurnProof, SqlitePool, burn_proof_scan_state, get_pending_burn_proofs, mark_burn_proof_complete_if_current,
+    },
     http::{HttpError, WalletHttpClient},
 };
 
@@ -94,23 +96,22 @@ impl BurnProofWorker {
             return Ok(());
         }
 
+        // A rollback may have committed before a previous process exited, or
+        // a standalone rollback may not have known this output directory.
+        // Pending proofs must not leave old claim files available.
+        for proof in &pending {
+            remove_proof_file(&self.burn_proofs_dir, &proof.claim_public_key, &proof.commitment).await?;
+        }
+
         info!(
             target: LOG_TARGET,
             count = pending.len();
             "Processing pending burn proofs"
         );
 
-        let tip_height = self
-            .client
-            .get_tip_info()
-            .await?
-            .metadata
-            .ok_or_else(|| anyhow::anyhow!("Base node returned no chain metadata"))?
-            .best_block_height();
-
         for proof in pending {
             let proof_id = proof.id;
-            if let Err(e) = self.process_single_proof(&proof, tip_height).await {
+            if let Err(e) = self.process_single_proof(&proof).await {
                 if is_pruned_block_error(&e) {
                     error!(
                         target: LOG_TARGET,
@@ -133,10 +134,24 @@ impl BurnProofWorker {
         Ok(())
     }
 
-    async fn process_single_proof(&self, proof: &DbBurnProof, tip_height: u64) -> Result<(), anyhow::Error> {
+    async fn process_single_proof(&self, proof: &DbBurnProof) -> Result<(), anyhow::Error> {
+        let (reorg_generation, scanned_height) = {
+            let conn = self.db_pool.get()?;
+            burn_proof_scan_state(&conn, proof.account_id)?
+        };
         let output_proof = self.client.get_burn_output_proof(&proof.commitment).await?.proof;
 
         check_output_proof(&proof.output_hash, &output_proof)?;
+
+        // Read the tip after the proof: a cached height from an earlier proof
+        // can overstate the depth if the node reorged during this cycle.
+        let tip_height = self
+            .client
+            .get_tip_info()
+            .await?
+            .metadata
+            .ok_or_else(|| anyhow::anyhow!("Base node returned no chain metadata"))?
+            .best_block_height();
 
         // A proof from a block that could still be reorged out would point the claim at an orphaned block.
         if !is_deep_enough(tip_height, output_proof.block_height, self.required_confirmations) {
@@ -147,6 +162,22 @@ impl BurnProofWorker {
                 tip_height = tip_height;
                 "Burn not yet deep enough to claim — will retry next cycle"
             );
+            return Ok(());
+        }
+        // A proof may reach the node's confirmation depth while this wallet's
+        // scanner is still behind it. Such a block could be orphaned before the
+        // scanner ever records it, leaving no rollback to reset the proof.
+        if scanned_height.is_none_or(|height| height < output_proof.block_height) {
+            return Ok(());
+        }
+        if self
+            .client
+            .get_block_hash_by_height(output_proof.block_height)
+            .await?
+            .is_none_or(|hash| hash.as_slice() != output_proof.block_hash.as_slice())
+        {
+            // The node switched chains between producing the proof and this
+            // check. Retry from the new chain on the next cycle.
             return Ok(());
         }
         let mined_height = output_proof.block_height;
@@ -167,9 +198,33 @@ impl BurnProofWorker {
 
         // Mark complete — get a fresh connection after the await.
         let conn = self.db_pool.get()?;
-        mark_burn_proof_complete(&conn, proof.id, mined_height)?;
+        if !mark_burn_proof_complete_if_current(&conn, proof.id, mined_height, reorg_generation)? {
+            // A rollback or a status change won while the worker was awaiting.
+            // The file was just written, but must never be offered as complete.
+            remove_proof_file(&self.burn_proofs_dir, &proof.claim_public_key, &proof.commitment).await?;
+        }
 
         Ok(())
+    }
+}
+
+pub(crate) fn proof_file_path(
+    burn_proofs_dir: &std::path::Path,
+    claim_public_key_hex: &str,
+    commitment: &[u8],
+) -> PathBuf {
+    burn_proofs_dir.join(format!("{}-{}.json", claim_public_key_hex, hex::encode(commitment)))
+}
+
+pub(crate) async fn remove_proof_file(
+    burn_proofs_dir: &std::path::Path,
+    claim_public_key_hex: &str,
+    commitment: &[u8],
+) -> Result<(), anyhow::Error> {
+    match fs::remove_file(proof_file_path(burn_proofs_dir, claim_public_key_hex, commitment)).await {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
     }
 }
 
@@ -244,8 +299,7 @@ async fn write_proof_file(
 ) -> Result<(), anyhow::Error> {
     fs::create_dir_all(burn_proofs_dir).await?;
 
-    let filename = format!("{}-{}.json", claim_public_key_hex, hex::encode(commitment));
-    let path = burn_proofs_dir.join(&filename);
+    let path = proof_file_path(burn_proofs_dir, claim_public_key_hex, commitment);
 
     let json = serde_json::to_vec_pretty(proof)?;
     fs::write(&path, &json).await?;
