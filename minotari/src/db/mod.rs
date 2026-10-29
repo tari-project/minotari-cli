@@ -127,7 +127,7 @@ pub use inputs::{DbInput, get_input_by_id, insert_input, soft_delete_inputs_from
 mod burn_proofs;
 pub use burn_proofs::{
     DbBurnProof, NewBurnProof, get_burn_proof_by_output_hash, get_pending_burn_proofs, insert_burn_proof,
-    mark_burn_proof_complete,
+    mark_burn_proof_complete, reset_burn_proofs_from_height,
 };
 
 mod payref_history;

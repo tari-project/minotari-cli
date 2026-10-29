@@ -4,7 +4,9 @@
 //! # Flow
 //!
 //! 1. Poll `burn_proofs` table for records with `status = 'pending_merkle'`
-//! 2. For each, call `/generate_burn_output_proof` on the base node with the burn commitment
+//! 2. For each, call `/generate_burn_output_proof` on the base node with the burn commitment, and leave the record
+//!    pending until the burn's block is `required_confirmations` deep (a reorg resets a complete record whose block
+//!    it rolls back)
 //! 3. Check the proof is for the expected output, then assemble [`CompleteClaimBurnProof`] from the stored partial
 //!    proof and the burn output proof
 //! 4. Write `{claim_public_key}-{commitment_hex}.json` to `burn_proofs_dir`
@@ -37,15 +39,23 @@ pub struct BurnProofWorker {
     client: WalletHttpClient,
     burn_proofs_dir: PathBuf,
     consensus_manager: ConsensusManager,
+    required_confirmations: u64,
 }
 
 impl BurnProofWorker {
-    pub fn new(db_pool: SqlitePool, client: WalletHttpClient, burn_proofs_dir: PathBuf, network: Network) -> Self {
+    pub fn new(
+        db_pool: SqlitePool,
+        client: WalletHttpClient,
+        burn_proofs_dir: PathBuf,
+        network: Network,
+        required_confirmations: u64,
+    ) -> Self {
         Self {
             db_pool,
             client,
             burn_proofs_dir,
             consensus_manager: ConsensusManager::builder(network).build(),
+            required_confirmations,
         }
     }
 
@@ -90,9 +100,17 @@ impl BurnProofWorker {
             "Processing pending burn proofs"
         );
 
+        let tip_height = self
+            .client
+            .get_tip_info()
+            .await?
+            .metadata
+            .ok_or_else(|| anyhow::anyhow!("Base node returned no chain metadata"))?
+            .best_block_height();
+
         for proof in pending {
             let proof_id = proof.id;
-            if let Err(e) = self.process_single_proof(&proof).await {
+            if let Err(e) = self.process_single_proof(&proof, tip_height).await {
                 if is_pruned_block_error(&e) {
                     error!(
                         target: LOG_TARGET,
@@ -115,10 +133,23 @@ impl BurnProofWorker {
         Ok(())
     }
 
-    async fn process_single_proof(&self, proof: &DbBurnProof) -> Result<(), anyhow::Error> {
+    async fn process_single_proof(&self, proof: &DbBurnProof, tip_height: u64) -> Result<(), anyhow::Error> {
         let output_proof = self.client.get_burn_output_proof(&proof.commitment).await?.proof;
 
         check_output_proof(&proof.output_hash, &output_proof)?;
+
+        // A proof from a block that could still be reorged out would point the claim at an orphaned block.
+        if !is_deep_enough(tip_height, output_proof.block_height, self.required_confirmations) {
+            info!(
+                target: LOG_TARGET,
+                burn_proof_id = proof.id,
+                block_height = output_proof.block_height,
+                tip_height = tip_height;
+                "Burn not yet deep enough to claim — will retry next cycle"
+            );
+            return Ok(());
+        }
+        let mined_height = output_proof.block_height;
 
         // Convert the burn's L1 block height to its epoch so an L2 claimant can defer the claim until L2 has synced
         // past it.
@@ -136,10 +167,15 @@ impl BurnProofWorker {
 
         // Mark complete — get a fresh connection after the await.
         let conn = self.db_pool.get()?;
-        mark_burn_proof_complete(&conn, proof.id)?;
+        mark_burn_proof_complete(&conn, proof.id, mined_height)?;
 
         Ok(())
     }
+}
+
+/// Whether a block at `block_height` has the confirmations the wallet requires, counted as the monitor counts them.
+fn is_deep_enough(tip_height: u64, block_height: u64, required_confirmations: u64) -> bool {
+    tip_height.saturating_sub(block_height) >= required_confirmations
 }
 
 /// Converts an L1 block height to its VN epoch (`height / vn_epoch_length`).
@@ -351,6 +387,15 @@ mod tests {
 
         let err = check_output_proof(&FixedHash::from([1u8; 32]), &output_proof).unwrap_err();
         assert!(err.to_string().contains("instead of"), "Unexpected error: {err}");
+    }
+
+    #[test]
+    fn test_is_deep_enough() {
+        assert!(!is_deep_enough(100, 100, 3));
+        assert!(!is_deep_enough(102, 100, 3));
+        assert!(is_deep_enough(103, 100, 3));
+        // A tip behind the proof's block (node mid-reorg) is never deep enough.
+        assert!(!is_deep_enough(99, 100, 3));
     }
 
     #[test]

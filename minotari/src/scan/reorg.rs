@@ -305,6 +305,9 @@ pub fn rollback_from_height(
         generated_events.push((event_id, event));
     }
 
+    // A claim proof taken from a rolled-back block points at a block no longer on the chain.
+    db::reset_burn_proofs_from_height(tx, account_id, reorg_start_height)?;
+
     let affected_count = db::reset_mined_completed_transactions_from_height(tx, account_id, reorg_start_height)?;
     if affected_count > 0 {
         info!(
