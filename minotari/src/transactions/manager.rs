@@ -1197,9 +1197,10 @@ pub fn record_first_broadcast(
                 id = completed_tx_id.to_string().as_str();
                 "Transaction accepted by network"
             );
-            // An accepted broadcast does not count towards the stall limit.
-            let recorded =
-                connection.map(|conn| db::mark_completed_transaction_as_broadcasted(conn, completed_tx_id, 0));
+            // An accepted broadcast does not count towards the stall limit. A send
+            // abandoned meanwhile is left as it is.
+            let recorded = connection
+                .map(|conn| db::mark_completed_transaction_as_broadcasted(conn, completed_tx_id, 0).map(|_| ()));
             (FirstBroadcast::accepted(), recorded)
         },
         Ok(submission) if submission.rejection_reason == TxSubmissionRejectionReason::AlreadyMined => {
