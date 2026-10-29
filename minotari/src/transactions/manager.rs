@@ -111,11 +111,10 @@ use crate::{
             DisplayedTransaction, DisplayedTransactionBuilder, TransactionDirection, TransactionDisplayStatus,
             TransactionInput, TransactionSource,
         },
-        fee_estimator::estimated_output_size_for_payment_id,
         fund_locker::{check_replay_allowed, lock_expiry_at, validate_fee_per_gram},
         idempotency::{IdempotencyBinding, IdempotencyConflict, IdempotencyOperation, RequestFingerprint},
         input_selector::{InputSelector, UtxoSelection, map_change_required_error},
-        one_sided_transaction::{Recipient, recipient_memo},
+        one_sided_transaction::{Recipient, check_memos_and_estimate_output_size, recipient_memo},
     },
 };
 use zeroize::Zeroizing;
@@ -403,12 +402,12 @@ impl TransactionSender {
         let num_outputs = 1;
         // Selection has to charge for the memo this send will actually carry. Left at the
         // default, a long payment id is weight nobody reserved inputs for, and the send fails
-        // at build time with the funds already locked.
-        let estimated_output_size = Some(estimated_output_size_for_payment_id(
-            processed_transaction
-                .recipient
-                .payment_id_bytes()
-                .map_or(0, |bytes| bytes.len()),
+        // at build time with the funds already locked. A payment id that cannot fit at all is
+        // refused here, before anything is locked.
+        let sender_address = self.account.get_address(self.network, &self.password)?;
+        let estimated_output_size = Some(check_memos_and_estimate_output_size(
+            std::slice::from_ref(&processed_transaction.recipient),
+            &sender_address,
         )?);
 
         let input_selector = InputSelector::new(self.account.id, self.confirmation_window);
@@ -2278,6 +2277,31 @@ mod tests {
 
         assert_eq!(prepared.info.recipients[0].payment_id.payment_id_as_bytes(), embedded);
         assert_eq!(prepared.info.payment_id.payment_id_as_bytes(), embedded);
+    }
+
+    /// An embedded id too long for the memos is refused before any UTXO is locked.
+    #[test]
+    fn an_address_payment_id_that_cannot_fit_locks_nothing() {
+        let (pool, _temp) = setup_funded_wallet(3);
+        let mut sender = sender_for(&pool);
+        let deposit = TariAddress::new_dual_address_with_default_features(
+            CompressedPublicKey::from_secret_key(&PrivateKey::from(7u64)),
+            CompressedPublicKey::from_secret_key(&PrivateKey::from(9u64)),
+            Network::LocalNet,
+        )
+        .expect("address")
+        .with_memo_field_payment_id(vec![0xff; 256])
+        .expect("payment id");
+        let recipient = Recipient {
+            address: deposit,
+            amount: MicroMinotari(1_000),
+            payment_id: None,
+        };
+
+        sender
+            .start_new_transaction("too-long".to_string(), recipient, 300)
+            .expect_err("a payment id that cannot fit must be refused");
+        assert_eq!(count(&pool, "SELECT COUNT(*) FROM outputs WHERE status = 'LOCKED'"), 0);
     }
 
     #[tokio::test]
