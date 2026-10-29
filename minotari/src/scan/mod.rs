@@ -37,6 +37,47 @@
 //! - [`ProcessingEvent::TransactionsReady`] - Newly detected transactions
 //! - [`ProcessingEvent::ReorgDetected`] - Chain reorganization detected and handled
 //!
+//! # Continuous Mode Event Contract
+//!
+//! Events are per account (`account_id`). A Continuous scan repeats one cycle
+//! until it is cancelled:
+//!
+//! 1. While blocks remain, for every batch: `MoreBlocksAvailable`, then
+//!    `BlockProcessed` / `TransactionsReady` for wallet activity, then
+//!    `Progress { current_height, tip_height, .. }`. The tip is read once per
+//!    pass, so `current_height / tip_height` drives a progress bar; `tip_height`
+//!    is never below `current_height`.
+//! 2. Caught up: post-scan `TransactionsUpdated` / `TransactionsReady`
+//!    (`is_initial_sync: false`) for confirmation and status changes, then
+//!    `Completed { final_height, .. }`, then `Waiting { resume_in }` (the poll
+//!    interval). The scanner is idle until the next poll.
+//! 3. After each poll, and every `reorg_check_interval` blocks while scanning,
+//!    the stored tip blocks are checked against the chain. A reorg sends
+//!    `ReorgDetected`: blocks from `reorg_from_height` were rolled back, the
+//!    `cancelled_transaction_ids` and `reorganized_displayed_transactions` are
+//!    affected, and scanning resumes at `new_height`, mid-pass included. A
+//!    reorg below every stored block resumes at the account's birthday. If the
+//!    birthday lookup fails, returns a height above the chain tip, or is
+//!    cancelled, `new_height` is 0: the scan stopped (with that error, or
+//!    cancelled) before choosing a resume height, and the next run resumes from
+//!    the birthday. A reorg found when the scan starts is reported the same
+//!    way. A node that keeps reporting reorgs without letting the scan get
+//!    further fails the scan with `ScanError::Intermittent`.
+//!
+//! `Started` is not sent. Cancelling the token stops the scan without waiting
+//! on the node: the startup reorg checks and birthday lookups, block
+//! downloads, tip reads, reorg checks and the poll sleep are all interrupted.
+//! It sends `Paused { reason: Cancelled }` for every account prepared so far
+//! (none if it is cancelled during startup) and returns `more_blocks == true`.
+//! The one wait that is not interrupted is the end-of-pass transaction monitor,
+//! so its updates are always reported; a cancel that arrives first skips it,
+//! and its node requests are bounded by the HTTP client's timeout and retries.
+//! Blocks are only written after a whole batch arrives, and a reorg rollback is
+//! a single database transaction, so a cancelled scan leaves the database at
+//! the last fully processed batch. The scanner's background download tasks
+//! stop as soon as the scan drops its stream. Dropping the scan future stops it
+//! the same way, without the `Paused` event.
+//!
 //! # Example Usage
 //!
 //! ```rust,ignore
