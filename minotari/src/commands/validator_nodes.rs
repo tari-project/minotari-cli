@@ -10,6 +10,7 @@ use crate::{
     http::WalletHttpClient,
     models::PendingTransactionStatus,
     transactions::{
+        fund_locker::release_reservation,
         input_selector::map_change_required_error,
         manager::{NOT_YET_ACCEPTED_NOTE, record_first_broadcast},
         validator_node::{
@@ -17,6 +18,7 @@ use crate::{
             registration::{ValidatorNodeRegistrationParams, create_validator_node_registration_tx},
         },
     },
+    utils::crypto::parse_claimable_public_key_hex,
 };
 use anyhow::anyhow;
 use log::info;
@@ -290,6 +292,7 @@ where
         u64,
     ) -> Result<PrepareOneSidedTransactionForSigningResult, anyhow::Error>,
 {
+    let caller_supplied_key = idempotency_key.is_some();
     let idempotency_key = idempotency_key.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
     // Checked before anything is locked or recorded.
     let client = WalletHttpClient::new(base_url.parse()?)?;
@@ -299,6 +302,8 @@ where
     let mut conn = pool.get()?;
     let account =
         db::get_account_by_name(&conn, account_name)?.ok_or_else(|| anyhow!("Account not found: {}", account_name))?;
+    let had_existing_reservation = caller_supplied_key
+        && db::find_pending_transaction_by_idempotency_key(&conn, &idempotency_key, account.id)?.is_some();
 
     let unsigned_result = create_tx(
         &account,
@@ -310,7 +315,7 @@ where
         confirmation_window,
     )?;
 
-    sign_save_and_broadcast(
+    let result = sign_save_and_broadcast(
         unsigned_result,
         &account,
         &conn,
@@ -320,7 +325,16 @@ where
         &client,
         tx_kind,
     )
-    .await
+    .await;
+
+    if result.is_err()
+        && !had_existing_reservation
+        && let Ok(Some(pending)) = db::find_pending_transaction_by_idempotency_key(&conn, &idempotency_key, account.id)
+    {
+        release_reservation(&conn, &pending.id.to_string());
+    }
+
+    result
 }
 
 // ── Public handlers ───────────────────────────────────────────────────────────
@@ -345,7 +359,8 @@ pub async fn handle_register_validator_node(
     base_url: String,
 ) -> Result<(), anyhow::Error> {
     let (vn_public_key, vn_signature) = parse_vn_signature(&vn_public_key, &vn_sig_nonce, &vn_sig)?;
-    let claim_public_key = parse_compressed_public_key(&claim_public_key, "claim-public-key")?;
+    let claim_public_key =
+        parse_claimable_public_key_hex(&claim_public_key).map_err(|e| anyhow!("Invalid claim-public-key: {e}"))?;
     let sidechain_deployment_key = parse_sidechain_deployment_key(sidechain_deployment_key)?;
 
     let params = ValidatorNodeRegistrationParams {
@@ -576,5 +591,72 @@ mod tests {
         drop(conn);
         assert_eq!(claimed, pending_id(&pool));
         assert_eq!(status_of(&pool), PendingTransactionStatus::Completed.to_string());
+    }
+
+    #[tokio::test]
+    async fn run_vn_command_releases_fresh_reservation_when_signing_fails() {
+        let (pool, _account_id, temp) = setup_reservation();
+        let db_path = temp.path().join("test.db");
+
+        // `create_tx` builds a fresh reservation under a new key and returns a payload with no inputs,
+        // which `sign_locked_transaction` refuses. `run_vn_command` must release that fresh reservation.
+        let res = run_vn_command(
+            db_path,
+            "test",
+            Network::LocalNet,
+            "pass",
+            Some("fresh-vn-key".to_string()),
+            3600,
+            10,
+            "http://127.0.0.1:18142",
+            "VN registration",
+            |account, conn, network, password, idempotency_key, _seconds_to_lock, _confirmation_window| {
+                let key = idempotency_key.expect("key");
+                let operation = IdempotencyOperation::ValidatorNodeRegistration;
+                let binding = IdempotencyBinding::new(Some(key.clone()), operation, RequestFingerprint::new(operation));
+                db::create_pending_transaction(
+                    conn,
+                    &key,
+                    &binding,
+                    account.id,
+                    false,
+                    MicroMinotari(1_000),
+                    MicroMinotari(0),
+                    MicroMinotari(0),
+                    Utc::now() + TimeDelta::hours(1),
+                )?;
+                let key_manager = account.get_key_manager(password)?;
+                let sender_address = account.get_address(network, password)?;
+                let consensus = ConsensusConstantsBuilder::new(network).build();
+                let tx_builder =
+                    tari_transaction_components::TransactionBuilder::new(consensus, key_manager.clone(), network)?;
+                let prepared = tari_transaction_components::offline_signing::prepare_one_sided_transaction_for_signing(
+                    &key_manager,
+                    tari_common_types::transaction::TxId::from(1u64),
+                    tx_builder,
+                    &[],
+                    tari_transaction_components::transaction_components::MemoField::default(),
+                    sender_address,
+                )?;
+                Ok(prepared)
+            },
+        )
+        .await;
+        assert!(res.is_err(), "signing empty payload must fail");
+
+        let fresh_status: String = pool
+            .get()
+            .expect("conn")
+            .query_row(
+                "SELECT status FROM pending_transactions WHERE idempotency_key = 'fresh-vn-key'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("fresh reservation row exists");
+        assert_eq!(
+            fresh_status,
+            PendingTransactionStatus::Expired.to_string(),
+            "fresh reservation must be released when signing fails"
+        );
     }
 }

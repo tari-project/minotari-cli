@@ -6,17 +6,15 @@
 
 use std::{path::Path, str::FromStr};
 
-use crate::utils::crypto::{is_identity_public_key, parse_private_key_hex};
+use crate::utils::crypto::{is_identity_public_key, parse_private_key_hex, parse_public_key_hex};
 use crate::{db, init_db};
 use anyhow::Context;
 use tari_common::configuration::Network;
 use tari_common_types::{
     seeds::cipher_seed::CipherSeed,
     tari_address::{TariAddress, TariAddressFeatures},
-    types::{CompressedPublicKey, PrivateKey},
 };
 use tari_transaction_components::key_manager::wallet_types::{SeedWordsWallet, SpendWallet, ViewWallet, WalletType};
-use tari_utilities::hex::Hex;
 
 /// Initializes a new wallet account with view and spend keys.
 ///
@@ -79,12 +77,19 @@ pub fn init_with_view_key(
     birthday: u16,
     friendly_name: Option<&str>,
 ) -> Result<(), anyhow::Error> {
-    let view_key = PrivateKey::from_hex(view_private_key).map_err(|_| anyhow::anyhow!("Invalid hex for view key"))?;
-    let spend_key =
-        CompressedPublicKey::from_hex(spend_public_key).map_err(|_| anyhow::anyhow!("Invalid hex for spend key"))?;
+    let view_key = parse_private_key_hex(view_private_key).context("Invalid hex for view key")?;
+    let spend_key = parse_public_key_hex(spend_public_key).context("Invalid hex for spend key")?;
 
     let view_wallet = ViewWallet::new(spend_key, view_key, Some(birthday));
     let wallet_enum = WalletType::ViewWallet(view_wallet);
+    if is_identity_public_key(&wallet_enum.get_public_view_key())
+        || is_identity_public_key(&wallet_enum.get_public_spend_key())
+    {
+        return Err(anyhow::anyhow!("A zero or identity key is not a usable wallet key"));
+    }
+    if wallet_enum.get_public_view_key() == wallet_enum.get_public_spend_key() {
+        return Err(anyhow::anyhow!("The view key and the spend key must differ"));
+    }
 
     save_wallet_to_db(wallet_enum, password, database_file, friendly_name)
 }
@@ -195,12 +200,14 @@ mod tests {
     use crate::transactions::burn::{BurnTxParams, create_burn_tx};
     use chrono::Utc;
     use rusqlite::named_params;
+    use tari_common_types::types::CompressedPublicKey;
     use tari_script::script;
     use tari_transaction_components::{
         MicroMinotari,
         test_helpers::{TestParams, create_wallet_output_with_data},
         transaction_components::OutputFeatures,
     };
+    use tari_utilities::hex::Hex;
 
     /// A seed wallet's private (view, spend) keys, as hex.
     fn keys_of(seed: &CipherSeed) -> (String, String) {
@@ -370,5 +377,36 @@ mod tests {
         let conn = pool.get().unwrap();
         assert!(db::get_account_by_name(&conn, "second").unwrap().is_none());
         assert!(db::get_account_by_name(&conn, "third").unwrap().is_none());
+    }
+
+    #[test]
+    fn view_wallet_refuses_zero_identity_or_equal_keys() {
+        let temp = tempfile::tempdir().unwrap();
+        let database_file = temp.path().join("view_keys.db");
+        let seed_wallet = SeedWordsWallet::construct_new(CipherSeed::random()).unwrap();
+        let view_secret_hex = seed_wallet.view_key().to_hex();
+        let view_public_hex = CompressedPublicKey::from_secret_key(seed_wallet.view_key()).to_hex();
+        let spend_public_hex = CompressedPublicKey::from_secret_key(seed_wallet.spend_key()).to_hex();
+        let zero_hex = "00".repeat(32);
+
+        let cases = [
+            ("zero-view", &zero_hex, &spend_public_hex),
+            ("identity-spend", &view_secret_hex, &zero_hex),
+            ("equal-keys", &view_secret_hex, &view_public_hex),
+        ];
+        for (name, view_priv, spend_pub) in cases {
+            let res = init_with_view_key(view_priv, spend_pub, "pass", &database_file, 0, Some(name));
+            assert!(res.is_err(), "{name} must be refused");
+        }
+
+        init_with_view_key(
+            &view_secret_hex,
+            &spend_public_hex,
+            "pass",
+            &database_file,
+            0,
+            Some("valid-view"),
+        )
+        .expect("valid view wallet succeeds");
     }
 }

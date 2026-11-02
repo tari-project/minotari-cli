@@ -87,6 +87,12 @@ pub fn create_validator_node_registration_tx(
         ));
     }
 
+    if crate::utils::crypto::is_identity_public_key(&params.claim_public_key) {
+        return Err(anyhow!(
+            "claim_public_key is the identity element; validator node rewards sent to it could never be claimed"
+        ));
+    }
+
     let vn_sig = ValidatorNodeSignature::new(params.validator_node_public_key, params.validator_node_signature);
     let sidechain_pk = params
         .sidechain_deployment_key
@@ -121,4 +127,58 @@ pub fn create_validator_node_registration_tx(
         confirmation_window,
         IdempotencyOperation::ValidatorNodeRegistration,
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::{create_account, get_account_by_name, init_db};
+    use tari_common_types::seeds::cipher_seed::CipherSeed;
+    use tari_transaction_components::key_manager::wallet_types::SeedWordsWallet;
+    use tempfile::tempdir;
+
+    #[test]
+    fn registration_rejects_identity_claim_public_key() {
+        let temp = tempdir().unwrap();
+        let pool = init_db(temp.path().join("vn_reg.db")).unwrap();
+        let mut conn = pool.get().unwrap();
+
+        let wallet = WalletType::SeedWords(SeedWordsWallet::construct_new(CipherSeed::random()).unwrap());
+        create_account(&conn, "vn", &wallet, "pass").unwrap();
+        let account = get_account_by_name(&conn, "vn").unwrap().unwrap();
+
+        let vn_sk = PrivateKey::from(7u64);
+        let identity_claim_pk = CompressedPublicKey::default();
+        let max_epoch = VnEpoch(50);
+        let vn_sig = ValidatorNodeSignature::sign_for_registration(
+            &vn_sk,
+            Network::LocalNet.as_byte(),
+            None,
+            &identity_claim_pk,
+            max_epoch,
+        );
+
+        let params = ValidatorNodeRegistrationParams {
+            validator_node_public_key: vn_sig.public_key().clone(),
+            validator_node_signature: vn_sig.signature().clone(),
+            claim_public_key: identity_claim_pk,
+            max_epoch,
+            fee_per_gram: MicroMinotari(5),
+            payment_id: None,
+            sidechain_deployment_key: None,
+        };
+
+        let err = create_validator_node_registration_tx(
+            &account,
+            params,
+            &mut conn,
+            Network::LocalNet,
+            "pass",
+            Some("vn-reg-id-key".to_string()),
+            3600,
+            10,
+        )
+        .expect_err("identity claim_public_key must be rejected");
+        assert!(err.to_string().contains("identity element"), "unexpected error: {err}");
+    }
 }
