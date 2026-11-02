@@ -146,6 +146,71 @@ pub fn get_pending_burn_proofs(conn: &Connection) -> WalletDbResult<Vec<DbBurnPr
     Ok(results)
 }
 
+/// Completed rows whose claim file should be present. The worker uses this to
+/// recover a crash between committing completion and publishing the file.
+pub fn get_completed_burn_proof_files(conn: &Connection) -> WalletDbResult<Vec<(i64, String, Vec<u8>)>> {
+    let mut stmt =
+        conn.prepare_cached("SELECT id, claim_public_key, commitment FROM burn_proofs WHERE status = :complete")?;
+    let rows = stmt.query_map(named_params! { ":complete": BURN_PROOF_STATUS_COMPLETE }, |row| {
+        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+    })?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}
+
+/// Makes a completed proof eligible for regeneration when its file is absent.
+pub fn reset_completed_burn_proof_for_missing_file(conn: &Connection, id: i64) -> WalletDbResult<bool> {
+    let updated = conn.execute(
+        "UPDATE burn_proofs SET status = :pending, mined_height = NULL, updated_at = CURRENT_TIMESTAMP \
+         WHERE id = :id AND status = :complete",
+        named_params! {
+            ":pending": BURN_PROOF_STATUS_PENDING_MERKLE,
+            ":complete": BURN_PROOF_STATUS_COMPLETE,
+            ":id": id,
+        },
+    )?;
+    Ok(updated == 1)
+}
+
+/// Remembers which scanned block a pending proof needs. The scanner keeps that
+/// block hash across pruning so a later rescan can verify an old proof.
+pub fn remember_pending_burn_proof_height(conn: &Connection, id: i64, mined_height: u64) -> WalletDbResult<()> {
+    let mined_height = i64::try_from(mined_height)
+        .map_err(|_| WalletDbError::InvalidInput("Burn proof height exceeds SQLite range".to_string()))?;
+    conn.execute(
+        "UPDATE burn_proofs SET mined_height = :height WHERE id = :id AND status = :pending",
+        named_params! {
+            ":height": mined_height,
+            ":id": id,
+            ":pending": BURN_PROOF_STATUS_PENDING_MERKLE,
+        },
+    )?;
+    Ok(())
+}
+
+/// Confirms that a just-published file still belongs to the accepted chain.
+pub fn burn_proof_is_current_complete(
+    conn: &Connection,
+    id: i64,
+    mined_height: u64,
+    expected_generation: i64,
+) -> WalletDbResult<bool> {
+    let mined_height = i64::try_from(mined_height)
+        .map_err(|_| WalletDbError::InvalidInput("Burn proof height exceeds SQLite range".to_string()))?;
+    let current: i64 = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM burn_proofs b JOIN accounts a ON a.id = b.account_id \
+         WHERE b.id = :id AND b.status = :complete AND b.mined_height = :height \
+           AND a.burn_proof_reorg_generation = :generation)",
+        named_params! {
+            ":id": id,
+            ":complete": BURN_PROOF_STATUS_COMPLETE,
+            ":height": mined_height,
+            ":generation": expected_generation,
+        },
+        |row| row.get(0),
+    )?;
+    Ok(current == 1)
+}
+
 /// The account rollback generation and highest block the scanner has recorded.
 pub fn burn_proof_scan_state(conn: &Connection, account_id: i64) -> WalletDbResult<(i64, Option<u64>)> {
     let (generation, scanned_height): (i64, Option<i64>) = conn.query_row(
@@ -194,6 +259,7 @@ pub fn mark_burn_proof_complete_if_current(
     conn: &Connection,
     id: i64,
     mined_height: u64,
+    block_hash: &[u8],
     expected_generation: i64,
 ) -> WalletDbResult<bool> {
     let mined_height = i64::try_from(mined_height)
@@ -203,12 +269,14 @@ pub fn mark_burn_proof_complete_if_current(
          WHERE id = :id AND status = :pending AND EXISTS ( \
            SELECT 1 FROM accounts a WHERE a.id = burn_proofs.account_id \
            AND a.burn_proof_reorg_generation = :generation \
-           AND EXISTS (SELECT 1 FROM scanned_tip_blocks s WHERE s.account_id = a.id AND s.height >= :height) \
+           AND EXISTS (SELECT 1 FROM scanned_tip_blocks s WHERE s.account_id = a.id \
+             AND s.height = :height AND s.hash = :block_hash) \
          )",
         named_params! {
             ":complete": BURN_PROOF_STATUS_COMPLETE,
             ":pending": BURN_PROOF_STATUS_PENDING_MERKLE,
             ":height": mined_height,
+            ":block_hash": block_hash,
             ":generation": expected_generation,
             ":id": id,
         },
@@ -226,7 +294,8 @@ pub fn reset_burn_proofs_from_height(conn: &Connection, account_id: i64, height:
         r#"
         UPDATE burn_proofs
         SET status = :pending, mined_height = NULL, updated_at = CURRENT_TIMESTAMP
-        WHERE account_id = :account_id AND status = :complete AND mined_height >= :height
+        WHERE account_id = :account_id AND status = :complete
+          AND (mined_height IS NULL OR mined_height >= :height)
         "#,
         named_params! {
             ":pending": BURN_PROOF_STATUS_PENDING_MERKLE,
@@ -251,7 +320,8 @@ pub fn burn_proof_files_from_height(
         .map_err(|_| WalletDbError::InvalidInput("Rollback height exceeds SQLite range".to_string()))?;
     let mut stmt = conn.prepare_cached(
         "SELECT claim_public_key, commitment FROM burn_proofs \
-         WHERE account_id = :account_id AND status = :complete AND mined_height >= :height",
+         WHERE account_id = :account_id AND status = :complete \
+           AND (mined_height IS NULL OR mined_height >= :height)",
     )?;
     let rows = stmt.query_map(
         named_params! {
@@ -270,7 +340,10 @@ mod tests {
     use tari_transaction_components::key_manager::wallet_types::{SeedWordsWallet, WalletType};
 
     use super::*;
-    use crate::db::{create_account, get_account_by_name, init_db, insert_scanned_tip_block};
+    use crate::db::{
+        create_account, get_account_by_name, get_scanned_tip_block_hash_at_height, init_db, insert_scanned_tip_block,
+        prune_scanned_tip_blocks,
+    };
 
     fn new_proof(account_id: i64, hash_byte: u8) -> NewBurnProof {
         NewBurnProof {
@@ -314,6 +387,65 @@ mod tests {
     }
 
     #[test]
+    fn a_reorg_resets_legacy_complete_proofs_without_a_mined_height() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let pool = init_db(dir.path().join("burn.db")).expect("init db");
+        let conn = pool.get().expect("conn");
+        let wallet = WalletType::SeedWords(SeedWordsWallet::construct_new(CipherSeed::random()).unwrap());
+        create_account(&conn, "default", &wallet, "password").unwrap();
+        let account_id = get_account_by_name(&conn, "default").unwrap().unwrap().id;
+        let legacy = insert_burn_proof(&conn, &new_proof(account_id, 4)).unwrap();
+        conn.execute("UPDATE burn_proofs SET status = 'complete' WHERE id = ?1", [legacy])
+            .unwrap();
+
+        assert_eq!(burn_proof_files_from_height(&conn, account_id, 100).unwrap().len(), 1);
+        assert_eq!(reset_burn_proofs_from_height(&conn, account_id, 100).unwrap(), 1);
+        assert_eq!(get_pending_burn_proofs(&conn).unwrap().first().unwrap().id, legacy);
+    }
+
+    #[test]
+    fn a_completed_proof_with_a_missing_file_can_be_regenerated() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let pool = init_db(dir.path().join("burn.db")).expect("init db");
+        let conn = pool.get().expect("conn");
+        let wallet = WalletType::SeedWords(SeedWordsWallet::construct_new(CipherSeed::random()).unwrap());
+        create_account(&conn, "default", &wallet, "password").unwrap();
+        let account_id = get_account_by_name(&conn, "default").unwrap().unwrap().id;
+        let id = insert_burn_proof(&conn, &new_proof(account_id, 5)).unwrap();
+        mark_burn_proof_complete(&conn, id, 100).unwrap();
+
+        assert_eq!(get_completed_burn_proof_files(&conn).unwrap().first().unwrap().0, id);
+        assert!(reset_completed_burn_proof_for_missing_file(&conn, id).unwrap());
+        assert!(!reset_completed_burn_proof_for_missing_file(&conn, id).unwrap());
+        assert_eq!(get_pending_burn_proofs(&conn).unwrap().first().unwrap().id, id);
+    }
+
+    #[test]
+    fn a_rescan_retains_the_block_hash_needed_by_an_old_pending_proof() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let pool = init_db(dir.path().join("burn.db")).expect("init db");
+        let conn = pool.get().expect("conn");
+        let wallet = WalletType::SeedWords(SeedWordsWallet::construct_new(CipherSeed::random()).unwrap());
+        create_account(&conn, "default", &wallet, "password").unwrap();
+        let account_id = get_account_by_name(&conn, "default").unwrap().unwrap().id;
+        let proof_id = insert_burn_proof(&conn, &new_proof(account_id, 6)).unwrap();
+        conn.execute("UPDATE burn_proofs SET mined_height = 5 WHERE id = ?1", [proof_id])
+            .unwrap();
+        insert_scanned_tip_block(&conn, account_id, 5, &[5u8; 32]).unwrap();
+        insert_scanned_tip_block(&conn, account_id, 6, &[6u8; 32]).unwrap();
+
+        prune_scanned_tip_blocks(&conn, account_id, 1_007).unwrap();
+        assert_eq!(
+            get_scanned_tip_block_hash_at_height(&conn, account_id, 5).unwrap(),
+            Some(vec![5u8; 32])
+        );
+        assert_eq!(
+            get_scanned_tip_block_hash_at_height(&conn, account_id, 6).unwrap(),
+            None
+        );
+    }
+
+    #[test]
     fn an_in_flight_proof_cannot_complete_after_a_rollback() {
         let dir = tempfile::tempdir().expect("temp dir");
         let pool = init_db(dir.path().join("burn.db")).expect("init db");
@@ -326,18 +458,19 @@ mod tests {
         // The worker fetched the proof before the scanner reached its block.
         let (generation, scanned_height) = burn_proof_scan_state(&conn, account_id).unwrap();
         assert_eq!(scanned_height, None);
-        assert!(!mark_burn_proof_complete_if_current(&conn, proof_id, 100, generation).unwrap());
+        assert!(!mark_burn_proof_complete_if_current(&conn, proof_id, 100, &[1u8; 32], generation).unwrap());
 
         insert_scanned_tip_block(&conn, account_id, 100, &[1u8; 32]).unwrap();
-        assert!(mark_burn_proof_complete_if_current(&conn, proof_id, 100, generation).unwrap());
+        assert!(!mark_burn_proof_complete_if_current(&conn, proof_id, 100, &[2u8; 32], generation).unwrap());
+        assert!(mark_burn_proof_complete_if_current(&conn, proof_id, 100, &[1u8; 32], generation).unwrap());
         reset_burn_proofs_from_height(&conn, account_id, 100).unwrap();
         advance_burn_proof_reorg_generation(&conn, account_id).unwrap();
 
         // Even if the scanner catches up on the replacement chain, this old
         // in-flight worker cannot publish its proof from the old chain.
-        assert!(!mark_burn_proof_complete_if_current(&conn, proof_id, 100, generation).unwrap());
+        assert!(!mark_burn_proof_complete_if_current(&conn, proof_id, 100, &[1u8; 32], generation).unwrap());
         let (new_generation, _) = burn_proof_scan_state(&conn, account_id).unwrap();
         assert_ne!(new_generation, generation);
-        assert!(mark_burn_proof_complete_if_current(&conn, proof_id, 100, new_generation).unwrap());
+        assert!(mark_burn_proof_complete_if_current(&conn, proof_id, 100, &[1u8; 32], new_generation).unwrap());
     }
 }

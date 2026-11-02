@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use log::info;
+use log::{info, warn};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
@@ -168,19 +168,14 @@ pub async fn rollback_account_to_height(
         tx.commit()?;
 
         for (claim_public_key, commitment) in info.invalidated_burn_proof_files {
-            std::fs::remove_file(crate::tasks::burn_proof_worker::proof_file_path(
+            if let Err(error) = std::fs::remove_file(crate::tasks::burn_proof_worker::proof_file_path(
                 &burn_proofs_dir,
                 &claim_public_key,
                 &commitment,
-            ))
-            .or_else(|error| {
-                if error.kind() == std::io::ErrorKind::NotFound {
-                    Ok(())
-                } else {
-                    Err(error)
-                }
-            })
-            .map_err(|e| WalletDbError::Unexpected(format!("Failed to remove invalidated burn proof: {e}")))?;
+            )) && error.kind() != std::io::ErrorKind::NotFound
+            {
+                warn!(error:% = error; "Could not remove invalidated burn proof file");
+            }
         }
 
         Ok::<(), WalletDbError>(())
@@ -419,6 +414,51 @@ mod tests {
             .query_row("SELECT status FROM burn_proofs", [], |row| row.get(0))
             .unwrap();
         assert_eq!(status, "pending_merkle");
+    }
+
+    #[tokio::test]
+    async fn rollback_continues_claim_cleanup_after_one_file_cannot_be_removed() {
+        let setup = setup().await;
+        let pool = init_db(setup.config.database_path.clone()).unwrap();
+        let conn = pool.get().unwrap();
+        let account_id = get_account_by_name(&conn, "default").unwrap().unwrap().id;
+        let dir = setup.config.effective_burn_proofs_dir();
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut paths = Vec::new();
+        for byte in [7u8, 8u8] {
+            let claim_public_key = format!("{byte:02x}").repeat(32);
+            let commitment = vec![byte; 32];
+            conn.execute(
+                "INSERT INTO burn_proofs (account_id, output_hash, commitment, claim_public_key, \
+                 ownership_proof_nonce, ownership_proof_sig, kernel_excess, kernel_excess_nonce, kernel_excess_sig, \
+                 sender_offset_public_key, encrypted_data, value, status, mined_height) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?5, ?5, ?5, ?5, ?5, ?5, 1000, 'complete', 10)",
+                rusqlite::params![account_id, vec![byte; 32], commitment, claim_public_key, vec![0u8; 32]],
+            )
+            .unwrap();
+            paths.push(crate::tasks::burn_proof_worker::proof_file_path(
+                &dir,
+                &claim_public_key,
+                &commitment,
+            ));
+        }
+        drop(conn);
+        std::fs::create_dir_all(paths.first().unwrap()).unwrap();
+        std::fs::write(paths.last().unwrap(), "old orphaned claim").unwrap();
+
+        rollback_account_to_height(setup.config.database_path.clone(), PASSWORD, "default", 10, None, dir)
+            .await
+            .expect("a file removal error must not hide a committed rollback");
+        assert!(!paths.last().unwrap().exists(), "later claim files are still removed");
+        let conn = pool.get().unwrap();
+        let pending: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM burn_proofs WHERE status = 'pending_merkle'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(pending, 2);
     }
 
     #[tokio::test]

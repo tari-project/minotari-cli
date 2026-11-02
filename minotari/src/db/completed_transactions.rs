@@ -355,39 +355,43 @@ pub fn record_failed_broadcast_attempt(
     tx_id: TxId,
     attempts: i32,
     reason: &str,
-) -> WalletDbResult<()> {
-    conn.execute(
+) -> WalletDbResult<bool> {
+    let updated = conn.execute(
         r#"
         UPDATE completed_transactions
         SET broadcast_attempts = :attempts, last_broadcast_error = :reason, updated_at = :now
-        WHERE id = :id
+        WHERE id = :id AND status IN (:completed, :broadcast)
         "#,
         named_params! {
             ":attempts": attempts,
             ":reason": reason,
             ":now": Utc::now(),
             ":id": tx_id.as_i64_wrapped()
+            ,":completed": CompletedTransactionStatus::Completed.to_string()
+            ,":broadcast": CompletedTransactionStatus::Broadcast.to_string()
         },
     )?;
-    Ok(())
+    Ok(updated == 1)
 }
 
 /// Keeps why a broadcast got no answer (`reason`, already sanitised) as
 /// `last_broadcast_error`, without counting it as an attempt.
-pub fn record_last_broadcast_error(conn: &Connection, tx_id: TxId, reason: &str) -> WalletDbResult<()> {
-    conn.execute(
+pub fn record_last_broadcast_error(conn: &Connection, tx_id: TxId, reason: &str) -> WalletDbResult<bool> {
+    let updated = conn.execute(
         r#"
         UPDATE completed_transactions
         SET last_broadcast_error = :reason, updated_at = :now
-        WHERE id = :id
+        WHERE id = :id AND status IN (:completed, :broadcast)
         "#,
         named_params! {
             ":reason": reason,
             ":now": Utc::now(),
             ":id": tx_id.as_i64_wrapped()
+            ,":completed": CompletedTransactionStatus::Completed.to_string()
+            ,":broadcast": CompletedTransactionStatus::Broadcast.to_string()
         },
     )?;
-    Ok(())
+    Ok(updated == 1)
 }
 
 /// The node's answer to the send's last broadcast it did not accept, if any.

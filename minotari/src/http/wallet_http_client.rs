@@ -108,7 +108,7 @@ impl WalletHttpClient {
         let path = format!("/get_header_by_height?height={height}");
         match self
             .http_client
-            .send_request::<HeaderHash>(Method::GET, &path, None)
+            .send_request_capped::<HeaderHash>(Method::GET, &path, None, 16 * 1024)
             .await
         {
             Ok(header) => Ok(Some(FixedHash::try_from(header.hash)?)),
@@ -594,6 +594,22 @@ mod tests {
             Some(FixedHash::from([7u8; 32]))
         );
         assert_eq!(client.get_block_hash_by_height(101).await.unwrap(), None);
+    }
+
+    #[tokio::test]
+    async fn block_hash_lookup_rejects_an_oversized_node_response() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/get_header_by_height"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("x".repeat(16 * 1024 + 1)))
+            .mount(&server)
+            .await;
+        let client = WalletHttpClient::new(server.uri().parse().unwrap()).unwrap();
+        let error = client
+            .get_block_hash_by_height(100)
+            .await
+            .expect_err("body must be capped");
+        assert!(error.to_string().contains("byte limit"), "{error}");
     }
 
     #[tokio::test]
