@@ -37,12 +37,13 @@ use chrono::{DateTime, Utc};
 use log::info;
 use rusqlite::{Connection, named_params};
 use tari_common_types::{
-    seeds::cipher_seed::CipherSeed, tari_address::TariAddress, transaction::TxId, types::FixedHash,
+    payment_reference::generate_payment_reference, seeds::cipher_seed::CipherSeed, tari_address::TariAddress,
+    transaction::TxId, types::FixedHash,
 };
 use tari_transaction_components::MicroMinotari;
 use tari_transaction_components::key_manager::wallet_types::{SeedWordsWallet, WalletType};
 use tari_transaction_components::key_manager::{KeyManager, TransactionKeyManagerInterface};
-use tari_transaction_components::transaction_components::memo_field::MemoField;
+use tari_transaction_components::transaction_components::{OutputType, memo_field::MemoField};
 use tari_utilities::ByteArray;
 
 use crate::db::{self, init_db};
@@ -281,7 +282,12 @@ fn migrate_in_transaction(
             report.source_balance = report.source_balance.saturating_add(converted.value);
         }
 
-        let inserted_id = insert_converted_output(tx, account_id, &converted, &view_key_bytes)?;
+        // Pull the recipient / sender / fee / memo out of the output's
+        // MemoField once and reuse the same claimed-fields struct for the
+        // output row and the credit / debit balance_change rows.
+        let memo_claims = ClaimedMemoFields::extract(converted.wallet_output.payment_id());
+
+        let inserted_id = insert_converted_output(tx, account_id, &converted, &view_key_bytes, &memo_claims)?;
         report.outputs_migrated = report.outputs_migrated.saturating_add(1);
 
         // Index for the displayed-transactions join in step 6.
@@ -309,12 +315,6 @@ fn migrate_in_transaction(
                 .or_default()
                 .push(matched_for_indexes);
         }
-
-        // Pull the recipient / sender / fee / memo out of the output's
-        // MemoField once and reuse the same claimed-fields struct for both
-        // the credit and (if applicable) the debit balance_change. Saves
-        // a re-decode and keeps the two sides consistent.
-        let memo_claims = ClaimedMemoFields::extract(converted.wallet_output.payment_id());
 
         // Balance changes: credit on receive, debit on spend. Keeping these
         // per-output (rather than per-transaction) matches what the runtime
@@ -399,6 +399,7 @@ fn insert_converted_output(
     account_id: i64,
     converted: &ConvertedOutput,
     view_key_bytes: &[u8],
+    claims: &ClaimedMemoFields,
 ) -> Result<i64, anyhow::Error> {
     let output_json =
         serde_json::to_string(&converted.wallet_output).context("Failed to serialise migrated WalletOutput as JSON")?;
@@ -407,6 +408,27 @@ fn insert_converted_output(
     let height_i64 = i64::try_from(converted.mined_height).unwrap_or(i64::MAX);
     let mined_dt = DateTime::<Utc>::from_naive_utc_and_offset(converted.mined_timestamp, Utc);
     let tx_id = deterministic_tx_id(view_key_bytes, &converted.output_hash);
+    #[allow(clippy::cast_possible_wrap)]
+    let maturity_i64 = std::cmp::max(converted.lock_height, converted.wallet_output.features().maturity) as i64;
+    let is_burn = matches!(converted.output_type, OutputType::Burn) || converted.wallet_output.is_burned();
+    let payment_reference_hex =
+        hex::encode(generate_payment_reference(&converted.mined_block_hash, &converted.output_hash).as_slice());
+
+    // Outputs that were already confirmed in the source console wallet must
+    // carry `confirmed_height` / `confirmed_hash` into the destination `outputs`
+    // row; otherwise `get_output_totals_for_account` and `get_balance` classify
+    // the entire migrated balance as unconfirmed / unavailable forever (since
+    // subsequent scans resume from `scan_tip` and never re-visit historical
+    // blocks). Only the explicitly mined-unconfirmed legacy states remain
+    // unconfirmed until a scan confirms them.
+    let (confirmed_height, confirmed_hash): (Option<i64>, Option<&[u8]>) = if matches!(
+        converted.legacy_status,
+        LegacyOutputStatus::UnspentMinedUnconfirmed | LegacyOutputStatus::SpentMinedUnconfirmed
+    ) {
+        (None, None)
+    } else {
+        (Some(height_i64), Some(converted.mined_block_hash.as_slice()))
+    };
 
     // Per maintainer feedback (round 2) on PR #121:
     //   * Spent / SpentMinedUnconfirmed are both mined-in-block spends -
@@ -427,10 +449,12 @@ fn insert_converted_output(
         INSERT INTO outputs (
             account_id, tx_id, output_hash, mined_in_block_height,
             mined_in_block_hash, value, mined_timestamp, wallet_output_json,
-            status
+            status, confirmed_height, confirmed_hash, memo_parsed, memo_hex,
+            payment_reference, is_burn, maturity
         ) VALUES (
             :account_id, :tx_id, :hash, :height, :block_hash, :value,
-            :ts, :json, :status
+            :ts, :json, :status, :confirmed_height, :confirmed_hash,
+            :memo_parsed, :memo_hex, :payment_reference, :is_burn, :maturity
         )
         "#,
         named_params! {
@@ -443,6 +467,13 @@ fn insert_converted_output(
             ":ts": mined_dt,
             ":json": output_json,
             ":status": status_label,
+            ":confirmed_height": confirmed_height,
+            ":confirmed_hash": confirmed_hash,
+            ":memo_parsed": claims.memo_parsed,
+            ":memo_hex": claims.memo_hex,
+            ":payment_reference": payment_reference_hex,
+            ":is_burn": is_burn,
+            ":maturity": maturity_i64,
         },
     )
     .context("Failed to insert migrated output")?;

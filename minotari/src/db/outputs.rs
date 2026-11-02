@@ -142,6 +142,8 @@ pub fn insert_spent_output_if_not_exists(
     let block_height = block_height as i64;
     #[allow(clippy::cast_possible_wrap)]
     let value = output.value().as_u64() as i64;
+    #[allow(clippy::cast_possible_wrap)]
+    let maturity = output.features().maturity as i64;
     let payment_reference_hex = hex::encode(payment_reference.as_slice());
     let status = OutputStatus::SpentUnconfirmed.to_string();
 
@@ -160,6 +162,7 @@ pub fn insert_spent_output_if_not_exists(
             memo_hex,
             payment_reference,
             is_burn,
+            maturity,
             status
        )
        VALUES (
@@ -175,6 +178,7 @@ pub fn insert_spent_output_if_not_exists(
             :memo_hex,
             :payment_reference,
             :is_burn,
+            :maturity,
             :status
        )
         "#,
@@ -191,6 +195,7 @@ pub fn insert_spent_output_if_not_exists(
             ":memo_hex": memo_hex,
             ":payment_reference": payment_reference_hex,
             ":is_burn": is_burn,
+            ":maturity": maturity,
             ":status": status,
         },
     )?;
@@ -1585,9 +1590,7 @@ pub fn get_output_totals_for_account(
                 ELSE 0
             END), 0) as locked_val,
             COALESCE(SUM(CASE
-                WHEN status = :locked THEN 0
-                WHEN status = :unconfirmed_change THEN 0
-                WHEN confirmed_height IS NULL THEN value
+                WHEN status = :unspent AND confirmed_height IS NULL THEN value
                 ELSE 0
             END), 0) as unconfirmed_val,
             COALESCE(SUM(CASE
@@ -1595,10 +1598,10 @@ pub fn get_output_totals_for_account(
                 ELSE 0
             END), 0) as pending_change_val,
             COALESCE(SUM(CASE
-                WHEN status = :locked THEN 0
-                WHEN status = :unconfirmed_change THEN 0
-                WHEN confirmed_height IS NULL THEN 0
-                WHEN maturity < 0 OR maturity > :tip_height THEN value
+                WHEN status = :unspent
+                     AND confirmed_height IS NOT NULL
+                     AND (maturity < 0 OR maturity > :tip_height)
+                THEN value
                 ELSE 0
             END), 0) as immature_val,
             COALESCE(SUM(CASE
@@ -1610,7 +1613,10 @@ pub fn get_output_totals_for_account(
                 ELSE 0
             END), 0) as available_val
         FROM outputs
-        WHERE account_id = :account_id AND deleted_at IS NULL AND is_burn = 0 AND status != :rejected
+        WHERE account_id = :account_id
+          AND deleted_at IS NULL
+          AND is_burn = 0
+          AND status NOT IN (:rejected, :spent, :spent_unconfirmed)
         "#,
     )?;
 
@@ -1619,6 +1625,8 @@ pub fn get_output_totals_for_account(
         ":unspent": unspent_status,
         ":unconfirmed_change": OutputStatus::Unconfirmed.to_string(),
         ":rejected": OutputStatus::Rejected.to_string(),
+        ":spent": OutputStatus::Spent.to_string(),
+        ":spent_unconfirmed": OutputStatus::SpentUnconfirmed.to_string(),
         ":account_id": account_id,
         ":tip_height": tip_height_i64,
     })?;
@@ -2173,5 +2181,41 @@ mod tests {
             .expect("row");
         assert_eq!(status, "UNSPENT");
         assert_eq!(lock, None);
+    }
+
+    #[test]
+    fn spent_outputs_are_excluded_from_all_output_totals_buckets() {
+        let temp = tempdir().expect("temp dir");
+        let pool = init_db(temp.path().join("spent_totals.db")).expect("init db");
+        let conn = pool.get().expect("conn");
+        let account_id = create_test_account(&conn);
+
+        // Active unspent confirmed output (1,000) -> available.
+        insert_synthetic_output(&conn, account_id, 1, 1_000, 50, true, OutputStatus::Unspent, 0);
+        // Spent output whose confirmed_height was never populated (e.g. received
+        // and spent within the confirmation window or migrated) -> must NOT count
+        // as unconfirmed or unavailable.
+        insert_synthetic_output(&conn, account_id, 2, 4_000, 60, false, OutputStatus::Spent, 0);
+        // Backfilled SpentUnconfirmed output with confirmed_height = NULL -> must
+        // NOT count as unconfirmed or unavailable.
+        insert_synthetic_output(
+            &conn,
+            account_id,
+            3,
+            5_000,
+            70,
+            false,
+            OutputStatus::SpentUnconfirmed,
+            0,
+        );
+        // Spent output with future maturity -> must NOT count as immature or unavailable.
+        insert_synthetic_output(&conn, account_id, 4, 6_000, 80, true, OutputStatus::Spent, 500);
+
+        let totals = get_output_totals_for_account(&conn, account_id, 100).expect("totals");
+        assert_eq!(totals.available, MicroMinotari::from(1_000));
+        assert_eq!(totals.unconfirmed, MicroMinotari::from(0));
+        assert_eq!(totals.immature, MicroMinotari::from(0));
+        assert_eq!(totals.locked, MicroMinotari::from(0));
+        assert_eq!(totals.unavailable, MicroMinotari::from(0));
     }
 }

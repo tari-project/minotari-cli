@@ -14,8 +14,11 @@ use std::path::PathBuf;
 use rusqlite::{Connection, OptionalExtension, params};
 use tempfile::tempdir;
 
-use super::test_fixture::{ConsoleFixtureBuilder, insert_test_completed_transaction, insert_test_scanned_block};
+use super::test_fixture::{
+    ConsoleFixtureBuilder, insert_test_completed_transaction, insert_test_output, insert_test_scanned_block,
+};
 use super::{MigrationOptions, run_migration};
+use crate::db;
 
 const SOURCE_PASSPHRASE: &str = "old-console-wallet-pw";
 const DEST_PASSPHRASE: &str = "new-wallet-pw";
@@ -320,4 +323,56 @@ fn migration_rejects_duplicate_account_name() {
         msg.contains("already") || msg.contains("imported"),
         "expected duplicate-account error, got: {msg}"
     );
+}
+
+#[test]
+fn migration_populates_confirmation_maturity_and_burn_columns_for_balance_totals() {
+    let temp = tempdir().expect("temp dir");
+    let fixture = ConsoleFixtureBuilder::new(SOURCE_PASSPHRASE)
+        .write(temp.path())
+        .expect("write console fixture");
+
+    // 1. Confirmed mature standard Unspent output (status=0, value=10_000, maturity=0, mined=100)
+    insert_test_output(&fixture.db_path, 1, 10_000, 0, 0, 0, 100, None).expect("seed unspent");
+    // 2. UnspentMinedUnconfirmed output (status=6, value=2_500, maturity=0, mined=499)
+    insert_test_output(&fixture.db_path, 2, 2_500, 0, 0, 6, 499, None).expect("seed unconfirmed");
+    // 3. Confirmed immature coinbase Unspent output (status=0, output_type=1, value=5_000, maturity=800, mined=400)
+    insert_test_output(&fixture.db_path, 3, 5_000, 1, 800, 0, 400, None).expect("seed immature");
+    // 4. Spent output (status=1, value=7_000, maturity=0, mined=50)
+    insert_test_output(&fixture.db_path, 4, 7_000, 0, 0, 1, 50, None).expect("seed spent");
+    // 5. Burn output (status=1, output_type=2, value=1_500, maturity=0, mined=60)
+    insert_test_output(&fixture.db_path, 5, 1_500, 2, 0, 1, 60, None).expect("seed burn");
+
+    insert_test_scanned_block(&fixture.db_path, 500, &[0xAA; 32]).expect("seed scan tip");
+
+    let dest_db = temp.path().join("destination_wallet.sqlite3");
+    let report = run_migration(MigrationOptions {
+        source_db_path: fixture.db_path,
+        source_passphrase: fixture.passphrase,
+        destination_db_path: dest_db.clone(),
+        destination_passphrase: DEST_PASSPHRASE.to_string(),
+        account_name: "imported".to_string(),
+        dry_run: false,
+    })
+    .expect("migration succeeds");
+
+    assert!(report.balance_match);
+    assert_eq!(report.source_balance.as_u64(), 17_500);
+
+    let conn = Connection::open(&dest_db).expect("open destination");
+    let account = db::get_account_by_name(&conn, "imported")
+        .expect("lookup")
+        .expect("account exists");
+
+    let balance = db::get_balance(&conn, account.id).expect("balance");
+    assert_eq!(balance.total.as_u64(), 17_500);
+    assert_eq!(balance.available.as_u64(), 10_000);
+    assert_eq!(balance.unconfirmed.as_u64(), 2_500);
+    assert_eq!(balance.immature.as_u64(), 5_000);
+    assert_eq!(balance.locked.as_u64(), 0);
+
+    let is_burn_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM outputs WHERE is_burn = 1", [], |r| r.get(0))
+        .expect("burn count");
+    assert_eq!(is_burn_count, 1);
 }

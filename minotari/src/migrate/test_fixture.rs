@@ -123,6 +123,86 @@ pub fn insert_test_scanned_block(db_path: &Path, height: u64, hash: &[u8]) -> Re
     Ok(())
 }
 
+/// Insert a synthetic `outputs` row in the legacy console wallet schema.
+#[allow(clippy::too_many_arguments)]
+pub fn insert_test_output(
+    db_path: &Path,
+    seed_byte: u8,
+    value: u64,
+    output_type: i32,
+    maturity: u64,
+    status: i32,
+    mined_height: u64,
+    payment_id: Option<&[u8]>,
+) -> Result<(), anyhow::Error> {
+    use tari_common_types::types::{CompressedCommitment, CompressedPublicKey, PrivateKey};
+    use tari_script::{ExecutionStack, TariScript};
+    use tari_transaction_components::{
+        key_manager::TariKeyId,
+        transaction_components::{EncryptedData, OutputFeatures, covenants::Covenant},
+    };
+    use tari_utilities::ByteArray;
+
+    let conn = Connection::open(db_path).context("reopen synthetic console DB")?;
+    let now = chrono::Utc::now().naive_utc();
+    let pk = CompressedPublicKey::from_secret_key(&PrivateKey::from(u64::from(seed_byte).max(1)));
+    let commitment = CompressedCommitment::from_compressed_key(pk.clone());
+    let features = OutputFeatures {
+        maturity,
+        ..Default::default()
+    };
+    let features_json = serde_json::to_string(&features)?;
+    let script_bytes = TariScript::default().to_bytes();
+    let input_data_bytes = ExecutionStack::default().to_bytes();
+    let covenant_bytes = Covenant::default().to_bytes();
+    let encrypted_data_bytes = EncryptedData::default().to_byte_vec();
+    let spend_key_str = TariKeyId::SpendKey.to_string();
+    let scalar_bytes = PrivateKey::from(1u64).as_bytes().to_vec();
+
+    conn.execute(
+        "INSERT INTO outputs (
+            commitment, rangeproof, spending_key, value, output_type, maturity,
+            status, hash, script, input_data, script_private_key, script_lock_height,
+            sender_offset_public_key, metadata_signature_ephemeral_commitment,
+            metadata_signature_ephemeral_pubkey, metadata_signature_u_a,
+            metadata_signature_u_x, metadata_signature_u_y, mined_height,
+            mined_in_block, mined_timestamp, received_in_tx_id, spent_in_tx_id,
+            features_json, covenant, encrypted_data, minimum_value_promise, payment_id
+        ) VALUES (
+            ?1, NULL, ?2, ?3, ?4, ?5,
+            ?6, ?7, ?8, ?9, ?10, 0,
+            ?11, ?12, ?13, ?14, ?15, ?16, ?17,
+            ?18, ?19, NULL, NULL, ?20, ?21, ?22, 0, ?23
+        )",
+        params![
+            commitment.as_bytes(),
+            spend_key_str,
+            value as i64,
+            output_type,
+            maturity as i64,
+            status,
+            vec![seed_byte; 32],
+            script_bytes,
+            input_data_bytes,
+            spend_key_str,
+            pk.as_bytes(),
+            commitment.as_bytes(),
+            pk.as_bytes(),
+            scalar_bytes,
+            scalar_bytes,
+            scalar_bytes,
+            mined_height as i64,
+            vec![seed_byte; 32],
+            now,
+            features_json,
+            covenant_bytes,
+            encrypted_data_bytes,
+            payment_id,
+        ],
+    )?;
+    Ok(())
+}
+
 fn create_console_schema(conn: &Connection) -> Result<(), anyhow::Error> {
     // We only need the subset of tables our migration touches. Everything
     // else the console wallet has (e.g. inbound_transactions) is irrelevant.
