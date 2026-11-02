@@ -10,6 +10,7 @@ use crate::scan::{DetectedOutput, MemoInfo, SpentInput};
 use log::debug;
 use rusqlite::Connection;
 use std::collections::{BinaryHeap, HashMap};
+use tari_common_types::payment_reference::generate_payment_reference;
 use tari_common_types::transaction::TxId;
 use tari_common_types::types::FixedHash;
 use tari_common_types::types::PrivateKey;
@@ -67,17 +68,26 @@ impl DisplayedTransactionProcessor {
         'output_loop: for (balance_change, output) in accumulator.credit_balance_changes() {
             for tx in current_display_transactions {
                 if tx.details.outputs.iter().any(|o| o.hash == output.output.output_hash()) {
-                    let mut updated = tx.clone();
+                    let mut updated = updated_transactions.remove(&tx.id).unwrap_or_else(|| tx.clone());
+                    let (status, confirmations) =
+                        self.calculate_status_and_confirmations(output.height, updated.lock_height);
                     updated.blockchain.block_height = output.height;
+                    updated.blockchain.block_hash = output.mined_in_block_hash;
                     updated.blockchain.timestamp = balance_change.effective_date;
-                    updated.blockchain.confirmations = self.current_tip_height.saturating_sub(output.height);
-
-                    // Update status based on confirmations
-                    if updated.blockchain.confirmations >= self.req_confirmations {
-                        updated.status = TransactionDisplayStatus::Confirmed;
-                    } else {
-                        updated.status = TransactionDisplayStatus::Unconfirmed;
+                    updated.blockchain.confirmations = confirmations;
+                    updated.status = status;
+                    for tx_output in &mut updated.details.outputs {
+                        if tx_output.hash == output.output.output_hash() {
+                            tx_output.mined_in_block_height = output.height;
+                            tx_output.mined_in_block_hash = output.mined_in_block_hash;
+                        }
                     }
+                    updated.details.sent_payrefs = updated
+                        .details
+                        .sent_output_hashes
+                        .iter()
+                        .map(|h| generate_payment_reference(&output.mined_in_block_hash, h))
+                        .collect();
                     let _unused = updated_transactions.insert(tx.id, updated);
                     continue 'output_loop;
                 }
@@ -93,18 +103,26 @@ impl DisplayedTransactionProcessor {
                     .iter()
                     .any(|o| o.output_hash == output.output.output_hash())
                 {
-                    let mut updated = tx.clone();
+                    let mut updated = updated_transactions.remove(&tx.id).unwrap_or_else(|| tx.clone());
+                    let (status, confirmations) =
+                        self.calculate_status_and_confirmations(output.mined_in_block_height, updated.lock_height);
                     updated.blockchain.block_height = output.mined_in_block_height;
+                    updated.blockchain.block_hash = output.mined_in_block;
                     updated.blockchain.timestamp = balance_change.effective_date;
-                    updated.blockchain.confirmations =
-                        self.current_tip_height.saturating_sub(output.mined_in_block_height);
-
-                    // Update status based on confirmations
-                    if updated.blockchain.confirmations >= self.req_confirmations {
-                        updated.status = TransactionDisplayStatus::Confirmed;
-                    } else {
-                        updated.status = TransactionDisplayStatus::Unconfirmed;
+                    updated.blockchain.confirmations = confirmations;
+                    updated.status = status;
+                    for tx_input in &mut updated.details.inputs {
+                        if tx_input.output_hash == output.output.output_hash() {
+                            tx_input.mined_in_block_hash = output.mined_in_block;
+                            tx_input.matched_output_id = output.output_id;
+                        }
                     }
+                    updated.details.sent_payrefs = updated
+                        .details
+                        .sent_output_hashes
+                        .iter()
+                        .map(|h| generate_payment_reference(&output.mined_in_block, h))
+                        .collect();
                     let _unused = updated_transactions.insert(tx.id, updated);
                     continue 'input_loop;
                 }
@@ -288,7 +306,7 @@ impl DisplayedTransactionProcessor {
             let sent = output.output.payment_id().get_sent_hashes().unwrap_or_default();
             let (initial_status, initial_confirmations) =
                 self.calculate_status_and_confirmations(output.height, output.output.max_lock_height());
-            let mut other_party = output.output.payment_id().claimed_sender_address();
+            let other_party = output.output.payment_id().claimed_sender_address().or(Some(sender));
             let id = TxId::new_deterministic(self.view_key.as_bytes(), &output.output.output_hash());
             let memo = MemoInfo::from_output(&output.output);
             let tx = DisplayedTransactionBuilder::new()
@@ -312,7 +330,7 @@ impl DisplayedTransactionProcessor {
                     mined_in_block_height: output.height,
                     mined_in_block_hash: output.mined_in_block_hash,
                     output_type: OutputType::Standard,
-                    is_change: false,
+                    is_change: true,
                 }])
                 .output_type(Some(OutputType::Standard))
                 .sent_output_hashes(sent)
@@ -320,7 +338,6 @@ impl DisplayedTransactionProcessor {
                 .credits_and_debits(balance_change.balance_credit, debit_value)
                 .counterparty(other_party)
                 .build(id)?;
-            other_party = Some(sender);
             result.push(tx);
         }
         // these should be desc order, so lets pop them to remove them
@@ -2032,5 +2049,92 @@ mod tests {
         let nums = [MicroMinotari(u64::MAX), MicroMinotari(u64::MAX)];
         let used = DisplayedTransactionProcessor::backtrack_subset(&[0, 1], &nums, MicroMinotari(u64::MAX - 1));
         assert!(used.is_none());
+    }
+
+    #[test]
+    fn test_pending_transaction_updates_block_hash_payrefs_and_lock_status_when_mined() {
+        let processor = DisplayedTransactionProcessor::new(100, 3, PrivateKey::default());
+        let block_hash = mock_fixed_hash(0x42);
+        let sent_hash = mock_fixed_hash(0x33);
+
+        let mut detected_change = mock_detected_output(200, 0x11, 50);
+        detected_change.mined_in_block_hash = block_hash;
+        let change_hash = detected_change.output.output_hash();
+
+        let mut spent_input = mock_spent_input(1000, 0x22);
+        spent_input.mined_in_block = block_hash;
+        spent_input.mined_in_block_height = 50;
+        spent_input.output_id = 77;
+        let input_hash = spent_input.output.output_hash();
+
+        let pending_tx = DisplayedTransactionBuilder::new()
+            .account_id(1)
+            .source(TransactionSource::OneSided)
+            .status(TransactionDisplayStatus::Pending)
+            .lock_height(150)
+            .credits_and_debits(MicroMinotari::from(200), MicroMinotari::from(1000))
+            .blockchain_info(0, FixedHash::zero(), mock_timestamp(), 0)
+            .inputs(vec![TransactionInput {
+                output_hash: input_hash,
+                amount: MicroMinotari::from(1000),
+                mined_in_block_hash: FixedHash::zero(),
+                matched_output_id: 0,
+            }])
+            .outputs(vec![TransactionOutput {
+                hash: change_hash,
+                amount: MicroMinotari::from(200),
+                status: OutputStatus::Unspent,
+                mined_in_block_height: 0,
+                mined_in_block_hash: FixedHash::zero(),
+                output_type: OutputType::Standard,
+                is_change: true,
+            }])
+            .sent_output_hashes(vec![sent_hash])
+            .build(1u64.into())
+            .unwrap();
+
+        assert!(
+            pending_tx.details.sent_payrefs.is_empty(),
+            "unmined pending transaction must not have payrefs from zero block hash"
+        );
+
+        let mut accumulator = BlockEventAccumulator::new(1, 50, block_hash.to_vec());
+        accumulator.add_credit_change(create_credit_balance_change(1, 200, 50), detected_change);
+        accumulator.add_debit_change(create_debit_balance_change(1, 1000, 50), spent_input);
+
+        let (updated, new) = processor
+            .create_new_updated_display_transactions(&accumulator, &[pending_tx])
+            .unwrap();
+        assert!(new.is_empty());
+        assert_eq!(updated.len(), 1);
+        let updated_tx = &updated[0];
+        assert_eq!(updated_tx.blockchain.block_height, 50);
+        assert_eq!(updated_tx.blockchain.block_hash, block_hash);
+        assert_eq!(updated_tx.status, TransactionDisplayStatus::Locked);
+        assert_eq!(
+            updated_tx.details.sent_payrefs,
+            vec![generate_payment_reference(&block_hash, &sent_hash)]
+        );
+        assert_eq!(updated_tx.details.outputs[0].mined_in_block_height, 50);
+        assert_eq!(updated_tx.details.outputs[0].mined_in_block_hash, block_hash);
+        assert_eq!(updated_tx.details.inputs[0].mined_in_block_hash, block_hash);
+        assert_eq!(updated_tx.details.inputs[0].matched_output_id, 77);
+    }
+
+    #[test]
+    fn test_search_inputs_populates_counterparty_and_marks_change_output() {
+        let processor = DisplayedTransactionProcessor::new(100, 3, PrivateKey::default());
+        let accumulator = BlockEventAccumulator::new(1, 50, vec![0xAB; 32]);
+        let inputs = vec![(create_debit_balance_change(1, 1225, 50), mock_spent_input(1225, 1))];
+        let outputs = vec![(
+            create_credit_balance_change(1, 200, 50),
+            mock_output_claiming(200, 1000, 25, 2, 50),
+        )];
+
+        let result = processor.search_inputs(inputs, outputs, &accumulator).unwrap();
+        assert_eq!(result.len(), 1);
+        assert!(result[0].counterparty.is_some());
+        assert_eq!(result[0].details.outputs.len(), 1);
+        assert!(result[0].details.outputs[0].is_change);
     }
 }

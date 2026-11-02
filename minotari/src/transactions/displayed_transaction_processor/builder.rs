@@ -155,7 +155,10 @@ impl DisplayedTransactionBuilder {
         };
 
         let mut payrefs = Vec::new();
-        if let Some(block_hash) = &self.block_hash {
+        let is_mined = self.block_height.unwrap_or(0) > 0 || self.block_hash.is_some_and(|h| h != FixedHash::zero());
+        if is_mined
+            && let Some(block_hash) = &self.block_hash
+        {
             for output_hash in &self.sent_output_hashes {
                 let payref = generate_payment_reference(block_hash, output_hash);
                 payrefs.push(payref);

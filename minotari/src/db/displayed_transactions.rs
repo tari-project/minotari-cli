@@ -92,6 +92,8 @@ pub fn insert_displayed_transaction(conn: &Connection, transaction: &DisplayedTr
         )
         ON CONFLICT(id) DO UPDATE SET
             status = excluded.status,
+            block_height = excluded.block_height,
+            timestamp = excluded.timestamp,
             transaction_json = excluded.transaction_json,
             payref = excluded.payref,
             updated_at = excluded.updated_at
@@ -535,11 +537,12 @@ pub fn reset_displayed_transaction_to_pending(
     tx.blockchain.block_height = 0;
     tx.blockchain.confirmations = 0;
     tx.blockchain.block_hash = FixedHash::zero();
+    tx.details.sent_payrefs.clear();
 
     conn.execute(
         r#"
         UPDATE displayed_transactions
-        SET status = :status, block_height = 0, transaction_json = :json, updated_at = :now
+        SET status = :status, block_height = 0, payref = NULL, transaction_json = :json, updated_at = :now
         WHERE id = :id
         "#,
         named_params! {
@@ -744,5 +747,41 @@ mod tests {
         let found = get_displayed_transactions_by_payref(&conn, account_id, &target).expect("query");
         assert_eq!(found.len(), 1, "the literal payref must still match its transaction");
         assert_eq!(found.first().expect("one match").id, TxId::from(1_u64));
+    }
+
+    #[test]
+    fn reset_to_pending_clears_payrefs_and_upsert_updates_block_height() {
+        let temp = tempdir().expect("temp dir");
+        let pool = init_db(temp.path().join("reset_payref.db")).expect("init db");
+        let conn = pool.get().expect("conn");
+        let account_id = create_test_account(&conn);
+
+        let mut tx = transaction_with_payref(account_id, 99, 0xCC);
+        tx.blockchain.block_height = 42;
+        insert_displayed_transaction(&conn, &tx).expect("insert");
+
+        let target = "cc".repeat(32);
+        assert_eq!(
+            get_displayed_transactions_by_payref(&conn, account_id, &target)
+                .expect("query")
+                .len(),
+            1
+        );
+
+        let reset = reset_displayed_transaction_to_pending(&conn, TxId::from(99_u64))
+            .expect("reset")
+            .expect("exists");
+        assert!(reset.details.sent_payrefs.is_empty());
+        assert!(
+            get_displayed_transactions_by_payref(&conn, account_id, &target)
+                .expect("query")
+                .is_empty(),
+            "resetting to pending must clear stale payref column"
+        );
+
+        tx.blockchain.block_height = 84;
+        insert_displayed_transaction(&conn, &tx).expect("upsert");
+        let by_height = get_displayed_transactions_from_height(&conn, account_id, 84).expect("by height");
+        assert_eq!(by_height.len(), 1);
     }
 }
