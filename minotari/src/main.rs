@@ -132,7 +132,7 @@ async fn main() -> Result<(), anyhow::Error> {
             let tari_address = TariAddress::new_dual_address(
                 public_view_key,
                 spend_key.pub_key.clone(),
-                Network::MainNet,
+                wallet_config.network,
                 TariAddressFeatures::create_one_sided_only(),
                 None,
             )?;
@@ -168,7 +168,12 @@ async fn main() -> Result<(), anyhow::Error> {
                     "birthday": birthday,
                 })
             };
-            std::fs::create_dir_all(std::path::Path::new(&output_file).parent().unwrap())?;
+            if let Some(parent) = std::path::Path::new(&output_file)
+                .parent()
+                .filter(|p| !p.as_os_str().is_empty())
+            {
+                std::fs::create_dir_all(parent)?;
+            }
             std::fs::write(output_file, serde_json::to_string_pretty(&wallet_data)?)?;
             info!("Wallet data written to file.");
             Ok(())
@@ -922,7 +927,7 @@ fn handle_create_unsigned_transaction(
             .create_unsigned_transaction(&account, locked_funds, recipients, fee_per_gram)
             .map_err(|e| anyhow!("Failed to create an unsigned transaction: {}", e))?;
 
-        if let Some(parent) = Path::new(&output_file).parent() {
+        if let Some(parent) = Path::new(&output_file).parent().filter(|p| !p.as_os_str().is_empty()) {
             create_dir_all(parent)?;
         }
         fs::write(&output_file, serde_json::to_string_pretty(&result)?)?;
@@ -998,7 +1003,9 @@ fn handle_lock_funds(
         )
         .map_err(|e| anyhow!("Failed to lock funds: {}", e))?;
 
-    create_dir_all(Path::new(&output_file).parent().unwrap())?;
+    if let Some(parent) = Path::new(&output_file).parent().filter(|p| !p.as_os_str().is_empty()) {
+        create_dir_all(parent)?;
+    }
     fs::write(output_file, serde_json::to_string_pretty(&result)?)?;
 
     info!(target:"audit", "Locked funds output written to file.");

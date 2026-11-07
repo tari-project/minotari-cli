@@ -118,8 +118,23 @@ pub async fn api_estimate_fees(
     let default_confirmations = app_state.required_confirmations;
     let name = name.clone();
 
-    let estimator = FeeEstimator::new(pool, base_url);
     let confirmation_window = resolve_confirmation_window(body.confirmation_window, default_confirmations)?;
+
+    {
+        let pool_check = pool.clone();
+        let name_check = name.clone();
+        tokio::task::spawn_blocking(move || {
+            let conn = pool_check.get().map_err(|e| ApiError::DbError(e.to_string()))?;
+            crate::db::get_account_by_name(&conn, &name_check)
+                .map_err(|e| ApiError::DbError(e.to_string()))?
+                .ok_or_else(|| ApiError::AccountNotFound(name_check.clone()))?;
+            Ok::<_, ApiError>(())
+        })
+        .await
+        .map_err(|e| ApiError::InternalServerError(format!("Task join error: {}", e)))??;
+    }
+
+    let estimator = FeeEstimator::new(pool, base_url);
 
     let estimates = estimator
         .estimate_fees(
