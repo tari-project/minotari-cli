@@ -120,8 +120,14 @@ impl WebhookWorker {
         })
         .await;
 
-        if let Err(e) = update_result {
-            error!(id = item.id, error:? = e; "Failed to update webhook status in DB");
+        match update_result {
+            Ok(Ok(())) => {},
+            Ok(Err(e)) => {
+                error!(id = item.id, error:% = e; "Failed to update webhook status in DB");
+            },
+            Err(e) => {
+                error!(id = item.id, error:? = e; "Webhook status update task panicked");
+            },
         }
     }
 }

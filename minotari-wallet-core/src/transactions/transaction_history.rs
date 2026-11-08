@@ -375,6 +375,7 @@ impl TransactionHistoryService {
     {
         let all_transactions = self.load_all_transactions(account_id)?;
         let total = all_transactions.len();
+        let chunk_size = chunk_size.max(1);
 
         for chunk in all_transactions.chunks(chunk_size) {
             emit_fn(DisplayedTransactionsEvent {
@@ -386,5 +387,32 @@ impl TransactionHistoryService {
         }
 
         Ok(total)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::db::{create_account, get_account_by_name, init_db};
+    use tari_common_types::seeds::cipher_seed::CipherSeed;
+    use tari_transaction_components::key_manager::wallet_types::{SeedWordsWallet, WalletType};
+
+    #[test]
+    fn emit_in_chunks_with_zero_chunk_size_does_not_panic() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let pool = init_db(dir.path().join("history.db")).expect("init db");
+        let conn = pool.get().expect("conn");
+        let wallet = WalletType::SeedWords(SeedWordsWallet::construct_new(CipherSeed::random()).unwrap());
+        create_account(&conn, "default", &wallet, "password").unwrap();
+        let account = get_account_by_name(&conn, "default").unwrap().unwrap();
+        drop(conn);
+
+        let service = TransactionHistoryService::new(pool);
+        let mut emitted = Vec::new();
+        let total = service
+            .emit_in_chunks(account.id, 0, |event| emitted.push(event))
+            .expect("zero chunk size must not panic");
+        assert_eq!(total, 0);
+        assert!(emitted.is_empty());
     }
 }

@@ -16,7 +16,7 @@ use crate::{
     transactions::DisplayedTransaction,
 };
 
-use super::params::{DEFAULT_PAGE_LIMIT, MAX_PAGE_LIMIT, PaginationParams, PayrefParams, WalletParams};
+use super::params::{PaginationParams, PayrefParams, WalletParams};
 
 /// Retrieves completed transactions for a specified account with pagination.
 ///
@@ -100,8 +100,7 @@ pub async fn api_get_completed_transactions(
     Query(pagination): Query<PaginationParams>,
 ) -> Result<Json<Vec<CompletedTransactionResponse>>, ApiError> {
     // Apply defaults and constraints
-    let limit = pagination.limit.unwrap_or(DEFAULT_PAGE_LIMIT).min(MAX_PAGE_LIMIT);
-    let offset = pagination.offset.unwrap_or(0).max(0);
+    let (limit, offset) = pagination.resolve();
 
     trace!(
         account = &*name,
@@ -198,8 +197,7 @@ pub async fn api_get_displayed_transactions(
     Query(pagination): Query<PaginationParams>,
 ) -> Result<Json<Vec<DisplayedTransaction>>, ApiError> {
     // Apply defaults and constraints
-    let limit = pagination.limit.unwrap_or(DEFAULT_PAGE_LIMIT).min(MAX_PAGE_LIMIT);
-    let offset = pagination.offset.unwrap_or(0).max(0);
+    let (limit, offset) = pagination.resolve();
 
     trace!(
         account = &*name,

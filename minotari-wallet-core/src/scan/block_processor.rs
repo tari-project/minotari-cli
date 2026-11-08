@@ -367,6 +367,13 @@ impl<E: EventSender> BlockProcessor<E> {
         std::mem::take(&mut self.wallet_events)
     }
 
+    /// Clears transient state accumulated during a batch whose database transaction rolled back.
+    pub fn clear_uncommitted_batch_state(&mut self) {
+        self.wallet_events.clear();
+        self.current_block = None;
+        self.send_block = None;
+    }
+
     /// Processes all detected outputs in the block.
     ///
     /// For each output owned by the wallet:

@@ -63,93 +63,99 @@ impl<E: EventSender + Clone + Send + 'static> ScanDbHandler<E> {
         block_processor.set_has_pending_outbound(has_pending_outbound);
         block_processor.set_webhook_config(webhook_config);
 
-        tokio::task::spawn_blocking(move || {
-            let mut conn = pool.get().map_err(WalletDbError::from)?;
-
-            let tx = conn
-                .transaction_with_behavior(TransactionBehavior::Immediate)
-                .map_err(WalletDbError::from)?;
+        let (processor, result) = tokio::task::spawn_blocking(move || {
             let mut processor = block_processor;
+            let result = (|| -> Result<Vec<WalletEvent>, WalletDbError> {
+                let mut conn = pool.get().map_err(WalletDbError::from)?;
 
-            // Heights must arrive in an unbroken run starting at `next_block_to_scan`.
-            // `block.height` is taken as the current chain tip for this account: it
-            // decides which outputs have reached the confirmation depth, which
-            // coinbases have matured, and which UTXOs the input selector will hand
-            // out. A base node that answers with a block claiming a height far ahead
-            // of the last one therefore ages every pending output to "confirmed and
-            // mature" in one step, and the wallet goes on to spend funds that were
-            // never confirmed. A skipped height is the mirror image: the outputs and
-            // inputs in it are never recorded, so the balance is wrong and the reorg
-            // check has no hash to compare that height against.
-            //
-            // A repeat of the previous height is legitimate and must be allowed: a
-            // block with more outputs than the node's chunk size is split across
-            // several `BlockScanResult`s that all carry the same height.
-            let mut last_height: Option<u64> = None;
+                let tx = conn
+                    .transaction_with_behavior(TransactionBehavior::Immediate)
+                    .map_err(WalletDbError::from)?;
 
-            for block in blocks.iter() {
-                // The base node never truncates a block: it sends every chunk of a
-                // block before checking the page limit. When a page fills up it
-                // drops the last block whole and starts the next page at it; a
-                // first block larger than a page is sent whole, over-filling the
-                // page. So results behind the resume point are never the rest of
-                // a block and are skipped.
-                if block.height < next_block_to_scan {
-                    continue;
+                // Heights must arrive in an unbroken run starting at `next_block_to_scan`.
+                // `block.height` is taken as the current chain tip for this account: it
+                // decides which outputs have reached the confirmation depth, which
+                // coinbases have matured, and which UTXOs the input selector will hand
+                // out. A base node that answers with a block claiming a height far ahead
+                // of the last one therefore ages every pending output to "confirmed and
+                // mature" in one step, and the wallet goes on to spend funds that were
+                // never confirmed. A skipped height is the mirror image: the outputs and
+                // inputs in it are never recorded, so the balance is wrong and the reorg
+                // check has no hash to compare that height against.
+                //
+                // A repeat of the previous height is legitimate and must be allowed: a
+                // block with more outputs than the node's chunk size is split across
+                // several `BlockScanResult`s that all carry the same height.
+                let mut last_height: Option<u64> = None;
+
+                for block in blocks.iter() {
+                    // The base node never truncates a block: it sends every chunk of a
+                    // block before checking the page limit. When a page fills up it
+                    // drops the last block whole and starts the next page at it; a
+                    // first block larger than a page is sent whole, over-filling the
+                    // page. So results behind the resume point are never the rest of
+                    // a block and are skipped.
+                    if block.height < next_block_to_scan {
+                        continue;
+                    }
+
+                    let permitted = match last_height {
+                        None => block.height == next_block_to_scan,
+                        Some(last) => block.height == last || block.height == last.saturating_add(1),
+                    };
+                    if !permitted {
+                        return Err(WalletDbError::Unexpected(format!(
+                            "Base node returned a non-contiguous block batch for account {}: expected height {}, got {}",
+                            target_account_id,
+                            last_height.map_or(next_block_to_scan, |h| h.saturating_add(1)),
+                            block.height
+                        )));
+                    }
+                    last_height = Some(block.height);
+
+                    processor
+                        .process_block(&tx, block, target_account_id)
+                        .map_err(|e| WalletDbError::Unexpected(e.to_string()))?;
                 }
 
-                let permitted = match last_height {
-                    None => block.height == next_block_to_scan,
-                    Some(last) => block.height == last || block.height == last.saturating_add(1),
-                };
-                if !permitted {
-                    return Err(WalletDbError::Unexpected(format!(
-                        "Base node returned a non-contiguous block batch for account {}: expected height {}, got {}",
-                        target_account_id,
-                        last_height.map_or(next_block_to_scan, |h| h.saturating_add(1)),
-                        block.height
-                    )));
+                // Match the wallet's sends in the last block of the batch. The node
+                // sends blocks whole (see above), so that block is complete; still,
+                // defensively, a mismatch there does not reject a send until the
+                // scan has moved past the block.
+                processor
+                    .match_sends(&tx, false)
+                    .map_err(|e| WalletDbError::Unexpected(e.to_string()))?;
+
+                // Blocks below the last one of this batch have been moved past, so
+                // they are complete: decide the sends whose inputs were spent there
+                // that an earlier batch's last block left undecided.
+                if let Some(last) = last_height {
+                    processor
+                        .settle_sends_in_passed_blocks(&tx, target_account_id, last)
+                        .map_err(|e| WalletDbError::Unexpected(e.to_string()))?;
                 }
-                last_height = Some(block.height);
 
-                processor
-                    .process_block(&tx, block, target_account_id)
-                    .map_err(|e| WalletDbError::Unexpected(e.to_string()))?;
+                let events = processor.take_wallet_events();
+                tx.commit().map_err(WalletDbError::from)?;
+
+                Ok(events)
+            })();
+
+            if result.is_err() {
+                processor.clear_uncommitted_batch_state();
             }
 
-            // Match the wallet's sends in the last block of the batch. The node
-            // sends blocks whole (see above), so that block is complete; still,
-            // defensively, a mismatch there does not reject a send until the
-            // scan has moved past the block.
-            processor
-                .match_sends(&tx, false)
-                .map_err(|e| WalletDbError::Unexpected(e.to_string()))?;
-
-            // Blocks below the last one of this batch have been moved past, so
-            // they are complete: decide the sends whose inputs were spent there
-            // that an earlier batch's last block left undecided.
-            if let Some(last) = last_height {
-                processor
-                    .settle_sends_in_passed_blocks(&tx, target_account_id, last)
-                    .map_err(|e| WalletDbError::Unexpected(e.to_string()))?;
-            }
-
-            let events = processor.take_wallet_events();
-            tx.commit().map_err(WalletDbError::from)?;
-
-            Ok::<(Vec<WalletEvent>, BlockProcessor<E>), WalletDbError>((events, processor))
+            (processor, result)
         })
         .await
         .map_err(|e| {
             let err = anyhow::anyhow!("Block processing task failed: {}", e);
             error!("Block processing task failed: {}", e);
             ScanError::Fatal(err)
-        })?
-        .map_err(ScanError::from)
-        .map(|(events, processor)| {
-            self.block_processor = Some(processor);
-            events
-        })
+        })?;
+
+        self.block_processor = Some(processor);
+        result.map_err(ScanError::from)
     }
 
     pub async fn prune_tips(&self, account_id: i64, height: u64) -> Result<(), ScanError> {
@@ -256,5 +262,22 @@ mod tests {
             .process_blocks(blocks, account_id, false, None, 103)
             .await
             .expect("already-scanned blocks are skipped");
+    }
+
+    #[tokio::test]
+    async fn a_failed_batch_keeps_the_block_processor_available_for_subsequent_batches() {
+        let (mut handler, account_id, _dir) = handler("recover.db");
+
+        let bad_blocks = Arc::new(vec![block(100), block(105)]);
+        handler
+            .process_blocks(bad_blocks, account_id, false, None, 100)
+            .await
+            .expect_err("non-contiguous batch must fail");
+
+        let good_blocks = Arc::new(vec![block(100), block(101)]);
+        handler
+            .process_blocks(good_blocks, account_id, false, None, 100)
+            .await
+            .expect("subsequent contiguous batch must succeed without losing BlockProcessor");
     }
 }

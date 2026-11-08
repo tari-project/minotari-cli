@@ -628,8 +628,9 @@ impl TransactionMonitor {
         transactions: Vec<CompletedTransaction>,
     ) -> Result<MonitoringResult> {
         let mut result = MonitoringResult::default();
+        let mut newly_mined = Vec::new();
 
-        for tx in transactions {
+        for mut tx in transactions {
             let Some(transaction) = Self::decode_transaction(&tx) else {
                 continue;
             };
@@ -683,13 +684,14 @@ impl TransactionMonitor {
                         id = tx.id.to_string().as_str();
                         "Transaction mined in a block the scan has already passed (unconfirmed)"
                     );
+                    let confirmations = scanned_height.saturating_sub(mined_height);
                     let event = WalletEvent {
                         id: 0,
                         account_id,
                         event_type: WalletEventType::TransactionUnconfirmed {
                             tx_id: tx.id,
                             mined_height,
-                            confirmations: 0,
+                            confirmations,
                         },
                         description: format!("Transaction {} mined at height {}", tx.id, mined_height),
                     };
@@ -705,6 +707,14 @@ impl TransactionMonitor {
                     self.persist_event(&db_tx, account_id, &event)?;
                     db_tx.commit()?;
                     result.wallet_events.push(event);
+
+                    tx.status = db::CompletedTransactionStatus::MinedUnconfirmed;
+                    #[allow(clippy::cast_possible_wrap)]
+                    {
+                        tx.mined_height = Some(mined_height as i64);
+                    }
+                    tx.mined_block_hash = Some(mined_block_hash.to_vec());
+                    newly_mined.push(tx);
                 },
                 TxLocation::NotStored | TxLocation::None => {
                     info!(target: "audit", "Broadcast transaction is not in the mempool");
@@ -719,6 +729,12 @@ impl TransactionMonitor {
                     Self::skip_on_node_error(outcome)?;
                 },
             }
+        }
+
+        if !newly_mined.is_empty() {
+            let confirmation_events =
+                self.check_confirmation_status(db_pool, account_id, scanned_height, newly_mined)?;
+            result.wallet_events.extend(confirmation_events);
         }
 
         Ok(result)
@@ -1589,6 +1605,41 @@ mod tests {
         let conn = fixture.pool.get().expect("conn");
         let stored = db::get_events_by_account_id(&conn, fixture.account_id, 10, 0).expect("events");
         assert!(stored.iter().any(|e| e.event_type == "TransactionUnconfirmed"));
+    }
+
+    #[tokio::test]
+    async fn a_transaction_mined_in_a_block_already_at_confirmation_depth_is_confirmed_in_the_same_pass() {
+        let fixture = send_fixture("mined_deep.db", 1);
+        record_scanned_block(&fixture, 100, [8u8; 32]);
+        let server = node_reporting_mined_at(100).await;
+        expect_submissions(&server, 0).await;
+
+        let result = monitor_for(&fixture)
+            .monitor_if_needed(&client(&server), &fixture.pool, fixture.account_id, 103)
+            .await
+            .expect("monitor");
+
+        let completed = completed(&fixture);
+        assert_eq!(completed.status, CompletedTransactionStatus::MinedConfirmed);
+        assert_eq!(completed.mined_height, Some(100));
+        assert_eq!(completed.confirmation_height, Some(103));
+        assert!(completed.sent_payref.is_some());
+        assert!(result.wallet_events.iter().any(|e| matches!(
+            e.event_type,
+            WalletEventType::TransactionUnconfirmed {
+                tx_id,
+                mined_height: 100,
+                confirmations: 3,
+            } if tx_id == fixture.tx_id
+        )));
+        assert!(result.wallet_events.iter().any(|e| matches!(
+            e.event_type,
+            WalletEventType::TransactionConfirmed {
+                tx_id,
+                mined_height: 100,
+                confirmation_height: 103,
+            } if tx_id == fixture.tx_id
+        )));
     }
 
     #[tokio::test]

@@ -478,7 +478,9 @@ impl ScanCoordinator {
                         .await?;
                     self.forward_block_events(&mut block_events).await;
                     Self::push_events_with_limit(&mut all_events, events, max_buffered_events);
-                    if let Some(last) = shared_blocks.last() {
+                    if let Some(last) = shared_blocks.last()
+                        && last.height >= target.next_block_to_scan
+                    {
                         target.next_block_to_scan = next_block_height(last.height)?;
 
                         if last.height > max_new_height_in_batch {
@@ -1284,13 +1286,14 @@ impl ScanCoordinator {
             .map_err(|e| ScanError::Intermittent(e.to_string()))?;
 
         let mut stop = ScanStop::CaughtUp;
-        while let Some(response) = utxo_stream.recv().await {
-            if let Some(token) = cancel_token
-                && token.is_cancelled()
-            {
+        loop {
+            let Some(response) = unless_cancelled(cancel_token, utxo_stream.recv()).await else {
                 stop = ScanStop::Cancelled;
                 break;
-            }
+            };
+            let Some(response) = response else {
+                break;
+            };
 
             let scanned_blocks = response.map_err(|e| ScanError::Intermittent(e.to_string()))?;
             if scanned_blocks.is_empty() {
@@ -1302,6 +1305,12 @@ impl ScanCoordinator {
 
             for account_id in &active_account_ids {
                 let Some(target) = targets.iter_mut().find(|t| t.account.id == *account_id) else {
+                    continue;
+                };
+                let Some(last) = shared_blocks
+                    .last()
+                    .filter(|last| last.height >= target.next_block_to_scan)
+                else {
                     continue;
                 };
 
@@ -1317,18 +1326,17 @@ impl ScanCoordinator {
                 self.forward_block_events(&mut block_events).await;
                 all_events.extend(events);
 
-                if let Some(last) = shared_blocks.last() {
-                    target.next_block_to_scan = next_block_height(last.height)?;
+                target.next_block_to_scan = next_block_height(last.height)?;
+                db_handler.prune_tips(target.account.id, last.height).await?;
 
-                    self.events
-                        .send(ProcessingEvent::ScanStatus(ScanStatusEvent::Progress {
-                            account_id: target.account.id,
-                            current_height: last.height,
-                            tip_height: tip_height.max(last.height),
-                            blocks_scanned: total_scanned,
-                        }))
-                        .await;
-                }
+                self.events
+                    .send(ProcessingEvent::ScanStatus(ScanStatusEvent::Progress {
+                        account_id: target.account.id,
+                        current_height: last.height,
+                        tip_height: tip_height.max(last.height),
+                        blocks_scanned: total_scanned,
+                    }))
+                    .await;
             }
 
             // Past the deadline, stop at this batch: out of budget if an account is
@@ -1390,13 +1398,14 @@ impl ScanCoordinator {
             .map_err(|e| ScanError::Intermittent(e.to_string()))?;
 
         let mut stop = ScanStop::CaughtUp;
-        while let Some(response) = utxo_stream.recv().await {
-            if let Some(token) = cancel_token
-                && token.is_cancelled()
-            {
+        loop {
+            let Some(response) = unless_cancelled(cancel_token, utxo_stream.recv()).await else {
                 stop = ScanStop::Cancelled;
                 break;
-            }
+            };
+            let Some(response) = response else {
+                break;
+            };
 
             let scanned_blocks = response.map_err(|e| ScanError::Intermittent(e.to_string()))?;
             if scanned_blocks.is_empty() {
@@ -1408,6 +1417,12 @@ impl ScanCoordinator {
 
             for account_id in &active_account_ids {
                 let Some(target) = targets.iter_mut().find(|t| t.account.id == *account_id) else {
+                    continue;
+                };
+                let Some(last) = shared_blocks
+                    .last()
+                    .filter(|last| last.height >= target.next_block_to_scan)
+                else {
                     continue;
                 };
 
@@ -1427,18 +1442,17 @@ impl ScanCoordinator {
                 self.forward_block_events(&mut block_events).await;
                 all_events.extend(events);
 
-                if let Some(last) = shared_blocks.last() {
-                    target.next_block_to_scan = next_block_height(last.height)?;
+                target.next_block_to_scan = next_block_height(last.height)?;
+                db_handler.prune_tips(target.account.id, last.height).await?;
 
-                    self.events
-                        .send(ProcessingEvent::ScanStatus(ScanStatusEvent::Progress {
-                            account_id: target.account.id,
-                            current_height: last.height,
-                            tip_height: tip_height.max(last.height),
-                            blocks_scanned: total_scanned,
-                        }))
-                        .await;
-                }
+                self.events
+                    .send(ProcessingEvent::ScanStatus(ScanStatusEvent::Progress {
+                        account_id: target.account.id,
+                        current_height: last.height,
+                        tip_height: tip_height.max(last.height),
+                        blocks_scanned: total_scanned,
+                    }))
+                    .await;
             }
 
             // Past the deadline, stop at this batch: out of budget if an account is
@@ -1515,13 +1529,14 @@ impl ScanCoordinator {
             .map_err(|e| ScanError::Intermittent(e.to_string()))?;
 
         let mut stop = ScanStop::CaughtUp;
-        while let Some(response) = utxo_stream.recv().await {
-            if let Some(token) = cancel_token
-                && token.is_cancelled()
-            {
+        loop {
+            let Some(response) = unless_cancelled(cancel_token, utxo_stream.recv()).await else {
                 stop = ScanStop::Cancelled;
                 break;
-            }
+            };
+            let Some(response) = response else {
+                break;
+            };
 
             let scanned_blocks = response.map_err(|e| ScanError::Intermittent(e.to_string()))?;
             if scanned_blocks.is_empty() {
@@ -1533,6 +1548,12 @@ impl ScanCoordinator {
 
             for account_id in &active_account_ids {
                 let Some(target) = targets.iter_mut().find(|t| t.account.id == *account_id) else {
+                    continue;
+                };
+                let Some(last) = shared_blocks
+                    .last()
+                    .filter(|last| last.height >= target.next_block_to_scan)
+                else {
                     continue;
                 };
 
@@ -1548,18 +1569,16 @@ impl ScanCoordinator {
                 self.forward_block_events(&mut block_events).await;
                 all_events.extend(events);
 
-                if let Some(last) = shared_blocks.last() {
-                    target.next_block_to_scan = next_block_height(last.height)?;
+                target.next_block_to_scan = next_block_height(last.height)?;
 
-                    self.events
-                        .send(ProcessingEvent::ScanStatus(ScanStatusEvent::Progress {
-                            account_id: target.account.id,
-                            current_height: last.height,
-                            tip_height: end_height.max(last.height),
-                            blocks_scanned: total_scanned,
-                        }))
-                        .await;
-                }
+                self.events
+                    .send(ProcessingEvent::ScanStatus(ScanStatusEvent::Progress {
+                        account_id: target.account.id,
+                        current_height: last.height,
+                        tip_height: end_height.max(last.height),
+                        blocks_scanned: total_scanned,
+                    }))
+                    .await;
             }
 
             // Past the deadline, stop at this batch: out of budget if an account is
@@ -2550,6 +2569,52 @@ mod tests {
             assert_eq!(completed_at_tip, 1, "account {account_id} completes at the tip");
             assert_eq!(max_tip_height(&setup.pool, account_id), 1600);
         }
+    }
+
+    #[tokio::test]
+    async fn a_fast_sync_of_accounts_at_different_heights_never_rewinds_the_ahead_account() {
+        let mut setup = setup(1500, 1600).await;
+        let (accounts, second_id) = {
+            let conn = setup.pool.get().expect("conn");
+            let wallet = WalletType::SeedWords(SeedWordsWallet::construct_new(CipherSeed::random()).unwrap());
+            create_account(&conn, "second", &wallet, "password").unwrap();
+            let second = get_account_by_name(&conn, "second").unwrap().unwrap();
+            insert_scanned_tip_block(&conn, second.id, 1550, &block_hash(1550)).expect("tip");
+            let second_id = second.id;
+            (
+                vec![get_account_by_name(&conn, "default").unwrap().unwrap(), second],
+                second_id,
+            )
+        };
+
+        let (_, more_blocks) = setup
+            .coordinator
+            .run(accounts, "password", FAST_SYNC, 0, None)
+            .await
+            .expect("fast sync");
+        assert!(!more_blocks);
+        let events = drain(&mut setup.events);
+
+        let second_progress: Vec<u64> = events
+            .iter()
+            .filter_map(|e| match e {
+                ProcessingEvent::ScanStatus(ScanStatusEvent::Progress {
+                    account_id,
+                    current_height,
+                    ..
+                }) if *account_id == second_id => Some(*current_height),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            second_progress.iter().all(|&h| h > 1550),
+            "ahead account must never emit progress below its starting height 1550, got: {second_progress:?}"
+        );
+        assert!(
+            second_progress.windows(2).all(|w| w[0] <= w[1]),
+            "ahead account progress must be monotonically non-decreasing, got: {second_progress:?}"
+        );
+        assert_eq!(max_tip_height(&setup.pool, second_id), 1600);
     }
 
     #[tokio::test]

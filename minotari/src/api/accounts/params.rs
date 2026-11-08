@@ -97,6 +97,19 @@ pub struct PaginationParams {
     pub offset: Option<i64>,
 }
 
+impl PaginationParams {
+    /// Resolves `(limit, offset)` clamped to `0..=MAX_PAGE_LIMIT` and `0..`.
+    ///
+    /// SQLite treats a negative `LIMIT` (such as `LIMIT -1`) as "no upper bound",
+    /// so clamping only with `.min(MAX_PAGE_LIMIT)` would let `?limit=-1` bypass
+    /// the page cap and load the entire table.
+    pub(super) fn resolve(&self) -> (i64, i64) {
+        let limit = self.limit.unwrap_or(DEFAULT_PAGE_LIMIT).clamp(0, MAX_PAGE_LIMIT);
+        let offset = self.offset.unwrap_or(0).max(0);
+        (limit, offset)
+    }
+}
+
 /// Path parameters for wallet/account identification.
 ///
 /// Used to extract the account name from URL path segments in account-related
@@ -157,6 +170,34 @@ mod tests {
         assert!(
             resolve_confirmation_window(Some(2), 3).is_err(),
             "lowering below the operator's policy is refused"
+        );
+    }
+
+    #[test]
+    fn pagination_clamps_negative_limits_instead_of_passing_unbounded_sqlite_limit() {
+        assert_eq!(
+            PaginationParams {
+                limit: None,
+                offset: None
+            }
+            .resolve(),
+            (DEFAULT_PAGE_LIMIT, 0)
+        );
+        assert_eq!(
+            PaginationParams {
+                limit: Some(-1),
+                offset: Some(-5)
+            }
+            .resolve(),
+            (0, 0)
+        );
+        assert_eq!(
+            PaginationParams {
+                limit: Some(5_000),
+                offset: Some(10)
+            }
+            .resolve(),
+            (MAX_PAGE_LIMIT, 10)
         );
     }
 }
