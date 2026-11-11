@@ -43,7 +43,7 @@
 //! ```
 
 use log::{debug, info, trace, warn};
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use tari_common::configuration::Network;
 use tari_common_types::types::{ComAndPubSignature, FixedHash};
 use tari_transaction_components::{
@@ -62,9 +62,13 @@ use thiserror::Error;
 use crate::{
     db::{DbWalletOutput, WalletDbError, get_latest_scanned_tip_block_by_account},
     log::mask_amount,
+    models::OutputStatus,
     transactions::fee_estimator::estimated_output_size_for_send,
 };
-use tari_transaction_components::utxo_selection::branch_and_bound::branch_bound_builder::BranchAndBoundUtxoSelectionBuilder;
+use tari_transaction_components::utxo_selection::branch_and_bound::{
+    branch_and_bound_selector::{BranchAndBoundUtxoSelector, SelectionResult},
+    branch_bound_builder::BranchAndBoundUtxoSelectionBuilder,
+};
 /// Errors that can occur during UTXO selection.
 #[derive(Debug, Error)]
 pub enum UtxoSelectionError {
@@ -121,6 +125,19 @@ pub enum UtxoSelectionError {
         limit: usize,
     },
 
+    /// An output the caller required as an input cannot be spent now.
+    ///
+    /// Required inputs are never silently dropped: a send that must spend a
+    /// given output (for example to conflict with an abandoned send) fails
+    /// instead of going ahead without it.
+    #[error("Required input {output_id} cannot be spent: {issue}")]
+    RequiredInputNotSpendable {
+        /// The `outputs` row id of the required output.
+        output_id: i64,
+        /// Why it cannot be spent.
+        issue: RequiredInputIssue,
+    },
+
     /// DB execution failed
     #[error("Database execution error: {0}")]
     DbError(#[from] WalletDbError),
@@ -128,6 +145,40 @@ pub enum UtxoSelectionError {
     /// General service error during UTXO selection (e.g., from the selection algorithm)
     #[error("UTXO selection service error: {0}")]
     ServiceError(String),
+}
+
+/// Why an output required as an input cannot be spent.
+#[derive(Debug, Clone, PartialEq, Eq, Error)]
+pub enum RequiredInputIssue {
+    /// No live output with that id belongs to the account.
+    #[error("it is not an output of this account")]
+    NotFound,
+    /// It is a burn output, which is never spent.
+    #[error("it is a burn output")]
+    Burn,
+    /// Another send holds it.
+    #[error("it is locked by another send")]
+    Locked,
+    /// It is not `UNSPENT` (for example already spent, or an unconfirmed change).
+    #[error("it is {status}, not unspent")]
+    NotUnspent {
+        /// The output's status.
+        status: String,
+    },
+    /// Its maturity height has not been reached yet.
+    #[error("it is immature until height {maturity}")]
+    Immature {
+        /// The height from which it can be spent.
+        maturity: i64,
+    },
+    /// It was mined too recently: it is still inside the confirmation window.
+    #[error("it is not confirmed yet (mined at height {mined_height}, spendable from height {spendable_from})")]
+    Unconfirmed {
+        /// The height it was mined at.
+        mined_height: i64,
+        /// The tip height from which it is outside the confirmation window.
+        spendable_from: u64,
+    },
 }
 
 /// Result of UTXO selection for a transaction.
@@ -309,6 +360,32 @@ impl InputSelector {
         fee_per_gram: MicroMinotari,
         estimated_output_size: Option<usize>,
     ) -> Result<UtxoSelection, UtxoSelectionError> {
+        self.fetch_unspent_outputs_with_required(conn, amount, num_outputs, fee_per_gram, estimated_output_size, &[])
+    }
+
+    /// As [`fetch_unspent_outputs`](Self::fetch_unspent_outputs), but the
+    /// outputs in `required` (`outputs` row ids) are always spent.
+    ///
+    /// The required outputs are taken first; if they do not cover the amount
+    /// plus fees, the selection is topped up from the other spendable outputs
+    /// as usual. A duplicate id counts once. With `required` empty this is
+    /// exactly [`fetch_unspent_outputs`](Self::fetch_unspent_outputs).
+    ///
+    /// # Errors
+    ///
+    /// As [`fetch_unspent_outputs`](Self::fetch_unspent_outputs), and
+    /// [`UtxoSelectionError::RequiredInputNotSpendable`] when a required output
+    /// is not this account's, not `UNSPENT`, locked, immature, or still inside
+    /// the confirmation window.
+    pub fn fetch_unspent_outputs_with_required(
+        &self,
+        conn: &Connection,
+        amount: MicroMinotari,
+        num_outputs: usize,
+        fee_per_gram: MicroMinotari,
+        estimated_output_size: Option<usize>,
+        required: &[i64],
+    ) -> Result<UtxoSelection, UtxoSelectionError> {
         debug!(
             account_id = self.account_id,
             amount = &*mask_amount(amount);
@@ -339,6 +416,7 @@ impl InputSelector {
             });
         }
         let uo = crate::db::fetch_unspent_outputs(conn, self.account_id, min_height, tip_height)?;
+        let must_select = self.resolve_required(conn, required, &uo, min_height, tip_height)?;
 
         let features_and_scripts_byte_size = match estimated_output_size {
             Some(sz) => sz,
@@ -388,7 +466,7 @@ impl InputSelector {
             .build()
             .map_err(|e| UtxoSelectionError::ServiceError(e.to_string()))?;
 
-        let Some(selection) = bnb.search() else {
+        let Some(selection) = search(&bnb, &must_select)? else {
             // Tell "cannot afford the change output" apart from plain
             // insufficient funds: search again without the change requirement.
             let without_change = BranchAndBoundUtxoSelectionBuilder::new(uo)
@@ -399,7 +477,7 @@ impl InputSelector {
                 .with_change_fee(default_output_fee)
                 .build()
                 .map_err(|e| UtxoSelectionError::ServiceError(e.to_string()))?;
-            if let Some(selection) = without_change.search() {
+            if let Some(selection) = search(&without_change, &must_select)? {
                 let needed = selection
                     .final_target
                     .saturating_add(default_output_fee)
@@ -463,6 +541,92 @@ impl InputSelector {
             fee_without_change,
             fee_with_change,
         })
+    }
+
+    /// Looks up the outputs in `required` among `spendable` (what
+    /// [`db::fetch_unspent_outputs`](crate::db::fetch_unspent_outputs) returns
+    /// for `min_height` and `tip_height`), in the order given and without
+    /// duplicates. A required output that is not spendable fails with
+    /// [`UtxoSelectionError::RequiredInputNotSpendable`], saying why.
+    fn resolve_required(
+        &self,
+        conn: &Connection,
+        required: &[i64],
+        spendable: &[DbWalletOutput],
+        min_height: u64,
+        tip_height: u64,
+    ) -> Result<Vec<DbWalletOutput>, UtxoSelectionError> {
+        let mut resolved: Vec<DbWalletOutput> = Vec::with_capacity(required.len());
+        for &output_id in required {
+            if resolved.iter().any(|utxo| utxo.id == output_id) {
+                continue;
+            }
+            match spendable.iter().find(|utxo| utxo.id == output_id) {
+                Some(utxo) => resolved.push(utxo.clone()),
+                None => {
+                    let issue = self.required_input_issue(conn, output_id, min_height, tip_height)?;
+                    warn!(
+                        target: "audit",
+                        account_id = self.account_id,
+                        output_id = output_id,
+                        issue:% = issue;
+                        "Required input cannot be spent"
+                    );
+                    return Err(UtxoSelectionError::RequiredInputNotSpendable { output_id, issue });
+                },
+            }
+        }
+        Ok(resolved)
+    }
+
+    /// Why the output `output_id`, which is not among the spendable outputs,
+    /// cannot be spent.
+    fn required_input_issue(
+        &self,
+        conn: &Connection,
+        output_id: i64,
+        min_height: u64,
+        tip_height: u64,
+    ) -> Result<RequiredInputIssue, UtxoSelectionError> {
+        let row: Option<(String, i64, i64, bool)> = conn
+            .query_row(
+                r#"
+                SELECT status, mined_in_block_height, maturity, is_burn
+                FROM outputs
+                WHERE id = :id AND account_id = :account_id AND deleted_at IS NULL
+                "#,
+                rusqlite::named_params! { ":id": output_id, ":account_id": self.account_id },
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()
+            .map_err(WalletDbError::from)?;
+        let Some((status, mined_height, maturity, is_burn)) = row else {
+            return Ok(RequiredInputIssue::NotFound);
+        };
+        if is_burn {
+            return Ok(RequiredInputIssue::Burn);
+        }
+        if status == OutputStatus::Locked.to_string() {
+            return Ok(RequiredInputIssue::Locked);
+        }
+        if status != OutputStatus::Unspent.to_string() {
+            return Ok(RequiredInputIssue::NotUnspent { status });
+        }
+        if maturity < 0 || u64::try_from(maturity).is_ok_and(|m| m > tip_height) {
+            return Ok(RequiredInputIssue::Immature { maturity });
+        }
+        if !u64::try_from(mined_height).is_ok_and(|h| h <= min_height) {
+            return Ok(RequiredInputIssue::Unconfirmed {
+                mined_height,
+                spendable_from: u64::try_from(mined_height)
+                    .unwrap_or(0)
+                    .saturating_add(self.confirmation_window),
+            });
+        }
+        // Spendable by every measure above, yet not returned as spendable.
+        Err(UtxoSelectionError::ServiceError(format!(
+            "Required input {output_id} is not among the spendable outputs"
+        )))
     }
 
     /// The smallest change worth keeping: what spending it as an input later
@@ -551,12 +715,48 @@ impl InputSelector {
         recipient_output_size: usize,
         change_output_size: usize,
     ) -> Result<SendAllSelection, UtxoSelectionError> {
+        self.select_all_with_required(
+            conn,
+            network,
+            fee_per_gram,
+            recipient_output_size,
+            change_output_size,
+            &[],
+        )
+    }
+
+    /// As [`select_all`](Self::select_all), but the outputs in `required`
+    /// (`outputs` row ids) are always spent, even when they are dust.
+    ///
+    /// The required outputs are taken first and are exempt from the dust and
+    /// input-cap skipping; the remaining room is filled largest first as usual.
+    /// A duplicate id counts once. With `required` empty this is exactly
+    /// [`select_all`](Self::select_all).
+    ///
+    /// # Errors
+    ///
+    /// As [`select_all`](Self::select_all);
+    /// [`UtxoSelectionError::RequiredInputNotSpendable`] when a required output
+    /// cannot be spent (see
+    /// [`fetch_unspent_outputs_with_required`](Self::fetch_unspent_outputs_with_required));
+    /// and [`UtxoSelectionError::TooManyInputs`] when the required outputs alone
+    /// do not fit in one transaction.
+    pub fn select_all_with_required(
+        &self,
+        conn: &Connection,
+        network: Network,
+        fee_per_gram: MicroMinotari,
+        recipient_output_size: usize,
+        change_output_size: usize,
+        required: &[i64],
+    ) -> Result<SendAllSelection, UtxoSelectionError> {
         self.select_all_up_to(
             conn,
             fee_per_gram,
             recipient_output_size,
             change_output_size,
             max_send_all_inputs(network, recipient_output_size, change_output_size),
+            required,
         )
     }
 
@@ -567,6 +767,7 @@ impl InputSelector {
         recipient_output_size: usize,
         change_output_size: usize,
         max_inputs: usize,
+        required: &[i64],
     ) -> Result<SendAllSelection, UtxoSelectionError> {
         let tip_height = get_latest_scanned_tip_block_by_account(conn, self.account_id)?
             .map(|b| b.height)
@@ -574,16 +775,34 @@ impl InputSelector {
         let min_height = tip_height.saturating_sub(self.confirmation_window);
         let spend_cost = self.min_change(fee_per_gram);
         let spendable = crate::db::fetch_unspent_outputs(conn, self.account_id, min_height, tip_height)?;
-        let spendable_count = spendable.len();
-        let mut candidates: Vec<DbWalletOutput> = spendable
+        let mut utxos = self.resolve_required(conn, required, &spendable, min_height, tip_height)?;
+        let byte_budget = input_body_byte_budget(2);
+        // The required outputs are never skipped, so they must fit by themselves.
+        check_input_limits(&utxos, max_inputs, byte_budget)?;
+        let mut required_bytes = 0usize;
+        for utxo in &utxos {
+            required_bytes = required_bytes.saturating_add(hydrated_input_size(&utxo.output)?);
+        }
+
+        let others: Vec<DbWalletOutput> = spendable
+            .into_iter()
+            .filter(|utxo| !utxos.iter().any(|required| required.id == utxo.id))
+            .collect();
+        let others_count = others.len();
+        let mut candidates: Vec<DbWalletOutput> = others
             .into_iter()
             .filter(|utxo| utxo.output.value() > spend_cost)
             .collect();
-        let skipped_dust = spendable_count.saturating_sub(candidates.len());
+        let skipped_dust = others_count.saturating_sub(candidates.len());
         candidates.sort_by_key(|utxo| std::cmp::Reverse(utxo.output.value()));
         let candidate_count = candidates.len();
-        let utxos = take_inputs_within_limits(candidates, max_inputs, input_body_byte_budget(2))?;
-        let skipped_over_cap = candidate_count.saturating_sub(utxos.len());
+        let topped_up = take_inputs_within_limits(
+            candidates,
+            max_inputs.saturating_sub(utxos.len()),
+            byte_budget.saturating_sub(required_bytes),
+        )?;
+        let skipped_over_cap = candidate_count.saturating_sub(topped_up.len());
+        utxos.extend(topped_up);
 
         let mut total_value = MicroMinotari::zero();
         for utxo in &utxos {
@@ -721,6 +940,19 @@ pub fn hydrated_input_size(output: &WalletOutput) -> Result<usize, UtxoSelection
     input
         .get_serialized_size()
         .map_err(|e| UtxoSelectionError::SerializationError(e.to_string()))
+}
+
+/// Runs `selector`, always spending `must_select` when it is not empty.
+fn search(
+    selector: &BranchAndBoundUtxoSelector<DbWalletOutput>,
+    must_select: &[DbWalletOutput],
+) -> Result<Option<SelectionResult<DbWalletOutput>>, UtxoSelectionError> {
+    if must_select.is_empty() {
+        return Ok(selector.search());
+    }
+    selector
+        .search_with_must_select(must_select.to_vec())
+        .map_err(UtxoSelectionError::ServiceError)
 }
 
 /// Takes `candidates` in order while there are fewer than `max_inputs` and
@@ -988,7 +1220,7 @@ mod tests {
         let (pool, account_id, _dir) = account_with_outputs(&[200_000, 900_000, 500_000, 700_000, 1]);
         let conn = pool.get().expect("conn");
         let all = InputSelector::new(account_id, 100)
-            .select_all_up_to(&conn, MicroMinotari(5), 1000, 1000, 2)
+            .select_all_up_to(&conn, MicroMinotari(5), 1000, 1000, 2, &[])
             .expect("selection");
         assert_eq!((all.skipped_dust, all.skipped_over_cap), (1, 2));
         let selection = all.selection;
@@ -1092,6 +1324,232 @@ mod tests {
         assert!(matches!(
             selector.select_all(&conn, Network::LocalNet, MicroMinotari(5), 1000, 1000),
             Err(UtxoSelectionError::InsufficientFunds { .. })
+        ));
+    }
+
+    /// The `outputs` row id of the output `account_with_outputs` inserted
+    /// `index`-th (0-based).
+    fn output_id(pool: &SqlitePool, index: usize) -> i64 {
+        let seed = u8::try_from(index + 1).expect("few outputs");
+        pool.get()
+            .expect("conn")
+            .query_row(
+                "SELECT id FROM outputs WHERE output_hash = :hash",
+                named_params! { ":hash": vec![seed; 32] },
+                |row| row.get(0),
+            )
+            .expect("output id")
+    }
+
+    fn select_with(
+        pool: &SqlitePool,
+        account_id: i64,
+        amount: u64,
+        required: &[i64],
+    ) -> Result<UtxoSelection, UtxoSelectionError> {
+        let conn = pool.get().expect("conn");
+        InputSelector::new(account_id, 100).fetch_unspent_outputs_with_required(
+            &conn,
+            MicroMinotari(amount),
+            1,
+            MicroMinotari(5),
+            Some(1000),
+            required,
+        )
+    }
+
+    fn ids(selection: &UtxoSelection) -> Vec<i64> {
+        let mut ids: Vec<i64> = selection.utxos.iter().map(|u| u.id).collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    /// A required output that covers the payment is spent instead of the
+    /// larger one the selector would otherwise prefer.
+    #[test]
+    fn a_required_input_is_taken_instead_of_a_larger_one() {
+        let (pool, account_id, _dir) = account_with_outputs(&[10_000_000, 3_000_000, 50_000_000]);
+        let (ten, fifty) = (output_id(&pool, 0), output_id(&pool, 2));
+
+        let plain = select(&pool, account_id, 3_000_000).expect("plain selection");
+        // Plain selection prefers the largest output: the double-pay hazard.
+        assert_eq!(ids(&plain), vec![fifty]);
+
+        let required = select_with(&pool, account_id, 3_000_000, &[ten]).expect("selection");
+        assert_eq!(ids(&required), vec![ten]);
+        assert!(!ids(&required).contains(&fifty));
+        assert_eq!(required.total_value, MicroMinotari(10_000_000));
+        // A duplicate id counts once.
+        let duplicated = select_with(&pool, account_id, 3_000_000, &[ten, ten]).expect("selection");
+        assert_eq!(ids(&duplicated), vec![ten]);
+    }
+
+    /// Required outputs too small for the payment are topped up from the rest.
+    #[test]
+    fn required_inputs_are_topped_up_when_they_do_not_cover_the_payment() {
+        let (pool, account_id, _dir) = account_with_outputs(&[10_000_000, 3_000_000, 50_000_000]);
+        let three = output_id(&pool, 1);
+
+        let selection = select_with(&pool, account_id, 20_000_000, &[three]).expect("selection");
+        let selected = ids(&selection);
+        assert!(selected.contains(&three), "the required input is spent: {selected:?}");
+        assert!(selected.len() >= 2, "it is topped up: {selected:?}");
+        assert!(selection.total_value >= MicroMinotari(20_000_000) + selection.fee_with_change);
+
+        // Without it the same payment need not spend it.
+        assert!(select(&pool, account_id, 20_000_000).is_ok());
+        // With required inputs empty the selection is the plain one.
+        assert_eq!(
+            ids(&select_with(&pool, account_id, 20_000_000, &[]).expect("selection")),
+            ids(&select(&pool, account_id, 20_000_000).expect("selection"))
+        );
+    }
+
+    fn required_issue(result: Result<UtxoSelection, UtxoSelectionError>, expected_id: i64) -> RequiredInputIssue {
+        match result {
+            Err(UtxoSelectionError::RequiredInputNotSpendable { output_id, issue }) => {
+                assert_eq!(output_id, expected_id);
+                issue
+            },
+            other => panic!("expected RequiredInputNotSpendable, got {other:?}"),
+        }
+    }
+
+    /// A required output that cannot be spent fails the selection, saying
+    /// why, rather than being dropped.
+    #[test]
+    fn a_required_input_that_cannot_be_spent_is_refused() {
+        let (pool, account_id, _dir) = account_with_outputs(&[10_000_000, 3_000_000, 50_000_000, 7_000_000, 8_000_000]);
+        let (spent, locked, immature, unconfirmed) = (
+            output_id(&pool, 0),
+            output_id(&pool, 1),
+            output_id(&pool, 3),
+            output_id(&pool, 4),
+        );
+        {
+            let conn = pool.get().expect("conn");
+            crate::db::update_output_status(&conn, spent, OutputStatus::Spent).expect("spend");
+            crate::db::lock_output(&conn, locked, "another-send", Utc::now()).expect("lock");
+            conn.execute(
+                "UPDATE outputs SET maturity = 500 WHERE id = :id",
+                named_params! { ":id": immature },
+            )
+            .expect("immature");
+            conn.execute(
+                "UPDATE outputs SET mined_in_block_height = 150 WHERE id = :id",
+                named_params! { ":id": unconfirmed },
+            )
+            .expect("recent");
+        }
+
+        assert_eq!(
+            required_issue(select_with(&pool, account_id, 1_000_000, &[spent]), spent),
+            RequiredInputIssue::NotUnspent {
+                status: "SPENT".to_string()
+            }
+        );
+        assert_eq!(
+            required_issue(select_with(&pool, account_id, 1_000_000, &[locked]), locked),
+            RequiredInputIssue::Locked
+        );
+        assert_eq!(
+            required_issue(select_with(&pool, account_id, 1_000_000, &[immature]), immature),
+            RequiredInputIssue::Immature { maturity: 500 }
+        );
+        assert_eq!(
+            required_issue(select_with(&pool, account_id, 1_000_000, &[unconfirmed]), unconfirmed),
+            RequiredInputIssue::Unconfirmed {
+                mined_height: 150,
+                spendable_from: 250
+            }
+        );
+        assert_eq!(
+            required_issue(select_with(&pool, account_id, 1_000_000, &[9_999]), 9_999),
+            RequiredInputIssue::NotFound
+        );
+        // Another account's output is not this account's to spend.
+        assert_eq!(
+            required_issue(
+                pool.get().map_err(|e| panic!("{e}")).and_then(|conn| {
+                    InputSelector::new(account_id + 1, 100).fetch_unspent_outputs_with_required(
+                        &conn,
+                        MicroMinotari(1_000_000),
+                        1,
+                        MicroMinotari(5),
+                        Some(1000),
+                        &[output_id(&pool, 2)],
+                    )
+                }),
+                output_id(&pool, 2)
+            ),
+            RequiredInputIssue::NotFound
+        );
+        // One bad required input fails the selection even next to a good one.
+        let message = select_with(&pool, account_id, 1_000_000, &[output_id(&pool, 2), locked])
+            .expect_err("refused")
+            .to_string();
+        assert!(message.contains("locked by another send"), "got: {message}");
+
+        // The send-all refuses them too.
+        let conn = pool.get().expect("conn");
+        assert!(matches!(
+            InputSelector::new(account_id, 100).select_all_with_required(
+                &conn,
+                Network::LocalNet,
+                MicroMinotari(5),
+                1000,
+                1000,
+                &[spent]
+            ),
+            Err(UtxoSelectionError::RequiredInputNotSpendable { .. })
+        ));
+    }
+
+    /// A send-all spends a required dust output it would otherwise skip.
+    #[test]
+    fn a_send_all_spends_a_required_dust_input() {
+        let spend_cost = InputSelector::new(1, 100).min_change(MicroMinotari(5));
+        let (pool, account_id, _dir) = account_with_outputs(&[1_000_000, spend_cost.as_u64(), 300_000]);
+        let dust = output_id(&pool, 1);
+        let conn = pool.get().expect("conn");
+        let selector = InputSelector::new(account_id, 100);
+
+        let plain = selector
+            .select_all(&conn, Network::LocalNet, MicroMinotari(5), 1000, 1000)
+            .expect("selection");
+        assert_eq!(plain.skipped_dust, 1);
+        assert!(!plain.selection.utxos.iter().any(|u| u.id == dust));
+
+        let all = selector
+            .select_all_with_required(&conn, Network::LocalNet, MicroMinotari(5), 1000, 1000, &[dust])
+            .expect("selection");
+        assert_eq!((all.skipped_dust, all.skipped_over_cap), (0, 0));
+        assert_eq!(all.selection.utxos.first().map(|u| u.id), Some(dust), "required first");
+        assert_eq!(all.selection.utxos.len(), 3);
+        assert_eq!(all.selection.total_value, MicroMinotari(1_300_000) + spend_cost);
+        let (_, fee) = selector.send_all_fees(3, MicroMinotari(5), 1000, 1000).expect("fees");
+        assert_eq!(all.selection.fee_with_change, fee);
+    }
+
+    /// Required inputs are exempt from the send-all's input cap: the cap is
+    /// filled with them first and the rest, largest first, after.
+    #[test]
+    fn a_send_all_keeps_required_inputs_under_the_cap() {
+        let (pool, account_id, _dir) = account_with_outputs(&[200_000, 900_000, 500_000, 700_000]);
+        let smallest = output_id(&pool, 0);
+        let conn = pool.get().expect("conn");
+        let all = InputSelector::new(account_id, 100)
+            .select_all_up_to(&conn, MicroMinotari(5), 1000, 1000, 2, &[smallest])
+            .expect("selection");
+        assert_eq!((all.skipped_dust, all.skipped_over_cap), (0, 2));
+        let values: Vec<u64> = all.selection.utxos.iter().map(|u| u.output.value().as_u64()).collect();
+        assert_eq!(values, vec![200_000, 900_000]);
+
+        // Required inputs that alone exceed the cap are refused.
+        let too_many = [smallest, output_id(&pool, 1), output_id(&pool, 2)];
+        assert!(matches!(
+            InputSelector::new(account_id, 100).select_all_up_to(&conn, MicroMinotari(5), 1000, 1000, 2, &too_many),
+            Err(UtxoSelectionError::TooManyInputs { selected: 3, limit: 2 })
         ));
     }
 
