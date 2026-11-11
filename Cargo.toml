@@ -3,7 +3,7 @@ resolver = "2"
 members = [
     "minotari",
     "minotari-wallet-core",
-    "integration-tests",
+    # "integration-tests", # disabled until diesel supports libsqlite3-sys 0.39 (diesel-rs/diesel#5372), see README
     "minotari-scanning"
 ]
 

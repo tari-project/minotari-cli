@@ -271,6 +271,8 @@ The project includes a comprehensive Cucumber BDD integration testing suite that
 
 The tests are located in a separate package (`integration-tests/`) within the workspace:
 
+> **Temporarily disabled.** `integration-tests` is commented out of the workspace `members` in `Cargo.toml`. It runs a Tari base node in-process, whose `diesel` dependency cannot yet link `libsqlite3-sys` 0.39, required for the [RUSTSEC-2026-0459](https://rustsec.org/advisories/RUSTSEC-2026-0459) fix in `rusqlite` 0.41, and only one SQLite library can be linked per workspace. Re-enable it once `diesel` supports `libsqlite3-sys` 0.39 ([diesel-rs/diesel#5372](https://github.com/diesel-rs/diesel/pull/5372)) and Tari adopts it.
+
 ```bash
 # Run all integration tests from workspace root
 cargo test -p integration-tests
