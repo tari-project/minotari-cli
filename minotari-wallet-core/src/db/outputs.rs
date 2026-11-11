@@ -1358,16 +1358,20 @@ pub struct DbOutput {
     pub mined_in_block_hash: Vec<u8>,
     pub mined_in_block_height: i64,
     pub value: i64,
+    #[serde(deserialize_with = "crate::db::sqlite_time::naive")]
     pub created_at: chrono::NaiveDateTime,
     pub wallet_output_json: Option<String>,
+    #[serde(deserialize_with = "crate::db::sqlite_time::naive")]
     pub mined_timestamp: chrono::NaiveDateTime,
     pub confirmed_height: Option<i64>,
     pub confirmed_hash: Option<Vec<u8>>,
     pub memo_parsed: Option<String>,
     pub memo_hex: Option<String>,
     pub status: String,
+    #[serde(deserialize_with = "crate::db::sqlite_time::naive_opt")]
     pub locked_at: Option<chrono::NaiveDateTime>,
     pub locked_by_request_id: Option<String>,
+    #[serde(deserialize_with = "crate::db::sqlite_time::naive_opt")]
     pub deleted_at: Option<chrono::NaiveDateTime>,
     pub deleted_in_block_height: Option<i64>,
     pub payment_reference: Option<String>,
@@ -1780,6 +1784,48 @@ mod tests {
         let wallet = WalletType::SeedWords(SeedWordsWallet::construct_new(seeds).unwrap());
         create_account(conn, "default", &wallet, "password").unwrap();
         get_account_by_name(conn, "default").unwrap().unwrap().id
+    }
+
+    #[test]
+    fn get_output_by_id_reads_a_stored_row() {
+        let temp = tempdir().expect("temp dir");
+        let pool = init_db(temp.path().join("by_id.db")).expect("init db");
+        let conn = pool.get().expect("conn");
+        let account_id = create_test_account(&conn);
+        insert_synthetic_output(&conn, account_id, 7, 1_000, 100, true, OutputStatus::Unspent, 50);
+        let id: i64 = conn
+            .query_row("SELECT id FROM outputs WHERE account_id = ?1", [account_id], |r| {
+                r.get(0)
+            })
+            .expect("id");
+
+        let output = get_output_by_id(&conn, id)
+            .expect("read output")
+            .expect("output exists");
+        assert_eq!(output.output_hash, vec![7u8; 32]);
+        assert_eq!(output.value, 1_000);
+    }
+
+    #[test]
+    fn get_input_by_id_reads_a_stored_row() {
+        let temp = tempdir().expect("temp dir");
+        let pool = init_db(temp.path().join("input_by_id.db")).expect("init db");
+        let conn = pool.get().expect("conn");
+        let account_id = create_test_account(&conn);
+        insert_synthetic_output(&conn, account_id, 8, 1_000, 100, true, OutputStatus::Unspent, 50);
+        let output_id: i64 = conn
+            .query_row("SELECT id FROM outputs WHERE account_id = ?1", [account_id], |r| {
+                r.get(0)
+            })
+            .expect("id");
+        let input_id = crate::db::insert_input(&conn, account_id, output_id, 120, &[9u8; 32], 1_700_000_000)
+            .expect("insert input");
+
+        let input = crate::db::get_input_by_id(&conn, input_id)
+            .expect("read input")
+            .expect("input exists");
+        assert_eq!(input.output_id, output_id);
+        assert_eq!(input.mined_timestamp.and_utc().timestamp(), 1_700_000_000);
     }
 
     #[test]

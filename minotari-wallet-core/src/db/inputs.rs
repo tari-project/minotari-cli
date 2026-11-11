@@ -16,8 +16,11 @@ pub struct DbInput {
     pub output_id: i64,
     pub mined_in_block_hash: Vec<u8>,
     pub mined_in_block_height: i64,
+    #[serde(deserialize_with = "crate::db::sqlite_time::naive")]
     pub mined_timestamp: NaiveDateTime,
+    #[serde(deserialize_with = "crate::db::sqlite_time::naive")]
     pub created_at: NaiveDateTime,
+    #[serde(deserialize_with = "crate::db::sqlite_time::naive_opt")]
     pub deleted_at: Option<NaiveDateTime>,
     pub deleted_in_block_height: Option<i64>,
 }
