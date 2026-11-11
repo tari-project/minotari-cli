@@ -256,6 +256,85 @@ pub fn abandon_send(
     })
 }
 
+/// Why the inputs of a send cannot be listed as an abandoned send's.
+#[derive(Debug, Error)]
+pub enum AbandonedSendInputsError {
+    #[error("No send {0} in this account")]
+    NotFound(TxId),
+    #[error("Send {tx_id} is not an abandoned send (it is {status})")]
+    NotAbandoned { tx_id: TxId, status: String },
+    #[error("The stored transaction of send {tx_id} cannot be decoded: {reason}")]
+    Undecodable { tx_id: TxId, reason: String },
+    #[error(transparent)]
+    Db(#[from] WalletDbError),
+}
+
+/// The `outputs` row ids of the inputs of the abandoned send `tx_id`: the
+/// outputs [`abandon_send`] released.
+///
+/// Abandoning clears the inputs' lock, so nothing in `outputs` links them to
+/// the send any more. They are found instead by decoding the signed
+/// transaction stored with the send and matching each input to this account's
+/// outputs by output hash. The ids are in the transaction's input order,
+/// without duplicates. An input that matches no live output of the account
+/// (for example one a reorg removed) is left out.
+///
+/// The ids are returned whatever the outputs' status now is: one may since
+/// have been spent or locked by another send. Spending at least one of them in
+/// a new send ([`TransactionSender::start_new_transaction_multi_with_inputs`])
+/// makes that send conflict with the abandoned one, so the two can never both
+/// be mined.
+///
+/// # Errors
+///
+/// [`AbandonedSendInputsError::NotFound`] when the account has no send
+/// `tx_id`; [`AbandonedSendInputsError::NotAbandoned`] when it is not
+/// `Rejected` with [`ABANDONED_REASON`] (including an abandoned send that was
+/// mined after all); [`AbandonedSendInputsError::Undecodable`] when its stored
+/// transaction cannot be decoded.
+///
+/// [`TransactionSender::start_new_transaction_multi_with_inputs`]: crate::transactions::manager::TransactionSender::start_new_transaction_multi_with_inputs
+pub fn abandoned_send_inputs(
+    conn: &Connection,
+    account_id: i64,
+    tx_id: TxId,
+) -> Result<Vec<i64>, AbandonedSendInputsError> {
+    let send = match db::get_completed_transaction_by_id(conn, tx_id)? {
+        Some(send) if send.account_id == account_id => send,
+        _ => return Err(AbandonedSendInputsError::NotFound(tx_id)),
+    };
+    if send.status != CompletedTransactionStatus::Rejected
+        || send.last_rejected_reason.as_deref() != Some(ABANDONED_REASON)
+    {
+        return Err(AbandonedSendInputsError::NotAbandoned {
+            tx_id,
+            status: send.status.to_string(),
+        });
+    }
+    let transaction = serde_json::from_slice::<Transaction>(&send.serialized_transaction).map_err(|e| {
+        AbandonedSendInputsError::Undecodable {
+            tx_id,
+            reason: e.to_string(),
+        }
+    })?;
+    let mut output_ids = Vec::new();
+    for input in transaction.body().inputs() {
+        match db::get_output_info_by_hash_for_account(conn, account_id, &input.output_hash())? {
+            Some((output_id, _, _)) => {
+                if !output_ids.contains(&output_id) {
+                    output_ids.push(output_id);
+                }
+            },
+            None => warn!(
+                target: "audit",
+                tx_id:% = tx_id;
+                "An input of the abandoned send matches no output of the account"
+            ),
+        }
+    }
+    Ok(output_ids)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -655,6 +734,69 @@ mod tests {
         let abandoned = abandon_unreconcilable(&send).expect("the flag does not matter when there is change");
         assert!(abandoned.reconcilable);
         assert_eq!(abandoned.note(), ABANDON_NOTE);
+    }
+
+    fn released_inputs(send: &Send, account_id: i64) -> Result<Vec<i64>, AbandonedSendInputsError> {
+        abandoned_send_inputs(&send.pool.get().expect("conn"), account_id, send.tx_id)
+    }
+
+    #[test]
+    fn an_abandoned_sends_inputs_are_the_outputs_it_released() {
+        let send = send_with_attempts(MAX_BROADCAST_ATTEMPTS);
+        abandon(&send, false).expect("abandon");
+
+        assert_eq!(
+            released_inputs(&send, send.account_id).expect("inputs"),
+            vec![send.input_id]
+        );
+        // Listed whatever their status now is.
+        {
+            let conn = send.pool.get().expect("conn");
+            db::lock_output(&conn, send.input_id, "another-send", Utc::now()).expect("lock");
+        }
+        assert_eq!(
+            released_inputs(&send, send.account_id).expect("inputs"),
+            vec![send.input_id]
+        );
+    }
+
+    #[test]
+    fn only_an_abandoned_send_of_the_account_has_released_inputs() {
+        // Pending: not abandoned.
+        let send = send_with_attempts(MAX_BROADCAST_ATTEMPTS);
+        assert!(matches!(
+            released_inputs(&send, send.account_id),
+            Err(AbandonedSendInputsError::NotAbandoned { .. })
+        ));
+
+        // Rejected for another reason: not abandoned.
+        {
+            let conn = send.pool.get().expect("conn");
+            db::mark_completed_transaction_as_rejected(&conn, send.tx_id, "inputs spent elsewhere").expect("reject");
+        }
+        assert!(matches!(
+            released_inputs(&send, send.account_id),
+            Err(AbandonedSendInputsError::NotAbandoned { .. })
+        ));
+
+        // Abandoned, but asked for by another account.
+        let abandoned = send_with_attempts(MAX_BROADCAST_ATTEMPTS);
+        abandon(&abandoned, false).expect("abandon");
+        assert!(matches!(
+            released_inputs(&abandoned, abandoned.account_id + 1),
+            Err(AbandonedSendInputsError::NotFound(_))
+        ));
+
+        // Abandoned, then mined after all.
+        {
+            let conn = abandoned.pool.get().expect("conn");
+            db::mark_completed_transaction_as_mined_unconfirmed(&conn, abandoned.tx_id, 50, &[5u8; 32]).expect("mined");
+        }
+        let mined = released_inputs(&abandoned, abandoned.account_id);
+        assert!(
+            matches!(mined, Err(AbandonedSendInputsError::NotAbandoned { .. })),
+            "got: {mined:?}"
+        );
     }
 
     fn lock_change(send: &Send, by: &str) {

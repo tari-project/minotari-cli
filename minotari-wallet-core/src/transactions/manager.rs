@@ -169,6 +169,8 @@ pub struct ProcessedTransaction {
     reservation: Reservation,
     /// Whether this send spends every spendable UTXO to its one recipient.
     send_all: bool,
+    /// `outputs` row ids this send must spend, sorted and without duplicates.
+    required_inputs: Vec<i64>,
 }
 
 impl ProcessedTransaction {
@@ -194,6 +196,7 @@ impl ProcessedTransaction {
             selected_utxos: Vec::new(),
             reservation: Reservation::Created,
             send_all: false,
+            required_inputs: Vec::new(),
         }
     }
 
@@ -237,6 +240,13 @@ impl ProcessedTransaction {
             fingerprint = fingerprint
                 .field("send_all", [1u8])
                 .field("fee_per_gram", fee_per_gram.as_u64().to_le_bytes());
+        }
+        // Only bound when there are any, so a send without required inputs
+        // keeps the binding it always had. A replay that requires other inputs
+        // is a different request: the reservation it would be handed need not
+        // spend them.
+        for output_id in &self.required_inputs {
+            fingerprint = fingerprint.field("required_input", output_id.to_le_bytes());
         }
         IdempotencyBinding::new(
             Some(self.idempotency_key.clone()),
@@ -427,12 +437,13 @@ impl TransactionSender {
         if processed_transaction.send_all {
             let (recipient_output_size, change_output_size) =
                 one_sided_output_sizes(&processed_transaction.recipients, self.network)?;
-            let all = input_selector.select_all(
+            let all = input_selector.select_all_with_required(
                 connection,
                 self.network,
                 self.fee_per_gram,
                 recipient_output_size,
                 change_output_size,
+                &processed_transaction.required_inputs,
             )?;
             all.audit_if_partial(self.account.id);
             return Ok(all.selection);
@@ -441,12 +452,13 @@ impl TransactionSender {
         let estimated_output_size = Some(estimated_output_size_for_recipients(&processed_transaction.recipients)?);
         let amount = total_recipient_amount(&processed_transaction.recipients, self.network)?;
         let num_outputs = processed_transaction.recipients.len();
-        let utxo_selection = input_selector.fetch_unspent_outputs(
+        let utxo_selection = input_selector.fetch_unspent_outputs_with_required(
             connection,
             amount,
             num_outputs,
             self.fee_per_gram,
             estimated_output_size,
+            &processed_transaction.required_inputs,
         )?;
         Ok(utxo_selection)
     }
@@ -642,7 +654,58 @@ impl TransactionSender {
             amount = &*mask_amount(total_amount);
             "Starting new transaction"
         );
-        self.start_transaction(idempotency_key, recipients, false, seconds_to_lock_utxo)
+        self.start_transaction(idempotency_key, recipients, false, seconds_to_lock_utxo, &[])
+    }
+
+    /// As [`start_new_transaction_multi`](Self::start_new_transaction_multi),
+    /// but the outputs in `required_inputs` (`outputs` row ids) are always
+    /// spent.
+    ///
+    /// The required outputs are taken first and the selection is topped up
+    /// from the other spendable outputs as usual
+    /// ([`InputSelector::fetch_unspent_outputs_with_required`]). With
+    /// `required_inputs` empty this is exactly
+    /// [`start_new_transaction_multi`](Self::start_new_transaction_multi).
+    ///
+    /// Use it to pay again after [`abandon_send`]: requiring the abandoned
+    /// send's released inputs ([`abandoned_send_inputs`]) makes the new send
+    /// conflict with the original, so the two can never both be mined.
+    ///
+    /// The required inputs are part of the idempotency binding: replaying the
+    /// key with other required inputs is refused.
+    ///
+    /// # Errors
+    ///
+    /// As [`start_new_transaction_multi`](Self::start_new_transaction_multi),
+    /// and [`UtxoSelectionError::RequiredInputNotSpendable`] when a required
+    /// output is not this account's, not `UNSPENT`, locked, immature, or still
+    /// inside the confirmation window.
+    ///
+    /// [`abandon_send`]: crate::transactions::abandon::abandon_send
+    /// [`abandoned_send_inputs`]: crate::transactions::abandon::abandoned_send_inputs
+    /// [`UtxoSelectionError::RequiredInputNotSpendable`]: crate::transactions::input_selector::UtxoSelectionError::RequiredInputNotSpendable
+    pub fn start_new_transaction_multi_with_inputs(
+        &mut self,
+        idempotency_key: String,
+        recipients: Vec<Recipient>,
+        seconds_to_lock_utxo: u64,
+        required_inputs: &[i64],
+    ) -> Result<PrepareOneSidedTransactionForSigningResult, anyhow::Error> {
+        let total_amount = total_recipient_amount(&recipients, self.network)?;
+        info!(
+            target: "audit",
+            recipient_count = recipients.len(),
+            required_input_count = required_inputs.len(),
+            amount = &*mask_amount(total_amount);
+            "Starting new transaction with required inputs"
+        );
+        self.start_transaction(
+            idempotency_key,
+            recipients,
+            false,
+            seconds_to_lock_utxo,
+            required_inputs,
+        )
     }
 
     /// Starts a send-all: every spendable, unlocked UTXO is spent to `address`,
@@ -690,7 +753,50 @@ impl TransactionSender {
             amount: MicroMinotari::zero(),
             payment_id,
         };
-        self.start_transaction(idempotency_key, vec![recipient], true, seconds_to_lock_utxo)
+        self.start_transaction(idempotency_key, vec![recipient], true, seconds_to_lock_utxo, &[])
+    }
+
+    /// As [`start_new_send_all_transaction`](Self::start_new_send_all_transaction),
+    /// but the outputs in `required_inputs` (`outputs` row ids) are always
+    /// spent, even when they are dust or would not otherwise fit under the
+    /// input cap ([`InputSelector::select_all_with_required`]). With
+    /// `required_inputs` empty this is exactly
+    /// [`start_new_send_all_transaction`](Self::start_new_send_all_transaction).
+    ///
+    /// The required inputs are part of the idempotency binding, as for
+    /// [`start_new_transaction_multi_with_inputs`](Self::start_new_transaction_multi_with_inputs).
+    ///
+    /// # Errors
+    ///
+    /// As [`start_new_send_all_transaction`](Self::start_new_send_all_transaction),
+    /// and as [`start_new_transaction_multi_with_inputs`](Self::start_new_transaction_multi_with_inputs)
+    /// for the required inputs; also when the required inputs alone do not fit
+    /// in one transaction.
+    pub fn start_new_send_all_transaction_with_inputs(
+        &mut self,
+        idempotency_key: String,
+        address: TariAddress,
+        payment_id: Option<String>,
+        seconds_to_lock_utxo: u64,
+        required_inputs: &[i64],
+    ) -> Result<PrepareOneSidedTransactionForSigningResult, anyhow::Error> {
+        info!(
+            target: "audit",
+            required_input_count = required_inputs.len();
+            "Starting new send-all transaction with required inputs"
+        );
+        let recipient = Recipient {
+            address,
+            amount: MicroMinotari::zero(),
+            payment_id,
+        };
+        self.start_transaction(
+            idempotency_key,
+            vec![recipient],
+            true,
+            seconds_to_lock_utxo,
+            required_inputs,
+        )
     }
 
     fn start_transaction(
@@ -699,6 +805,7 @@ impl TransactionSender {
         recipients: Vec<Recipient>,
         send_all: bool,
         seconds_to_lock_utxo: u64,
+        required_inputs: &[i64],
     ) -> Result<PrepareOneSidedTransactionForSigningResult, anyhow::Error> {
         // One connection for the whole flow. Taking a fresh one at each step instead meant a
         // single send held three at once — this one, another in
@@ -711,6 +818,10 @@ impl TransactionSender {
         let mut processed_transaction =
             ProcessedTransaction::new(None, idempotency_key, recipients, seconds_to_lock_utxo);
         processed_transaction.send_all = send_all;
+        let mut required_inputs = required_inputs.to_vec();
+        required_inputs.sort_unstable();
+        required_inputs.dedup();
+        processed_transaction.required_inputs = required_inputs;
 
         self.validate_transaction_creation_request()?;
 
@@ -3105,6 +3216,124 @@ mod tests {
             )
             .expect_err("a different request");
         conflict(&err);
+    }
+
+    // -----------------------------------------------------------------------
+    // Required inputs
+    // -----------------------------------------------------------------------
+
+    /// The `outputs` row id of the output `insert_test_output` wrote with `output_hash_byte`.
+    fn test_output_id(pool: &SqlitePool, output_hash_byte: u8) -> i64 {
+        pool.get()
+            .expect("conn")
+            .query_row(
+                "SELECT id FROM outputs WHERE output_hash = :hash",
+                named_params! { ":hash": vec![output_hash_byte; 32] },
+                |row| row.get(0),
+            )
+            .expect("output id")
+    }
+
+    fn output_lock(pool: &SqlitePool, output_id: i64) -> (String, Option<String>) {
+        pool.get()
+            .expect("conn")
+            .query_row(
+                "SELECT status, locked_by_request_id FROM outputs WHERE id = :id",
+                named_params! { ":id": output_id },
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("output")
+    }
+
+    /// A send with a required input spends and locks it, not the larger
+    /// output plain selection would pick; a replay must require the same.
+    #[test]
+    fn a_send_with_required_inputs_spends_them() {
+        // 1, 2 and 3 T.
+        let (pool, _temp) = setup_funded_wallet(3);
+        let mut sender = sender_for(&pool);
+        let (smallest, largest) = (test_output_id(&pool, 1), test_output_id(&pool, 3));
+        let recipient = Recipient {
+            address: other_address(1),
+            amount: MicroMinotari(500_000),
+            payment_id: None,
+        };
+
+        let prepared = sender
+            .start_new_transaction_multi_with_inputs("pinned".to_string(), vec![recipient.clone()], 300, &[smallest])
+            .expect("prepare");
+        assert_eq!(prepared.info.recipients.len(), 1);
+        assert_eq!(locked_output_count(&pool), 1);
+        let (status, lock) = output_lock(&pool, smallest);
+        assert_eq!(status, "LOCKED");
+        assert!(lock.is_some());
+        assert_eq!(output_lock(&pool, largest).0, "UNSPENT");
+
+        // The same key and required inputs replay onto the reservation.
+        sender
+            .start_new_transaction_multi_with_inputs("pinned".to_string(), vec![recipient.clone()], 300, &[smallest])
+            .expect("replay");
+        assert_eq!(pending_transaction_count(&pool), 1);
+
+        // The same key without them, or with others, is another request.
+        let err = sender
+            .start_new_transaction_multi("pinned".to_string(), vec![recipient.clone()], 300)
+            .expect_err("no required inputs");
+        conflict(&err);
+        let err = sender
+            .start_new_transaction_multi_with_inputs("pinned".to_string(), vec![recipient], 300, &[largest])
+            .expect_err("other required inputs");
+        conflict(&err);
+    }
+
+    /// A required input another send holds fails the send and reserves nothing.
+    #[test]
+    fn a_send_requiring_a_locked_input_is_refused() {
+        let (pool, _temp) = setup_funded_wallet(3);
+        let mut sender = sender_for(&pool);
+        reserve(&sender, &pool, "first", 2_500_000).expect("first reservation");
+        let held: i64 = count(&pool, "SELECT MIN(id) FROM outputs WHERE status = 'LOCKED'");
+
+        let err = sender
+            .start_new_transaction_multi_with_inputs(
+                "second".to_string(),
+                vec![Recipient {
+                    address: other_address(1),
+                    amount: MicroMinotari(100_000),
+                    payment_id: None,
+                }],
+                300,
+                &[held],
+            )
+            .expect_err("locked");
+        assert!(
+            matches!(
+                err.downcast_ref::<crate::transactions::input_selector::UtxoSelectionError>(),
+                Some(
+                    crate::transactions::input_selector::UtxoSelectionError::RequiredInputNotSpendable {
+                        issue: crate::transactions::input_selector::RequiredInputIssue::Locked,
+                        ..
+                    }
+                )
+            ),
+            "got: {err}"
+        );
+        assert_eq!(pending_transaction_count(&pool), 1);
+    }
+
+    /// A send-all with a required dust input spends it too.
+    #[test]
+    fn a_send_all_with_a_required_dust_input_spends_it() {
+        let (pool, _temp) = setup_funded_wallet(2);
+        let mut sender = sender_for(&pool);
+        insert_test_output(&pool.get().expect("conn"), sender.account.id, 9, 10, 100);
+        let dust = test_output_id(&pool, 9);
+
+        sender
+            .start_new_send_all_transaction_with_inputs("sweep".to_string(), other_address(1), None, 300, &[dust])
+            .expect("prepare");
+        assert_eq!(locked_output_count(&pool), 3);
+        assert_eq!(output_lock(&pool, dust).0, "LOCKED");
     }
 
     #[test]
