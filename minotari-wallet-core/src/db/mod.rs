@@ -56,6 +56,7 @@ use rusqlite::Connection;
 use rusqlite_migration::Migrations;
 
 mod error;
+mod sqlite_time;
 pub use error::{WalletDbError, WalletDbResult};
 
 mod accounts;
