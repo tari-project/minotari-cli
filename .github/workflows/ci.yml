@@ -50,7 +50,11 @@ jobs:
         run: cargo build --release --all-targets --all-features
 
       - name: Run tests
-        run: cargo test --release --all-targets --all-features --workspace
+        run: cargo test --release --all-targets --all-features --workspace --exclude integration-tests
+
+      # Disabled with the integration-tests workspace member (see Cargo.toml).
+      # - name: Run integration tests
+      #   run: cargo test --release --test cucumber -- -t "not @benchmark"
 
       - name: Check unused dependencies
         run: cargo machete
