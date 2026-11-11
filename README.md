@@ -9,7 +9,6 @@ transactions without requiring a full node.
 This repository is organized as a Cargo workspace:
 
 - **minotari/**: Main CLI wallet application
-- **integration-tests/**: Cucumber BDD integration tests with real base node
 
 ## Features
 
@@ -267,19 +266,12 @@ cargo run --bin generate-openapi
 
 ## Testing
 
-The project includes a comprehensive Cucumber BDD integration testing suite that covers all major features.
+The Cucumber integration tests (`integration-tests/`) are temporarily removed. They run a Tari base node in-process, and its `diesel` dependency cannot yet link `libsqlite3-sys` 0.39, which is required for the [RUSTSEC-2026-0459](https://rustsec.org/advisories/RUSTSEC-2026-0459) fix in `rusqlite` 0.41. Only one SQLite library can be linked per workspace. Restore them from git history once `diesel` supports `libsqlite3-sys` 0.39 ([diesel-rs/diesel#5372](https://github.com/diesel-rs/diesel/pull/5372)) and Tari adopts it.
 
-The tests are located in a separate package (`integration-tests/`) within the workspace:
+Unit tests:
 
 ```bash
-# Run all integration tests from workspace root
-cargo test -p integration-tests
-
-# Run from the integration-tests directory
-cd integration-tests
-cargo test
+cargo test --workspace
 ```
-
-See [integration-tests/README.md](integration-tests/README.md) for detailed testing documentation.
 
 ## Contributing

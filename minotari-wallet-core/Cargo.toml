@@ -27,7 +27,7 @@ include_dir = "0.7.4"
 minotari-scanning = { workspace = true, default-features = false }
 log = { version = "0.4.29", features = ["kv"] }
 r2d2 = "0.8.10"
-r2d2_sqlite = "0.34.0"
+r2d2_sqlite = "0.36.0"
 reqwest = { version = "0.12", default-features = false, features = [
     "charset",
     "http2",
@@ -37,11 +37,11 @@ reqwest = { version = "0.12", default-features = false, features = [
 ] }
 reqwest-middleware = { version = "0.4", default-features = false }
 reqwest-retry = { version = "0.7", default-features = false }
-rusqlite = { version = "0.39", features = ["bundled", "chrono", "uuid", "serde_json"] }
-rusqlite_migration = { version = "2.5.0", features = ["from-directory"] }
+rusqlite = { version = "0.41", features = ["bundled", "chrono", "uuid", "serde_json"] }
+rusqlite_migration = { version = "2.7.0", features = ["from-directory"] }
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
-serde_rusqlite = "0.42.0"
+serde_rusqlite = "0.44.0"
 tari_common = { workspace = true }
 tari_common_types = { workspace = true }
 tari_crypto = { workspace = true, features = ["borsh"] }
