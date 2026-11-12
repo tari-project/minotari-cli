@@ -709,6 +709,13 @@ impl<E: EventSender> BlockProcessor<E> {
     /// - Updates the output status to Spent
     /// - Adds to the block accumulator for event emission
     ///
+    /// An input hash spends the oldest active instance of the hash that has no
+    /// active input and was mined at or below this block. A hash already spent
+    /// in this block (a re-read, a later result of the same block, or a repeat
+    /// in one result) is skipped silently; one with no such instance is skipped
+    /// with a warning. Both are decided from the database, so they hold across
+    /// results and batches.
+    ///
     /// While `has_pending_outbound` is set, also returns the
     /// `locked_by_request_id` of every spent output that had one: the sends
     /// that may have landed in this block.
@@ -720,8 +727,38 @@ impl<E: EventSender> BlockProcessor<E> {
     ) -> Result<Vec<String>, BlockProcessorError> {
         let mut request_ids = Vec::new();
         for input_hash in &block.inputs {
-            let Some((output_id, tx_id, output)) = db::get_output_info_by_hash_for_account(tx, account_id, input_hash)?
+            let mut instances = db::get_output_instances_for_account(tx, account_id, input_hash)?;
+            if instances
+                .iter()
+                .any(|o| o.spent_in_block_hash.as_deref() == Some(block.block_hash.as_slice()))
+            {
+                continue;
+            }
+            let Some(db::OutputInstance {
+                id: output_id,
+                tx_id,
+                output,
+                ..
+            }) = instances
+                .iter()
+                .position(|o| o.spent_in_block_hash.is_none() && o.mined_in_block_height <= block.height)
+                .map(|i| instances.swap_remove(i))
             else {
+                if !instances.is_empty() {
+                    let spent_in_block = instances
+                        .iter()
+                        .rev()
+                        .find_map(|o| o.spent_in_block_hash.as_deref())
+                        .map(hex::encode);
+                    warn!(
+                        target: "audit",
+                        account_id = account_id,
+                        block_height = block.height,
+                        block_hash = &*hex::encode(block.block_hash),
+                        spent_in_block = spent_in_block.as_deref().unwrap_or("none");
+                        "Input matches no unspent output mined at or below its block; ignoring it"
+                    );
+                }
                 continue;
             };
 
@@ -1065,11 +1102,8 @@ impl<E: EventSender> BlockProcessor<E> {
             is_reversed: false,
         };
 
-        if self.backfill_mode {
-            db::insert_balance_change_if_not_exists(tx, &change)?;
-        } else {
-            db::insert_balance_change(tx, &change)?;
-        }
+        // One debit per input row.
+        db::insert_balance_change_if_not_exists(tx, &change)?;
         Ok(change)
     }
 
@@ -1130,12 +1164,7 @@ impl<E: EventSender> BlockProcessor<E> {
             let event_id = db::insert_wallet_event(tx, account_id, &event)?;
             generated_events.push((event_id, event));
 
-            db::mark_output_confirmed(
-                tx,
-                unconfirmed_output.id,
-                block.height,
-                block.block_hash.as_slice(),
-            )?;
+            db::mark_output_confirmed(tx, unconfirmed_output.id, block.height, block.block_hash.as_slice())?;
 
             // If this is a burn output, check if we have a matching pending burn proof
             // and log that the daemon should pick it up for burn output proof fetching.

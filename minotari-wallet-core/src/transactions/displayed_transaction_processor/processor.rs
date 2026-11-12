@@ -259,7 +259,7 @@ impl DisplayedTransactionProcessor {
                 .memo_hex(memo.hex)
                 .outputs(vec![Self::burn_display_output(&output)])
                 .output_type(Some(OutputType::Burn))
-.build(output.tx_id)?;
+                .build(output.tx_id)?;
             new_transactions.push(display_tx);
         }
 
@@ -647,7 +647,7 @@ impl DisplayedTransactionProcessor {
                     matched_output_id: input.output_id,
                 }])
                 .output_type(None)
-.build(input.tx_id)?;
+                .build(input.tx_id)?;
             results.push(tx);
         }
 

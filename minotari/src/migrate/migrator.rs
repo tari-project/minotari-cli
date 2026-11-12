@@ -36,9 +36,7 @@ use anyhow::{Context, anyhow};
 use chrono::{DateTime, Utc};
 use log::{info, trace};
 use rusqlite::{Connection, named_params};
-use tari_common_types::{
-    seeds::cipher_seed::CipherSeed, tari_address::TariAddress, types::PrivateKey,
-};
+use tari_common_types::{seeds::cipher_seed::CipherSeed, tari_address::TariAddress, types::PrivateKey};
 use tari_transaction_components::MicroMinotari;
 use tari_transaction_components::key_manager::wallet_types::{SeedWordsWallet, WalletType};
 use tari_transaction_components::key_manager::{KeyManager, TransactionKeyManagerInterface};

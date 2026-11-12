@@ -51,7 +51,10 @@ pub fn derive_output_tx_id(
         let tx_id = if counter == 0 {
             TxId::new_deterministic(account_view_key.as_bytes(), output_hash)
         } else {
-            TxId::new_deterministic(&[account_view_key.as_bytes(), &counter.to_le_bytes()].concat(), output_hash)
+            TxId::new_deterministic(
+                &[account_view_key.as_bytes(), &counter.to_le_bytes()].concat(),
+                output_hash,
+            )
         }
         .as_i64_wrapped();
         // An instance stored out of order (a backfill below a later instance) can count the same as one already stored.
@@ -1044,6 +1047,56 @@ pub fn revert_change_outputs_from_height(
     }
 
     Ok(outputs_to_revert)
+}
+
+/// An active instance of an output hash in an account, with the block of its active input if it was spent.
+pub struct OutputInstance {
+    pub id: i64,
+    pub tx_id: TxId,
+    pub output: WalletOutput,
+    pub mined_in_block_height: u64,
+    pub spent_in_block_hash: Option<Vec<u8>>,
+}
+
+/// Every active instance of `output_hash` in the account, oldest first.
+pub fn get_output_instances_for_account(
+    conn: &Connection,
+    account_id: i64,
+    output_hash: &FixedHash,
+) -> WalletDbResult<Vec<OutputInstance>> {
+    let mut stmt = conn.prepare_cached(
+        r#"
+        SELECT o.id, o.tx_id, o.wallet_output_json, o.mined_in_block_height, i.mined_in_block_hash
+        FROM outputs o
+        LEFT JOIN inputs i ON i.output_id = o.id AND i.deleted_at IS NULL
+        WHERE o.account_id = :account_id AND o.output_hash = :hash AND o.deleted_at IS NULL
+        ORDER BY o.mined_in_block_height, o.id
+        "#,
+    )?;
+    let rows = stmt.query_map(
+        named_params! { ":account_id": account_id, ":hash": output_hash.as_slice() },
+        |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, Option<Vec<u8>>>(4)?,
+            ))
+        },
+    )?;
+    let mut instances = Vec::new();
+    for row in rows {
+        let (id, tx_id, json, height, spent_in_block_hash) = row?;
+        instances.push(OutputInstance {
+            id,
+            tx_id: TxId::from(tx_id.cast_unsigned()),
+            output: serde_json::from_str(&json)?,
+            mined_in_block_height: height.cast_unsigned(),
+            spent_in_block_hash,
+        });
+    }
+    Ok(instances)
 }
 
 /// The newest active instance of `output_hash` in the account: the one a send can spend.

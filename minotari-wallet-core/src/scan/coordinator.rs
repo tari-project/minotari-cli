@@ -1691,7 +1691,7 @@ impl ScanCoordinator {
                         reversal_of_balance_change_id: None,
                         is_reversed: false,
                     };
-                    crate::db::insert_balance_change(&tx, &change).map_err(ScanError::DbError)?;
+                    crate::db::insert_balance_change_if_not_exists(&tx, &change).map_err(ScanError::DbError)?;
 
                     crate::db::update_output_status(&tx, *output_id, OutputStatus::Spent)
                         .map_err(ScanError::DbError)?;
