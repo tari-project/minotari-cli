@@ -13,25 +13,24 @@ use rusqlite::Connection;
 use std::collections::{BinaryHeap, HashMap};
 use tari_common_types::transaction::TxId;
 use tari_common_types::types::FixedHash;
-use tari_common_types::types::PrivateKey;
 use tari_transaction_components::MicroMinotari;
 use tari_transaction_components::transaction_components::memo_field::TxType;
 use tari_transaction_components::transaction_components::{OutputType, WalletOutput};
-use tari_utilities::ByteArray;
 
 /// Processes balance changes into user-displayable transactions.
+///
+/// Each entry built from an output takes the output row's stored `tx_id` as its id: an output re-created on chain
+/// has the same hash as the earlier instance, and only the stored id tells their entries apart.
 pub struct DisplayedTransactionProcessor {
     current_tip_height: u64,
     req_confirmations: u64,
-    view_key: PrivateKey,
 }
 
 impl DisplayedTransactionProcessor {
-    pub fn new(current_tip_height: u64, req_confirmations: u64, view_key: PrivateKey) -> Self {
+    pub fn new(current_tip_height: u64, req_confirmations: u64) -> Self {
         Self {
             current_tip_height,
             req_confirmations,
-            view_key,
         }
     }
 
@@ -147,7 +146,7 @@ impl DisplayedTransactionProcessor {
             let (balance_change, output) = new_credit.remove(i);
             let (initial_status, initial_confirmations) =
                 self.calculate_status_and_confirmations(output.height, output.output.max_lock_height());
-            let id = TxId::new_deterministic(self.view_key.as_bytes(), &output.output.output_hash());
+            let id = output.tx_id;
             let memo = MemoInfo::from_output(&output.output);
             let display_tx = DisplayedTransactionBuilder::new()
                 .account_id(accumulator.account_id as Id)
@@ -202,7 +201,7 @@ impl DisplayedTransactionProcessor {
             let (balance_change, output) = new_credit.remove(i);
             let (initial_status, initial_confirmations) =
                 self.calculate_status_and_confirmations(output.height, output.output.max_lock_height());
-            let id = TxId::new_deterministic(self.view_key.as_bytes(), &output.output.output_hash());
+            let id = output.tx_id;
             let memo = MemoInfo::from_output(&output.output);
             let sent = output.output.payment_id().get_sent_hashes().unwrap_or_default();
             // this must be some received output
@@ -260,10 +259,7 @@ impl DisplayedTransactionProcessor {
                 .memo_hex(memo.hex)
                 .outputs(vec![Self::burn_display_output(&output)])
                 .output_type(Some(OutputType::Burn))
-                .build(TxId::new_deterministic(
-                    self.view_key.as_bytes(),
-                    &output.output.output_hash(),
-                ))?;
+.build(output.tx_id)?;
             new_transactions.push(display_tx);
         }
 
@@ -344,7 +340,7 @@ impl DisplayedTransactionProcessor {
             let (initial_status, initial_confirmations) =
                 self.calculate_status_and_confirmations(output.height, output.output.max_lock_height());
             let mut other_party = output.output.payment_id().claimed_sender_address();
-            let id = TxId::new_deterministic(self.view_key.as_bytes(), &output.output.output_hash());
+            let id = output.tx_id;
             let memo = MemoInfo::from_output(&output.output);
             let mut tx_outputs = vec![TransactionOutput {
                 hash: output.output.output_hash(),
@@ -595,7 +591,7 @@ impl DisplayedTransactionProcessor {
                 .ok_or(ProcessorError::MissingError("Output index out of bounds".to_string()))?;
             let (initial_status, initial_confirmations) =
                 self.calculate_status_and_confirmations(output.height, output.output.max_lock_height());
-            let id = TxId::new_deterministic(self.view_key.as_bytes(), &output.output.output_hash());
+            let id = output.tx_id;
             let memo = MemoInfo::from_output(&output.output);
             let sent = output.output.payment_id().get_sent_hashes().unwrap_or_default();
             let other_party = output.output.payment_id().claimed_sender_address();
@@ -651,10 +647,7 @@ impl DisplayedTransactionProcessor {
                     matched_output_id: input.output_id,
                 }])
                 .output_type(None)
-                .build(TxId::new_deterministic(
-                    self.view_key.as_bytes(),
-                    &input.output.output_hash(),
-                ))?;
+.build(input.tx_id)?;
             results.push(tx);
         }
 
@@ -699,6 +692,7 @@ impl DisplayedTransactionProcessor {
                         .map_err(|e| ProcessorError::ParseError(e.to_string()))?,
                     mined_in_block_height: input.mined_in_block_height as u64,
                     output: output.to_wallet_output()?,
+                    tx_id: TxId::from(output.tx_id.cast_unsigned()),
                 };
                 acc.add_debit_change(balance_change, spent_input);
             } else {
@@ -716,6 +710,7 @@ impl DisplayedTransactionProcessor {
                     mined_in_block_hash: FixedHash::try_from(output.mined_in_block_hash.clone())
                         .map_err(|e| ProcessorError::ParseError(e.to_string()))?,
                     output: output.to_wallet_output()?,
+                    tx_id: TxId::from(output.tx_id.cast_unsigned()),
                 };
                 acc.add_credit_change(balance_change, detected);
             }
@@ -728,6 +723,7 @@ impl DisplayedTransactionProcessor {
                 mined_in_block_hash: FixedHash::try_from(output.mined_in_block_hash.clone())
                     .map_err(|e| ProcessorError::ParseError(e.to_string()))?,
                 output: output.to_wallet_output()?,
+                tx_id: TxId::from(output.tx_id.cast_unsigned()),
             };
             accumulators
                 .entry(height)
@@ -891,7 +887,7 @@ mod tests {
 
     #[test]
     fn test_create_new_updated_display_transactions_empty_accumulator() {
-        let processor = DisplayedTransactionProcessor::new(100, 3, PrivateKey::default());
+        let processor = DisplayedTransactionProcessor::new(100, 3);
         let accumulator = BlockEventAccumulator::new(1, 50, vec![0u8; 32]);
         let current_display_transactions: Vec<DisplayedTransaction> = vec![];
 
@@ -905,7 +901,7 @@ mod tests {
 
     #[test]
     fn test_create_new_updated_display_transactions_empty_existing_transactions() {
-        let processor = DisplayedTransactionProcessor::new(100, 3, PrivateKey::default());
+        let processor = DisplayedTransactionProcessor::new(100, 3);
         let accumulator = BlockEventAccumulator::new(1, 50, vec![0u8; 32]);
         let current_display_transactions: Vec<DisplayedTransaction> = vec![];
 
@@ -920,19 +916,19 @@ mod tests {
 
     #[test]
     fn test_processor_new_with_tip_height() {
-        let processor = DisplayedTransactionProcessor::new(500, 3, PrivateKey::default());
+        let processor = DisplayedTransactionProcessor::new(500, 3);
         assert_eq!(processor.current_tip_height, 500);
     }
 
     #[test]
     fn test_processor_new_with_zero_tip_height() {
-        let processor = DisplayedTransactionProcessor::new(0, 3, PrivateKey::default());
+        let processor = DisplayedTransactionProcessor::new(0, 3);
         assert_eq!(processor.current_tip_height, 0);
     }
 
     #[test]
     fn test_create_new_updated_display_transactions_returns_tuple() {
-        let processor = DisplayedTransactionProcessor::new(100, 3, PrivateKey::default());
+        let processor = DisplayedTransactionProcessor::new(100, 3);
         let accumulator = BlockEventAccumulator::new(1, 50, vec![0u8; 32]);
         let current_display_transactions: Vec<DisplayedTransaction> = vec![];
 
@@ -1024,7 +1020,7 @@ mod tests {
 
     #[test]
     fn test_processor_with_very_high_tip_height() {
-        let processor = DisplayedTransactionProcessor::new(u64::MAX, 3, PrivateKey::default());
+        let processor = DisplayedTransactionProcessor::new(u64::MAX, 3);
         assert_eq!(processor.current_tip_height, u64::MAX);
 
         let accumulator = BlockEventAccumulator::new(1, 50, vec![0u8; 32]);
@@ -1046,7 +1042,7 @@ mod tests {
 
     #[test]
     fn test_multiple_existing_transactions_no_matches() {
-        let processor = DisplayedTransactionProcessor::new(100, 3, PrivateKey::default());
+        let processor = DisplayedTransactionProcessor::new(100, 3);
         let accumulator = BlockEventAccumulator::new(1, 50, vec![0u8; 32]);
 
         // Create some existing transactions that won't match anything in the empty accumulator
@@ -1095,7 +1091,7 @@ mod tests {
     #[test]
     fn test_create_new_updated_with_no_matching_outputs_returns_empty_updated() {
         // When the accumulator is empty, existing transactions should not be updated
-        let processor = DisplayedTransactionProcessor::new(100, 3, PrivateKey::default());
+        let processor = DisplayedTransactionProcessor::new(100, 3);
         let accumulator = BlockEventAccumulator::new(1, 50, vec![0u8; 32]);
 
         // Create several existing transactions with different output hashes
@@ -1122,7 +1118,7 @@ mod tests {
     #[test]
     fn test_create_new_updated_with_no_matching_inputs_returns_empty_updated() {
         // Test with existing transactions that have inputs but no matching debit changes
-        let processor = DisplayedTransactionProcessor::new(100, 3, PrivateKey::default());
+        let processor = DisplayedTransactionProcessor::new(100, 3);
         let accumulator = BlockEventAccumulator::new(1, 50, vec![0u8; 32]);
 
         // Create existing transactions with inputs
@@ -1154,7 +1150,7 @@ mod tests {
     #[test]
     fn test_create_new_updated_preserves_original_when_no_match() {
         // Verify that original transactions are not modified when there's no match
-        let processor = DisplayedTransactionProcessor::new(100, 3, PrivateKey::default());
+        let processor = DisplayedTransactionProcessor::new(100, 3);
         let accumulator = BlockEventAccumulator::new(1, 50, vec![0u8; 32]);
 
         let original_status = TransactionDisplayStatus::Pending;
@@ -1176,7 +1172,7 @@ mod tests {
     #[test]
     fn test_create_new_updated_with_mixed_output_types() {
         // Test with a mix of transactions having outputs and inputs
-        let processor = DisplayedTransactionProcessor::new(100, 3, PrivateKey::default());
+        let processor = DisplayedTransactionProcessor::new(100, 3);
         let accumulator = BlockEventAccumulator::new(1, 50, vec![0u8; 32]);
 
         let tx_with_output =
@@ -1200,7 +1196,7 @@ mod tests {
 
     #[test]
     fn test_create_new_updated_handles_empty_inputs_list() {
-        let processor = DisplayedTransactionProcessor::new(100, 3, PrivateKey::default());
+        let processor = DisplayedTransactionProcessor::new(100, 3);
         let accumulator = BlockEventAccumulator::new(1, 50, vec![0u8; 32]);
 
         // Transaction with an empty inputs list
@@ -1235,7 +1231,7 @@ mod tests {
 
     #[test]
     fn test_create_new_updated_handles_empty_outputs_list() {
-        let processor = DisplayedTransactionProcessor::new(100, 3, PrivateKey::default());
+        let processor = DisplayedTransactionProcessor::new(100, 3);
         let accumulator = BlockEventAccumulator::new(1, 50, vec![0u8; 32]);
 
         // Transaction with an empty outputs list (debit only)
@@ -1268,7 +1264,7 @@ mod tests {
     #[test]
     fn test_create_new_updated_with_large_transaction_set() {
         // Test with many existing transactions to ensure scaling
-        let processor = DisplayedTransactionProcessor::new(1000, 3, PrivateKey::default());
+        let processor = DisplayedTransactionProcessor::new(1000, 3);
         let accumulator = BlockEventAccumulator::new(1, 500, vec![0u8; 32]);
 
         let mut current_display_transactions = Vec::new();
@@ -1294,7 +1290,7 @@ mod tests {
     #[test]
     fn test_create_new_updated_with_zero_required_confirmations() {
         // Edge case: zero required confirmations means everything is immediately confirmed
-        let processor = DisplayedTransactionProcessor::new(100, 0, PrivateKey::default());
+        let processor = DisplayedTransactionProcessor::new(100, 0);
         let accumulator = BlockEventAccumulator::new(1, 50, vec![0u8; 32]);
 
         let tx = create_test_displayed_transaction(1, mock_fixed_hash(10), TransactionDisplayStatus::Pending, 45);
@@ -1312,7 +1308,7 @@ mod tests {
     #[test]
     fn test_create_new_updated_with_very_large_confirmations_requirement() {
         // Edge case: very large confirmation requirement
-        let processor = DisplayedTransactionProcessor::new(100, u64::MAX, PrivateKey::default());
+        let processor = DisplayedTransactionProcessor::new(100, u64::MAX);
         let accumulator = BlockEventAccumulator::new(1, 50, vec![0u8; 32]);
 
         let tx = create_test_displayed_transaction(1, mock_fixed_hash(10), TransactionDisplayStatus::Unconfirmed, 45);
@@ -1329,7 +1325,7 @@ mod tests {
     #[test]
     fn test_create_new_updated_returns_separate_updated_and_new_vectors() {
         // Verify the function returns two separate vectors
-        let processor = DisplayedTransactionProcessor::new(100, 3, PrivateKey::default());
+        let processor = DisplayedTransactionProcessor::new(100, 3);
         let accumulator = BlockEventAccumulator::new(1, 50, vec![0u8; 32]);
         let current_display_transactions: Vec<DisplayedTransaction> = vec![];
 
@@ -1347,7 +1343,7 @@ mod tests {
     #[test]
     fn test_create_new_updated_with_multiple_outputs_same_transaction() {
         // Test transaction with multiple outputs
-        let processor = DisplayedTransactionProcessor::new(100, 3, PrivateKey::default());
+        let processor = DisplayedTransactionProcessor::new(100, 3);
         let accumulator = BlockEventAccumulator::new(1, 50, vec![0u8; 32]);
 
         let tx = DisplayedTransactionBuilder::new()
@@ -1402,7 +1398,7 @@ mod tests {
     #[test]
     fn test_create_new_updated_with_multiple_inputs_same_transaction() {
         // Test transaction with multiple inputs
-        let processor = DisplayedTransactionProcessor::new(100, 3, PrivateKey::default());
+        let processor = DisplayedTransactionProcessor::new(100, 3);
         let accumulator = BlockEventAccumulator::new(1, 50, vec![0u8; 32]);
 
         let tx = DisplayedTransactionBuilder::new()
@@ -1535,7 +1531,7 @@ mod tests {
     #[test]
     fn test_different_account_ids_in_accumulator() {
         // Test that account_id is properly used from accumulator
-        let processor = DisplayedTransactionProcessor::new(100, 3, PrivateKey::default());
+        let processor = DisplayedTransactionProcessor::new(100, 3);
 
         // Different account IDs
         let acc1 = BlockEventAccumulator::new(1, 50, vec![0u8; 32]);
@@ -1561,7 +1557,7 @@ mod tests {
     #[test]
     fn test_different_block_heights_in_accumulator() {
         // Test that block height is properly captured from accumulator
-        let processor = DisplayedTransactionProcessor::new(100, 3, PrivateKey::default());
+        let processor = DisplayedTransactionProcessor::new(100, 3);
 
         let acc_low = BlockEventAccumulator::new(1, 0, vec![0u8; 32]);
         let acc_mid = BlockEventAccumulator::new(1, 50, vec![0u8; 32]);
@@ -1594,7 +1590,7 @@ mod tests {
     #[test]
     fn test_accumulator_with_various_block_hashes() {
         // Test with different block hash values
-        let processor = DisplayedTransactionProcessor::new(100, 3, PrivateKey::default());
+        let processor = DisplayedTransactionProcessor::new(100, 3);
         let current_display_transactions: Vec<DisplayedTransaction> = vec![];
 
         // Zero hash
@@ -1661,6 +1657,7 @@ mod tests {
             mined_in_block: mock_fixed_hash(hash_byte),
             mined_in_block_height: 10,
             output: mock_wallet_output(value),
+            tx_id: mock_tx_id(&mock_wallet_output(value)),
         }
     }
 
@@ -1669,7 +1666,13 @@ mod tests {
             height,
             mined_in_block_hash: mock_fixed_hash(hash_byte),
             output: mock_wallet_output(value),
+            tx_id: mock_tx_id(&mock_wallet_output(value)),
         }
+    }
+
+    /// The `tx_id` a first instance of `output` is stored with.
+    fn mock_tx_id(output: &WalletOutput) -> TxId {
+        TxId::new_deterministic(&[0u8; 32], &output.output_hash())
     }
 
     // ── solve_back_track tests ──────────────────────────────────────────────────
@@ -1888,7 +1891,7 @@ mod tests {
 
     #[test]
     fn test_search_inputs_empty_inputs_and_outputs() {
-        let processor = DisplayedTransactionProcessor::new(100, 3, PrivateKey::default());
+        let processor = DisplayedTransactionProcessor::new(100, 3);
         let accumulator = BlockEventAccumulator::new(1, 50, vec![0u8; 32]);
         let inputs: Vec<(BalanceChange, SpentInput)> = vec![];
         let outputs: Vec<(BalanceChange, DetectedOutput)> = vec![];
@@ -1901,7 +1904,7 @@ mod tests {
     #[test]
     fn test_search_inputs_only_unmatched_inputs() {
         // Inputs with no matching outputs should become unmatched (outgoing) transactions
-        let processor = DisplayedTransactionProcessor::new(100, 3, PrivateKey::default());
+        let processor = DisplayedTransactionProcessor::new(100, 3);
         let accumulator = BlockEventAccumulator::new(1, 50, vec![0u8; 32]);
 
         let inputs = vec![
@@ -1920,7 +1923,7 @@ mod tests {
     #[test]
     fn test_search_inputs_only_unmatched_outputs() {
         // Outputs with no transaction_info_details go to unmatched (mock_wallet_output uses MemoField::new_empty)
-        let processor = DisplayedTransactionProcessor::new(100, 3, PrivateKey::default());
+        let processor = DisplayedTransactionProcessor::new(100, 3);
         let accumulator = BlockEventAccumulator::new(1, 50, vec![0u8; 32]);
 
         let inputs: Vec<(BalanceChange, SpentInput)> = vec![];
@@ -1938,7 +1941,7 @@ mod tests {
 
     #[test]
     fn test_search_inputs_multiple_unmatched_inputs_creates_individual_transactions() {
-        let processor = DisplayedTransactionProcessor::new(100, 3, PrivateKey::default());
+        let processor = DisplayedTransactionProcessor::new(100, 3);
         let accumulator = BlockEventAccumulator::new(1, 50, vec![0u8; 32]);
 
         let inputs = vec![
@@ -1956,7 +1959,7 @@ mod tests {
 
     #[test]
     fn test_search_inputs_mixed_unmatched_inputs_and_outputs() {
-        let processor = DisplayedTransactionProcessor::new(100, 3, PrivateKey::default());
+        let processor = DisplayedTransactionProcessor::new(100, 3);
         let accumulator = BlockEventAccumulator::new(1, 50, vec![0u8; 32]);
 
         let inputs = vec![(create_debit_balance_change(1, 100, 50), mock_spent_input(100, 1))];
@@ -1974,7 +1977,7 @@ mod tests {
 
     #[test]
     fn test_search_inputs_status_confirmed_when_enough_confirmations() {
-        let processor = DisplayedTransactionProcessor::new(100, 3, PrivateKey::default());
+        let processor = DisplayedTransactionProcessor::new(100, 3);
         let accumulator = BlockEventAccumulator::new(1, 50, vec![0u8; 32]);
 
         let inputs = vec![(create_debit_balance_change(1, 100, 50), mock_spent_input(100, 1))];
@@ -1991,7 +1994,7 @@ mod tests {
     #[test]
     fn test_search_inputs_status_unconfirmed_when_few_confirmations() {
         // tip=12, req=3, mined_at=10 -> confirmations=2 < 3
-        let processor = DisplayedTransactionProcessor::new(12, 3, PrivateKey::default());
+        let processor = DisplayedTransactionProcessor::new(12, 3);
         let accumulator = BlockEventAccumulator::new(1, 50, vec![0u8; 32]);
 
         let inputs = vec![(create_debit_balance_change(1, 100, 50), mock_spent_input(100, 1))];
@@ -2059,6 +2062,7 @@ mod tests {
         DetectedOutput {
             height,
             mined_in_block_hash: mock_fixed_hash(hash_byte),
+            tx_id: mock_tx_id(&output),
             output,
         }
     }
@@ -2094,7 +2098,7 @@ mod tests {
         // A sender can put any amount in the memo; it is decrypted verbatim and never checked against the
         // commitment. Summing it unchecked used to panic the scanner, and because the output stays on chain every
         // rescan panicked again.
-        let processor = DisplayedTransactionProcessor::new(100, 3, PrivateKey::default());
+        let processor = DisplayedTransactionProcessor::new(100, 3);
         let accumulator = BlockEventAccumulator::new(1, 50, vec![0u8; 32]);
 
         let inputs = vec![(create_debit_balance_change(1, 100, 50), mock_spent_input(100, 1))];
@@ -2112,7 +2116,7 @@ mod tests {
 
     #[test]
     fn test_create_new_updated_survives_memo_claiming_max_amount() {
-        let processor = DisplayedTransactionProcessor::new(100, 3, PrivateKey::default());
+        let processor = DisplayedTransactionProcessor::new(100, 3);
         let mut accumulator = BlockEventAccumulator::new(1, 50, vec![0u8; 32]);
         accumulator.add_credit_change(
             create_credit_balance_change(1, 1, 50),
@@ -2187,6 +2191,7 @@ mod tests {
             let detected = DetectedOutput {
                 height: 50,
                 mined_in_block_hash: mock_fixed_hash(1),
+                tx_id: mock_tx_id(&output),
                 output,
             };
             (mock_timestamp(), detected)

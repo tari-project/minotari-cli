@@ -291,7 +291,7 @@ impl<E: EventSender> BlockProcessor<E> {
 
         if let Some(acc) = self.current_block.take() {
             if !acc.is_empty() {
-                self.save_and_emit_displayed_transactions(tx, block.height, account_id, &account_view_key, &acc)?;
+                self.save_and_emit_displayed_transactions(tx, block.height, account_id, &acc)?;
             }
 
             let block_event = acc.into_event();
@@ -306,18 +306,13 @@ impl<E: EventSender> BlockProcessor<E> {
         tx: &Connection,
         block_height: u64,
         account_id: i64,
-        account_view_key: &PrivateKey,
         accumulator: &BlockEventAccumulator,
     ) -> Result<(), BlockProcessorError> {
         if accumulator.is_empty() {
             return Ok(());
         }
 
-        let processor = DisplayedTransactionProcessor::new(
-            self.current_tip_height,
-            self.required_confirmations,
-            account_view_key.clone(),
-        );
+        let processor = DisplayedTransactionProcessor::new(self.current_tip_height, self.required_confirmations);
         let (mut updated_transactions, mut new_transactions) = processor
             .create_new_updated_display_transactions_for_height(accumulator, tx)
             .map_err(|e| {
@@ -465,7 +460,7 @@ impl<E: EventSender> BlockProcessor<E> {
                     tx,
                     account_id,
                     account_view_key,
-                    hash.to_vec(),
+                    hash,
                     output,
                     block.height,
                     &block.block_hash,
@@ -479,11 +474,11 @@ impl<E: EventSender> BlockProcessor<E> {
                     None => continue, // Output already exists, skip events and balance changes
                 }
             } else {
-                db::insert_output(
+                let (output_id, newly_inserted) = db::insert_output(
                     tx,
                     account_id,
                     account_view_key,
-                    hash.to_vec(),
+                    hash,
                     output,
                     block.height,
                     &block.block_hash,
@@ -492,8 +487,16 @@ impl<E: EventSender> BlockProcessor<E> {
                     memo.hex.clone(),
                     payment_reference,
                     is_burn,
-                )?
+                )?;
+                if !newly_inserted {
+                    // Seen before (the continuous scan re-reads the tip): its event, webhook and credit are recorded.
+                    continue;
+                }
+                output_id
             };
+            let tx_id = db::get_output_by_id(tx, output_id)?
+                .map(|row| TxId::from(row.tx_id.cast_unsigned()))
+                .ok_or_else(|| WalletDbError::Unexpected(format!("Output {output_id} not found after insert")))?;
 
             info!(
                 target: "audit",
@@ -514,6 +517,7 @@ impl<E: EventSender> BlockProcessor<E> {
                 height: block.height,
                 mined_in_block_hash: block.block_hash,
                 output: output.clone(),
+                tx_id,
             };
             // A burn is an outflow: its output is kept and shown, but never credits the balance.
             if is_burn {
@@ -691,12 +695,8 @@ impl<E: EventSender> BlockProcessor<E> {
         output: &WalletOutput,
     ) -> Result<BalanceChange, BlockProcessorError> {
         let change = make_balance_change_for_output(account_id, output_id, block.mined_timestamp, block.height, output);
-
-        if self.backfill_mode {
-            db::insert_balance_change_if_not_exists(tx, &change)?;
-        } else {
-            db::insert_balance_change(tx, &change)?;
-        }
+        // One credit per output row, however often its block is presented.
+        db::insert_balance_change_if_not_exists(tx, &change)?;
 
         Ok(change)
     }
@@ -764,6 +764,7 @@ impl<E: EventSender> BlockProcessor<E> {
                         mined_in_block_height: block.height,
                         output_id,
                         output,
+                        tx_id,
                     },
                 );
             }
@@ -1481,7 +1482,7 @@ mod tests {
                 conn,
                 wallet.account_id,
                 &wallet.view_key,
-                output.output_hash().to_vec(),
+                &output.output_hash(),
                 &output,
                 10,
                 &hash(10),
@@ -1491,7 +1492,8 @@ mod tests {
                 FixedHash::zero(),
                 false,
             )
-            .expect("input output");
+            .expect("input output")
+            .0;
             db::lock_output(conn, output_id, &request_id, Utc::now()).expect("lock input");
             input_hashes.push(output.output_hash());
             inputs.push(TransactionInput::new_with_output_hash(
@@ -2882,7 +2884,7 @@ mod tests {
                 conn,
                 wallet.account_id,
                 &wallet.view_key,
-                output.output_hash().to_vec(),
+                &output.output_hash(),
                 &output,
                 height,
                 &hash(byte),
@@ -2892,7 +2894,8 @@ mod tests {
                 FixedHash::zero(),
                 false,
             )
-            .expect("output");
+            .expect("output")
+            .0;
             db::lock_output(conn, id, request_id, Utc::now()).expect("lock");
             id
         };
@@ -3056,7 +3059,7 @@ mod tests {
             .map(display_shape)
             .collect();
         conn.execute("DELETE FROM displayed_transactions", []).expect("clear");
-        let (updated, rebuilt) = DisplayedTransactionProcessor::new(100, 3, wallet.view_key.clone())
+        let (updated, rebuilt) = DisplayedTransactionProcessor::new(100, 3)
             .process_all_stored_with_conn(wallet.account_id, conn)
             .expect("rebuild");
         assert!(updated.is_empty());

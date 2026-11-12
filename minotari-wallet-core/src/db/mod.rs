@@ -78,7 +78,7 @@ pub use scanned_tip_blocks::{
 mod outputs;
 pub use outputs::{
     ChangeOutputToRevert, DbOutput, DbWalletOutput, UnresolvedSpentOutput, clear_dead_lock,
-    confirm_unconfirmed_change_output, fetch_outputs_by_lock_request_id, fetch_unspent_outputs,
+    confirm_unconfirmed_change_output, derive_output_tx_id, fetch_outputs_by_lock_request_id, fetch_unspent_outputs,
     get_active_burn_outputs, get_active_outputs_from_height, get_change_output_hash_for_request, get_output_by_id,
     get_output_hashes_mined_in_block, get_output_hashes_spent_in_block,
     get_output_info_by_hash_for_account, get_output_lock_request_id, get_output_spend, get_output_totals_for_account,
