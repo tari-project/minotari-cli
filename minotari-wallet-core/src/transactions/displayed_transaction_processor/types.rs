@@ -80,6 +80,7 @@ pub enum TransactionSource {
     Transfer,
     Coinbase,
     OneSided,
+    Burn,
     Unknown,
 }
 
@@ -89,6 +90,7 @@ impl TransactionSource {
             Self::Transfer => "Transfer",
             Self::Coinbase => "Mining Reward",
             Self::OneSided => "One-sided Payment",
+            Self::Burn => "Burn",
             Self::Unknown => "Transaction",
         }
     }

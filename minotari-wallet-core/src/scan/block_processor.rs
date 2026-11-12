@@ -372,7 +372,7 @@ impl<E: EventSender> BlockProcessor<E> {
     /// For each output owned by the wallet:
     /// - Inserts the output into the database
     /// - Creates a wallet event for detection
-    /// - Records the balance change (credit)
+    /// - Records the balance change (credit), except for a burn output
     /// - Adds to the block accumulator for event emission
     ///
     /// Returns the sends the monitor rejected whose change output is in this
@@ -509,17 +509,27 @@ impl<E: EventSender> BlockProcessor<E> {
             let event_id = db::insert_wallet_event(tx, account_id, &event)?;
             generated_events.push((event_id, event));
 
+            let detected = DetectedOutput {
+                height: block.height,
+                mined_in_block_hash: block.block_hash,
+                output: output.clone(),
+            };
+            // A burn is an outflow: its output is kept and shown, but never credits the balance.
+            if is_burn {
+                #[allow(clippy::cast_possible_wrap)]
+                let mined_at = DateTime::<Utc>::from_timestamp(block.mined_timestamp as i64, 0)
+                    .unwrap_or_else(Utc::now)
+                    .naive_utc();
+                if let Some(ref mut acc) = self.current_block {
+                    acc.add_burn_output(mined_at, detected);
+                }
+                continue;
+            }
+
             let balance_change = self.record_output_balance_change(tx, account_id, output_id, block, output)?;
 
             if let Some(ref mut acc) = self.current_block {
-                acc.add_credit_change(
-                    balance_change,
-                    DetectedOutput {
-                        height: block.height,
-                        mined_in_block_hash: block.block_hash,
-                        output: output.clone(),
-                    },
-                );
+                acc.add_credit_change(balance_change, detected);
             }
         }
 
@@ -1286,13 +1296,15 @@ mod tests {
     };
     use rusqlite::named_params;
     use tari_common_types::seeds::cipher_seed::CipherSeed;
+    use tari_common_types::tari_address::TariAddress;
     use tari_common_types::transaction::TxId;
     use tari_common_types::types::{ComAndPubSignature, CompressedPublicKey};
     use tari_script::{ExecutionStack, TariScript};
     use tari_transaction_components::key_manager::wallet_types::{SeedWordsWallet, WalletType};
     use tari_transaction_components::key_manager::{KeyManager, TariKeyId, TransactionKeyManagerInterface};
     use tari_transaction_components::transaction_components::{
-        EncryptedData, MemoField, OutputFeatures, TransactionInput, TransactionOutputVersion, covenants::Covenant,
+        EncryptedData, MemoField, OutputFeatures, OutputType, TransactionInput, TransactionOutputVersion,
+        covenants::Covenant, memo_field::TxType,
     };
     use tempfile::TempDir;
 
@@ -1330,11 +1342,15 @@ mod tests {
     }
 
     fn test_wallet_output(value: u64, hash_byte: u8) -> WalletOutput {
+        test_output(value, hash_byte, OutputFeatures::default(), MemoField::new_empty())
+    }
+
+    fn test_output(value: u64, hash_byte: u8, features: OutputFeatures, memo: MemoField) -> WalletOutput {
         WalletOutput::new_from_parts(
             TransactionOutputVersion::default(),
             MicroMinotari::from(value),
             TariKeyId::default(),
-            OutputFeatures::default(),
+            features,
             TariScript::default(),
             ExecutionStack::default(),
             TariKeyId::default(),
@@ -1345,7 +1361,7 @@ mod tests {
             EncryptedData::default(),
             MicroMinotari::from(0),
             None,
-            MemoField::new_empty(),
+            memo,
             hash(hash_byte),
             Default::default(),
         )
@@ -2924,5 +2940,428 @@ mod tests {
             lock_of(&conn, send_input),
             ("LOCKED".to_string(), Some(send.request_id.clone()))
         );
+    }
+
+    // ── Burns ──────────────────────────────────────────────────────────────────
+
+    /// A recovered burn output, carrying the open memo a burn gives it.
+    fn burn_output(value: u64, hash_byte: u8) -> WalletOutput {
+        let memo = MemoField::new_open_from_string("to L2", TxType::Burn).expect("memo");
+        test_output(value, hash_byte, OutputFeatures::create_burn_output(), memo)
+    }
+
+    /// The change of a burn of `burned` with `fee`, carrying the memo the burn's transaction builder gives it.
+    fn burn_change(value: u64, hash_byte: u8, burned: u64, fee: u64) -> WalletOutput {
+        let memo = MemoField::new_transaction_info(
+            TariAddress::default(),
+            burned.into(),
+            fee.into(),
+            false,
+            TxType::Burn,
+            Vec::new(),
+            Vec::new(),
+        )
+        .expect("memo");
+        test_output(value, hash_byte, OutputFeatures::default(), memo)
+    }
+
+    /// Receives two 6_000 outputs at height 10 and lets them confirm; returns their hashes, the inputs of a burn.
+    fn fund_burn(wallet: &TestWallet, conn: &Connection) -> Vec<FixedHash> {
+        let funding = block(
+            10,
+            vec![test_wallet_output(6_000, 1), test_wallet_output(6_000, 2)],
+            Vec::new(),
+        );
+        let mut blocks = vec![funding];
+        blocks.extend((11..=15).map(|h| block(h, Vec::new(), Vec::new())));
+        process(&mut processor(wallet, false), conn, wallet.account_id, &blocks);
+        vec![hash(1), hash(2)]
+    }
+
+    /// The block at `height` with a burn of 7_000 (fee 100) from the funded inputs, leaving 4_900 change, and
+    /// `burn_outputs` recovered alongside.
+    fn own_burn_block(height: u64, inputs: Vec<FixedHash>, burn_outputs: Vec<WalletOutput>) -> BlockScanResult {
+        let mut outputs = vec![burn_change(4_900, 3, 7_000, 100)];
+        outputs.extend(burn_outputs);
+        block(height, outputs, inputs)
+    }
+
+    fn displays_at(conn: &Connection, account_id: i64, height: u64) -> Vec<DisplayedTransaction> {
+        db::get_displayed_transactions_from_height(conn, account_id, height)
+            .expect("displays")
+            .into_iter()
+            .filter(|d| d.blockchain.block_height == height)
+            .collect()
+    }
+
+    fn selectable(conn: &Connection, account_id: i64) -> u64 {
+        let tip = db::get_latest_scanned_tip_block_by_account(conn, account_id)
+            .expect("tip")
+            .expect("scanned")
+            .height;
+        db::fetch_unspent_outputs(conn, account_id, tip, tip)
+            .expect("unspent")
+            .iter()
+            .map(|o| o.output.value().as_u64())
+            .sum()
+    }
+
+    fn credit_rows_for(conn: &Connection, output_hash: &FixedHash) -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM balance_changes WHERE caused_by_output_id IN
+                 (SELECT id FROM outputs WHERE output_hash = :hash)",
+            named_params! { ":hash": output_hash.as_slice() },
+            |row| row.get(0),
+        )
+        .expect("count")
+    }
+
+    type DisplayShape = (
+        String,
+        TransactionSource,
+        u64,
+        u64,
+        Vec<(FixedHash, String)>,
+        Vec<FixedHash>,
+    );
+
+    fn display_shape(d: &DisplayedTransaction) -> DisplayShape {
+        (
+            d.id.to_string(),
+            d.source,
+            d.details.total_credit.as_u64(),
+            d.details.total_debit.as_u64(),
+            d.details
+                .outputs
+                .iter()
+                .map(|o| (o.hash, format!("{:?}", o.output_type)))
+                .collect(),
+            d.details.inputs.iter().map(|i| i.output_hash).collect(),
+        )
+    }
+
+    /// History rebuilt from the stored ledger and burn outputs matches what the scan built.
+    fn assert_rebuild_matches_scan(wallet: &TestWallet, conn: &Connection) {
+        let mut scanned: Vec<_> = db::get_displayed_transactions_from_height(conn, wallet.account_id, 0)
+            .expect("displays")
+            .iter()
+            .map(display_shape)
+            .collect();
+        conn.execute("DELETE FROM displayed_transactions", []).expect("clear");
+        let (updated, rebuilt) = DisplayedTransactionProcessor::new(100, 3, wallet.view_key.clone())
+            .process_all_stored_with_conn(wallet.account_id, conn)
+            .expect("rebuild");
+        assert!(updated.is_empty());
+        let mut rebuilt: Vec<_> = rebuilt.iter().map(display_shape).collect();
+        scanned.sort_by(|a, b| a.0.cmp(&b.0));
+        rebuilt.sort_by(|a, b| a.0.cmp(&b.0));
+        assert_eq!(rebuilt, scanned);
+    }
+
+    #[test]
+    fn a_recovered_burn_output_never_credits_the_balance() {
+        for (output, expected) in [(test_wallet_output(7_000, 1), 7_000u64), (burn_output(7_000, 1), 0)] {
+            let wallet = test_wallet();
+            let conn = wallet.pool.get().expect("conn");
+            let mut blocks = vec![block(20, vec![output], Vec::new())];
+            blocks.extend((21..=30).map(|h| block(h, Vec::new(), Vec::new())));
+            process(&mut processor(&wallet, false), &conn, wallet.account_id, &blocks);
+
+            let balance = db::get_balance(&conn, wallet.account_id).expect("balance");
+            assert_eq!(balance.total, expected.into());
+            assert_eq!(balance.available, expected.into());
+            let totals = db::get_output_totals_for_account(&conn, wallet.account_id, 30).expect("totals");
+            assert_eq!(totals.available, expected.into());
+            assert_eq!(
+                db::get_total_unspent_balance(&conn, wallet.account_id, 30).expect("unspent"),
+                expected
+            );
+            assert_eq!(selectable(&conn, wallet.account_id), expected);
+            assert_eq!(balance.available.as_u64(), selectable(&conn, wallet.account_id));
+        }
+    }
+
+    #[test]
+    fn an_own_burn_with_its_output_recovered_is_one_burn_transaction() {
+        let wallet = test_wallet();
+        let conn = wallet.pool.get().expect("conn");
+        let inputs = fund_burn(&wallet, &conn);
+
+        let burn_block = own_burn_block(20, inputs.clone(), vec![burn_output(7_000, 4)]);
+        process(
+            &mut processor(&wallet, false),
+            &conn,
+            wallet.account_id,
+            std::slice::from_ref(&burn_block),
+        );
+
+        let displays = displays_at(&conn, wallet.account_id, 20);
+        assert_eq!(displays.len(), 1, "one transaction, no separate received entry");
+        let burn = &displays[0];
+        assert_eq!(burn.source, TransactionSource::Burn);
+        assert_eq!(burn.direction, TransactionDirection::Outgoing);
+        assert_eq!(burn.details.total_debit, 12_000.into());
+        assert_eq!(burn.details.total_credit, 4_900.into());
+        assert_eq!(burn.amount, 7_100.into(), "burn plus fee");
+        assert_eq!(burn.details.output_type, Some(OutputType::Burn));
+        assert_eq!(burn.details.inputs.len(), inputs.len());
+        let burned = burn
+            .details
+            .outputs
+            .iter()
+            .find(|o| o.hash == hash(4))
+            .expect("burn output attached");
+        assert_eq!(burned.output_type, OutputType::Burn);
+        assert_eq!(burned.amount, 7_000.into());
+        assert!(!burned.is_change);
+
+        let balance = db::get_balance(&conn, wallet.account_id).expect("balance");
+        assert_eq!(balance.total, 4_900.into(), "dropped by the burn and its fee");
+        assert_eq!(credit_rows_for(&conn, &hash(4)), 0);
+
+        assert_rebuild_matches_scan(&wallet, &conn);
+    }
+
+    #[test]
+    fn an_own_burn_without_its_output_recovered_is_a_burn_transaction() {
+        let wallet = test_wallet();
+        let conn = wallet.pool.get().expect("conn");
+        let inputs = fund_burn(&wallet, &conn);
+
+        let burn_block = own_burn_block(20, inputs, Vec::new());
+        process(
+            &mut processor(&wallet, false),
+            &conn,
+            wallet.account_id,
+            std::slice::from_ref(&burn_block),
+        );
+
+        let displays = displays_at(&conn, wallet.account_id, 20);
+        assert_eq!(displays.len(), 1);
+        assert_eq!(displays[0].source, TransactionSource::Burn);
+        assert_eq!(displays[0].details.total_debit, 12_000.into());
+        assert_eq!(displays[0].details.total_credit, 4_900.into());
+        assert_eq!(displays[0].details.outputs.len(), 1, "only the change");
+
+        assert_rebuild_matches_scan(&wallet, &conn);
+    }
+
+    #[test]
+    fn a_burn_this_wallet_sent_is_shown_as_a_burn_once_mined() {
+        // As `persist_burn_records` leaves a burn: a completed transaction and its change row, no displayed entry.
+        let wallet = test_wallet();
+        let conn = wallet.pool.get().expect("conn");
+        let send = record_send(&wallet, &conn, 1, &[1, 2], None);
+        conn.execute("DELETE FROM displayed_transactions", [])
+            .expect("no display");
+        let change = burn_change(12_900, 3, 7_000, 100);
+        db::insert_unconfirmed_change_output(&conn, wallet.account_id, &wallet.view_key, &send.request_id, &change)
+            .expect("change row");
+
+        let mined = block(50, vec![change], send.input_hashes.clone());
+        process(
+            &mut processor(&wallet, true),
+            &conn,
+            wallet.account_id,
+            std::slice::from_ref(&mined),
+        );
+
+        assert_eq!(
+            completed(&conn, send.tx_id).status,
+            db::CompletedTransactionStatus::MinedUnconfirmed
+        );
+        let displays = displays_at(&conn, wallet.account_id, 50);
+        assert_eq!(displays.len(), 1);
+        assert_eq!(displays[0].source, TransactionSource::Burn);
+        assert_eq!(displays[0].details.total_debit, 20_000.into());
+        assert_eq!(displays[0].details.total_credit, 12_900.into());
+    }
+
+    #[test]
+    fn a_third_party_burn_is_stored_and_shown_without_value() {
+        let wallet = test_wallet();
+        let conn = wallet.pool.get().expect("conn");
+        let mut blocks = vec![block(10, vec![test_wallet_output(5_000, 1)], Vec::new())];
+        blocks.extend((11..=15).map(|h| block(h, Vec::new(), Vec::new())));
+        process(&mut processor(&wallet, false), &conn, wallet.account_id, &blocks);
+        let available_before = db::get_balance(&conn, wallet.account_id).expect("balance").available;
+        assert_eq!(available_before, 5_000.into());
+
+        let mut burn_processor = processor(&wallet, false);
+        burn_processor.set_webhook_config(Some(WebhookTriggerConfig {
+            url: "https://example.invalid/hook".to_string(),
+            send_only_event_types: None,
+        }));
+        let burn_block = block(20, vec![burn_output(7_000, 4)], Vec::new());
+        process(
+            &mut burn_processor,
+            &conn,
+            wallet.account_id,
+            std::slice::from_ref(&burn_block),
+        );
+
+        let (_, status, height, ..) = output_row(&conn, &hash(4));
+        assert_eq!(
+            (status.as_str(), height),
+            ("UNSPENT", 20),
+            "the burn output row is stored"
+        );
+        assert_eq!(credit_rows_for(&conn, &hash(4)), 0);
+        assert!(burn_processor.take_wallet_events().iter().any(|e| matches!(
+            e.event_type,
+            WalletEventType::OutputDetected { hash: h, .. } if h == hash(4)
+        )));
+        let balance = db::get_balance(&conn, wallet.account_id).expect("balance");
+        assert_eq!(balance.available, available_before);
+        assert_eq!(balance.available.as_u64(), selectable(&conn, wallet.account_id));
+
+        let displays = displays_at(&conn, wallet.account_id, 20);
+        assert_eq!(displays.len(), 1);
+        let burn = &displays[0];
+        assert_eq!(burn.source, TransactionSource::Burn);
+        assert_eq!(burn.direction, TransactionDirection::Incoming);
+        assert_eq!(burn.amount, 0.into());
+        assert_eq!(burn.details.total_credit, 0.into());
+        assert_eq!(burn.details.total_debit, 0.into());
+        assert_eq!(burn.message.as_deref(), Some("to L2"));
+        assert_eq!(burn.details.outputs.len(), 1);
+        assert_eq!(burn.details.outputs[0].amount, 7_000.into());
+        assert_eq!(burn.details.outputs[0].output_type, OutputType::Burn);
+
+        // The webhook sent for the burn output carries the unchanged balance.
+        let payload: String = conn
+            .query_row(
+                "SELECT payload FROM webhook_queue WHERE event_type = 'OutputDetected'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("webhook");
+        let payload: serde_json::Value = serde_json::from_str(&payload).expect("json");
+        assert_eq!(payload["balance"]["available"], 5_000);
+
+        assert_rebuild_matches_scan(&wallet, &conn);
+    }
+
+    #[test]
+    fn two_burn_outputs_in_one_block_are_each_shown_once() {
+        // Another account's burn of a different amount, and one of the same amount (ambiguous: the first is paired).
+        for (other_value, other_first) in [(3_000u64, true), (7_000, false)] {
+            let wallet = test_wallet();
+            let conn = wallet.pool.get().expect("conn");
+            let inputs = fund_burn(&wallet, &conn);
+
+            let burn_outputs = if other_first {
+                vec![burn_output(other_value, 5), burn_output(7_000, 4)]
+            } else {
+                vec![burn_output(7_000, 4), burn_output(other_value, 5)]
+            };
+            let burn_block = own_burn_block(20, inputs, burn_outputs);
+            process(
+                &mut processor(&wallet, false),
+                &conn,
+                wallet.account_id,
+                std::slice::from_ref(&burn_block),
+            );
+
+            let displays = displays_at(&conn, wallet.account_id, 20);
+            assert_eq!(displays.len(), 2);
+            assert!(displays.iter().all(|d| d.source == TransactionSource::Burn));
+            let own = displays
+                .iter()
+                .find(|d| !d.details.inputs.is_empty())
+                .expect("own burn");
+            let burns: Vec<_> = own
+                .details
+                .outputs
+                .iter()
+                .filter(|o| o.output_type == OutputType::Burn)
+                .collect();
+            assert_eq!(burns.len(), 1);
+            assert_eq!(burns[0].hash, hash(4));
+            let other = displays
+                .iter()
+                .find(|d| d.details.inputs.is_empty())
+                .expect("other burn");
+            assert_eq!(other.amount, 0.into());
+            assert_eq!(other.details.outputs[0].hash, hash(5));
+            assert_eq!(
+                db::get_balance(&conn, wallet.account_id).expect("balance").total,
+                4_900.into()
+            );
+        }
+    }
+
+    #[test]
+    fn a_burn_output_found_in_backfill_is_not_credited() {
+        let wallet = test_wallet();
+        let conn = wallet.pool.get().expect("conn");
+        let mut backfill = processor(&wallet, false);
+        backfill.set_backfill_mode(true);
+        let burn_block = block(20, vec![burn_output(7_000, 4)], Vec::new());
+        process(
+            &mut backfill,
+            &conn,
+            wallet.account_id,
+            std::slice::from_ref(&burn_block),
+        );
+
+        output_row(&conn, &hash(4));
+        assert_eq!(credit_rows_for(&conn, &hash(4)), 0);
+        assert_eq!(
+            db::get_balance(&conn, wallet.account_id).expect("balance").total,
+            0.into()
+        );
+    }
+
+    #[test]
+    fn a_reorg_of_a_block_with_burn_outputs_rolls_back_cleanly() {
+        // This wallet's burn, with its output recovered.
+        let wallet = test_wallet();
+        let mut conn = wallet.pool.get().expect("conn");
+        let inputs = fund_burn(&wallet, &conn);
+        let blocks = [
+            own_burn_block(50, inputs, vec![burn_output(7_000, 4)]),
+            block(51, Vec::new(), Vec::new()),
+        ];
+        process(&mut processor(&wallet, false), &conn, wallet.account_id, &blocks);
+        assert_eq!(
+            db::get_balance(&conn, wallet.account_id).expect("balance").total,
+            4_900.into()
+        );
+
+        rollback_to_50(&mut conn, wallet.account_id);
+
+        assert_eq!(
+            db::get_balance(&conn, wallet.account_id).expect("balance").total,
+            12_000.into()
+        );
+        assert_eq!(
+            credit_rows_for(&conn, &hash(4)),
+            0,
+            "nothing reversed for the burn output"
+        );
+        let displays = displays_at(&conn, wallet.account_id, 50);
+        assert_eq!(displays.len(), 1);
+        assert_eq!(displays[0].status, TransactionDisplayStatus::Reorganized);
+
+        // Another account's burn.
+        let wallet = test_wallet();
+        let mut conn = wallet.pool.get().expect("conn");
+        let blocks = [
+            block(10, vec![test_wallet_output(5_000, 1)], Vec::new()),
+            block(50, vec![burn_output(7_000, 4)], Vec::new()),
+        ];
+        process(&mut processor(&wallet, false), &conn, wallet.account_id, &blocks);
+
+        rollback_to_50(&mut conn, wallet.account_id);
+
+        assert_eq!(
+            db::get_balance(&conn, wallet.account_id).expect("balance").total,
+            5_000.into()
+        );
+        assert_eq!(credit_rows_for(&conn, &hash(4)), 0);
+        let displays = displays_at(&conn, wallet.account_id, 50);
+        assert_eq!(displays.len(), 1);
+        assert_eq!(displays[0].status, TransactionDisplayStatus::Reorganized);
     }
 }

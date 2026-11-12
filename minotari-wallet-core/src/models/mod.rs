@@ -178,8 +178,10 @@ pub struct BalanceChange {
     /// Human-readable description of the change
     pub description: String,
     /// Amount credited to the balance (in µT)
+    #[serde(deserialize_with = "crate::db::sqlite_amount::micro_minotari")]
     pub balance_credit: MicroMinotari,
     /// Amount debited from the balance (in µT)
+    #[serde(deserialize_with = "crate::db::sqlite_amount::micro_minotari")]
     pub balance_debit: MicroMinotari,
     /// Timestamp when the change becomes effective
     pub effective_date: NaiveDateTime,
@@ -194,8 +196,10 @@ pub struct BalanceChange {
     /// Raw memo
     pub memo_hex: Option<String>,
     /// Transaction fee from metadata
+    #[serde(deserialize_with = "crate::db::sqlite_amount::micro_minotari_opt")]
     pub claimed_fee: Option<MicroMinotari>,
     /// Transaction amount from metadata
+    #[serde(deserialize_with = "crate::db::sqlite_amount::micro_minotari_opt")]
     pub claimed_amount: Option<MicroMinotari>,
     /// Whether this balance change is a reversal of another balance change (e.g., due to reorg)
     #[serde(default)]

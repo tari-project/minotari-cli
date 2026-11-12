@@ -7,6 +7,7 @@ use crate::db::{self};
 use crate::models::{BalanceChange, Id, OutputStatus};
 use crate::scan::block_event_accumulator::BlockEventAccumulator;
 use crate::scan::{DetectedOutput, MemoInfo, SpentInput};
+use chrono::NaiveDateTime;
 use log::debug;
 use rusqlite::Connection;
 use std::collections::{BinaryHeap, HashMap};
@@ -14,6 +15,7 @@ use tari_common_types::transaction::TxId;
 use tari_common_types::types::FixedHash;
 use tari_common_types::types::PrivateKey;
 use tari_transaction_components::MicroMinotari;
+use tari_transaction_components::transaction_components::memo_field::TxType;
 use tari_transaction_components::transaction_components::{OutputType, WalletOutput};
 use tari_utilities::ByteArray;
 
@@ -111,6 +113,27 @@ impl DisplayedTransactionProcessor {
             }
             // we need to create a new display tx for this input
             new_debit.push((balance_change.clone(), output.clone()));
+        }
+        let mut new_burns = Vec::new();
+        for (mined_at, output) in accumulator.burn_outputs() {
+            let hash = output.output.output_hash();
+            let Some(tx) = current_display_transactions
+                .iter()
+                .find(|tx| tx.details.outputs.iter().any(|o| o.hash == hash))
+            else {
+                new_burns.push((*mined_at, output.clone()));
+                continue;
+            };
+            let mut updated = tx.clone();
+            updated.blockchain.block_height = output.height;
+            updated.blockchain.timestamp = *mined_at;
+            updated.blockchain.confirmations = self.current_tip_height.saturating_sub(output.height);
+            if updated.blockchain.confirmations >= self.req_confirmations {
+                updated.status = TransactionDisplayStatus::Confirmed;
+            } else {
+                updated.status = TransactionDisplayStatus::Unconfirmed;
+            }
+            let _unused = updated_transactions.insert(tx.id, updated);
         }
         new_debit.sort_by_key(|a| a.1.output.value());
         let mut new_transactions = Vec::new();
@@ -214,15 +237,46 @@ impl DisplayedTransactionProcessor {
                 .build(id)?;
             new_transactions.push(display_tx);
         }
-        new_transactions.append(&mut self.search_inputs(new_debit, new_credit, accumulator)?);
+        new_transactions.append(&mut self.search_inputs(new_debit, new_credit, &mut new_burns, accumulator)?);
+        // A burn output not paired with one of this wallet's burns in the block is shown without value, for
+        // information: it may be claimable on L2 with this key.
+        for (mined_at, output) in new_burns {
+            let (initial_status, initial_confirmations) =
+                self.calculate_status_and_confirmations(output.height, output.output.max_lock_height());
+            let memo = MemoInfo::from_output(&output.output);
+            let display_tx = DisplayedTransactionBuilder::new()
+                .account_id(accumulator.account_id as Id)
+                .source(TransactionSource::Burn)
+                .status(initial_status)
+                .lock_height(output.output.max_lock_height())
+                .credits_and_debits(0.into(), 0.into())
+                .blockchain_info(
+                    accumulator.height,
+                    output.mined_in_block_hash,
+                    mined_at,
+                    initial_confirmations,
+                )
+                .message(memo.parsed)
+                .memo_hex(memo.hex)
+                .outputs(vec![Self::burn_display_output(&output)])
+                .output_type(Some(OutputType::Burn))
+                .build(TxId::new_deterministic(
+                    self.view_key.as_bytes(),
+                    &output.output.output_hash(),
+                ))?;
+            new_transactions.push(display_tx);
+        }
 
         Ok((updated_transactions.into_values().collect(), new_transactions))
     }
 
+    /// Matches change outputs to the inputs they were made from. A matched burn takes its paired output out of
+    /// `burn_outputs`.
     fn search_inputs(
         &self,
         mut inputs: Vec<(BalanceChange, SpentInput)>,
         outputs: Vec<(BalanceChange, DetectedOutput)>,
+        burn_outputs: &mut Vec<(NaiveDateTime, DetectedOutput)>,
         accumulator: &BlockEventAccumulator,
     ) -> Result<Vec<DisplayedTransaction>, ProcessorError> {
         let mut result = Vec::new();
@@ -268,7 +322,7 @@ impl DisplayedTransactionProcessor {
             let (balance_change, output) = outputs
                 .get(output_index)
                 .ok_or(ProcessorError::MissingError("Output index out of bounds".to_string()))?;
-            let (sender, amount, _tx_type, _one_sided) = output
+            let (sender, amount, tx_type, _one_sided) = output
                 .output
                 .payment_id()
                 .get_transaction_info_details()
@@ -291,9 +345,26 @@ impl DisplayedTransactionProcessor {
             let mut other_party = output.output.payment_id().claimed_sender_address();
             let id = TxId::new_deterministic(self.view_key.as_bytes(), &output.output.output_hash());
             let memo = MemoInfo::from_output(&output.output);
+            let mut tx_outputs = vec![TransactionOutput {
+                hash: output.output.output_hash(),
+                amount: output.output.value(),
+                status: OutputStatus::Unspent,
+                mined_in_block_height: output.height,
+                mined_in_block_hash: output.mined_in_block_hash,
+                output_type: OutputType::Standard,
+                is_change: false,
+            }];
+            let is_burn = tx_type == TxType::Burn;
+            if is_burn && let Some(burn) = Self::take_paired_burn_output(burn_outputs, amount, &sent) {
+                tx_outputs.push(Self::burn_display_output(&burn));
+            }
             let tx = DisplayedTransactionBuilder::new()
                 .account_id(accumulator.account_id as Id)
-                .source(TransactionSource::Transfer)
+                .source(if is_burn {
+                    TransactionSource::Burn
+                } else {
+                    TransactionSource::Transfer
+                })
                 .status(initial_status)
                 .lock_height(output.output.max_lock_height())
                 .blockchain_info(
@@ -305,16 +376,12 @@ impl DisplayedTransactionProcessor {
                 .fee(output.output.payment_id().get_fee())
                 .message(memo.parsed)
                 .memo_hex(memo.hex)
-                .outputs(vec![TransactionOutput {
-                    hash: output.output.output_hash(),
-                    amount: output.output.value(),
-                    status: OutputStatus::Unspent,
-                    mined_in_block_height: output.height,
-                    mined_in_block_hash: output.mined_in_block_hash,
-                    output_type: OutputType::Standard,
-                    is_change: false,
-                }])
-                .output_type(Some(OutputType::Standard))
+                .outputs(tx_outputs)
+                .output_type(Some(if is_burn {
+                    OutputType::Burn
+                } else {
+                    OutputType::Standard
+                }))
                 .sent_output_hashes(sent)
                 .inputs(tx_inputs)
                 .credits_and_debits(balance_change.balance_credit, debit_value)
@@ -330,6 +397,43 @@ impl DisplayedTransactionProcessor {
         result.append(&mut self.handle_unmatched_inputs_outputs(inputs, &outputs, &unmatched_index, accumulator)?);
 
         Ok(result)
+    }
+
+    /// Takes the burn output a burn's change memo points at: one of its sent hashes, else the first with the burned
+    /// amount.
+    fn take_paired_burn_output(
+        burn_outputs: &mut Vec<(NaiveDateTime, DetectedOutput)>,
+        amount: MicroMinotari,
+        sent: &[FixedHash],
+    ) -> Option<DetectedOutput> {
+        let index = burn_outputs
+            .iter()
+            .position(|(_, b)| sent.contains(&b.output.output_hash()))
+            .or_else(|| {
+                let mut same_amount = burn_outputs
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, (_, b))| b.output.value() == amount)
+                    .map(|(i, _)| i);
+                let first = same_amount.next();
+                if same_amount.next().is_some() {
+                    debug!("Several burn outputs in the block have the burned amount; pairing the first");
+                }
+                first
+            })?;
+        Some(burn_outputs.remove(index).1)
+    }
+
+    fn burn_display_output(output: &DetectedOutput) -> TransactionOutput {
+        TransactionOutput {
+            hash: output.output.output_hash(),
+            amount: output.output.value(),
+            status: OutputStatus::Unspent,
+            mined_in_block_height: output.height,
+            mined_in_block_hash: output.mined_in_block_hash,
+            output_type: OutputType::Burn,
+            is_change: false,
+        }
     }
 
     /// The total value the sender claims left their wallet for this transaction: the amount the memo says was paid to
@@ -565,70 +669,75 @@ impl DisplayedTransactionProcessor {
 
         let balance_changes = db::get_all_active_balance_changes_by_account_id(conn, account_id)?;
 
-        if balance_changes.is_empty() {
-            return Ok((Vec::new(), Vec::new()));
+        //lets group them via height, one accumulator per height.
+        let mut accumulators: HashMap<u64, BlockEventAccumulator> = HashMap::new();
+        for balance_change in balance_changes {
+            let height = balance_change.effective_height;
+            let acc = accumulators
+                .entry(height)
+                .or_insert_with(|| BlockEventAccumulator::new(account_id, height, vec![]));
+            if balance_change.is_debit() {
+                let input = db::get_input_by_id(
+                    conn,
+                    balance_change.caused_by_input_id.ok_or(ProcessorError::MissingError(
+                        "Debit balance change has no associated input".to_string(),
+                    ))?,
+                )?
+                .ok_or(ProcessorError::MissingError(
+                    "Debit balance change has no associated input".to_string(),
+                ))?;
+                let output = db::get_output_by_id(conn, input.output_id)?.ok_or(ProcessorError::MissingError(
+                    format!("Ouput does not exist: {}", input.output_id),
+                ))?;
+                let spent_input = SpentInput {
+                    output_id: input.id,
+                    mined_in_block: FixedHash::try_from(input.mined_in_block_hash)
+                        .map_err(|e| ProcessorError::ParseError(e.to_string()))?,
+                    mined_in_block_height: input.mined_in_block_height as u64,
+                    output: output.to_wallet_output()?,
+                };
+                acc.add_debit_change(balance_change, spent_input);
+            } else {
+                let output = db::get_output_by_id(
+                    conn,
+                    balance_change.caused_by_output_id.ok_or(ProcessorError::MissingError(
+                        "Credit balance change has no associated input".to_string(),
+                    ))?,
+                )?
+                .ok_or(ProcessorError::MissingError(
+                    "Credit balance change has no associated input".to_string(),
+                ))?;
+                let detected = DetectedOutput {
+                    height: output.mined_in_block_height as u64,
+                    mined_in_block_hash: FixedHash::try_from(output.mined_in_block_hash.clone())
+                        .map_err(|e| ProcessorError::ParseError(e.to_string()))?,
+                    output: output.to_wallet_output()?,
+                };
+                acc.add_credit_change(balance_change, detected);
+            }
+        }
+        // Burn outputs have no balance change, so they are loaded on their own.
+        for output in db::get_active_burn_outputs(conn, account_id)? {
+            let height = output.mined_in_block_height as u64;
+            let detected = DetectedOutput {
+                height,
+                mined_in_block_hash: FixedHash::try_from(output.mined_in_block_hash.clone())
+                    .map_err(|e| ProcessorError::ParseError(e.to_string()))?,
+                output: output.to_wallet_output()?,
+            };
+            accumulators
+                .entry(height)
+                .or_insert_with(|| BlockEventAccumulator::new(account_id, height, vec![]))
+                .add_burn_output(output.mined_timestamp, detected);
         }
 
-        //lets group them via height.
-        let mapped_changes: HashMap<u64, Vec<BalanceChange>> =
-            balance_changes.into_iter().fold(HashMap::new(), |mut acc, change| {
-                acc.entry(change.effective_height).or_default().push(change);
-                acc
-            });
         let mut new_transactions = Vec::new();
         let mut updated_transactions = Vec::new();
-        for balance_changes in mapped_changes.into_values() {
+        for acc in accumulators.into_values() {
             debug!(
-                count = balance_changes.len();
+                count = acc.total_changes();
                 "Processing balance changes at height"
             );
-            //let create the accumulator for this height and process it
-            let mut acc = BlockEventAccumulator::new(
-                account_id,
-                balance_changes.first().expect("Already checked").effective_height,
-                vec![],
-            );
-            for balance_change in balance_changes {
-                if balance_change.is_debit() {
-                    let input = db::get_input_by_id(
-                        conn,
-                        balance_change.caused_by_input_id.ok_or(ProcessorError::MissingError(
-                            "Debit balance change has no associated input".to_string(),
-                        ))?,
-                    )?
-                    .ok_or(ProcessorError::MissingError(
-                        "Debit balance change has no associated input".to_string(),
-                    ))?;
-                    let output = db::get_output_by_id(conn, input.output_id)?.ok_or(ProcessorError::MissingError(
-                        format!("Ouput does not exist: {}", input.output_id),
-                    ))?;
-                    let spent_input = SpentInput {
-                        output_id: input.id,
-                        mined_in_block: FixedHash::try_from(input.mined_in_block_hash)
-                            .map_err(|e| ProcessorError::ParseError(e.to_string()))?,
-                        mined_in_block_height: input.mined_in_block_height as u64,
-                        output: output.to_wallet_output()?,
-                    };
-                    acc.add_debit_change(balance_change, spent_input);
-                } else {
-                    let output = db::get_output_by_id(
-                        conn,
-                        balance_change.caused_by_output_id.ok_or(ProcessorError::MissingError(
-                            "Credit balance change has no associated input".to_string(),
-                        ))?,
-                    )?
-                    .ok_or(ProcessorError::MissingError(
-                        "Credit balance change has no associated input".to_string(),
-                    ))?;
-                    let detected = DetectedOutput {
-                        height: output.mined_in_block_height as u64,
-                        mined_in_block_hash: FixedHash::try_from(output.mined_in_block_hash.clone())
-                            .map_err(|e| ProcessorError::ParseError(e.to_string()))?,
-                        output: output.to_wallet_output()?,
-                    };
-                    acc.add_credit_change(balance_change, detected);
-                }
-            }
             let (mut updated_tx, mut new_tx) = self.create_new_updated_display_transactions_for_height(&acc, conn)?;
             updated_transactions.append(&mut updated_tx);
             new_transactions.append(&mut new_tx);
@@ -1780,7 +1889,7 @@ mod tests {
         let inputs: Vec<(BalanceChange, SpentInput)> = vec![];
         let outputs: Vec<(BalanceChange, DetectedOutput)> = vec![];
 
-        let result = processor.search_inputs(inputs, outputs, &accumulator);
+        let result = processor.search_inputs(inputs, outputs, &mut Vec::new(), &accumulator);
         assert!(result.is_ok());
         assert!(result.unwrap().is_empty());
     }
@@ -1797,7 +1906,7 @@ mod tests {
         ];
         let outputs: Vec<(BalanceChange, DetectedOutput)> = vec![];
 
-        let result = processor.search_inputs(inputs, outputs, &accumulator);
+        let result = processor.search_inputs(inputs, outputs, &mut Vec::new(), &accumulator);
         assert!(result.is_ok());
         let txs = result.unwrap();
         // Each unmatched input should generate a transaction
@@ -1816,7 +1925,7 @@ mod tests {
             mock_detected_output(1000, 1, 50),
         )];
 
-        let result = processor.search_inputs(inputs, outputs, &accumulator);
+        let result = processor.search_inputs(inputs, outputs, &mut Vec::new(), &accumulator);
         assert!(result.is_ok());
         let txs = result.unwrap();
         // Output without transaction_info_details -> unmatched output transaction
@@ -1835,7 +1944,7 @@ mod tests {
         ];
         let outputs: Vec<(BalanceChange, DetectedOutput)> = vec![];
 
-        let result = processor.search_inputs(inputs, outputs, &accumulator);
+        let result = processor.search_inputs(inputs, outputs, &mut Vec::new(), &accumulator);
         assert!(result.is_ok());
         let txs = result.unwrap();
         assert_eq!(txs.len(), 3);
@@ -1852,7 +1961,7 @@ mod tests {
             mock_detected_output(500, 2, 50),
         )];
 
-        let result = processor.search_inputs(inputs, outputs, &accumulator);
+        let result = processor.search_inputs(inputs, outputs, &mut Vec::new(), &accumulator);
         assert!(result.is_ok());
         let txs = result.unwrap();
         // 1 unmatched input + 1 unmatched output = 2 transactions
@@ -1867,7 +1976,9 @@ mod tests {
         let inputs = vec![(create_debit_balance_change(1, 100, 50), mock_spent_input(100, 1))];
         let outputs: Vec<(BalanceChange, DetectedOutput)> = vec![];
 
-        let result = processor.search_inputs(inputs, outputs, &accumulator).unwrap();
+        let result = processor
+            .search_inputs(inputs, outputs, &mut Vec::new(), &accumulator)
+            .unwrap();
         assert_eq!(result.len(), 1);
         // tip=100, mined_height=10 (from mock_spent_input), confirmations=90 >= 3
         assert_eq!(result[0].status, TransactionDisplayStatus::Confirmed);
@@ -1882,7 +1993,9 @@ mod tests {
         let inputs = vec![(create_debit_balance_change(1, 100, 50), mock_spent_input(100, 1))];
         let outputs: Vec<(BalanceChange, DetectedOutput)> = vec![];
 
-        let result = processor.search_inputs(inputs, outputs, &accumulator).unwrap();
+        let result = processor
+            .search_inputs(inputs, outputs, &mut Vec::new(), &accumulator)
+            .unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].status, TransactionDisplayStatus::Unconfirmed);
     }
@@ -1986,7 +2099,9 @@ mod tests {
             mock_output_claiming(1, u64::MAX, u64::MAX, 2, 50),
         )];
 
-        let result = processor.search_inputs(inputs, outputs, &accumulator).unwrap();
+        let result = processor
+            .search_inputs(inputs, outputs, &mut Vec::new(), &accumulator)
+            .unwrap();
         // The unmatchable output and the leftover input each become their own transaction.
         assert_eq!(result.len(), 2);
     }

@@ -56,6 +56,7 @@ use rusqlite::Connection;
 use rusqlite_migration::Migrations;
 
 mod error;
+pub(crate) mod sqlite_amount;
 mod sqlite_time;
 pub use error::{WalletDbError, WalletDbResult};
 
@@ -78,7 +79,7 @@ mod outputs;
 pub use outputs::{
     ChangeOutputToRevert, DbOutput, DbWalletOutput, UnresolvedSpentOutput, clear_dead_lock,
     confirm_unconfirmed_change_output, fetch_outputs_by_lock_request_id, fetch_unspent_outputs,
-    get_active_outputs_from_height, get_change_output_hash_for_request, get_output_by_id,
+    get_active_burn_outputs, get_active_outputs_from_height, get_change_output_hash_for_request, get_output_by_id,
     get_output_hashes_mined_in_block, get_output_hashes_spent_in_block, get_output_info_by_hash,
     get_output_info_by_hash_for_account, get_output_lock_request_id, get_output_spend, get_output_totals_for_account,
     get_total_unspent_balance, get_unconfirmed_outputs, get_unresolved_spent_unconfirmed_outputs, insert_output,
@@ -281,4 +282,122 @@ fn attempt_sqlx_adoption(conn: &mut Connection) -> WalletDbResult<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::OutputStatus;
+    use crate::transactions::{DisplayedTransactionBuilder, TransactionOutput, TransactionSource};
+    use rusqlite::named_params;
+    use tari_common_types::seeds::cipher_seed::CipherSeed;
+    use tari_common_types::types::FixedHash;
+    use tari_transaction_components::key_manager::wallet_types::{SeedWordsWallet, WalletType};
+    use tari_transaction_components::transaction_components::OutputType;
+
+    fn seed_output(conn: &Connection, account_id: i64, hash: FixedHash, value: i64, is_burn: bool) -> i64 {
+        conn.execute(
+            "INSERT INTO outputs (account_id, tx_id, output_hash, mined_in_block_hash, mined_in_block_height, value,
+                                  mined_timestamp, wallet_output_json, is_burn)
+             VALUES (:account_id, :value, :hash, x'00', 10, :value, CURRENT_TIMESTAMP, '{}', :is_burn)",
+            named_params! { ":account_id": account_id, ":hash": hash.as_slice(), ":value": value, ":is_burn": is_burn },
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    fn seed_balance_change(
+        conn: &Connection,
+        account_id: i64,
+        output_id: i64,
+        credit: i64,
+        debit: i64,
+        reversal_of: Option<i64>,
+    ) -> i64 {
+        conn.execute(
+            "INSERT INTO balance_changes (account_id, caused_by_output_id, description, balance_credit, balance_debit,
+                                          effective_date, effective_height, is_reversal, reversal_of_balance_change_id)
+             VALUES (:account_id, :output_id, 'seed', :credit, :debit, CURRENT_TIMESTAMP, 10, :is_reversal, :reversal_of)",
+            named_params! {
+                ":account_id": account_id,
+                ":output_id": output_id,
+                ":credit": credit,
+                ":debit": debit,
+                ":is_reversal": reversal_of.is_some(),
+                ":reversal_of": reversal_of,
+            },
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    fn seed_received_display(conn: &Connection, account_id: i64, id: u64, hash: FixedHash, value: u64) {
+        let display = DisplayedTransactionBuilder::new()
+            .account_id(account_id)
+            .source(TransactionSource::Transfer)
+            .credits_and_debits(value.into(), 0.into())
+            .outputs(vec![TransactionOutput {
+                hash,
+                amount: value.into(),
+                status: OutputStatus::Unspent,
+                mined_in_block_height: 10,
+                mined_in_block_hash: FixedHash::zero(),
+                output_type: OutputType::Standard,
+                is_change: false,
+            }])
+            .build(id.into())
+            .unwrap();
+        insert_displayed_transaction(conn, &display).unwrap();
+    }
+
+    #[test]
+    fn migration_37_removes_burn_credits_and_their_received_entries_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut conn = Connection::open(dir.path().join("migrate.db")).unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        MIGRATIONS.to_version(&mut conn, 36).unwrap();
+
+        let wallet = WalletType::SeedWords(SeedWordsWallet::construct_new(CipherSeed::random()).unwrap());
+        create_account(&conn, "default", &wallet, "password").unwrap();
+        let account_id = get_account_by_name(&conn, "default").unwrap().unwrap().id;
+
+        let burn_hash = FixedHash::from([0xab; 32]);
+        let normal_hash = FixedHash::from([0x01; 32]);
+        let burn_id = seed_output(&conn, account_id, burn_hash, 7_000, true);
+        let normal_id = seed_output(&conn, account_id, normal_hash, 5_000, false);
+        // A burn credit that a reorg reversed, then booked again, as the scan used to.
+        let reversed = seed_balance_change(&conn, account_id, burn_id, 7_000, 0, None);
+        seed_balance_change(&conn, account_id, burn_id, 0, 7_000, Some(reversed));
+        seed_balance_change(&conn, account_id, burn_id, 7_000, 0, None);
+        let normal_credit = seed_balance_change(&conn, account_id, normal_id, 5_000, 0, None);
+        seed_received_display(&conn, account_id, 1, burn_hash, 7_000);
+        seed_received_display(&conn, account_id, 2, normal_hash, 5_000);
+        assert_eq!(get_balance(&conn, account_id).unwrap().total, 12_000.into());
+
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+
+        let remaining: Vec<i64> = conn
+            .prepare("SELECT id FROM balance_changes")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(remaining, vec![normal_credit]);
+        assert_eq!(get_balance(&conn, account_id).unwrap().total, 5_000.into());
+
+        let displays: Vec<String> = conn
+            .prepare("SELECT id FROM displayed_transactions")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(displays, vec!["2".to_string()]);
+
+        let burn_rows: i64 = conn
+            .query_row("SELECT COUNT(*) FROM outputs WHERE is_burn = 1", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(burn_rows, 1, "the burn output row is kept");
+    }
 }

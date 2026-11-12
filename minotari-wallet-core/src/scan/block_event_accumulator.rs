@@ -1,3 +1,5 @@
+use chrono::NaiveDateTime;
+
 use crate::BlockProcessedEvent;
 use crate::models::BalanceChange;
 use crate::scan::{BalanceChangeSummary, DetectedOutput, SpentInput};
@@ -16,6 +18,8 @@ pub struct BlockEventAccumulator {
     pub block_hash: Vec<u8>,
     debit_balance_changes: Vec<(BalanceChange, SpentInput)>,
     credit_balance_changes: Vec<(BalanceChange, DetectedOutput)>,
+    /// Burn outputs found in the block, with their mined time. They never credit the balance.
+    burn_outputs: Vec<(NaiveDateTime, DetectedOutput)>,
 }
 
 impl BlockEventAccumulator {
@@ -27,6 +31,7 @@ impl BlockEventAccumulator {
             block_hash,
             debit_balance_changes: Vec::new(),
             credit_balance_changes: Vec::new(),
+            burn_outputs: Vec::new(),
         }
     }
 
@@ -34,6 +39,7 @@ impl BlockEventAccumulator {
         self.debit_balance_changes
             .len()
             .saturating_add(self.credit_balance_changes.len())
+            .saturating_add(self.burn_outputs.len())
     }
 
     pub fn debit_balance_changes(&self) -> &[(BalanceChange, SpentInput)] {
@@ -42,6 +48,15 @@ impl BlockEventAccumulator {
 
     pub fn credit_balance_changes(&self) -> &[(BalanceChange, DetectedOutput)] {
         &self.credit_balance_changes
+    }
+
+    pub fn burn_outputs(&self) -> &[(NaiveDateTime, DetectedOutput)] {
+        &self.burn_outputs
+    }
+
+    /// Adds a burn output found in the block.
+    pub fn add_burn_output(&mut self, mined_at: NaiveDateTime, output: DetectedOutput) {
+        self.burn_outputs.push((mined_at, output));
     }
 
     /// Adds a debit balance change to the accumulator.
@@ -55,12 +70,12 @@ impl BlockEventAccumulator {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.debit_balance_changes.is_empty() && self.credit_balance_changes.is_empty()
+        self.debit_balance_changes.is_empty() && self.credit_balance_changes.is_empty() && self.burn_outputs.is_empty()
     }
 
     /// Consumes the accumulator and builds the final [`BlockProcessedEvent`].
     pub fn into_event(self) -> BlockProcessedEvent {
-        let mut outputs_detected = Vec::new();
+        let mut outputs_detected: Vec<DetectedOutput> = self.burn_outputs.into_iter().map(|(_, o)| o).collect();
         let mut inputs_spent = Vec::new();
         let mut balance_changes = Vec::new();
         for credit in self.credit_balance_changes {
