@@ -331,20 +331,24 @@ mod tests {
         conn.last_insert_rowid()
     }
 
-    fn seed_received_display(conn: &Connection, account_id: i64, id: u64, hash: FixedHash, value: u64) {
-        let display = DisplayedTransactionBuilder::new()
-            .account_id(account_id)
-            .source(TransactionSource::Transfer)
-            .credits_and_debits(value.into(), 0.into())
-            .outputs(vec![TransactionOutput {
-                hash,
+    fn seed_received_display(conn: &Connection, account_id: i64, id: u64, hashes: &[FixedHash], value: u64) {
+        let outputs = hashes
+            .iter()
+            .map(|hash| TransactionOutput {
+                hash: *hash,
                 amount: value.into(),
                 status: OutputStatus::Unspent,
                 mined_in_block_height: 10,
                 mined_in_block_hash: FixedHash::zero(),
                 output_type: OutputType::Standard,
                 is_change: false,
-            }])
+            })
+            .collect();
+        let display = DisplayedTransactionBuilder::new()
+            .account_id(account_id)
+            .source(TransactionSource::Transfer)
+            .credits_and_debits(value.into(), 0.into())
+            .outputs(outputs)
             .build(id.into())
             .unwrap();
         insert_displayed_transaction(conn, &display).unwrap();
@@ -370,8 +374,10 @@ mod tests {
         seed_balance_change(&conn, account_id, burn_id, 0, 7_000, Some(reversed));
         seed_balance_change(&conn, account_id, burn_id, 7_000, 0, None);
         let normal_credit = seed_balance_change(&conn, account_id, normal_id, 5_000, 0, None);
-        seed_received_display(&conn, account_id, 1, burn_hash, 7_000);
-        seed_received_display(&conn, account_id, 2, normal_hash, 5_000);
+        seed_received_display(&conn, account_id, 1, &[burn_hash], 7_000);
+        seed_received_display(&conn, account_id, 2, &[normal_hash], 5_000);
+        // Not built from a burn credit alone: kept.
+        seed_received_display(&conn, account_id, 3, &[burn_hash, normal_hash], 12_000);
         assert_eq!(get_balance(&conn, account_id).unwrap().total, 12_000.into());
 
         MIGRATIONS.to_latest(&mut conn).unwrap();
@@ -387,13 +393,13 @@ mod tests {
         assert_eq!(get_balance(&conn, account_id).unwrap().total, 5_000.into());
 
         let displays: Vec<String> = conn
-            .prepare("SELECT id FROM displayed_transactions")
+            .prepare("SELECT id FROM displayed_transactions ORDER BY id")
             .unwrap()
             .query_map([], |row| row.get(0))
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap();
-        assert_eq!(displays, vec!["2".to_string()]);
+        assert_eq!(displays, vec!["2".to_string(), "3".to_string()]);
 
         let burn_rows: i64 = conn
             .query_row("SELECT COUNT(*) FROM outputs WHERE is_burn = 1", [], |row| row.get(0))
