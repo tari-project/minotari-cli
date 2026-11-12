@@ -379,6 +379,31 @@ mod tests {
         conn.last_insert_rowid()
     }
 
+    /// A spend of `output_id` with its debit, as base-node verification recorded one; returns (input, debit) ids.
+    fn seed_spend(conn: &Connection, account_id: i64, output_id: i64, value: i64, status: &str) -> (i64, i64) {
+        conn.execute(
+            "INSERT INTO inputs (account_id, output_id, mined_in_block_hash, mined_in_block_height, mined_timestamp)
+             VALUES (:account_id, :output_id, x'00', 11, CURRENT_TIMESTAMP)",
+            named_params! { ":account_id": account_id, ":output_id": output_id },
+        )
+        .unwrap();
+        let input_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO balance_changes (account_id, caused_by_input_id, description, balance_credit, balance_debit,
+                                          effective_date, effective_height)
+             VALUES (:account_id, :input_id, 'seed', 0, :value, CURRENT_TIMESTAMP, 11)",
+            named_params! { ":account_id": account_id, ":input_id": input_id, ":value": value },
+        )
+        .unwrap();
+        let debit_id = conn.last_insert_rowid();
+        conn.execute(
+            "UPDATE outputs SET status = :status WHERE id = :id",
+            named_params! { ":status": status, ":id": output_id },
+        )
+        .unwrap();
+        (input_id, debit_id)
+    }
+
     fn seed_received_display(conn: &Connection, account_id: i64, id: u64, hashes: &[FixedHash], value: u64) {
         let outputs = hashes
             .iter()
@@ -433,6 +458,14 @@ mod tests {
             seed_output_with_json(&conn, account_id, legacy_normal_hash, 2_000, false, &legacy_normal_json);
         seed_balance_change(&conn, account_id, legacy_burn_id, 3_000, 0, None);
         let legacy_normal_credit = seed_balance_change(&conn, account_id, legacy_normal_id, 2_000, 0, None);
+        // A burn row a backfill left SPENT_UNCONFIRMED and base-node verification then recorded as spent, and a
+        // normal output spent the same way, which is kept.
+        let spent_burn_id = seed_output(&conn, account_id, FixedHash::from([0xef; 32]), 4_000, true);
+        seed_balance_change(&conn, account_id, spent_burn_id, 4_000, 0, None);
+        seed_spend(&conn, account_id, spent_burn_id, 4_000, "SPENT_UNCONFIRMED");
+        let spent_normal_id = seed_output(&conn, account_id, FixedHash::from([0x03; 32]), 1_000, false);
+        let spent_normal_credit = seed_balance_change(&conn, account_id, spent_normal_id, 1_000, 0, None);
+        let (spent_normal_input, spent_normal_debit) = seed_spend(&conn, account_id, spent_normal_id, 1_000, "SPENT");
         seed_received_display(&conn, account_id, 4, &[legacy_burn_hash], 3_000);
         seed_received_display(&conn, account_id, 5, &[legacy_normal_hash], 2_000);
         seed_received_display(&conn, account_id, 1, &[burn_hash], 7_000);
@@ -450,7 +483,15 @@ mod tests {
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap();
-        assert_eq!(remaining, vec![normal_credit, legacy_normal_credit]);
+        assert_eq!(
+            remaining,
+            vec![
+                normal_credit,
+                legacy_normal_credit,
+                spent_normal_credit,
+                spent_normal_debit
+            ]
+        );
         assert_eq!(get_balance(&conn, account_id).unwrap().total, 7_000.into());
 
         let displays: Vec<String> = conn
@@ -462,20 +503,31 @@ mod tests {
             .unwrap();
         assert_eq!(displays, vec!["2".to_string(), "3".to_string(), "5".to_string()]);
 
-        let burn_flags: Vec<(i64, bool)> = conn
-            .prepare("SELECT id, is_burn FROM outputs ORDER BY id")
+        let inputs: Vec<i64> = conn
+            .prepare("SELECT id FROM inputs")
             .unwrap()
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(inputs, vec![spent_normal_input], "the burn output's spend is gone");
+
+        let burn_flags: Vec<(i64, bool, String)> = conn
+            .prepare("SELECT id, is_burn, status FROM outputs ORDER BY id")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap();
         assert_eq!(
             burn_flags,
             vec![
-                (burn_id, true),
-                (normal_id, false),
-                (legacy_burn_id, true),
-                (legacy_normal_id, false)
+                (burn_id, true, "UNSPENT".to_string()),
+                (normal_id, false, "UNSPENT".to_string()),
+                (legacy_burn_id, true, "UNSPENT".to_string()),
+                (legacy_normal_id, false, "UNSPENT".to_string()),
+                (spent_burn_id, true, "UNSPENT".to_string()),
+                (spent_normal_id, false, "SPENT".to_string()),
             ],
             "every burn output row is kept and flagged"
         );

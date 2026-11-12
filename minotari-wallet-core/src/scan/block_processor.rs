@@ -3321,6 +3321,53 @@ mod tests {
     }
 
     #[test]
+    fn a_zero_value_output_claiming_a_burn_does_not_take_the_burn_output() {
+        // A 0-value output whose memo claims a burn of 0 naming our burn output: no inputs add up to 0, so it is
+        // not matched as a send and leaves the burn output to our own burn.
+        let wallet = test_wallet();
+        let conn = wallet.pool.get().expect("conn");
+        let inputs = fund_burn(&wallet, &conn);
+        let claim = MemoField::new_transaction_info(
+            TariAddress::default(),
+            0.into(),
+            0.into(),
+            false,
+            TxType::Burn,
+            vec![hash(4)],
+            Vec::new(),
+        )
+        .expect("memo");
+        let zero = test_output(0, 6, OutputFeatures::default(), claim);
+
+        let burn_block = own_burn_block(20, inputs, vec![zero, burn_output(7_000, 4)]);
+        process(
+            &mut processor(&wallet, false),
+            &conn,
+            wallet.account_id,
+            std::slice::from_ref(&burn_block),
+        );
+
+        let displays = displays_at(&conn, wallet.account_id, 20);
+        let own = displays
+            .iter()
+            .find(|d| !d.details.inputs.is_empty())
+            .expect("own burn");
+        assert_eq!(own.source, TransactionSource::Burn);
+        assert!(
+            own.details.outputs.iter().any(|o| o.hash == hash(4)),
+            "keeps its burn output"
+        );
+        let zero = displays
+            .iter()
+            .find(|d| d.details.outputs.iter().any(|o| o.hash == hash(6)))
+            .expect("zero-value output shown");
+        assert_ne!(zero.source, TransactionSource::Burn);
+        assert!(zero.details.inputs.is_empty());
+        assert!(!zero.details.outputs.iter().any(|o| o.hash == hash(4)));
+        assert_eq!(displays.len(), 2);
+    }
+
+    #[test]
     fn a_burn_output_found_in_backfill_is_not_credited() {
         let wallet = test_wallet();
         let conn = wallet.pool.get().expect("conn");

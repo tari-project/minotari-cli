@@ -11,6 +11,21 @@ WHERE is_burn = 0
            THEN json_extract(wallet_output_json, '$.features.output_type')
       END = 2;
 
+-- A burn output can never be spent. Remove any spend recorded for one (its
+-- input and the debits and reversals tied to that input) and make it unspent
+-- again, as a scan stores it.
+DELETE FROM balance_changes
+WHERE caused_by_input_id IN (
+    SELECT inputs.id FROM inputs JOIN outputs ON outputs.id = inputs.output_id WHERE outputs.is_burn = 1
+);
+
+DELETE FROM inputs
+WHERE output_id IN (SELECT id FROM outputs WHERE is_burn = 1);
+
+UPDATE outputs
+SET status = 'UNSPENT'
+WHERE is_burn = 1 AND status IN ('SPENT_UNCONFIRMED', 'SPENT');
+
 -- The "received" entries built from such a credit: no inputs, and every output
 -- a burn output of the account. Output hashes are stored in the JSON as arrays
 -- of byte values, so each is turned into hex and looked up in the set of burn

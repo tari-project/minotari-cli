@@ -328,8 +328,9 @@ impl DisplayedTransactionProcessor {
                 .get_transaction_info_details()
                 .ok_or(ProcessorError::MissingError("Missing Output details".to_string()))?;
             let total_send = Self::claimed_total_send(&output.output, amount);
+            // A change output always comes with inputs: a solution without any only "matches" a claimed total of 0.
             let debit_value = match (balance, total_send) {
-                (Some(balance), Some(total_send)) if balance == total_send => balance,
+                (Some(balance), Some(total_send)) if !solution.is_empty() && balance == total_send => balance,
                 _ => {
                     unmatched_index.push(output_index);
                     debug!("Output does not have a matching input solution");
