@@ -439,7 +439,8 @@ impl<E: EventSender> BlockProcessor<E> {
             // Update that row in place rather than inserting a second one (which
             // the active unique index on `output_hash` forbids); the credit,
             // event and accumulator entry below are recorded as for a new output.
-            let status_when_found = if self.backfill_mode {
+            // A burn output can never be spent, so it is unspent whichever scan finds it.
+            let status_when_found = if self.backfill_mode && !is_burn {
                 OutputStatus::SpentUnconfirmed
             } else {
                 OutputStatus::Unspent
@@ -3333,7 +3334,8 @@ mod tests {
             std::slice::from_ref(&burn_block),
         );
 
-        output_row(&conn, &hash(4));
+        let (_, status, ..) = output_row(&conn, &hash(4));
+        assert_eq!(status, "UNSPENT", "as in a normal scan: a burn output is never spent");
         assert_eq!(credit_rows_for(&conn, &hash(4)), 0);
         assert_eq!(
             db::get_balance(&conn, wallet.account_id).expect("balance").total,

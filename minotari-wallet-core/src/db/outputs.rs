@@ -113,8 +113,8 @@ pub fn insert_output(
     Ok(conn.last_insert_rowid())
 }
 
-/// Inserts an output with `SpentUnconfirmed` status using `INSERT OR IGNORE`.
-/// Used during backfill to avoid duplicate outputs in a single atomic statement.
+/// Inserts an output with `SpentUnconfirmed` status (`Unspent` for a burn output, which can never be spent) using
+/// `INSERT OR IGNORE`. Used during backfill to avoid duplicate outputs in a single atomic statement.
 /// Returns `Some(id)` if inserted, `None` if the output already existed.
 #[allow(clippy::too_many_arguments)]
 pub fn insert_spent_output_if_not_exists(
@@ -143,7 +143,12 @@ pub fn insert_spent_output_if_not_exists(
     #[allow(clippy::cast_possible_wrap)]
     let value = output.value().as_u64() as i64;
     let payment_reference_hex = hex::encode(payment_reference.as_slice());
-    let status = OutputStatus::SpentUnconfirmed.to_string();
+    let status = if is_burn {
+        OutputStatus::Unspent
+    } else {
+        OutputStatus::SpentUnconfirmed
+    }
+    .to_string();
 
     conn.execute(
         r#"
