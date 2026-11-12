@@ -899,7 +899,13 @@ impl<E: EventSender> BlockProcessor<E> {
                 // The inputs are spent by this send: record it as their holder.
                 // One may still be locked to another send that tried to spend it
                 // (and is rejected for it); a reorg must not hand it to that one.
-                db::record_spender_of_inputs(tx, send_block.account_id, request_id, &input_hashes)?;
+                db::record_spender_of_inputs(
+                    tx,
+                    send_block.account_id,
+                    request_id,
+                    send_block.block_hash.as_slice(),
+                    &input_hashes,
+                )?;
 
                 let event = WalletEvent {
                     id: 0,
@@ -1125,7 +1131,7 @@ impl<E: EventSender> BlockProcessor<E> {
 
             db::mark_output_confirmed(
                 tx,
-                &unconfirmed_output.output_hash,
+                unconfirmed_output.id,
                 block.height,
                 block.block_hash.as_slice(),
             )?;

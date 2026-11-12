@@ -1586,6 +1586,8 @@ impl ScanCoordinator {
     ) -> Result<(), ScanError> {
         use std::collections::HashMap;
 
+        // The node answers for the instance of a hash on chain now: the newest. `unresolved` is oldest first, so a
+        // newer instance replaces an older one; older ones stay `SpentUnconfirmed`.
         let hash_to_output: HashMap<Vec<u8>, &crate::db::UnresolvedSpentOutput> =
             unresolved.iter().map(|o| (o.output_hash.clone(), o)).collect();
 
