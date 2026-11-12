@@ -2950,7 +2950,8 @@ mod tests {
         test_output(value, hash_byte, OutputFeatures::create_burn_output(), memo)
     }
 
-    /// The change of a burn of `burned` with `fee`, carrying the memo the burn's transaction builder gives it.
+    /// The change of a burn of `burned` with `fee`, carrying the memo the burn's transaction builder gives it: it
+    /// names the burn output, which in these tests is always `hash(4)`.
     fn burn_change(value: u64, hash_byte: u8, burned: u64, fee: u64) -> WalletOutput {
         let memo = MemoField::new_transaction_info(
             TariAddress::default(),
@@ -2958,7 +2959,7 @@ mod tests {
             fee.into(),
             false,
             TxType::Burn,
-            Vec::new(),
+            vec![hash(4)],
             Vec::new(),
         )
         .expect("memo");
@@ -3244,18 +3245,14 @@ mod tests {
 
     #[test]
     fn two_burn_outputs_in_one_block_are_each_shown_once() {
-        // Another account's burn of a different amount, and one of the same amount (ambiguous: the first is paired).
-        for (other_value, other_first) in [(3_000u64, true), (7_000, false)] {
+        // Another account's burn ahead of ours, of a different amount and of the same amount: ours is paired by the
+        // hash its change memo names, not by order or amount.
+        for other_value in [3_000u64, 7_000] {
             let wallet = test_wallet();
             let conn = wallet.pool.get().expect("conn");
             let inputs = fund_burn(&wallet, &conn);
 
-            let burn_outputs = if other_first {
-                vec![burn_output(other_value, 5), burn_output(7_000, 4)]
-            } else {
-                vec![burn_output(7_000, 4), burn_output(other_value, 5)]
-            };
-            let burn_block = own_burn_block(20, inputs, burn_outputs);
+            let burn_block = own_burn_block(20, inputs, vec![burn_output(other_value, 5), burn_output(7_000, 4)]);
             process(
                 &mut processor(&wallet, false),
                 &conn,
@@ -3289,6 +3286,37 @@ mod tests {
                 4_900.into()
             );
         }
+    }
+
+    #[test]
+    fn another_burn_of_the_same_amount_is_not_taken_for_an_own_burn_whose_output_was_not_recovered() {
+        let wallet = test_wallet();
+        let conn = wallet.pool.get().expect("conn");
+        let inputs = fund_burn(&wallet, &conn);
+
+        // Our burn output (`hash(4)`) is not recovered; another burn of the same 7_000 is.
+        let burn_block = own_burn_block(20, inputs, vec![burn_output(7_000, 5)]);
+        process(
+            &mut processor(&wallet, false),
+            &conn,
+            wallet.account_id,
+            std::slice::from_ref(&burn_block),
+        );
+
+        let displays = displays_at(&conn, wallet.account_id, 20);
+        assert_eq!(displays.len(), 2);
+        assert!(displays.iter().all(|d| d.source == TransactionSource::Burn));
+        let own = displays
+            .iter()
+            .find(|d| !d.details.inputs.is_empty())
+            .expect("own burn");
+        assert_eq!(own.details.outputs.len(), 1, "only the change, no burn output attached");
+        let other = displays
+            .iter()
+            .find(|d| d.details.inputs.is_empty())
+            .expect("other burn");
+        assert_eq!(other.amount, 0.into());
+        assert_eq!(other.details.outputs[0].hash, hash(5));
     }
 
     #[test]

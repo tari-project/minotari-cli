@@ -399,28 +399,31 @@ impl DisplayedTransactionProcessor {
         Ok(result)
     }
 
-    /// Takes the burn output a burn's change memo points at: one of its sent hashes, else the first with the burned
-    /// amount.
+    /// Takes the burn output a burn's change memo points at: one of its sent hashes, or, for a memo without sent
+    /// hashes, the first with the burned amount.
     fn take_paired_burn_output(
         burn_outputs: &mut Vec<(NaiveDateTime, DetectedOutput)>,
         amount: MicroMinotari,
         sent: &[FixedHash],
     ) -> Option<DetectedOutput> {
-        let index = burn_outputs
-            .iter()
-            .position(|(_, b)| sent.contains(&b.output.output_hash()))
-            .or_else(|| {
-                let mut same_amount = burn_outputs
-                    .iter()
-                    .enumerate()
-                    .filter(|(_, (_, b))| b.output.value() == amount)
-                    .map(|(i, _)| i);
-                let first = same_amount.next();
-                if same_amount.next().is_some() {
-                    debug!("Several burn outputs in the block have the burned amount; pairing the first");
-                }
-                first
-            })?;
+        let index = if sent.is_empty() {
+            let mut same_amount = burn_outputs
+                .iter()
+                .enumerate()
+                .filter(|(_, (_, b))| b.output.value() == amount)
+                .map(|(i, _)| i);
+            let first = same_amount.next();
+            if same_amount.next().is_some() {
+                debug!("Several burn outputs in the block have the burned amount; pairing the first");
+            }
+            first
+        } else {
+            // The memo names the burn's own output: if it was not recovered, an output of the same amount is another
+            // burn's and must keep its own entry.
+            burn_outputs
+                .iter()
+                .position(|(_, b)| sent.contains(&b.output.output_hash()))
+        }?;
         Some(burn_outputs.remove(index).1)
     }
 
@@ -2147,5 +2150,66 @@ mod tests {
         let nums = [MicroMinotari(u64::MAX), MicroMinotari(u64::MAX)];
         let used = DisplayedTransactionProcessor::backtrack_subset(&[0, 1], &nums, MicroMinotari(u64::MAX - 1));
         assert!(used.is_none());
+    }
+
+    #[test]
+    fn test_take_paired_burn_output_uses_the_amount_only_without_sent_hashes() {
+        use tari_common_types::types::{ComAndPubSignature, CompressedPublicKey};
+        use tari_script::{ExecutionStack, TariScript};
+        use tari_transaction_components::{
+            key_manager::TariKeyId,
+            transaction_components::{
+                EncryptedData, MemoField, OutputFeatures, TransactionOutputVersion, covenants::Covenant,
+            },
+        };
+        // Pairing looks only at the value and the hash.
+        let burn = |value: u64, hash_byte: u8| {
+            let output = WalletOutput::new_from_parts(
+                TransactionOutputVersion::default(),
+                MicroMinotari::from(value),
+                TariKeyId::default(),
+                OutputFeatures::create_burn_output(),
+                TariScript::default(),
+                ExecutionStack::default(),
+                TariKeyId::default(),
+                CompressedPublicKey::default(),
+                ComAndPubSignature::default(),
+                0,
+                Covenant::default(),
+                EncryptedData::default(),
+                MicroMinotari::from(0),
+                None,
+                MemoField::new_empty(),
+                mock_fixed_hash(hash_byte),
+                Default::default(),
+            );
+            let detected = DetectedOutput {
+                height: 50,
+                mined_in_block_hash: mock_fixed_hash(1),
+                output,
+            };
+            (mock_timestamp(), detected)
+        };
+
+        // No sent hashes: the first of the same amount (ambiguous here).
+        let mut burns = vec![burn(3_000, 1), burn(7_000, 2), burn(7_000, 3)];
+        let paired = DisplayedTransactionProcessor::take_paired_burn_output(&mut burns, 7_000.into(), &[]).unwrap();
+        assert_eq!(paired.output.output_hash(), mock_fixed_hash(2));
+        assert_eq!(burns.len(), 2);
+
+        // Sent hashes name an output that is not there: nothing is paired, whatever the amounts.
+        let mut burns = vec![burn(7_000, 3)];
+        assert!(
+            DisplayedTransactionProcessor::take_paired_burn_output(&mut burns, 7_000.into(), &[mock_fixed_hash(9)])
+                .is_none()
+        );
+        assert_eq!(burns.len(), 1);
+
+        // Sent hashes name one that is: that one, not the first of the same amount.
+        let mut burns = vec![burn(7_000, 3), burn(7_000, 4)];
+        let paired =
+            DisplayedTransactionProcessor::take_paired_burn_output(&mut burns, 7_000.into(), &[mock_fixed_hash(4)])
+                .unwrap();
+        assert_eq!(paired.output.output_hash(), mock_fixed_hash(4));
     }
 }
