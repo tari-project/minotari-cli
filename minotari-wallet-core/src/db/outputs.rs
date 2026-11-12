@@ -113,8 +113,8 @@ pub fn insert_output(
     Ok(conn.last_insert_rowid())
 }
 
-/// Inserts an output with `SpentUnconfirmed` status using `INSERT OR IGNORE`.
-/// Used during backfill to avoid duplicate outputs in a single atomic statement.
+/// Inserts an output with `SpentUnconfirmed` status (`Unspent` for a burn output, which can never be spent) using
+/// `INSERT OR IGNORE`. Used during backfill to avoid duplicate outputs in a single atomic statement.
 /// Returns `Some(id)` if inserted, `None` if the output already existed.
 #[allow(clippy::too_many_arguments)]
 pub fn insert_spent_output_if_not_exists(
@@ -143,7 +143,12 @@ pub fn insert_spent_output_if_not_exists(
     #[allow(clippy::cast_possible_wrap)]
     let value = output.value().as_u64() as i64;
     let payment_reference_hex = hex::encode(payment_reference.as_slice());
-    let status = OutputStatus::SpentUnconfirmed.to_string();
+    let status = if is_burn {
+        OutputStatus::Unspent
+    } else {
+        OutputStatus::SpentUnconfirmed
+    }
+    .to_string();
 
     conn.execute(
         r#"
@@ -1118,11 +1123,11 @@ pub fn soft_delete_outputs_from_height(conn: &Connection, account_id: i64, heigh
     };
 
     for output_row in outputs_to_delete {
-        // Find and mark the original balance change as reversed
-        let original_balance_change_id = get_balance_change_id_by_output(conn, output_row.id)?;
-        if let Some(original_id) = original_balance_change_id {
-            mark_balance_change_as_reversed(conn, original_id)?;
-        }
+        // Only a credit is reversed: an output that never credited the balance (a burn) has none.
+        let Some(original_id) = get_balance_change_id_by_output(conn, output_row.id)? else {
+            continue;
+        };
+        mark_balance_change_as_reversed(conn, original_id)?;
 
         let balance_change = BalanceChange {
             account_id,
@@ -1140,7 +1145,7 @@ pub fn soft_delete_outputs_from_height(conn: &Connection, account_id: i64, heigh
             claimed_fee: None,
             claimed_amount: None,
             is_reversal: true,
-            reversal_of_balance_change_id: original_balance_change_id,
+            reversal_of_balance_change_id: Some(original_id),
             is_reversed: false,
         };
         insert_balance_change(conn, &balance_change)?;
@@ -1223,6 +1228,7 @@ pub fn get_unresolved_spent_unconfirmed_outputs(
         WHERE account_id = :account_id
           AND status = :status
           AND deleted_at IS NULL
+          AND is_burn = 0
         ORDER BY mined_in_block_height
         "#,
     )?;
@@ -1404,6 +1410,25 @@ pub fn get_output_by_id(conn: &Connection, output_id: i64) -> WalletDbResult<Opt
     let rows = stmt.query(named_params! { ":id": output_id })?;
     let output: Option<DbOutput> = from_rows(rows).next().transpose()?;
     Ok(output)
+}
+
+/// The account's active burn outputs. They have no balance change, so history rebuilt from the ledger loads them
+/// separately.
+pub fn get_active_burn_outputs(conn: &Connection, account_id: i64) -> WalletDbResult<Vec<DbOutput>> {
+    let mut stmt = conn.prepare_cached(
+        r#"
+        SELECT id, account_id, output_hash, mined_in_block_hash, mined_in_block_height,
+               value, created_at, wallet_output_json, mined_timestamp, confirmed_height,
+               confirmed_hash, memo_parsed, memo_hex, status, locked_at, locked_by_request_id,
+               deleted_at, deleted_in_block_height, payment_reference, maturity
+        FROM outputs
+        WHERE account_id = :account_id AND is_burn = 1 AND deleted_at IS NULL
+        ORDER BY id
+        "#,
+    )?;
+
+    let rows = stmt.query(named_params! { ":account_id": account_id })?;
+    Ok(from_rows(rows).collect::<Result<Vec<DbOutput>, _>>()?)
 }
 
 pub fn fetch_unspent_outputs(

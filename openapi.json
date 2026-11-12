@@ -2223,6 +2223,7 @@
           "transfer",
           "coinbase",
           "one_sided",
+          "burn",
           "unknown"
         ]
       },

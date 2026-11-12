@@ -56,6 +56,7 @@ use rusqlite::Connection;
 use rusqlite_migration::Migrations;
 
 mod error;
+pub(crate) mod sqlite_amount;
 mod sqlite_time;
 pub use error::{WalletDbError, WalletDbResult};
 
@@ -78,7 +79,7 @@ mod outputs;
 pub use outputs::{
     ChangeOutputToRevert, DbOutput, DbWalletOutput, UnresolvedSpentOutput, clear_dead_lock,
     confirm_unconfirmed_change_output, fetch_outputs_by_lock_request_id, fetch_unspent_outputs,
-    get_active_outputs_from_height, get_change_output_hash_for_request, get_output_by_id,
+    get_active_burn_outputs, get_active_outputs_from_height, get_change_output_hash_for_request, get_output_by_id,
     get_output_hashes_mined_in_block, get_output_hashes_spent_in_block, get_output_info_by_hash,
     get_output_info_by_hash_for_account, get_output_lock_request_id, get_output_spend, get_output_totals_for_account,
     get_total_unspent_balance, get_unconfirmed_outputs, get_unresolved_spent_unconfirmed_outputs, insert_output,
@@ -281,4 +282,265 @@ fn attempt_sqlx_adoption(conn: &mut Connection) -> WalletDbResult<()> {
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::models::OutputStatus;
+    use crate::transactions::{DisplayedTransactionBuilder, TransactionOutput, TransactionSource};
+    use rusqlite::named_params;
+    use tari_common_types::seeds::cipher_seed::CipherSeed;
+    use tari_common_types::types::FixedHash;
+    use tari_common_types::types::{ComAndPubSignature, CompressedPublicKey};
+    use tari_script::{ExecutionStack, TariScript};
+    use tari_transaction_components::MicroMinotari;
+    use tari_transaction_components::key_manager::TariKeyId;
+    use tari_transaction_components::key_manager::wallet_types::{SeedWordsWallet, WalletType};
+    use tari_transaction_components::transaction_components::{
+        EncryptedData, MemoField, OutputFeatures, OutputType, TransactionOutputVersion, WalletOutput,
+        covenants::Covenant,
+    };
+
+    /// A wallet output as the scan stores it, serialized.
+    fn wallet_output_json(value: u64, hash: FixedHash, features: OutputFeatures) -> String {
+        let output = WalletOutput::new_from_parts(
+            TransactionOutputVersion::default(),
+            MicroMinotari::from(value),
+            TariKeyId::default(),
+            features,
+            TariScript::default(),
+            ExecutionStack::default(),
+            TariKeyId::default(),
+            CompressedPublicKey::default(),
+            ComAndPubSignature::default(),
+            0,
+            Covenant::default(),
+            EncryptedData::default(),
+            MicroMinotari::from(0),
+            None,
+            MemoField::new_empty(),
+            hash,
+            Default::default(),
+        );
+        serde_json::to_string(&output).unwrap()
+    }
+
+    fn seed_output(conn: &Connection, account_id: i64, hash: FixedHash, value: i64, is_burn: bool) -> i64 {
+        seed_output_with_json(conn, account_id, hash, value, is_burn, "{}")
+    }
+
+    fn seed_output_with_json(
+        conn: &Connection,
+        account_id: i64,
+        hash: FixedHash,
+        value: i64,
+        is_burn: bool,
+        json: &str,
+    ) -> i64 {
+        conn.execute(
+            "INSERT INTO outputs (account_id, tx_id, output_hash, mined_in_block_hash, mined_in_block_height, value,
+                                  mined_timestamp, wallet_output_json, is_burn)
+             VALUES (:account_id, :value, :hash, x'00', 10, :value, CURRENT_TIMESTAMP, :json, :is_burn)",
+            named_params! {
+                ":account_id": account_id,
+                ":hash": hash.as_slice(),
+                ":value": value,
+                ":is_burn": is_burn,
+                ":json": json,
+            },
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    fn seed_balance_change(
+        conn: &Connection,
+        account_id: i64,
+        output_id: i64,
+        credit: i64,
+        debit: i64,
+        reversal_of: Option<i64>,
+    ) -> i64 {
+        conn.execute(
+            "INSERT INTO balance_changes (account_id, caused_by_output_id, description, balance_credit, balance_debit,
+                                          effective_date, effective_height, is_reversal, reversal_of_balance_change_id)
+             VALUES (:account_id, :output_id, 'seed', :credit, :debit, CURRENT_TIMESTAMP, 10, :is_reversal, :reversal_of)",
+            named_params! {
+                ":account_id": account_id,
+                ":output_id": output_id,
+                ":credit": credit,
+                ":debit": debit,
+                ":is_reversal": reversal_of.is_some(),
+                ":reversal_of": reversal_of,
+            },
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    /// A spend of `output_id` with its debit, as base-node verification recorded one; returns (input, debit) ids.
+    fn seed_spend(conn: &Connection, account_id: i64, output_id: i64, value: i64, status: &str) -> (i64, i64) {
+        conn.execute(
+            "INSERT INTO inputs (account_id, output_id, mined_in_block_hash, mined_in_block_height, mined_timestamp)
+             VALUES (:account_id, :output_id, x'00', 11, CURRENT_TIMESTAMP)",
+            named_params! { ":account_id": account_id, ":output_id": output_id },
+        )
+        .unwrap();
+        let input_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO balance_changes (account_id, caused_by_input_id, description, balance_credit, balance_debit,
+                                          effective_date, effective_height)
+             VALUES (:account_id, :input_id, 'seed', 0, :value, CURRENT_TIMESTAMP, 11)",
+            named_params! { ":account_id": account_id, ":input_id": input_id, ":value": value },
+        )
+        .unwrap();
+        let debit_id = conn.last_insert_rowid();
+        conn.execute(
+            "UPDATE outputs SET status = :status WHERE id = :id",
+            named_params! { ":status": status, ":id": output_id },
+        )
+        .unwrap();
+        (input_id, debit_id)
+    }
+
+    fn seed_received_display(conn: &Connection, account_id: i64, id: u64, hashes: &[FixedHash], value: u64) {
+        let outputs = hashes
+            .iter()
+            .map(|hash| TransactionOutput {
+                hash: *hash,
+                amount: value.into(),
+                status: OutputStatus::Unspent,
+                mined_in_block_height: 10,
+                mined_in_block_hash: FixedHash::zero(),
+                output_type: OutputType::Standard,
+                is_change: false,
+            })
+            .collect();
+        let display = DisplayedTransactionBuilder::new()
+            .account_id(account_id)
+            .source(TransactionSource::Transfer)
+            .credits_and_debits(value.into(), 0.into())
+            .outputs(outputs)
+            .build(id.into())
+            .unwrap();
+        insert_displayed_transaction(conn, &display).unwrap();
+    }
+
+    #[test]
+    fn migration_37_removes_burn_credits_and_their_received_entries_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut conn = Connection::open(dir.path().join("migrate.db")).unwrap();
+        conn.execute_batch("PRAGMA foreign_keys = ON;").unwrap();
+        MIGRATIONS.to_version(&mut conn, 36).unwrap();
+
+        let wallet = WalletType::SeedWords(SeedWordsWallet::construct_new(CipherSeed::random()).unwrap());
+        create_account(&conn, "default", &wallet, "password").unwrap();
+        let account_id = get_account_by_name(&conn, "default").unwrap().unwrap().id;
+
+        let burn_hash = FixedHash::from([0xab; 32]);
+        let normal_hash = FixedHash::from([0x01; 32]);
+        let burn_id = seed_output(&conn, account_id, burn_hash, 7_000, true);
+        let normal_id = seed_output(&conn, account_id, normal_hash, 5_000, false);
+        // A burn credit that a reorg reversed, then booked again, as the scan used to.
+        let reversed = seed_balance_change(&conn, account_id, burn_id, 7_000, 0, None);
+        seed_balance_change(&conn, account_id, burn_id, 0, 7_000, Some(reversed));
+        seed_balance_change(&conn, account_id, burn_id, 7_000, 0, None);
+        let normal_credit = seed_balance_change(&conn, account_id, normal_id, 5_000, 0, None);
+        // Stored before `is_burn` existed: a real serialized burn output, and a real standard one, both flagged 0.
+        let legacy_burn_hash = FixedHash::from([0xcd; 32]);
+        let legacy_normal_hash = FixedHash::from([0x02; 32]);
+        let legacy_burn_json = wallet_output_json(3_000, legacy_burn_hash, OutputFeatures::create_burn_output());
+        let legacy_normal_json = wallet_output_json(2_000, legacy_normal_hash, OutputFeatures::default());
+        let legacy_burn_id =
+            seed_output_with_json(&conn, account_id, legacy_burn_hash, 3_000, false, &legacy_burn_json);
+        let legacy_normal_id =
+            seed_output_with_json(&conn, account_id, legacy_normal_hash, 2_000, false, &legacy_normal_json);
+        seed_balance_change(&conn, account_id, legacy_burn_id, 3_000, 0, None);
+        let legacy_normal_credit = seed_balance_change(&conn, account_id, legacy_normal_id, 2_000, 0, None);
+        // A burn row a backfill left SPENT_UNCONFIRMED and base-node verification then recorded as spent, and a
+        // normal output spent the same way, which is kept.
+        let spent_burn_id = seed_output(&conn, account_id, FixedHash::from([0xef; 32]), 4_000, true);
+        seed_balance_change(&conn, account_id, spent_burn_id, 4_000, 0, None);
+        seed_spend(&conn, account_id, spent_burn_id, 4_000, "SPENT_UNCONFIRMED");
+        let spent_normal_id = seed_output(&conn, account_id, FixedHash::from([0x03; 32]), 1_000, false);
+        let spent_normal_credit = seed_balance_change(&conn, account_id, spent_normal_id, 1_000, 0, None);
+        let (spent_normal_input, spent_normal_debit) = seed_spend(&conn, account_id, spent_normal_id, 1_000, "SPENT");
+        seed_received_display(&conn, account_id, 4, &[legacy_burn_hash], 3_000);
+        seed_received_display(&conn, account_id, 5, &[legacy_normal_hash], 2_000);
+        seed_received_display(&conn, account_id, 1, &[burn_hash], 7_000);
+        seed_received_display(&conn, account_id, 2, &[normal_hash], 5_000);
+        // Not built from a burn credit alone: kept.
+        seed_received_display(&conn, account_id, 3, &[burn_hash, normal_hash], 12_000);
+        assert_eq!(get_balance(&conn, account_id).unwrap().total, 17_000.into());
+
+        MIGRATIONS.to_latest(&mut conn).unwrap();
+
+        let remaining: Vec<i64> = conn
+            .prepare("SELECT id FROM balance_changes")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            remaining,
+            vec![
+                normal_credit,
+                legacy_normal_credit,
+                spent_normal_credit,
+                spent_normal_debit
+            ]
+        );
+        assert_eq!(get_balance(&conn, account_id).unwrap().total, 7_000.into());
+
+        let displays: Vec<String> = conn
+            .prepare("SELECT id FROM displayed_transactions ORDER BY id")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(displays, vec!["2".to_string(), "3".to_string(), "5".to_string()]);
+
+        let inputs: Vec<i64> = conn
+            .prepare("SELECT id FROM inputs")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(inputs, vec![spent_normal_input], "the burn output's spend is gone");
+
+        let burn_flags: Vec<(i64, bool, String)> = conn
+            .prepare("SELECT id, is_burn, status FROM outputs ORDER BY id")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            burn_flags,
+            vec![
+                (burn_id, true, "UNSPENT".to_string()),
+                (normal_id, false, "UNSPENT".to_string()),
+                (legacy_burn_id, true, "UNSPENT".to_string()),
+                (legacy_normal_id, false, "UNSPENT".to_string()),
+                (spent_burn_id, true, "UNSPENT".to_string()),
+                (spent_normal_id, false, "SPENT".to_string()),
+            ],
+            "every burn output row is kept and flagged"
+        );
+        // The legacy rows are otherwise untouched.
+        let legacy_json: Vec<String> = conn
+            .prepare("SELECT wallet_output_json FROM outputs WHERE id IN (:a, :b) ORDER BY id")
+            .unwrap()
+            .query_map(named_params! { ":a": legacy_burn_id, ":b": legacy_normal_id }, |row| {
+                row.get(0)
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(legacy_json, vec![legacy_burn_json, legacy_normal_json]);
+    }
 }
