@@ -1,6 +1,16 @@
 -- A burn is an outflow: a recovered burn output never credits the balance.
 -- Remove what earlier scans booked for burn outputs.
 
+-- Burn outputs stored before `is_burn` existed (00029) still have it 0. A
+-- serialized `OutputType` is its number, and Burn is 2. A row whose JSON is not
+-- valid is left alone rather than failing the migration.
+UPDATE outputs
+SET is_burn = 1
+WHERE is_burn = 0
+  AND CASE WHEN json_valid(wallet_output_json)
+           THEN json_extract(wallet_output_json, '$.features.output_type')
+      END = 2;
+
 -- The "received" entries built from such a credit: no inputs, and every output
 -- a burn output of the account. Output hashes are stored in the JSON as arrays
 -- of byte values, so each is turned into hex and looked up in the set of burn

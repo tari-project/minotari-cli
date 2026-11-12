@@ -292,15 +292,63 @@ mod tests {
     use rusqlite::named_params;
     use tari_common_types::seeds::cipher_seed::CipherSeed;
     use tari_common_types::types::FixedHash;
+    use tari_common_types::types::{ComAndPubSignature, CompressedPublicKey};
+    use tari_script::{ExecutionStack, TariScript};
+    use tari_transaction_components::MicroMinotari;
+    use tari_transaction_components::key_manager::TariKeyId;
     use tari_transaction_components::key_manager::wallet_types::{SeedWordsWallet, WalletType};
-    use tari_transaction_components::transaction_components::OutputType;
+    use tari_transaction_components::transaction_components::{
+        EncryptedData, MemoField, OutputFeatures, OutputType, TransactionOutputVersion, WalletOutput,
+        covenants::Covenant,
+    };
+
+    /// A wallet output as the scan stores it, serialized.
+    fn wallet_output_json(value: u64, hash: FixedHash, features: OutputFeatures) -> String {
+        let output = WalletOutput::new_from_parts(
+            TransactionOutputVersion::default(),
+            MicroMinotari::from(value),
+            TariKeyId::default(),
+            features,
+            TariScript::default(),
+            ExecutionStack::default(),
+            TariKeyId::default(),
+            CompressedPublicKey::default(),
+            ComAndPubSignature::default(),
+            0,
+            Covenant::default(),
+            EncryptedData::default(),
+            MicroMinotari::from(0),
+            None,
+            MemoField::new_empty(),
+            hash,
+            Default::default(),
+        );
+        serde_json::to_string(&output).unwrap()
+    }
 
     fn seed_output(conn: &Connection, account_id: i64, hash: FixedHash, value: i64, is_burn: bool) -> i64 {
+        seed_output_with_json(conn, account_id, hash, value, is_burn, "{}")
+    }
+
+    fn seed_output_with_json(
+        conn: &Connection,
+        account_id: i64,
+        hash: FixedHash,
+        value: i64,
+        is_burn: bool,
+        json: &str,
+    ) -> i64 {
         conn.execute(
             "INSERT INTO outputs (account_id, tx_id, output_hash, mined_in_block_hash, mined_in_block_height, value,
                                   mined_timestamp, wallet_output_json, is_burn)
-             VALUES (:account_id, :value, :hash, x'00', 10, :value, CURRENT_TIMESTAMP, '{}', :is_burn)",
-            named_params! { ":account_id": account_id, ":hash": hash.as_slice(), ":value": value, ":is_burn": is_burn },
+             VALUES (:account_id, :value, :hash, x'00', 10, :value, CURRENT_TIMESTAMP, :json, :is_burn)",
+            named_params! {
+                ":account_id": account_id,
+                ":hash": hash.as_slice(),
+                ":value": value,
+                ":is_burn": is_burn,
+                ":json": json,
+            },
         )
         .unwrap();
         conn.last_insert_rowid()
@@ -374,11 +422,24 @@ mod tests {
         seed_balance_change(&conn, account_id, burn_id, 0, 7_000, Some(reversed));
         seed_balance_change(&conn, account_id, burn_id, 7_000, 0, None);
         let normal_credit = seed_balance_change(&conn, account_id, normal_id, 5_000, 0, None);
+        // Stored before `is_burn` existed: a real serialized burn output, and a real standard one, both flagged 0.
+        let legacy_burn_hash = FixedHash::from([0xcd; 32]);
+        let legacy_normal_hash = FixedHash::from([0x02; 32]);
+        let legacy_burn_json = wallet_output_json(3_000, legacy_burn_hash, OutputFeatures::create_burn_output());
+        let legacy_normal_json = wallet_output_json(2_000, legacy_normal_hash, OutputFeatures::default());
+        let legacy_burn_id =
+            seed_output_with_json(&conn, account_id, legacy_burn_hash, 3_000, false, &legacy_burn_json);
+        let legacy_normal_id =
+            seed_output_with_json(&conn, account_id, legacy_normal_hash, 2_000, false, &legacy_normal_json);
+        seed_balance_change(&conn, account_id, legacy_burn_id, 3_000, 0, None);
+        let legacy_normal_credit = seed_balance_change(&conn, account_id, legacy_normal_id, 2_000, 0, None);
+        seed_received_display(&conn, account_id, 4, &[legacy_burn_hash], 3_000);
+        seed_received_display(&conn, account_id, 5, &[legacy_normal_hash], 2_000);
         seed_received_display(&conn, account_id, 1, &[burn_hash], 7_000);
         seed_received_display(&conn, account_id, 2, &[normal_hash], 5_000);
         // Not built from a burn credit alone: kept.
         seed_received_display(&conn, account_id, 3, &[burn_hash, normal_hash], 12_000);
-        assert_eq!(get_balance(&conn, account_id).unwrap().total, 12_000.into());
+        assert_eq!(get_balance(&conn, account_id).unwrap().total, 17_000.into());
 
         MIGRATIONS.to_latest(&mut conn).unwrap();
 
@@ -389,8 +450,8 @@ mod tests {
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap();
-        assert_eq!(remaining, vec![normal_credit]);
-        assert_eq!(get_balance(&conn, account_id).unwrap().total, 5_000.into());
+        assert_eq!(remaining, vec![normal_credit, legacy_normal_credit]);
+        assert_eq!(get_balance(&conn, account_id).unwrap().total, 7_000.into());
 
         let displays: Vec<String> = conn
             .prepare("SELECT id FROM displayed_transactions ORDER BY id")
@@ -399,11 +460,35 @@ mod tests {
             .unwrap()
             .collect::<Result<_, _>>()
             .unwrap();
-        assert_eq!(displays, vec!["2".to_string(), "3".to_string()]);
+        assert_eq!(displays, vec!["2".to_string(), "3".to_string(), "5".to_string()]);
 
-        let burn_rows: i64 = conn
-            .query_row("SELECT COUNT(*) FROM outputs WHERE is_burn = 1", [], |row| row.get(0))
+        let burn_flags: Vec<(i64, bool)> = conn
+            .prepare("SELECT id, is_burn FROM outputs ORDER BY id")
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
             .unwrap();
-        assert_eq!(burn_rows, 1, "the burn output row is kept");
+        assert_eq!(
+            burn_flags,
+            vec![
+                (burn_id, true),
+                (normal_id, false),
+                (legacy_burn_id, true),
+                (legacy_normal_id, false)
+            ],
+            "every burn output row is kept and flagged"
+        );
+        // The legacy rows are otherwise untouched.
+        let legacy_json: Vec<String> = conn
+            .prepare("SELECT wallet_output_json FROM outputs WHERE id IN (:a, :b) ORDER BY id")
+            .unwrap()
+            .query_map(named_params! { ":a": legacy_burn_id, ":b": legacy_normal_id }, |row| {
+                row.get(0)
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(legacy_json, vec![legacy_burn_json, legacy_normal_json]);
     }
 }
