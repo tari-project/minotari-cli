@@ -466,11 +466,9 @@ impl<E: EventSender> BlockProcessor<E> {
             )?;
 
             // Two unspent copies of one hash cannot be on chain: a copy still unspent in another block means the scan
-            // crossed a reorg it has not rolled back. Not checked without inputs (no spend is ever recorded) or when
-            // this block spends the hash itself.
+            // crossed a reorg it has not rolled back. Not checked without inputs (no spend is ever recorded).
             if change_output_id.is_none()
                 && !self.inputs_excluded
-                && !block.inputs.contains(hash)
                 && let Some(copy_block) =
                     db::get_unspent_copy_block(tx, account_id, hash, block.height, &block.block_hash)?
             {
@@ -743,8 +741,9 @@ impl<E: EventSender> BlockProcessor<E> {
     /// - Adds to the block accumulator for event emission
     ///
     /// An input hash spends the newest active instance of the hash mined at or
-    /// below this block (not in it: a block cannot spend what it creates), if
-    /// that instance has no active input. An older instance was spent before the
+    /// below this block, if that instance has no active input. This block counts:
+    /// an output can be created and spent in the same block (a zero-conf spend,
+    /// such as a send's change spent at once). An older instance was spent before the
     /// newer one was created, even when its spend is not recorded yet (a backfill
     /// that has not reached it). A hash already spent
     /// in this block (a re-read, a later result of the same block, or a repeat
@@ -777,9 +776,7 @@ impl<E: EventSender> BlockProcessor<E> {
                 ..
             }) = instances
                 .iter()
-                .rposition(|o| {
-                    o.mined_in_block_height <= block.height && o.mined_in_block_hash != block.block_hash.as_slice()
-                })
+                .rposition(|o| o.mined_in_block_height <= block.height)
                 .filter(|i| instances.get(*i).is_some_and(|o| o.spent_in_block_hash.is_none()))
                 .map(|i| instances.swap_remove(i))
             else {
@@ -3891,13 +3888,36 @@ mod tests {
     }
 
     #[test]
-    fn an_output_spent_and_re_created_in_one_block_is_stored_again() {
+    fn an_output_created_and_spent_in_one_block_is_debited() {
+        let wallet = test_wallet();
+        let conn = wallet.pool.get().expect("conn");
+        let a = test_wallet_output(10_000, 1);
+        let blocks = [block(20, vec![a.clone()], vec![a.output_hash()])];
+        let mut processor = processor(&wallet, false);
+        process(&mut processor, &conn, wallet.account_id, &blocks);
+        process(&mut processor, &conn, wallet.account_id, &blocks);
+
+        let rows = instances(&conn, wallet.account_id, &a);
+        assert_eq!(rows.len(), 1);
+        assert_eq!(
+            rows[0].spent_in_block_hash.as_deref(),
+            Some(blocks[0].block_hash.as_slice())
+        );
+        let (_, status, ..) = output_row(&conn, &a.output_hash());
+        assert_eq!(status, "SPENT");
+        assert_eq!(ledger_counts(&conn, wallet.account_id), (1, 1));
+        assert_eq!(total(&conn, wallet.account_id), 0);
+    }
+
+    #[test]
+    fn a_re_created_output_spent_in_its_own_block_is_debited() {
         let wallet = test_wallet();
         let conn = wallet.pool.get().expect("conn");
         let a = test_wallet_output(10_000, 1);
         let blocks = [
             block(10, vec![a.clone()], Vec::new()),
-            block(20, vec![a.clone()], vec![a.output_hash()]),
+            block(20, Vec::new(), vec![a.output_hash()]),
+            block(30, vec![a.clone()], vec![a.output_hash()]),
         ];
         process(&mut processor(&wallet, false), &conn, wallet.account_id, &blocks);
 
@@ -3907,9 +3927,50 @@ mod tests {
             rows[0].spent_in_block_hash.as_deref(),
             Some(blocks[1].block_hash.as_slice())
         );
-        assert_eq!(rows[1].spent_in_block_hash, None);
-        assert_eq!(ledger_counts(&conn, wallet.account_id), (2, 1));
-        assert_eq!(total(&conn, wallet.account_id), 10_000);
+        assert_eq!(
+            rows[1].spent_in_block_hash.as_deref(),
+            Some(blocks[2].block_hash.as_slice())
+        );
+        for row in &rows {
+            let status = db::get_output_by_id(&conn, row.id)
+                .expect("row")
+                .expect("exists")
+                .status;
+            assert_eq!(status, "SPENT");
+        }
+        assert_eq!(ledger_counts(&conn, wallet.account_id), (2, 2));
+        assert_eq!(total(&conn, wallet.account_id), 0);
+    }
+
+    #[test]
+    fn a_change_output_spent_in_the_block_it_is_mined_in_is_debited() {
+        let wallet = test_wallet();
+        let conn = wallet.pool.get().expect("conn");
+        let input = test_wallet_output(10_000, 1);
+        let mut processor = processor(&wallet, true);
+        process(
+            &mut processor,
+            &conn,
+            wallet.account_id,
+            &[block(10, vec![input.clone()], Vec::new())],
+        );
+        let send = record_send(&wallet, &conn, 1, &[1], Some(3));
+        let change = send.change.clone().expect("change");
+        process(
+            &mut processor,
+            &conn,
+            wallet.account_id,
+            &[block(
+                50,
+                vec![change.clone()],
+                vec![input.output_hash(), change.output_hash()],
+            )],
+        );
+
+        let (_, status, height, ..) = output_row(&conn, &change.output_hash());
+        assert_eq!((status.as_str(), height), ("SPENT", 50));
+        assert_eq!(ledger_counts(&conn, wallet.account_id), (2, 2));
+        assert_eq!(total(&conn, wallet.account_id), 0);
     }
 
     #[test]
