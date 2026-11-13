@@ -1101,6 +1101,7 @@ pub struct OutputInstance {
     pub tx_id: TxId,
     pub output: WalletOutput,
     pub mined_in_block_height: u64,
+    pub mined_in_block_hash: Vec<u8>,
     pub spent_in_block_hash: Option<Vec<u8>>,
 }
 
@@ -1113,7 +1114,8 @@ pub fn get_output_instances_for_account(
 ) -> WalletDbResult<Vec<OutputInstance>> {
     let mut stmt = conn.prepare_cached(
         r#"
-        SELECT o.id, o.tx_id, o.wallet_output_json, o.mined_in_block_height, i.mined_in_block_hash
+        SELECT o.id, o.tx_id, o.wallet_output_json, o.mined_in_block_height, o.mined_in_block_hash,
+               i.mined_in_block_hash
         FROM outputs o
         LEFT JOIN inputs i ON i.output_id = o.id AND i.deleted_at IS NULL
         WHERE o.account_id = :account_id AND o.output_hash = :hash AND o.deleted_at IS NULL
@@ -1134,18 +1136,20 @@ pub fn get_output_instances_for_account(
                 row.get::<_, i64>(1)?,
                 row.get::<_, String>(2)?,
                 row.get::<_, i64>(3)?,
-                row.get::<_, Option<Vec<u8>>>(4)?,
+                row.get::<_, Vec<u8>>(4)?,
+                row.get::<_, Option<Vec<u8>>>(5)?,
             ))
         },
     )?;
     let mut instances = Vec::new();
     for row in rows {
-        let (id, tx_id, json, height, spent_in_block_hash) = row?;
+        let (id, tx_id, json, height, mined_in_block_hash, spent_in_block_hash) = row?;
         instances.push(OutputInstance {
             id,
             tx_id: TxId::from(tx_id.cast_unsigned()),
             output: serde_json::from_str(&json)?,
             mined_in_block_height: height.cast_unsigned(),
+            mined_in_block_hash,
             spent_in_block_hash,
         });
     }

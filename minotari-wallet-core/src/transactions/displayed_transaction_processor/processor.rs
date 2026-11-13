@@ -10,7 +10,7 @@ use crate::scan::{DetectedOutput, MemoInfo, SpentInput};
 use chrono::NaiveDateTime;
 use log::debug;
 use rusqlite::Connection;
-use std::collections::{BinaryHeap, HashMap};
+use std::collections::{BinaryHeap, HashMap, HashSet};
 use tari_common_types::transaction::TxId;
 use tari_common_types::types::FixedHash;
 use tari_transaction_components::MicroMinotari;
@@ -49,14 +49,45 @@ impl DisplayedTransactionProcessor {
         let existing_ids: std::collections::HashSet<_> = current_display_transactions.iter().map(|tx| tx.id).collect();
         pending_txs.retain(|tx| !existing_ids.contains(&tx.id));
         current_display_transactions.append(&mut pending_txs);
-        self.create_new_updated_display_transactions(accumulator, &current_display_transactions)
+
+        // Output rows named by pending or reorganized entries that are gone: a reorg removed them, and the output may
+        // be on chain again as a new row.
+        let mut removed_rows = HashSet::new();
+        for entry in &current_display_transactions {
+            if !matches!(
+                entry.status,
+                TransactionDisplayStatus::Pending | TransactionDisplayStatus::Reorganized
+            ) {
+                continue;
+            }
+            for input in &entry.details.inputs {
+                if input.matched_output_id != 0
+                    && db::get_output_by_id(tx, input.matched_output_id)?.is_none_or(|row| row.deleted_at.is_some())
+                {
+                    removed_rows.insert(input.matched_output_id);
+                }
+            }
+        }
+        self.create_with_removed_rows(accumulator, &current_display_transactions, &removed_rows)
     }
 
-    #[allow(clippy::too_many_lines)]
     pub fn create_new_updated_display_transactions(
         &self,
         accumulator: &BlockEventAccumulator,
         current_display_transactions: &[DisplayedTransaction],
+    ) -> Result<(Vec<DisplayedTransaction>, Vec<DisplayedTransaction>), ProcessorError> {
+        self.create_with_removed_rows(accumulator, current_display_transactions, &HashSet::new())
+    }
+
+    /// Builds the history of a block. Each credit and debit first takes the entry that is exactly its own; only
+    /// without one does it fall back to a looser match (see [`Self::may_be_entry_of_output`] and
+    /// [`Self::may_be_entry_of_input`]), so a looser match never takes another copy's own entry.
+    #[allow(clippy::too_many_lines)]
+    fn create_with_removed_rows(
+        &self,
+        accumulator: &BlockEventAccumulator,
+        current_display_transactions: &[DisplayedTransaction],
+        removed_rows: &HashSet<Id>,
     ) -> Result<(Vec<DisplayedTransaction>, Vec<DisplayedTransaction>), ProcessorError> {
         debug!(
             count = accumulator.total_changes();
@@ -65,45 +96,56 @@ impl DisplayedTransactionProcessor {
         let mut updated_transactions = HashMap::new();
         let mut new_credit = Vec::new();
         let mut new_debit = Vec::new();
-        'output_loop: for (balance_change, output) in accumulator.credit_balance_changes() {
-            for tx in current_display_transactions {
-                if Self::is_entry_of_output(tx, output) {
-                    let mut updated = tx.clone();
-                    updated.blockchain.block_height = output.height;
-                    updated.blockchain.timestamp = balance_change.effective_date;
-                    updated.blockchain.confirmations = self.current_tip_height.saturating_sub(output.height);
+        for (balance_change, output) in accumulator.credit_balance_changes() {
+            let entry = current_display_transactions
+                .iter()
+                .find(|tx| Self::is_entry_of_output(tx, output))
+                .or_else(|| {
+                    current_display_transactions
+                        .iter()
+                        .find(|tx| Self::may_be_entry_of_output(tx, output))
+                });
+            if let Some(tx) = entry {
+                let mut updated = tx.clone();
+                updated.blockchain.block_height = output.height;
+                updated.blockchain.timestamp = balance_change.effective_date;
+                updated.blockchain.confirmations = self.current_tip_height.saturating_sub(output.height);
 
-                    // Update status based on confirmations
-                    if updated.blockchain.confirmations >= self.req_confirmations {
-                        updated.status = TransactionDisplayStatus::Confirmed;
-                    } else {
-                        updated.status = TransactionDisplayStatus::Unconfirmed;
-                    }
-                    let _unused = updated_transactions.insert(tx.id, updated);
-                    continue 'output_loop;
+                // Update status based on confirmations
+                if updated.blockchain.confirmations >= self.req_confirmations {
+                    updated.status = TransactionDisplayStatus::Confirmed;
+                } else {
+                    updated.status = TransactionDisplayStatus::Unconfirmed;
                 }
+                let _unused = updated_transactions.insert(tx.id, updated);
+                continue;
             }
             // we need to create a new display tx for this output
             new_credit.push((balance_change.clone(), output.clone()));
         }
-        'input_loop: for (balance_change, output) in accumulator.debit_balance_changes() {
-            for tx in current_display_transactions {
-                if Self::is_entry_of_input(tx, output) {
-                    let mut updated = tx.clone();
-                    updated.blockchain.block_height = output.mined_in_block_height;
-                    updated.blockchain.timestamp = balance_change.effective_date;
-                    updated.blockchain.confirmations =
-                        self.current_tip_height.saturating_sub(output.mined_in_block_height);
+        for (balance_change, output) in accumulator.debit_balance_changes() {
+            let entry = current_display_transactions
+                .iter()
+                .find(|tx| Self::is_entry_of_input(tx, output))
+                .or_else(|| {
+                    current_display_transactions
+                        .iter()
+                        .find(|tx| Self::may_be_entry_of_input(tx, output, removed_rows))
+                });
+            if let Some(tx) = entry {
+                let mut updated = tx.clone();
+                updated.blockchain.block_height = output.mined_in_block_height;
+                updated.blockchain.timestamp = balance_change.effective_date;
+                updated.blockchain.confirmations = self.current_tip_height.saturating_sub(output.mined_in_block_height);
 
-                    // Update status based on confirmations
-                    if updated.blockchain.confirmations >= self.req_confirmations {
-                        updated.status = TransactionDisplayStatus::Confirmed;
-                    } else {
-                        updated.status = TransactionDisplayStatus::Unconfirmed;
-                    }
-                    let _unused = updated_transactions.insert(tx.id, updated);
-                    continue 'input_loop;
+                // Update status based on confirmations
+                if updated.blockchain.confirmations >= self.req_confirmations {
+                    updated.status = TransactionDisplayStatus::Confirmed;
+                } else {
+                    updated.status = TransactionDisplayStatus::Unconfirmed;
                 }
+                let _unused = updated_transactions.insert(tx.id, updated);
+                continue;
             }
             // we need to create a new display tx for this input
             new_debit.push((balance_change.clone(), output.clone()));
@@ -261,30 +303,48 @@ impl DisplayedTransactionProcessor {
         Ok((updated_transactions.into_values().collect(), new_transactions))
     }
 
-    /// Whether `tx` is the entry for this copy of the output. An output hash can be on chain more than once, so an
-    /// entry listing the hash is only taken when it is this copy's own entry (its id is the copy's `tx_id`), lists the
-    /// output as mined in this block or not yet mined (a pending send's change), or was reorganized.
+    /// Whether `tx` is this copy's own entry: its id is the copy's `tx_id`, or it lists the output as mined in this
+    /// block. An output hash can be on chain more than once, so the hash alone does not say which copy an entry is for.
     fn is_entry_of_output(tx: &DisplayedTransaction, output: &DetectedOutput) -> bool {
+        let hash = output.output.output_hash();
+        tx.details
+            .outputs
+            .iter()
+            .any(|o| o.hash == hash && (tx.id == output.tx_id || o.mined_in_block_hash == output.mined_in_block_hash))
+    }
+
+    /// The fallback when no entry is this copy's own: an entry listing the output as not yet mined (a pending send's
+    /// change), or a reorganized one.
+    fn may_be_entry_of_output(tx: &DisplayedTransaction, output: &DetectedOutput) -> bool {
         let hash = output.output.output_hash();
         tx.details.outputs.iter().any(|o| {
             o.hash == hash
-                && (tx.id == output.tx_id
-                    || o.mined_in_block_hash == output.mined_in_block_hash
-                    || o.mined_in_block_hash == FixedHash::zero()
-                    || tx.status == TransactionDisplayStatus::Reorganized)
+                && (o.mined_in_block_hash == FixedHash::zero() || tx.status == TransactionDisplayStatus::Reorganized)
         })
     }
 
-    /// Whether `tx` is the entry for this spend: it lists the input as this output row (or does not say which row),
-    /// as spent in this block, or was reorganized.
+    /// Whether `tx` is this spend's own entry: it names this output row, or lists the input as spent in this block.
     fn is_entry_of_input(tx: &DisplayedTransaction, input: &SpentInput) -> bool {
         let hash = input.output.output_hash();
         tx.details.inputs.iter().any(|i| {
             i.output_hash == hash
-                && (i.matched_output_id == input.output_id
-                    || i.matched_output_id == 0
-                    || i.mined_in_block_hash == input.mined_in_block
-                    || tx.status == TransactionDisplayStatus::Reorganized)
+                && (i.matched_output_id == input.output_id || i.mined_in_block_hash == input.mined_in_block)
+        })
+    }
+
+    /// The fallback when no entry is this spend's own: an entry that does not name a row, or a pending (unmined) or
+    /// reorganized entry naming a row a reorg removed (`removed_rows`), so another live copy's spend cannot take it.
+    fn may_be_entry_of_input(tx: &DisplayedTransaction, input: &SpentInput, removed_rows: &HashSet<Id>) -> bool {
+        let hash = input.output.output_hash();
+        tx.details.inputs.iter().any(|i| {
+            i.output_hash == hash
+                && (i.matched_output_id == 0
+                    || (removed_rows.contains(&i.matched_output_id)
+                        && match tx.status {
+                            TransactionDisplayStatus::Pending => i.mined_in_block_hash == FixedHash::zero(),
+                            TransactionDisplayStatus::Reorganized => true,
+                            _ => false,
+                        }))
         })
     }
 
@@ -853,7 +913,7 @@ mod tests {
                 output_hash: input_hash,
                 amount: MicroMinotari::from(500),
                 mined_in_block_hash: mock_fixed_hash(1),
-                matched_output_id: 0,
+                matched_output_id: MOCK_OUTPUT_ROW,
             }])
             .outputs(vec![])
             .output_type(None)
@@ -1673,9 +1733,12 @@ mod tests {
         )
     }
 
+    /// The output row the mock inputs spend.
+    const MOCK_OUTPUT_ROW: Id = 7;
+
     fn mock_spent_input(value: u64, hash_byte: u8) -> SpentInput {
         SpentInput {
-            output_id: 0,
+            output_id: MOCK_OUTPUT_ROW,
             mined_in_block: mock_fixed_hash(hash_byte),
             mined_in_block_height: 10,
             output: mock_wallet_output(value),

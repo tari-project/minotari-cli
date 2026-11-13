@@ -742,8 +742,11 @@ impl<E: EventSender> BlockProcessor<E> {
     /// - Updates the output status to Spent
     /// - Adds to the block accumulator for event emission
     ///
-    /// An input hash spends the oldest active instance of the hash that has no
-    /// active input and was mined at or below this block. A hash already spent
+    /// An input hash spends the newest active instance of the hash mined at or
+    /// below this block (not in it: a block cannot spend what it creates), if
+    /// that instance has no active input. An older instance was spent before the
+    /// newer one was created, even when its spend is not recorded yet (a backfill
+    /// that has not reached it). A hash already spent
     /// in this block (a re-read, a later result of the same block, or a repeat
     /// in one result) is skipped silently; one with no such instance is skipped
     /// with a warning. Both are decided from the database, so they hold across
@@ -774,7 +777,10 @@ impl<E: EventSender> BlockProcessor<E> {
                 ..
             }) = instances
                 .iter()
-                .position(|o| o.spent_in_block_hash.is_none() && o.mined_in_block_height <= block.height)
+                .rposition(|o| {
+                    o.mined_in_block_height <= block.height && o.mined_in_block_hash != block.block_hash.as_slice()
+                })
+                .filter(|i| instances.get(*i).is_some_and(|o| o.spent_in_block_hash.is_none()))
                 .map(|i| instances.swap_remove(i))
             else {
                 if !instances.is_empty() {
@@ -1527,6 +1533,7 @@ mod tests {
         .expect("pending transaction");
 
         let mut input_hashes = Vec::new();
+        let mut input_rows = Vec::new();
         let mut inputs = Vec::new();
         for byte in input_bytes {
             let output = test_wallet_output(10_000, *byte);
@@ -1536,6 +1543,7 @@ mod tests {
             {
                 db::lock_output(conn, output_id, &request_id, Utc::now()).expect("lock input");
                 input_hashes.push(output.output_hash());
+                input_rows.push(output_id);
                 inputs.push(TransactionInput::new_with_output_hash(
                     output.output_hash(),
                     ExecutionStack::default(),
@@ -1561,6 +1569,7 @@ mod tests {
             .0;
             db::lock_output(conn, output_id, &request_id, Utc::now()).expect("lock input");
             input_hashes.push(output.output_hash());
+            input_rows.push(output_id);
             inputs.push(TransactionInput::new_with_output_hash(
                 output.output_hash(),
                 ExecutionStack::default(),
@@ -1594,7 +1603,7 @@ mod tests {
                 .expect("change row");
         }
 
-        let displayed = pending_displayed_send(wallet.account_id, tx_id, &input_hashes, change.as_ref());
+        let displayed = pending_displayed_send(wallet.account_id, tx_id, &input_hashes, &input_rows, change.as_ref());
         db::insert_displayed_transaction(conn, &displayed).expect("displayed");
 
         TestSend {
@@ -1606,19 +1615,20 @@ mod tests {
     }
 
     /// The pending displayed transaction `TransactionManager` records for a send:
-    /// its inputs and its change, so the scan can recognise it.
+    /// its inputs (with the rows it locked) and its change, so the scan can recognise it.
     fn pending_displayed_send(
         account_id: i64,
         tx_id: TxId,
         input_hashes: &[FixedHash],
+        input_rows: &[i64],
         change: Option<&WalletOutput>,
     ) -> DisplayedTransaction {
         let mut inputs = Vec::new();
-        for input_hash in input_hashes {
+        for (input_hash, row) in input_hashes.iter().zip(input_rows) {
             inputs.push(crate::transactions::TransactionInput {
                 output_hash: *input_hash,
                 amount: MicroMinotari::from(10_000),
-                matched_output_id: 0,
+                matched_output_id: *row,
                 mined_in_block_hash: FixedHash::default(),
             });
         }
@@ -4071,5 +4081,124 @@ mod tests {
         assert_eq!(spend.blockchain.block_height, 20);
         assert_eq!(spend.details.inputs.len(), 1);
         assert_eq!(spend.details.inputs[0].matched_output_id, rows[0].id);
+    }
+
+    #[test]
+    fn a_live_spend_takes_the_newer_copy_before_backfill_resolves_the_older() {
+        let wallet = test_wallet();
+        let conn = wallet.pool.get().expect("conn");
+        let a = test_wallet_output(10_000, 1);
+        store_newer_copy_then_older(&wallet, &conn, &a);
+        let live_spend = block(40, Vec::new(), vec![a.output_hash()]);
+        process(
+            &mut processor(&wallet, false),
+            &conn,
+            wallet.account_id,
+            std::slice::from_ref(&live_spend),
+        );
+
+        let rows = instances(&conn, wallet.account_id, &a);
+        assert_eq!(rows[0].spent_in_block_hash, None);
+        assert_eq!(
+            rows[1].spent_in_block_hash.as_deref(),
+            Some(live_spend.block_hash.as_slice())
+        );
+
+        // Backfill then reaches the older copy's own spend.
+        let mut backfill = processor(&wallet, false);
+        backfill.set_backfill_mode(true);
+        let old_spend = block(20, Vec::new(), vec![a.output_hash()]);
+        process(
+            &mut backfill,
+            &conn,
+            wallet.account_id,
+            std::slice::from_ref(&old_spend),
+        );
+        db::resolve_spent_unconfirmed_with_newer_copy(&conn, wallet.account_id).expect("resolve");
+
+        let rows = instances(&conn, wallet.account_id, &a);
+        assert_eq!(
+            rows[0].spent_in_block_hash.as_deref(),
+            Some(old_spend.block_hash.as_slice())
+        );
+        for row in &rows {
+            let status = db::get_output_by_id(&conn, row.id)
+                .expect("row")
+                .expect("exists")
+                .status;
+            assert_eq!(status, "SPENT");
+        }
+        assert_eq!(ledger_counts(&conn, wallet.account_id), (2, 2));
+        assert_eq!(total(&conn, wallet.account_id), 0);
+    }
+
+    #[test]
+    fn a_pending_send_whose_input_was_reorged_and_re_mined_keeps_one_entry() {
+        let wallet = test_wallet();
+        let mut conn = wallet.pool.get().expect("conn");
+        let a = test_wallet_output(10_000, 1);
+        process(
+            &mut processor(&wallet, true),
+            &conn,
+            wallet.account_id,
+            &[block(10, vec![a.clone()], Vec::new())],
+        );
+        let receive_id = instances(&conn, wallet.account_id, &a)[0].tx_id;
+        let send = record_send(&wallet, &conn, 1, &[1], Some(3));
+
+        let tx = conn.transaction().expect("tx");
+        crate::scan::reorg::rollback_from_height(&tx, wallet.account_id, 10, None).expect("rollback");
+        tx.commit().expect("commit");
+        let change = send.change.clone().expect("change");
+        process(
+            &mut processor(&wallet, true),
+            &conn,
+            wallet.account_id,
+            &[
+                block_with_hash(11, hash(98), vec![a.clone()], Vec::new()),
+                block(12, vec![change], vec![a.output_hash()]),
+            ],
+        );
+
+        let at_12 = displays_at(&conn, wallet.account_id, 12);
+        assert_eq!(at_12.len(), 1);
+        assert_eq!(at_12[0].id, send.tx_id);
+        let receive = displayed(&conn, receive_id);
+        assert_eq!(receive.blockchain.block_height, 11);
+        assert_ne!(receive.status, TransactionDisplayStatus::Reorganized);
+        assert!(receive.details.inputs.is_empty());
+    }
+
+    #[test]
+    fn a_rescan_after_a_reorg_below_two_copies_restores_each_copys_entry() {
+        let wallet = test_wallet();
+        let mut conn = wallet.pool.get().expect("conn");
+        let a = test_wallet_output(10_000, 1);
+        // Without inputs both copies are stored though the first one's spend is not seen.
+        let blocks = [
+            block(10, vec![a.clone()], Vec::new()),
+            block(30, vec![a.clone()], Vec::new()),
+        ];
+        let scan = || {
+            let mut processor = processor(&wallet, false);
+            processor.set_inputs_excluded(true);
+            processor
+        };
+        process(&mut scan(), &conn, wallet.account_id, &blocks);
+        let ids: Vec<TxId> = instances(&conn, wallet.account_id, &a)
+            .iter()
+            .map(|r| r.tx_id)
+            .collect();
+
+        let tx = conn.transaction().expect("tx");
+        crate::scan::reorg::rollback_from_height(&tx, wallet.account_id, 5, None).expect("rollback");
+        tx.commit().expect("commit");
+        process(&mut scan(), &conn, wallet.account_id, &blocks);
+
+        for (id, height) in ids.into_iter().zip([10, 30]) {
+            let entry = displayed(&conn, id);
+            assert_eq!(entry.blockchain.block_height, height);
+            assert_ne!(entry.status, TransactionDisplayStatus::Reorganized);
+        }
     }
 }
