@@ -107,21 +107,21 @@ pub struct BlockProcessor<E: EventSender = NoopEventSender> {
     /// What the block being processed showed of the wallet's own sends. Only
     /// collected while `has_pending_outbound` is set. See [`Self::match_sends`].
     send_block: Option<SendBlock>,
-    /// Inputs of the block being processed that matched no output yet.
-    unmatched_inputs: Option<UnmatchedInputs>,
+    /// Per account, inputs of the block being processed that matched no output yet.
+    unmatched_inputs: HashMap<i64, UnmatchedInputs>,
 }
 
 /// Inputs of one block that matched no output of the account. A block split over
 /// several results can list an input before the output it spends (an output
 /// created and spent in the block), so each is tried again when a later result
-/// of the block stores its output. Kept for the open block only.
+/// of the block stores its output. Kept for the account's open block only.
 struct UnmatchedInputs {
-    account_id: i64,
     height: u64,
     block_hash: FixedHash,
     /// Per input hash: `Some(block it was spent in, or "none")` when the account
-    /// has copies of the hash, which is warned about if it is still unmatched when
-    /// the block closes; `None` for a hash the account does not hold.
+    /// has copies of the hash, which is warned about (once) if it is still unmatched
+    /// at the end of the batch; `None` for a hash the account does not hold or one
+    /// already warned about.
     hashes: HashMap<FixedHash, Option<String>>,
 }
 
@@ -167,7 +167,7 @@ impl BlockProcessor<NoopEventSender> {
             backfill_mode: false,
             inputs_excluded: false,
             send_block: None,
-            unmatched_inputs: None,
+            unmatched_inputs: HashMap::new(),
         }
     }
 }
@@ -204,7 +204,7 @@ impl<E: EventSender> BlockProcessor<E> {
             backfill_mode: false,
             inputs_excluded: false,
             send_block: None,
-            unmatched_inputs: None,
+            unmatched_inputs: HashMap::new(),
         }
     }
 
@@ -292,10 +292,11 @@ impl<E: EventSender> BlockProcessor<E> {
         }
         if self
             .unmatched_inputs
-            .as_ref()
-            .is_some_and(|open| open.block_hash != block.block_hash || open.account_id != account_id)
+            .get(&account_id)
+            .is_some_and(|open| open.block_hash != block.block_hash)
+            && let Some(mut open) = self.unmatched_inputs.remove(&account_id)
         {
-            self.close_unmatched_inputs();
+            Self::warn_unmatched(account_id, &mut open);
         }
 
         self.current_tip_height = block.height;
@@ -309,7 +310,7 @@ impl<E: EventSender> BlockProcessor<E> {
         let mut request_ids = self.process_outputs(tx, block, account_id, &account_view_key)?;
         request_ids.extend(self.process_inputs(tx, block, account_id, &block.inputs)?);
         // Inputs an earlier result of this block listed before the outputs this one holds.
-        let retried: Vec<FixedHash> = match &mut self.unmatched_inputs {
+        let retried: Vec<FixedHash> = match self.unmatched_inputs.get_mut(&account_id) {
             Some(open) => block
                 .wallet_outputs
                 .iter()
@@ -815,6 +816,10 @@ impl<E: EventSender> BlockProcessor<E> {
                 ..
             }) = instances
                 .iter()
+                // shortcut: an input listed before its re-created output in a split block can match a backfilled
+                // SpentUnconfirmed older copy (its spend not yet recorded) instead of the new copy. Upgrade if
+                // re-creations in a backfill gap become realistic: make a match against a SpentUnconfirmed copy
+                // provisional until the block closes.
                 .rposition(|o| o.mined_in_block_height <= block.height)
                 .filter(|i| instances.get(*i).is_some_and(|o| o.spent_in_block_hash.is_none()))
                 .map(|i| instances.swap_remove(i))
@@ -827,8 +832,8 @@ impl<E: EventSender> BlockProcessor<E> {
                         .map_or_else(|| "none".to_string(), hex::encode)
                 });
                 self.unmatched_inputs
-                    .get_or_insert_with(|| UnmatchedInputs {
-                        account_id,
+                    .entry(account_id)
+                    .or_insert_with(|| UnmatchedInputs {
                         height: block.height,
                         block_hash: block.block_hash,
                         hashes: HashMap::new(),
@@ -886,16 +891,22 @@ impl<E: EventSender> BlockProcessor<E> {
         Ok(request_ids)
     }
 
-    /// Closes the open block's unmatched inputs, warning about each the account
-    /// holds copies of: no unspent copy mined at or below the block was found.
-    fn close_unmatched_inputs(&mut self) {
-        let Some(open) = self.unmatched_inputs.take() else {
-            return;
-        };
-        for spent_in_block in open.hashes.into_values().flatten() {
+    /// Warns about the inputs still unmatched in each account's open block. Call
+    /// at the end of a batch; the inputs stay open, in case the next result
+    /// continues the block.
+    pub fn warn_unmatched_inputs(&mut self) {
+        for (account_id, open) in &mut self.unmatched_inputs {
+            Self::warn_unmatched(*account_id, open);
+        }
+    }
+
+    /// Warns, once, about each unmatched input the account holds copies of: no
+    /// unspent copy mined at or below the block was found.
+    fn warn_unmatched(account_id: i64, open: &mut UnmatchedInputs) {
+        for spent_in_block in open.hashes.values_mut().filter_map(Option::take) {
             warn!(
                 target: "audit",
-                account_id = open.account_id,
+                account_id = account_id,
                 block_height = open.height,
                 block_hash = &*hex::encode(open.block_hash),
                 spent_in_block = spent_in_block.as_str();
@@ -1778,6 +1789,7 @@ mod tests {
                 .settle_sends_in_passed_blocks(conn, account_id, last.height)
                 .expect("settle sends");
         }
+        processor.warn_unmatched_inputs();
     }
 
     #[test]
@@ -4386,5 +4398,38 @@ mod tests {
         }
         assert_eq!(ledger_counts(&conn, wallet.account_id), (2, 2));
         assert_eq!(total(&conn, wallet.account_id), 0);
+    }
+
+    #[test]
+    fn another_accounts_result_does_not_drop_a_pending_zero_conf_input() {
+        let wallet = test_wallet();
+        let conn = wallet.pool.get().expect("conn");
+        let other = WalletType::SeedWords(SeedWordsWallet::construct_new(CipherSeed::random()).unwrap());
+        create_account(&conn, "other", &other, "password").unwrap();
+        let other_id = get_account_by_name(&conn, "other").unwrap().unwrap().id;
+        let mut processor = BlockProcessor::new(
+            vec![
+                (wallet.account_id, wallet.view_key.clone()),
+                (other_id, wallet.view_key.clone()),
+            ],
+            3,
+        );
+        let a = test_wallet_output(10_000, 1);
+        let input = block(30, Vec::new(), vec![a.output_hash()]);
+        let output = block(30, vec![a.clone()], Vec::new());
+
+        processor
+            .process_block(&conn, &input, wallet.account_id)
+            .expect("input");
+        processor
+            .process_block(&conn, &block(30, Vec::new(), Vec::new()), other_id)
+            .expect("other account");
+        processor
+            .process_block(&conn, &output, wallet.account_id)
+            .expect("output");
+
+        let (_, status, ..) = output_row(&conn, &a.output_hash());
+        assert_eq!(status, "SPENT");
+        assert_eq!(ledger_counts(&conn, wallet.account_id), (1, 1));
     }
 }
