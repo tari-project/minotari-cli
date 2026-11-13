@@ -55,31 +55,12 @@ pub fn derive_output_tx_id(
         },
         |row| row.get(0),
     )?;
-    if counter > 0 {
-        // Without header validation the wallet cannot tell a re-created output from one a node replays in a made-up
-        // block, so every new copy is recorded in the audit log.
-        let earlier_block: Vec<u8> = conn.query_row(
-            r#"
-            SELECT mined_in_block_hash FROM outputs
-            WHERE account_id = :account_id AND output_hash = :hash AND deleted_at IS NULL
-              AND +mined_in_block_height < :height
-            ORDER BY +mined_in_block_height DESC, id DESC
-            LIMIT 1
-            "#,
-            named_params! {
-                ":account_id": account_id,
-                ":hash": output_hash.as_slice(),
-                ":height": i64::try_from(block_height).unwrap_or(i64::MAX),
-            },
-            |row| row.get(0),
-        )?;
-        info!(
-            target: "audit",
-            account_id = account_id,
-            block_height = block_height,
-            earlier_copy_block_hash = &*hex::encode(earlier_block);
-            "Output re-created on chain: another copy of this hash was stored earlier"
-        );
+    // Without header validation the wallet cannot tell a re-created output from one a node replays in a made-up
+    // block, so every new copy is recorded in the audit log: when an earlier copy is counted, or when the first id is
+    // taken (a copy at a higher height, stored first). Neither is the common path.
+    let mut logged = counter > 0;
+    if logged {
+        log_re_created_output(conn, account_id, output_hash, block_height)?;
     }
     loop {
         let tx_id = if counter == 0 {
@@ -96,6 +77,10 @@ pub fn derive_output_tx_id(
         )?;
         if !taken {
             return Ok(tx_id);
+        }
+        if !logged {
+            log_re_created_output(conn, account_id, output_hash, block_height)?;
+            logged = true;
         }
         // shortcut: scans outputs, as no index covers soft-deleted rows; it runs only for copies stored out of chain
         // order. Add an index on (account_id, output_hash) for all rows if that becomes common.
@@ -120,6 +105,49 @@ pub fn derive_output_tx_id(
         }
         counter = counter.saturating_add(1);
     }
+}
+
+/// The block hash of the account's active copy of `output_hash` mined nearest to `block_height`, if it has one.
+fn nearest_copy_block(
+    conn: &Connection,
+    account_id: i64,
+    output_hash: &FixedHash,
+    block_height: u64,
+) -> WalletDbResult<Option<Vec<u8>>> {
+    Ok(conn
+        .query_row(
+            r#"
+            SELECT mined_in_block_hash FROM outputs
+            WHERE account_id = :account_id AND output_hash = :hash AND deleted_at IS NULL
+            ORDER BY abs(+mined_in_block_height - :height), id DESC
+            LIMIT 1
+            "#,
+            named_params! {
+                ":account_id": account_id,
+                ":hash": output_hash.as_slice(),
+                ":height": i64::try_from(block_height).unwrap_or(i64::MAX),
+            },
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
+fn log_re_created_output(
+    conn: &Connection,
+    account_id: i64,
+    output_hash: &FixedHash,
+    block_height: u64,
+) -> WalletDbResult<()> {
+    if let Some(other_block) = nearest_copy_block(conn, account_id, output_hash, block_height)? {
+        info!(
+            target: "audit",
+            account_id = account_id,
+            block_height = block_height,
+            other_copy_block_hash = &*hex::encode(other_block);
+            "Output re-created on chain: another copy of this hash is stored"
+        );
+    }
+    Ok(())
 }
 
 /// The id of the active row of `output_hash` mined in `block_hash`, if the account has one.
@@ -2074,6 +2102,24 @@ mod tests {
     /// Insert a synthetic outputs row directly. Avoids constructing a real
     /// `WalletOutput` (which requires keys and ranges) so we can assert the
     /// SQL filter logic in isolation.
+    #[test]
+    fn the_nearest_copy_is_found_above_or_below() {
+        let temp = tempdir().expect("temp dir");
+        let pool = init_db(temp.path().join("nearest.db")).expect("init db");
+        let conn = pool.get().expect("conn");
+        let account_id = create_test_account(&conn);
+        insert_synthetic_output(&conn, account_id, 5, 1_000, 30, false, OutputStatus::Unspent, 0);
+        // A copy stored before an older one (fast sync, then backfill) is found from below.
+        assert_eq!(
+            nearest_copy_block(&conn, account_id, &FixedHash::from([5u8; 32]), 10).expect("lookup"),
+            Some(vec![5u8; 32])
+        );
+        assert_eq!(
+            nearest_copy_block(&conn, account_id, &FixedHash::from([6u8; 32]), 10).expect("lookup"),
+            None
+        );
+    }
+
     fn insert_synthetic_output(
         conn: &Connection,
         account_id: i64,

@@ -839,7 +839,8 @@ impl<E: EventSender> BlockProcessor<E> {
                         hashes: HashMap::new(),
                     })
                     .hashes
-                    .insert(*input_hash, spent_in_block);
+                    .entry(*input_hash)
+                    .or_insert(spent_in_block);
                 continue;
             };
 
@@ -889,6 +890,15 @@ impl<E: EventSender> BlockProcessor<E> {
         }
 
         Ok(request_ids)
+    }
+
+    /// The warning still due for an unmatched input of the account's open block.
+    #[cfg(test)]
+    fn unmatched_input_warning(&self, account_id: i64, input_hash: &FixedHash) -> Option<Option<&String>> {
+        self.unmatched_inputs
+            .get(&account_id)
+            .and_then(|open| open.hashes.get(input_hash))
+            .map(Option::as_ref)
     }
 
     /// Warns about the inputs still unmatched in each account's open block. Call
@@ -4430,6 +4440,39 @@ mod tests {
 
         let (_, status, ..) = output_row(&conn, &a.output_hash());
         assert_eq!(status, "SPENT");
+        assert_eq!(ledger_counts(&conn, wallet.account_id), (1, 1));
+    }
+
+    #[test]
+    fn an_unmatched_input_is_warned_about_once_across_re_reads() {
+        let wallet = test_wallet();
+        let conn = wallet.pool.get().expect("conn");
+        let a = test_wallet_output(10_000, 1);
+        let relisted = block(21, Vec::new(), vec![a.output_hash()]);
+        let mut processor = processor(&wallet, false);
+        process(
+            &mut processor,
+            &conn,
+            wallet.account_id,
+            &[
+                block(10, vec![a.clone()], Vec::new()),
+                block(20, Vec::new(), vec![a.output_hash()]),
+                relisted.clone(),
+            ],
+        );
+        assert_eq!(
+            processor.unmatched_input_warning(wallet.account_id, &a.output_hash()),
+            Some(None)
+        );
+
+        // The continuous scan re-reads the tip in the next batch: nothing is due to be warned about again.
+        processor
+            .process_block(&conn, &relisted, wallet.account_id)
+            .expect("re-read");
+        assert_eq!(
+            processor.unmatched_input_warning(wallet.account_id, &a.output_hash()),
+            Some(None)
+        );
         assert_eq!(ledger_counts(&conn, wallet.account_id), (1, 1));
     }
 }
