@@ -465,6 +465,26 @@ impl<E: EventSender> BlockProcessor<E> {
                 status_when_found,
             )?;
 
+            // Two unspent copies of one hash cannot be on chain: a copy still unspent in another block means the scan
+            // crossed a reorg it has not rolled back. Not checked without inputs (no spend is ever recorded) or when
+            // this block spends the hash itself.
+            if change_output_id.is_none()
+                && !self.inputs_excluded
+                && !block.inputs.contains(hash)
+                && let Some(copy_block) =
+                    db::get_unspent_copy_block(tx, account_id, hash, block.height, &block.block_hash)?
+            {
+                warn!(
+                    target: "audit",
+                    account_id = account_id,
+                    block_height = block.height,
+                    block_hash = &*hex::encode(block.block_hash),
+                    unspent_in_block = &*hex::encode(copy_block);
+                    "Output already unspent in another block; ignoring this copy"
+                );
+                continue;
+            }
+
             let output_id = if let Some(id) = change_output_id {
                 id
             } else if self.backfill_mode {
@@ -486,24 +506,6 @@ impl<E: EventSender> BlockProcessor<E> {
                     None => continue, // Output already exists, skip events and balance changes
                 }
             } else {
-                // Two unspent copies of one hash cannot be on chain: a copy still unspent in another block means the
-                // scan crossed a reorg it has not rolled back. Not checked without inputs (no spend is ever recorded)
-                // or when this block spends the hash itself.
-                if !self.inputs_excluded
-                    && !block.inputs.contains(hash)
-                    && let Some(copy_block) =
-                        db::get_unspent_copy_block(tx, account_id, hash, block.height, &block.block_hash)?
-                {
-                    warn!(
-                        target: "audit",
-                        account_id = account_id,
-                        block_height = block.height,
-                        block_hash = &*hex::encode(block.block_hash),
-                        unspent_in_block = &*hex::encode(copy_block);
-                        "Output already unspent in another block; ignoring this copy"
-                    );
-                    continue;
-                }
                 let (output_id, newly_inserted) = db::insert_output(
                     tx,
                     account_id,
@@ -3934,5 +3936,59 @@ mod tests {
         assert_eq!(rows, 1);
         assert_eq!(instances(&conn, wallet.account_id, &a).len(), 1);
         assert_eq!(ledger_counts(&conn, wallet.account_id), (1, 0));
+    }
+
+    #[test]
+    fn backfill_does_not_store_a_copy_of_an_output_fast_sync_holds_in_another_block() {
+        // A reorg between fast sync and backfill moved the output to another block at the same height.
+        let wallet = test_wallet();
+        let conn = wallet.pool.get().expect("conn");
+        let a = test_wallet_output(10_000, 1);
+        let mut fast_sync = processor(&wallet, false);
+        fast_sync.set_inputs_excluded(true);
+        process(
+            &mut fast_sync,
+            &conn,
+            wallet.account_id,
+            &[block(20, vec![a.clone()], Vec::new())],
+        );
+        let mut backfill = processor(&wallet, false);
+        backfill.set_backfill_mode(true);
+        process(
+            &mut backfill,
+            &conn,
+            wallet.account_id,
+            &[block_with_hash(20, hash(99), vec![a.clone()], Vec::new())],
+        );
+        db::resolve_spent_unconfirmed_with_newer_copy(&conn, wallet.account_id).expect("resolve");
+
+        assert_eq!(instances(&conn, wallet.account_id, &a).len(), 1);
+        assert_eq!(ledger_counts(&conn, wallet.account_id), (1, 0));
+        assert_eq!(total(&conn, wallet.account_id), 10_000);
+        // Nothing is left for the node to mark unspent.
+        assert!(
+            db::get_unresolved_spent_unconfirmed_outputs(&conn, wallet.account_id)
+                .expect("unresolved")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn an_input_never_spends_an_unmined_change_row() {
+        let wallet = test_wallet();
+        let conn = wallet.pool.get().expect("conn");
+        let change = test_wallet_output(5_000, 7);
+        db::insert_unconfirmed_change_output(&conn, wallet.account_id, &wallet.view_key, "request-1", &change)
+            .expect("insert change");
+        process(
+            &mut processor(&wallet, false),
+            &conn,
+            wallet.account_id,
+            &[block(20, Vec::new(), vec![change.output_hash()])],
+        );
+
+        assert_eq!(ledger_counts(&conn, wallet.account_id), (0, 0));
+        let (_, status, ..) = output_row(&conn, &change.output_hash());
+        assert_eq!(status, "UNCONFIRMED");
     }
 }

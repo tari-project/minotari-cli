@@ -1082,7 +1082,8 @@ pub struct OutputInstance {
     pub spent_in_block_hash: Option<Vec<u8>>,
 }
 
-/// Every active instance of `output_hash` in the account, oldest first.
+/// Every active, mined instance of `output_hash` in the account, oldest first. An unmined change row (`UNCONFIRMED`
+/// or `REJECTED`, never credited) is left out: a spend can only be of a mined output.
 pub fn get_output_instances_for_account(
     conn: &Connection,
     account_id: i64,
@@ -1094,11 +1095,17 @@ pub fn get_output_instances_for_account(
         FROM outputs o
         LEFT JOIN inputs i ON i.output_id = o.id AND i.deleted_at IS NULL
         WHERE o.account_id = :account_id AND o.output_hash = :hash AND o.deleted_at IS NULL
+          AND o.status NOT IN (:unconfirmed, :rejected)
         ORDER BY o.mined_in_block_height, o.id
         "#,
     )?;
     let rows = stmt.query_map(
-        named_params! { ":account_id": account_id, ":hash": output_hash.as_slice() },
+        named_params! {
+            ":account_id": account_id,
+            ":hash": output_hash.as_slice(),
+            ":unconfirmed": OutputStatus::Unconfirmed.to_string(),
+            ":rejected": OutputStatus::Rejected.to_string(),
+        },
         |row| {
             Ok((
                 row.get::<_, i64>(0)?,
