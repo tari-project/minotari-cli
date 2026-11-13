@@ -1,8 +1,10 @@
 use crate::db::balance_changes::{
-    get_balance_change_id_by_output, insert_balance_change, mark_balance_change_as_reversed,
+    get_balance_change_id_by_output, insert_balance_change, insert_balance_change_if_not_exists,
+    mark_balance_change_as_reversed,
 };
 use crate::db::completed_transactions::CompletedTransactionStatus;
 use crate::db::error::{WalletDbError, WalletDbResult};
+use crate::db::inputs::insert_input;
 use crate::log::mask_amount;
 use crate::models::BalanceChange;
 use crate::models::OutputStatus;
@@ -20,13 +22,170 @@ use tari_transaction_components::MicroMinotari;
 use tari_transaction_components::transaction_components::WalletOutput;
 use tari_transaction_components::utxo_selection::UtxoValue;
 use tari_utilities::ByteArray;
+use zeroize::Zeroizing;
 
+/// `outputs.tx_id` for a new instance of `output_hash` in the account, mined at `block_height`.
+///
+/// The first instance keeps `H(view key, output_hash)`, the id stored before outputs could be re-created. An output
+/// re-created after it was spent gets `H(view key, output_hash, n)`, `n` being the number of active instances mined in
+/// earlier blocks, so a re-mine after a reorg derives the same id again. Derive it only when inserting a row and never
+/// recompute it: a reorg of an earlier instance lowers `n` for a later one.
+///
+/// When that id is held by an active row, the instances were stored out of chain order (a backfill below a copy fast
+/// sync already stored). The id of a soft-deleted instance of the hash that no active row holds is then reused, so a
+/// copy re-mined after a reorg keeps the id it had; failing that, `n` is raised until the id is free. The id therefore
+/// depends on the order the copies were found in: a wallet that found them in chain order derives different ids.
+pub fn derive_output_tx_id(
+    conn: &Connection,
+    account_id: i64,
+    account_view_key: &PrivateKey,
+    output_hash: &FixedHash,
+    block_height: u64,
+) -> WalletDbResult<i64> {
+    let mut counter: i64 = conn.query_row(
+        r#"
+        SELECT COUNT(*) FROM outputs
+        WHERE account_id = :account_id AND output_hash = :hash AND deleted_at IS NULL
+          AND +mined_in_block_height < :height
+        "#,
+        named_params! {
+            ":account_id": account_id,
+            ":hash": output_hash.as_slice(),
+            ":height": i64::try_from(block_height).unwrap_or(i64::MAX),
+        },
+        |row| row.get(0),
+    )?;
+    // Without header validation the wallet cannot tell a re-created output from one a node replays in a made-up
+    // block, so every new copy is recorded in the audit log: when an earlier copy is counted, or when the first id is
+    // taken (a copy at a higher height, stored first). Neither is the common path.
+    let mut logged = counter > 0;
+    if logged {
+        log_re_created_output(conn, account_id, output_hash, block_height)?;
+    }
+    loop {
+        let tx_id = if counter == 0 {
+            TxId::new_deterministic(account_view_key.as_bytes(), output_hash)
+        } else {
+            let key = Zeroizing::new([account_view_key.as_bytes(), &counter.to_le_bytes()].concat());
+            TxId::new_deterministic(&key, output_hash)
+        }
+        .as_i64_wrapped();
+        let taken: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM outputs WHERE account_id = :account_id AND tx_id = :tx_id AND deleted_at IS NULL)",
+            named_params! { ":account_id": account_id, ":tx_id": tx_id },
+            |row| row.get(0),
+        )?;
+        if !taken {
+            return Ok(tx_id);
+        }
+        if !logged {
+            log_re_created_output(conn, account_id, output_hash, block_height)?;
+            logged = true;
+        }
+        // shortcut: scans outputs, as no index covers soft-deleted rows; it runs only for copies stored out of chain
+        // order. Add an index on (account_id, output_hash) for all rows if that becomes common.
+        let freed: Option<i64> = conn
+            .query_row(
+                r#"
+                SELECT d.tx_id FROM outputs d
+                WHERE d.account_id = :account_id AND d.output_hash = :hash AND d.deleted_at IS NOT NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM outputs a
+                      WHERE a.account_id = d.account_id AND a.tx_id = d.tx_id AND a.deleted_at IS NULL
+                  )
+                ORDER BY d.id DESC
+                LIMIT 1
+                "#,
+                named_params! { ":account_id": account_id, ":hash": output_hash.as_slice() },
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(tx_id) = freed {
+            return Ok(tx_id);
+        }
+        counter = counter.saturating_add(1);
+    }
+}
+
+/// The block hash of the account's active copy of `output_hash` mined nearest to `block_height`, if it has one.
+fn nearest_copy_block(
+    conn: &Connection,
+    account_id: i64,
+    output_hash: &FixedHash,
+    block_height: u64,
+) -> WalletDbResult<Option<Vec<u8>>> {
+    Ok(conn
+        .query_row(
+            r#"
+            SELECT mined_in_block_hash FROM outputs
+            WHERE account_id = :account_id AND output_hash = :hash AND deleted_at IS NULL
+            ORDER BY abs(+mined_in_block_height - :height), id DESC
+            LIMIT 1
+            "#,
+            named_params! {
+                ":account_id": account_id,
+                ":hash": output_hash.as_slice(),
+                ":height": i64::try_from(block_height).unwrap_or(i64::MAX),
+            },
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
+fn log_re_created_output(
+    conn: &Connection,
+    account_id: i64,
+    output_hash: &FixedHash,
+    block_height: u64,
+) -> WalletDbResult<()> {
+    if let Some(other_block) = nearest_copy_block(conn, account_id, output_hash, block_height)? {
+        info!(
+            target: "audit",
+            account_id = account_id,
+            block_height = block_height,
+            other_copy_block_hash = &*hex::encode(other_block);
+            "Output re-created on chain: another copy of this hash is stored"
+        );
+    }
+    Ok(())
+}
+
+/// The id of the active row of `output_hash` mined in `block_hash`, if the account has one.
+fn get_output_id_in_block(
+    conn: &Connection,
+    account_id: i64,
+    output_hash: &FixedHash,
+    block_hash: &FixedHash,
+) -> WalletDbResult<Option<i64>> {
+    Ok(conn
+        .query_row(
+            r#"
+            SELECT id FROM outputs
+            WHERE account_id = :account_id AND output_hash = :hash AND mined_in_block_hash = :block_hash
+              AND deleted_at IS NULL
+            "#,
+            named_params! {
+                ":account_id": account_id,
+                ":hash": output_hash.as_slice(),
+                ":block_hash": block_hash.as_slice(),
+            },
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
+/// Records a detected output, returning `(output_id, newly_inserted)`.
+///
+/// An output is one row per account, hash and block, and the same block is presented more than once in normal
+/// operation: the continuous scan rewinds one block on every poll cycle to re-check the tip. `newly_inserted` is
+/// `false` when the row already existed; the caller then skips the detection event, the webhook and the credit,
+/// which were recorded the first time.
 #[allow(clippy::too_many_arguments)]
 pub fn insert_output(
     conn: &Connection,
     account_id: i64,
     account_view_key: &PrivateKey,
-    output_hash: Vec<u8>,
+    output_hash: &FixedHash,
     output: &WalletOutput,
     block_height: u64,
     block_hash: &FixedHash,
@@ -35,7 +194,11 @@ pub fn insert_output(
     memo_hex: Option<String>,
     payment_reference: PaymentReference,
     is_burn: bool,
-) -> WalletDbResult<i64> {
+) -> WalletDbResult<(i64, bool)> {
+    if let Some(id) = get_output_id_in_block(conn, account_id, output_hash, block_hash)? {
+        return Ok((id, false));
+    }
+
     info!(
         target: "audit",
         account_id = account_id,
@@ -44,7 +207,7 @@ pub fn insert_output(
         "DB: Inserting output"
     );
 
-    let tx_id = TxId::new_deterministic(account_view_key.as_bytes(), &output.output_hash()).as_i64_wrapped();
+    let tx_id = derive_output_tx_id(conn, account_id, account_view_key, output_hash, block_height)?;
 
     let output_json = serde_json::to_string(&output)?;
 
@@ -96,7 +259,7 @@ pub fn insert_output(
         named_params! {
             ":account_id": account_id,
             ":tx_id": tx_id,
-            ":output_hash": output_hash,
+            ":output_hash": output_hash.as_slice(),
             ":block_height": block_height,
             ":block_hash": block_hash.as_slice(),
             ":value": value,
@@ -110,7 +273,7 @@ pub fn insert_output(
         },
     )?;
 
-    Ok(conn.last_insert_rowid())
+    Ok((conn.last_insert_rowid(), true))
 }
 
 /// Inserts an output with `SpentUnconfirmed` status (`Unspent` for a burn output, which can never be spent) using
@@ -121,7 +284,7 @@ pub fn insert_spent_output_if_not_exists(
     conn: &Connection,
     account_id: i64,
     account_view_key: &PrivateKey,
-    output_hash: Vec<u8>,
+    output_hash: &FixedHash,
     output: &WalletOutput,
     block_height: u64,
     block_hash: &FixedHash,
@@ -131,7 +294,11 @@ pub fn insert_spent_output_if_not_exists(
     payment_reference: PaymentReference,
     is_burn: bool,
 ) -> WalletDbResult<Option<i64>> {
-    let tx_id = TxId::new_deterministic(account_view_key.as_bytes(), &output.output_hash()).as_i64_wrapped();
+    // A re-read: return before deriving an id that the existing row holds.
+    if get_output_id_in_block(conn, account_id, output_hash, block_hash)?.is_some() {
+        return Ok(None);
+    }
+    let tx_id = derive_output_tx_id(conn, account_id, account_view_key, output_hash, block_height)?;
     let output_json = serde_json::to_string(&output)?;
 
     #[allow(clippy::cast_possible_wrap)]
@@ -186,7 +353,7 @@ pub fn insert_spent_output_if_not_exists(
         named_params! {
             ":account_id": account_id,
             ":tx_id": tx_id,
-            ":output_hash": output_hash,
+            ":output_hash": output_hash.as_slice(),
             ":block_height": block_height,
             ":block_hash": block_hash.as_slice(),
             ":value": value,
@@ -217,8 +384,8 @@ pub fn insert_spent_output_if_not_exists(
 ///
 /// The output has not been mined, so the NOT NULL `mined_*` columns hold
 /// sentinel values: height 0, an empty block hash and the epoch as timestamp.
-/// `tx_id` uses the same deterministic formula as [`insert_output`], so the scan
-/// finds the same row. Senders that assemble a transaction outside
+/// `tx_id` is derived as in [`insert_output`], counting the output as mined
+/// after every instance already stored. Senders that assemble a transaction outside
 /// `TransactionManager` should call this after recording the completed
 /// transaction.
 pub fn insert_unconfirmed_change_output(
@@ -236,7 +403,7 @@ pub fn insert_unconfirmed_change_output(
     );
 
     let output_hash = output.output_hash();
-    let tx_id = TxId::new_deterministic(account_view_key.as_bytes(), &output_hash).as_i64_wrapped();
+    let tx_id = derive_output_tx_id(conn, account_id, account_view_key, &output_hash, u64::MAX)?;
     let output_json = serde_json::to_string(&output)?;
     let mined_timestamp = DateTime::<Utc>::from_timestamp(0, 0)
         .ok_or_else(|| WalletDbError::Unexpected("Epoch timestamp is out of range".to_string()))?;
@@ -319,8 +486,8 @@ pub fn insert_unconfirmed_change_output(
 /// When the scan finds an output that already has an active `UNCONFIRMED` (or
 /// `REJECTED`) row with the same hash, the row is updated in place: its mined
 /// fields, payment reference and memo are set and its status becomes
-/// `new_status`. Inserting a second row would violate the active unique index
-/// on `output_hash`. A `REJECTED` row is updated too: the output exists on
+/// `new_status`. Inserting a second row would leave two rows for one output,
+/// the send's change still unmined. A `REJECTED` row is updated too: the output exists on
 /// chain, so it is real whatever the wallet concluded before.
 ///
 /// A change output that a reorg reverted to `UNCONFIRMED` while a later send
@@ -365,10 +532,15 @@ pub fn confirm_unconfirmed_change_output(
                 status = CASE WHEN {live} THEN :locked ELSE :new_status END,
                 locked_by_request_id = CASE WHEN {live} THEN locked_by_request_id ELSE NULL END,
                 locked_at = CASE WHEN {live} THEN locked_at ELSE NULL END
-            WHERE account_id = :account_id
-              AND output_hash = :output_hash
-              AND status IN (:unconfirmed, :rejected)
-              AND deleted_at IS NULL
+            WHERE id = (
+                SELECT id FROM outputs
+                WHERE account_id = :account_id
+                  AND output_hash = :output_hash
+                  AND status IN (:unconfirmed, :rejected)
+                  AND deleted_at IS NULL
+                ORDER BY id
+                LIMIT 1
+            )
             RETURNING id
             "#
             ),
@@ -579,8 +751,8 @@ pub fn restore_change_of_rejected_send(
 
     if is_deleted {
         let active: i64 = conn.query_row(
-            "SELECT COUNT(*) FROM outputs WHERE output_hash = :hash AND deleted_at IS NULL",
-            named_params! { ":hash": output_hash.as_slice() },
+            "SELECT COUNT(*) FROM outputs WHERE account_id = :account_id AND output_hash = :hash AND deleted_at IS NULL",
+            named_params! { ":account_id": account_id, ":hash": output_hash.as_slice() },
             |row| row.get(0),
         )?;
         if active > 0 {
@@ -600,25 +772,34 @@ pub fn restore_change_of_rejected_send(
     Ok(Some((request_id, TxId::from(completed_id as u64))))
 }
 
-/// Where the scan saw the wallet's output `output_hash` spent: the height and
-/// block hash of its active input record, if it has one.
+/// Subquery for the id of the active instance of `:hash` in `:account_id` that the send `:request_id` locked (or
+/// spent), else the newest. `:request_id` may be NULL. The unary `+` keeps the planner on the hash index.
+const SEND_INSTANCE_SQL: &str = "SELECT id FROM outputs WHERE account_id = :account_id AND output_hash = :hash \
+     AND deleted_at IS NULL \
+     ORDER BY COALESCE(locked_by_request_id = :request_id, 0) DESC, +mined_in_block_height DESC, id DESC LIMIT 1";
+
+/// Where the scan saw the send `request_id`'s input `output_hash` spent: the
+/// height and block hash of its active input record, if it has one.
+///
+/// The copy of the hash the send locked counts, else the newest copy (older
+/// ones were spent before it was created).
 pub fn get_output_spend(
     conn: &Connection,
     account_id: i64,
+    request_id: &str,
     output_hash: &FixedHash,
 ) -> WalletDbResult<Option<(u64, Vec<u8>)>> {
     let spend: Option<(i64, Vec<u8>)> = conn
         .query_row(
-            r#"
-            SELECT i.mined_in_block_height, i.mined_in_block_hash
-            FROM inputs i
-            JOIN outputs o ON i.output_id = o.id
-            WHERE o.account_id = :account_id
-              AND o.output_hash = :hash
-              AND o.deleted_at IS NULL
-              AND i.deleted_at IS NULL
-            "#,
-            named_params! { ":account_id": account_id, ":hash": output_hash.as_slice() },
+            &format!(
+                r#"
+            SELECT mined_in_block_height, mined_in_block_hash
+            FROM inputs
+            WHERE output_id = ({SEND_INSTANCE_SQL})
+              AND deleted_at IS NULL
+            "#
+            ),
+            named_params! { ":account_id": account_id, ":hash": output_hash.as_slice(), ":request_id": request_id },
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
@@ -690,8 +871,9 @@ pub fn get_output_hashes_mined_in_block(
     Ok(hashes)
 }
 
-/// Records `pending_tx_id` as the holder of the wallet's outputs it spent in a
-/// block (`locked_by_request_id` on the `SPENT` rows for `input_hashes`).
+/// Records `pending_tx_id` as the holder of the wallet's outputs it spent in
+/// the block `block_hash` (`locked_by_request_id` on the `SPENT` rows for
+/// `input_hashes` whose active input is in that block).
 ///
 /// An input released by one send and locked by another can be spent by the
 /// first after all; the lock then names the wrong send. Reading it back (the
@@ -700,6 +882,7 @@ pub fn record_spender_of_inputs(
     conn: &Connection,
     account_id: i64,
     pending_tx_id: &str,
+    block_hash: &[u8],
     input_hashes: &[FixedHash],
 ) -> WalletDbResult<()> {
     for input_hash in input_hashes {
@@ -707,13 +890,24 @@ pub fn record_spender_of_inputs(
             r#"
             UPDATE outputs
             SET locked_by_request_id = :req_id
-            WHERE account_id = :account_id AND output_hash = :hash AND status = :spent AND deleted_at IS NULL
+            WHERE id IN (
+                SELECT o.id
+                FROM outputs o
+                JOIN inputs i ON i.output_id = o.id
+                WHERE o.account_id = :account_id
+                  AND o.output_hash = :hash
+                  AND o.status = :spent
+                  AND o.deleted_at IS NULL
+                  AND i.deleted_at IS NULL
+                  AND i.mined_in_block_hash = :block_hash
+            )
             "#,
             named_params! {
                 ":req_id": pending_tx_id,
                 ":account_id": account_id,
                 ":hash": input_hash.as_slice(),
                 ":spent": OutputStatus::Spent.to_string(),
+                ":block_hash": block_hash,
             },
         )?;
     }
@@ -744,12 +938,18 @@ pub fn relock_inputs_for_revived_send(
     for input_hash in input_hashes {
         let row: Option<(i64, String, Option<String>)> = conn
             .query_row(
-                r#"
+                &format!(
+                    r#"
                 SELECT id, status, locked_by_request_id
                 FROM outputs
-                WHERE account_id = :account_id AND output_hash = :hash AND deleted_at IS NULL
-                "#,
-                named_params! { ":account_id": account_id, ":hash": input_hash.as_slice() },
+                WHERE id = ({SEND_INSTANCE_SQL})
+                "#
+                ),
+                named_params! {
+                    ":account_id": account_id,
+                    ":hash": input_hash.as_slice(),
+                    ":request_id": pending_tx_id,
+                },
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
             .optional()?;
@@ -949,48 +1149,126 @@ pub fn revert_change_outputs_from_height(
     Ok(outputs_to_revert)
 }
 
-pub fn get_output_info_by_hash(
-    conn: &Connection,
-    output_hash: &FixedHash,
-) -> WalletDbResult<Option<(i64, TxId, WalletOutput)>> {
-    let mut stmt = conn.prepare_cached(
-        r#"
-        SELECT id, tx_id, wallet_output_json
-        FROM outputs
-        WHERE output_hash = :output_hash AND deleted_at IS NULL
-        "#,
-    )?;
-
-    let rows = stmt.query(named_params! { ":output_hash": output_hash.as_slice() })?;
-    let row: Option<WalletOutputRow> = from_rows(rows).next().transpose()?;
-    let data = match row {
-        Some(r) => r,
-        None => return Ok(None),
-    };
-
-    let output: WalletOutput = serde_json::from_str(&data.wallet_output_json)?;
-
-    let tx_id = TxId::from(data.tx_id as u64);
-
-    Ok(Some((data.id, tx_id, output)))
+/// An active instance of an output hash in an account, with the block of its active input if it was spent.
+pub struct OutputInstance {
+    pub id: i64,
+    pub tx_id: TxId,
+    pub output: WalletOutput,
+    pub mined_in_block_height: u64,
+    pub mined_in_block_hash: Vec<u8>,
+    pub spent_in_block_hash: Option<Vec<u8>>,
 }
 
+/// Every active, mined instance of `output_hash` in the account, oldest first. An unmined change row (`UNCONFIRMED`
+/// or `REJECTED`, never credited) is left out: a spend can only be of a mined output.
+pub fn get_output_instances_for_account(
+    conn: &Connection,
+    account_id: i64,
+    output_hash: &FixedHash,
+) -> WalletDbResult<Vec<OutputInstance>> {
+    let mut stmt = conn.prepare_cached(
+        r#"
+        SELECT o.id, o.tx_id, o.wallet_output_json, o.mined_in_block_height, o.mined_in_block_hash,
+               i.mined_in_block_hash
+        FROM outputs o
+        LEFT JOIN inputs i ON i.output_id = o.id AND i.deleted_at IS NULL
+        WHERE o.account_id = :account_id AND o.output_hash = :hash AND o.deleted_at IS NULL
+          AND o.status NOT IN (:unconfirmed, :rejected)
+        ORDER BY +o.mined_in_block_height, o.id
+        "#,
+    )?;
+    let rows = stmt.query_map(
+        named_params! {
+            ":account_id": account_id,
+            ":hash": output_hash.as_slice(),
+            ":unconfirmed": OutputStatus::Unconfirmed.to_string(),
+            ":rejected": OutputStatus::Rejected.to_string(),
+        },
+        |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, i64>(3)?,
+                row.get::<_, Vec<u8>>(4)?,
+                row.get::<_, Option<Vec<u8>>>(5)?,
+            ))
+        },
+    )?;
+    let mut instances = Vec::new();
+    for row in rows {
+        let (id, tx_id, json, height, mined_in_block_hash, spent_in_block_hash) = row?;
+        instances.push(OutputInstance {
+            id,
+            tx_id: TxId::from(tx_id.cast_unsigned()),
+            output: serde_json::from_str(&json)?,
+            mined_in_block_height: height.cast_unsigned(),
+            mined_in_block_hash,
+            spent_in_block_hash,
+        });
+    }
+    Ok(instances)
+}
+
+/// The block of an active copy of `output_hash` in the account, mined at or below `block_height` in another block
+/// than `block_hash`, that is still unspent: no active input, and not a backfill copy whose spend is unverified
+/// (`SpentUnconfirmed`) or an unmined change row. `None` once the output is stored for `block_hash`, so a re-read of
+/// that block stays a silent no-op.
+pub fn get_unspent_copy_block(
+    conn: &Connection,
+    account_id: i64,
+    output_hash: &FixedHash,
+    block_height: u64,
+    block_hash: &FixedHash,
+) -> WalletDbResult<Option<Vec<u8>>> {
+    Ok(conn
+        .query_row(
+            r#"
+            SELECT o.mined_in_block_hash FROM outputs o
+            WHERE o.account_id = :account_id AND o.output_hash = :hash AND o.deleted_at IS NULL
+              AND +o.mined_in_block_height <= :height
+              AND o.mined_in_block_hash != :block_hash
+              AND o.status NOT IN (:spent_unconfirmed, :unconfirmed, :rejected)
+              AND NOT EXISTS (SELECT 1 FROM inputs i WHERE i.output_id = o.id AND i.deleted_at IS NULL)
+              AND NOT EXISTS (
+                  SELECT 1 FROM outputs t
+                  WHERE t.account_id = o.account_id AND t.output_hash = o.output_hash
+                    AND t.mined_in_block_hash = :block_hash AND t.deleted_at IS NULL
+              )
+            LIMIT 1
+            "#,
+            named_params! {
+                ":account_id": account_id,
+                ":hash": output_hash.as_slice(),
+                ":height": i64::try_from(block_height).unwrap_or(i64::MAX),
+                ":block_hash": block_hash.as_slice(),
+                ":spent_unconfirmed": OutputStatus::SpentUnconfirmed.to_string(),
+                ":unconfirmed": OutputStatus::Unconfirmed.to_string(),
+                ":rejected": OutputStatus::Rejected.to_string(),
+            },
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
+/// The newest active instance of `output_hash` in the account: the one a send can spend.
 pub fn get_output_info_by_hash_for_account(
     conn: &Connection,
     account_id: i64,
     output_hash: &FixedHash,
 ) -> WalletDbResult<Option<(i64, TxId, WalletOutput)>> {
-    let mut stmt = conn.prepare_cached(
+    let mut stmt = conn.prepare_cached(&format!(
         r#"
         SELECT id, tx_id, wallet_output_json
         FROM outputs
-        WHERE account_id = :account_id AND output_hash = :output_hash AND deleted_at IS NULL
-        "#,
-    )?;
+        WHERE id = ({SEND_INSTANCE_SQL})
+        "#
+    ))?;
 
     let rows = stmt.query(named_params! {
         ":account_id": account_id,
-        ":output_hash": output_hash.as_slice(),
+        ":hash": output_hash.as_slice(),
+        ":request_id": None::<String>,
     })?;
     let row: Option<WalletOutputRow> = from_rows(rows).next().transpose()?;
     let data = match row {
@@ -1007,6 +1285,7 @@ pub fn get_output_info_by_hash_for_account(
 
 #[derive(Deserialize)]
 pub struct UnconfirmedOutputRow {
+    pub id: i64,
     pub output_hash: FixedHash,
     pub mined_in_block_height: i64,
     pub memo_parsed: Option<String>,
@@ -1027,7 +1306,7 @@ pub fn get_unconfirmed_outputs(
 
     let mut stmt = conn.prepare_cached(
         r#"
-        SELECT output_hash, mined_in_block_height, memo_parsed, memo_hex, tx_id, is_burn
+        SELECT id, output_hash, mined_in_block_height, memo_parsed, memo_hex, tx_id, is_burn
         FROM outputs o
         WHERE o.account_id = :account_id
           AND o.mined_in_block_height <= :min_height
@@ -1052,7 +1331,7 @@ pub fn get_unconfirmed_outputs(
 
 pub fn mark_output_confirmed(
     conn: &Connection,
-    output_hash: &FixedHash,
+    output_id: i64,
     confirmed_height: u64,
     confirmed_hash: &[u8],
 ) -> WalletDbResult<()> {
@@ -1068,12 +1347,12 @@ pub fn mark_output_confirmed(
         r#"
         UPDATE outputs
         SET confirmed_height = :height, confirmed_hash = :hash
-        WHERE output_hash = :output_hash
+        WHERE id = :id
         "#,
         named_params! {
             ":height": confirmed_height,
             ":hash": confirmed_hash,
-            ":output_hash": output_hash.to_vec(),
+            ":id": output_id,
         },
     )?;
 
@@ -1205,6 +1484,70 @@ pub fn resolve_spent_unconfirmed_with_inputs(conn: &Connection, account_id: i64)
     Ok(marked_spent)
 }
 
+/// Marks as `Spent` the `SpentUnconfirmed` outputs that have a newer active copy of the same hash in the account,
+/// with an input and its debit. A hash is only on chain again once its earlier copy was spent; the node, asked about
+/// the hash, answers for the newer copy, so it is never asked about these. Returns the number resolved.
+pub fn resolve_spent_unconfirmed_with_newer_copy(conn: &Connection, account_id: i64) -> WalletDbResult<u64> {
+    let superseded: Vec<(i64, i64, i64, Vec<u8>)> = {
+        let mut stmt = conn.prepare_cached(
+            r#"
+            SELECT o.id, o.value, o.mined_in_block_height, o.mined_in_block_hash
+            FROM outputs o
+            WHERE o.account_id = :account_id
+              AND o.status = :spent_unconfirmed
+              AND o.deleted_at IS NULL
+              AND o.is_burn = 0
+              AND EXISTS (
+                  SELECT 1 FROM outputs n
+                  WHERE n.account_id = o.account_id
+                    AND n.output_hash = o.output_hash
+                    AND n.deleted_at IS NULL
+                    AND (n.mined_in_block_height > o.mined_in_block_height
+                         OR (n.mined_in_block_height = o.mined_in_block_height AND n.id > o.id))
+              )
+            "#,
+        )?;
+        let rows = stmt.query_map(
+            named_params! {
+                ":account_id": account_id,
+                ":spent_unconfirmed": OutputStatus::SpentUnconfirmed.to_string(),
+            },
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?;
+        rows.collect::<Result<_, _>>()?
+    };
+
+    for (output_id, value, height, block_hash) in &superseded {
+        // The block it was spent in is unknown. Recording the spend at the copy's own block means only a reorg that
+        // also removes the copy can undo it: a fork between the two copies then under-reports the balance, where
+        // dating it at the newer copy's block would over-report it when the fork is above the real spend.
+        let input_id = insert_input(conn, account_id, *output_id, height.cast_unsigned(), block_hash, 0)?;
+        let change = BalanceChange {
+            account_id,
+            caused_by_output_id: None,
+            caused_by_input_id: Some(input_id),
+            description: "Output spent (a newer copy is on chain)".to_string(),
+            balance_credit: 0.into(),
+            balance_debit: value.cast_unsigned().into(),
+            effective_date: Utc::now().naive_utc(),
+            effective_height: height.cast_unsigned(),
+            claimed_recipient_address: None,
+            claimed_sender_address: None,
+            memo_parsed: None,
+            memo_hex: None,
+            claimed_fee: None,
+            claimed_amount: None,
+            is_reversal: false,
+            reversal_of_balance_change_id: None,
+            is_reversed: false,
+        };
+        insert_balance_change_if_not_exists(conn, &change)?;
+        update_output_status(conn, *output_id, OutputStatus::Spent)?;
+    }
+
+    Ok(superseded.len() as u64)
+}
+
 /// Returned data for an unresolved SpentUnconfirmed output.
 pub struct UnresolvedSpentOutput {
     pub output_id: i64,
@@ -1229,7 +1572,7 @@ pub fn get_unresolved_spent_unconfirmed_outputs(
           AND status = :status
           AND deleted_at IS NULL
           AND is_burn = 0
-        ORDER BY mined_in_block_height
+        ORDER BY mined_in_block_height, id
         "#,
     )?;
 
@@ -1360,6 +1703,7 @@ struct WalletOutputRow {
 pub struct DbOutput {
     pub id: i64,
     pub account_id: i64,
+    pub tx_id: i64,
     pub output_hash: Vec<u8>,
     pub mined_in_block_hash: Vec<u8>,
     pub mined_in_block_height: i64,
@@ -1398,7 +1742,7 @@ impl DbOutput {
 pub fn get_output_by_id(conn: &Connection, output_id: i64) -> WalletDbResult<Option<DbOutput>> {
     let mut stmt = conn.prepare_cached(
         r#"
-        SELECT id, account_id, output_hash, mined_in_block_hash, mined_in_block_height,
+        SELECT id, account_id, tx_id, output_hash, mined_in_block_hash, mined_in_block_height,
                value, created_at, wallet_output_json, mined_timestamp, confirmed_height,
                confirmed_hash, memo_parsed, memo_hex, status, locked_at, locked_by_request_id,
                deleted_at, deleted_in_block_height, payment_reference, maturity
@@ -1417,7 +1761,7 @@ pub fn get_output_by_id(conn: &Connection, output_id: i64) -> WalletDbResult<Opt
 pub fn get_active_burn_outputs(conn: &Connection, account_id: i64) -> WalletDbResult<Vec<DbOutput>> {
     let mut stmt = conn.prepare_cached(
         r#"
-        SELECT id, account_id, output_hash, mined_in_block_hash, mined_in_block_height,
+        SELECT id, account_id, tx_id, output_hash, mined_in_block_hash, mined_in_block_height,
                value, created_at, wallet_output_json, mined_timestamp, confirmed_height,
                confirmed_hash, memo_parsed, memo_hex, status, locked_at, locked_by_request_id,
                deleted_at, deleted_in_block_height, payment_reference, maturity
@@ -1758,6 +2102,24 @@ mod tests {
     /// Insert a synthetic outputs row directly. Avoids constructing a real
     /// `WalletOutput` (which requires keys and ranges) so we can assert the
     /// SQL filter logic in isolation.
+    #[test]
+    fn the_nearest_copy_is_found_above_or_below() {
+        let temp = tempdir().expect("temp dir");
+        let pool = init_db(temp.path().join("nearest.db")).expect("init db");
+        let conn = pool.get().expect("conn");
+        let account_id = create_test_account(&conn);
+        insert_synthetic_output(&conn, account_id, 5, 1_000, 30, false, OutputStatus::Unspent, 0);
+        // A copy stored before an older one (fast sync, then backfill) is found from below.
+        assert_eq!(
+            nearest_copy_block(&conn, account_id, &FixedHash::from([5u8; 32]), 10).expect("lookup"),
+            Some(vec![5u8; 32])
+        );
+        assert_eq!(
+            nearest_copy_block(&conn, account_id, &FixedHash::from([6u8; 32]), 10).expect("lookup"),
+            None
+        );
+    }
+
     fn insert_synthetic_output(
         conn: &Connection,
         account_id: i64,

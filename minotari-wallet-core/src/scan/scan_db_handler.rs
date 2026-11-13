@@ -134,6 +134,7 @@ impl<E: EventSender + Clone + Send + 'static> ScanDbHandler<E> {
                     .map_err(|e| WalletDbError::Unexpected(e.to_string()))?;
             }
 
+            processor.warn_unmatched_inputs();
             let events = processor.take_wallet_events();
             tx.commit().map_err(WalletDbError::from)?;
 

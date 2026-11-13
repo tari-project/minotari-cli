@@ -1187,13 +1187,26 @@ impl ScanCoordinator {
         // 2. Verify remaining outputs against the base node
         for target in &targets {
             let unresolved = {
-                let conn = self.pool.get().map_err(|e| ScanError::DbError(e.into()))?;
+                let mut conn = self.pool.get().map_err(|e| ScanError::DbError(e.into()))?;
                 let marked_spent = crate::db::resolve_spent_unconfirmed_with_inputs(&conn, target.account.id)
                     .map_err(ScanError::DbError)?;
                 info!(
                     account_id = target.account.id,
                     marked_spent = marked_spent;
                     "Resolved SpentUnconfirmed outputs with matching inputs"
+                );
+                // Before asking the node: it answers per hash, for the copy on chain now. In one transaction so an
+                // input is never left without its debit.
+                let tx = conn
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                    .map_err(|e| ScanError::DbError(WalletDbError::from(e)))?;
+                let superseded = crate::db::resolve_spent_unconfirmed_with_newer_copy(&tx, target.account.id)
+                    .map_err(ScanError::DbError)?;
+                tx.commit().map_err(|e| ScanError::DbError(WalletDbError::from(e)))?;
+                info!(
+                    account_id = target.account.id,
+                    marked_spent = superseded;
+                    "Resolved SpentUnconfirmed outputs re-created later on chain"
                 );
                 crate::db::get_unresolved_spent_unconfirmed_outputs(&conn, target.account.id)
                     .map_err(ScanError::DbError)?
@@ -1586,6 +1599,7 @@ impl ScanCoordinator {
     ) -> Result<(), ScanError> {
         use std::collections::HashMap;
 
+        // One per hash: an older copy with a newer active one was resolved without the node.
         let hash_to_output: HashMap<Vec<u8>, &crate::db::UnresolvedSpentOutput> =
             unresolved.iter().map(|o| (o.output_hash.clone(), o)).collect();
 
@@ -1689,7 +1703,7 @@ impl ScanCoordinator {
                         reversal_of_balance_change_id: None,
                         is_reversed: false,
                     };
-                    crate::db::insert_balance_change(&tx, &change).map_err(ScanError::DbError)?;
+                    crate::db::insert_balance_change_if_not_exists(&tx, &change).map_err(ScanError::DbError)?;
 
                     crate::db::update_output_status(&tx, *output_id, OutputStatus::Spent)
                         .map_err(ScanError::DbError)?;
@@ -1779,12 +1793,19 @@ mod tests {
     use tari_common_types::seeds::cipher_seed::CipherSeed;
     use tari_common_types::transaction::TxId;
     use tari_common_types::types::FixedHash;
+    use tari_script::script;
     use tari_transaction_components::MicroMinotari;
+    use tari_transaction_components::key_manager::TransactionKeyManagerInterface;
     use tari_transaction_components::key_manager::wallet_types::{SeedWordsWallet, WalletType};
     use tari_transaction_components::rpc::models::{
-        BlockUtxoInfo, SyncUtxosByBlockResponseV0, SyncUtxosByBlockResponseV1,
+        BlockUtxoInfo, GetUtxosByBlockResponse, MinimalUtxoSyncInfo, SyncUtxosByBlockResponseV0,
+        SyncUtxosByBlockResponseV1,
     };
-    use tari_transaction_components::transaction_components::{Transaction, TransactionKernel};
+    use tari_transaction_components::test_helpers::{TestParams, create_wallet_output_with_data};
+    use tari_transaction_components::transaction_components::{
+        OutputFeatures, Transaction, TransactionKernel, TransactionOutput,
+    };
+    use tari_utilities::ByteArray;
     use tempfile::TempDir;
     use tokio::sync::mpsc::UnboundedReceiver;
     use wiremock::{MockServer, Request, Respond, ResponseTemplate};
@@ -1875,7 +1896,11 @@ mod tests {
         slow_birthday: Arc<AtomicBool>,
         refork_from: Option<u64>,
         forks: AtomicU64,
+        /// The outputs and input hashes of the tip block.
+        tip_utxos: Arc<std::sync::Mutex<TipUtxos>>,
     }
+
+    type TipUtxos = (Vec<TransactionOutput>, Vec<Vec<u8>>);
 
     const BIRTHDAY_HEIGHT: u64 = 1450;
 
@@ -1900,6 +1925,7 @@ mod tests {
                 slow_birthday: Arc::new(AtomicBool::new(false)),
                 refork_from: None,
                 forks: AtomicU64::new(0),
+                tip_utxos: Arc::default(),
             }
         }
 
@@ -1970,11 +1996,27 @@ mod tests {
                     let last = (start + limit - 1).min(self.tip);
                     let mut blocks = Vec::new();
                     for height in start..=last {
+                        let (outputs, inputs) = if height == self.tip {
+                            let tip_utxos = self.tip_utxos.lock().expect("tip utxos");
+                            let outputs = tip_utxos
+                                .0
+                                .iter()
+                                .map(|output| MinimalUtxoSyncInfo {
+                                    output_hash: output.hash().to_vec(),
+                                    commitment: output.commitment.as_bytes().to_vec(),
+                                    encrypted_data: output.encrypted_data.as_bytes().to_vec(),
+                                    sender_offset_public_key: output.sender_offset_public_key.as_bytes().to_vec(),
+                                })
+                                .collect();
+                            (outputs, tip_utxos.1.clone())
+                        } else {
+                            (Vec::new(), Vec::new())
+                        };
                         blocks.push(BlockUtxoInfo {
                             header_hash: self.hash(height),
                             height,
-                            outputs: Vec::new(),
-                            inputs: Vec::new(),
+                            outputs,
+                            inputs,
                             mined_timestamp: 1_700_000_000,
                         });
                     }
@@ -1991,6 +2033,20 @@ mod tests {
                     ResponseTemplate::new(200)
                         .set_body_json(response)
                         .set_delay(self.download_delay)
+                },
+                "/get_utxos_by_block" => {
+                    let height = height_of(&query_param(request, "header_hash"));
+                    let outputs = if height == self.tip {
+                        self.tip_utxos.lock().expect("tip utxos").0.clone()
+                    } else {
+                        Vec::new()
+                    };
+                    ResponseTemplate::new(200).set_body_json(GetUtxosByBlockResponse {
+                        header_hash: self.hash(height),
+                        height,
+                        outputs,
+                        mined_timestamp: 1_700_000_000,
+                    })
                 },
                 _ => ResponseTemplate::new(404),
             }
@@ -2921,6 +2977,69 @@ mod tests {
             )),
             "a cancel during the poll wait reports the tip as scanned"
         );
+    }
+
+    #[tokio::test]
+    async fn a_continuous_scan_re_reading_the_tip_records_its_output_and_spend_once() {
+        let chain = MockChain::new(1505);
+        let tip_utxos = chain.tip_utxos.clone();
+        let mut setup = setup_chain(1500, chain, 1_000).await;
+        let account = account(&setup.pool);
+        let key_manager = account.get_key_manager("password").expect("key manager");
+        let new_output = |value| {
+            create_wallet_output_with_data(
+                script!(Nop).unwrap(),
+                OutputFeatures::default(),
+                &TestParams::new(&key_manager),
+                MicroMinotari(value),
+                &key_manager,
+            )
+            .expect("wallet output")
+        };
+        let spent = new_output(1_000_000);
+        let conn = setup.pool.get().expect("conn");
+        let (spent_id, _) = crate::db::insert_output(
+            &conn,
+            account.id,
+            &key_manager.get_private_view_key(),
+            &spent.output_hash(),
+            &spent,
+            1400,
+            &FixedHash::from([1u8; 32]),
+            1_700_000_000,
+            None,
+            None,
+            FixedHash::zero(),
+            false,
+        )
+        .expect("spent output");
+        let received = new_output(2_000_000)
+            .to_transaction_output()
+            .expect("transaction output");
+        *tip_utxos.lock().expect("tip utxos") = (vec![received.clone()], vec![spent.output_hash().to_vec()]);
+
+        // The first wait follows the tip; the second follows its re-read on the next poll. A scan error fails
+        // `run_continuous_until`.
+        let mut waits = 0;
+        run_continuous_until(&mut setup, |e| {
+            waits += usize::from(is_waiting(e));
+            waits == 2
+        })
+        .await;
+
+        let (credits, debits): (i64, i64) = conn
+            .query_row(
+                r#"
+                SELECT
+                    COUNT(*) FILTER (WHERE caused_by_output_id IN (SELECT id FROM outputs WHERE output_hash = :hash)),
+                    COUNT(*) FILTER (WHERE caused_by_input_id IN (SELECT id FROM inputs WHERE output_id = :spent_id))
+                FROM balance_changes
+                "#,
+                rusqlite::named_params! { ":hash": received.hash().to_vec(), ":spent_id": spent_id },
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .expect("ledger");
+        assert_eq!((credits, debits), (1, 1));
     }
 
     #[tokio::test]
