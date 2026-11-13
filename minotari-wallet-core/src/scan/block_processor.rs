@@ -443,8 +443,8 @@ impl<E: EventSender> BlockProcessor<E> {
             }
 
             // A send's change output was written at send time as `UNCONFIRMED`.
-            // Update that row in place rather than inserting a second one (which
-            // the active unique index on `output_hash` forbids); the credit,
+            // Update that row in place rather than inserting a second row for the
+            // same output (the send's change would stay unmined); the credit,
             // event and accumulator entry below are recorded as for a new output.
             // A burn output can never be spent, so it is unspent whichever scan finds it.
             let status_when_found = if self.backfill_mode && !is_burn {
@@ -3805,6 +3805,12 @@ mod tests {
         let a = test_wallet_output(10_000, 1);
         store_newer_copy_then_older(&wallet, &conn, &a);
         assert_eq!(total(&conn, wallet.account_id), 20_000);
+        // Each copy has its own receive entry at its own height.
+        for (row, height) in instances(&conn, wallet.account_id, &a).iter().zip([10, 30]) {
+            let entry = displayed(&conn, row.tx_id);
+            assert_eq!(entry.blockchain.block_height, height);
+            assert_eq!(entry.details.total_credit.as_u64(), 10_000);
+        }
 
         for _ in 0..2 {
             db::resolve_spent_unconfirmed_with_newer_copy(&conn, wallet.account_id).expect("resolve");
@@ -4024,5 +4030,46 @@ mod tests {
             db::get_output_spend(&conn, wallet.account_id, "other", &a.output_hash()).expect("spend"),
             None
         );
+    }
+
+    fn displayed(conn: &Connection, id: TxId) -> DisplayedTransaction {
+        db::get_displayed_transaction_by_id(conn, &id.to_string())
+            .expect("displayed")
+            .expect("exists")
+    }
+
+    #[test]
+    fn a_backfilled_spend_of_an_older_copy_leaves_the_newer_copys_entry() {
+        let wallet = test_wallet();
+        let conn = wallet.pool.get().expect("conn");
+        let a = test_wallet_output(10_000, 1);
+        process(
+            &mut processor(&wallet, false),
+            &conn,
+            wallet.account_id,
+            &[block(30, vec![a.clone()], Vec::new())],
+        );
+        let mut backfill = processor(&wallet, false);
+        backfill.set_backfill_mode(true);
+        process(
+            &mut backfill,
+            &conn,
+            wallet.account_id,
+            &[
+                block(10, vec![a.clone()], Vec::new()),
+                block(20, Vec::new(), vec![a.output_hash()]),
+            ],
+        );
+
+        let rows = instances(&conn, wallet.account_id, &a);
+        let newer = displayed(&conn, rows[1].tx_id);
+        assert_eq!(newer.blockchain.block_height, 30);
+        assert_eq!(newer.details.total_credit.as_u64(), 10_000);
+        assert!(newer.details.inputs.is_empty());
+        // The spend is the older copy's. Its entry takes that copy's id, as every unpaired spend takes its output's.
+        let spend = displayed(&conn, rows[0].tx_id);
+        assert_eq!(spend.blockchain.block_height, 20);
+        assert_eq!(spend.details.inputs.len(), 1);
+        assert_eq!(spend.details.inputs[0].matched_output_id, rows[0].id);
     }
 }

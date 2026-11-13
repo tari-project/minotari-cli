@@ -432,8 +432,8 @@ pub fn insert_unconfirmed_change_output(
 /// When the scan finds an output that already has an active `UNCONFIRMED` (or
 /// `REJECTED`) row with the same hash, the row is updated in place: its mined
 /// fields, payment reference and memo are set and its status becomes
-/// `new_status`. Inserting a second row would violate the active unique index
-/// on `output_hash`. A `REJECTED` row is updated too: the output exists on
+/// `new_status`. Inserting a second row would leave two rows for one output,
+/// the send's change still unmined. A `REJECTED` row is updated too: the output exists on
 /// chain, so it is real whatever the wallet concluded before.
 ///
 /// A change output that a reorg reverted to `UNCONFIRMED` while a later send

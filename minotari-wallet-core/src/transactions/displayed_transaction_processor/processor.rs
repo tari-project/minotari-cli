@@ -67,7 +67,7 @@ impl DisplayedTransactionProcessor {
         let mut new_debit = Vec::new();
         'output_loop: for (balance_change, output) in accumulator.credit_balance_changes() {
             for tx in current_display_transactions {
-                if tx.details.outputs.iter().any(|o| o.hash == output.output.output_hash()) {
+                if Self::is_entry_of_output(tx, output) {
                     let mut updated = tx.clone();
                     updated.blockchain.block_height = output.height;
                     updated.blockchain.timestamp = balance_change.effective_date;
@@ -88,12 +88,7 @@ impl DisplayedTransactionProcessor {
         }
         'input_loop: for (balance_change, output) in accumulator.debit_balance_changes() {
             for tx in current_display_transactions {
-                if tx
-                    .details
-                    .inputs
-                    .iter()
-                    .any(|o| o.output_hash == output.output.output_hash())
-                {
+                if Self::is_entry_of_input(tx, output) {
                     let mut updated = tx.clone();
                     updated.blockchain.block_height = output.mined_in_block_height;
                     updated.blockchain.timestamp = balance_change.effective_date;
@@ -264,6 +259,33 @@ impl DisplayedTransactionProcessor {
         }
 
         Ok((updated_transactions.into_values().collect(), new_transactions))
+    }
+
+    /// Whether `tx` is the entry for this copy of the output. An output hash can be on chain more than once, so an
+    /// entry listing the hash is only taken when it is this copy's own entry (its id is the copy's `tx_id`), lists the
+    /// output as mined in this block or not yet mined (a pending send's change), or was reorganized.
+    fn is_entry_of_output(tx: &DisplayedTransaction, output: &DetectedOutput) -> bool {
+        let hash = output.output.output_hash();
+        tx.details.outputs.iter().any(|o| {
+            o.hash == hash
+                && (tx.id == output.tx_id
+                    || o.mined_in_block_hash == output.mined_in_block_hash
+                    || o.mined_in_block_hash == FixedHash::zero()
+                    || tx.status == TransactionDisplayStatus::Reorganized)
+        })
+    }
+
+    /// Whether `tx` is the entry for this spend: it lists the input as this output row (or does not say which row),
+    /// as spent in this block, or was reorganized.
+    fn is_entry_of_input(tx: &DisplayedTransaction, input: &SpentInput) -> bool {
+        let hash = input.output.output_hash();
+        tx.details.inputs.iter().any(|i| {
+            i.output_hash == hash
+                && (i.matched_output_id == input.output_id
+                    || i.matched_output_id == 0
+                    || i.mined_in_block_hash == input.mined_in_block
+                    || tx.status == TransactionDisplayStatus::Reorganized)
+        })
     }
 
     /// Matches change outputs to the inputs they were made from. A matched burn takes its paired output out of
@@ -687,7 +709,7 @@ impl DisplayedTransactionProcessor {
                     format!("Ouput does not exist: {}", input.output_id),
                 ))?;
                 let spent_input = SpentInput {
-                    output_id: input.id,
+                    output_id: input.output_id,
                     mined_in_block: FixedHash::try_from(input.mined_in_block_hash)
                         .map_err(|e| ProcessorError::ParseError(e.to_string()))?,
                     mined_in_block_height: input.mined_in_block_height as u64,

@@ -14,3 +14,9 @@ CREATE UNIQUE INDEX idx_outputs_account_hash_block_active
 -- accounts without a fingerprint or Ledger accounts sharing a view key can.
 DROP INDEX IF EXISTS idx_outputs_tx_id_active;
 CREATE UNIQUE INDEX idx_outputs_account_tx_id_active ON outputs(account_id, tx_id) WHERE deleted_at IS NULL;
+
+-- Scans now check for an existing credit or debit before every one they write.
+CREATE INDEX idx_balance_changes_caused_by_output ON balance_changes(caused_by_output_id)
+    WHERE caused_by_output_id IS NOT NULL;
+CREATE INDEX idx_balance_changes_caused_by_input ON balance_changes(caused_by_input_id)
+    WHERE caused_by_input_id IS NOT NULL;
