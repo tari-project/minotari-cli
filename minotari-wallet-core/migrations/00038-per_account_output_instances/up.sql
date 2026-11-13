@@ -3,6 +3,9 @@
 -- instance of an output in one account: identified by the block it was mined in.
 -- Accounts scanned together get a shared output for the first matching account
 -- only; accounts scanned separately each store it.
+-- With rows per block, the wallet relies on the base node's block data to tell
+-- an output re-created on chain from one replayed in a made-up block (a new copy
+-- is logged on the audit target). Validating headers and PoW is the follow-up.
 DROP INDEX IF EXISTS idx_outputs_output_hash_active;
 CREATE UNIQUE INDEX idx_outputs_account_hash_block_active
     ON outputs(account_id, output_hash, mined_in_block_hash) WHERE deleted_at IS NULL;

@@ -55,6 +55,32 @@ pub fn derive_output_tx_id(
         },
         |row| row.get(0),
     )?;
+    if counter > 0 {
+        // Without header validation the wallet cannot tell a re-created output from one a node replays in a made-up
+        // block, so every new copy is recorded in the audit log.
+        let earlier_block: Vec<u8> = conn.query_row(
+            r#"
+            SELECT mined_in_block_hash FROM outputs
+            WHERE account_id = :account_id AND output_hash = :hash AND deleted_at IS NULL
+              AND +mined_in_block_height < :height
+            ORDER BY +mined_in_block_height DESC, id DESC
+            LIMIT 1
+            "#,
+            named_params! {
+                ":account_id": account_id,
+                ":hash": output_hash.as_slice(),
+                ":height": i64::try_from(block_height).unwrap_or(i64::MAX),
+            },
+            |row| row.get(0),
+        )?;
+        info!(
+            target: "audit",
+            account_id = account_id,
+            block_height = block_height,
+            earlier_copy_block_hash = &*hex::encode(earlier_block);
+            "Output re-created on chain: another copy of this hash was stored earlier"
+        );
+    }
     loop {
         let tx_id = if counter == 0 {
             TxId::new_deterministic(account_view_key.as_bytes(), output_hash)
