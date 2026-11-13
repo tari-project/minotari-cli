@@ -82,12 +82,12 @@ pub use outputs::{
     get_active_burn_outputs, get_active_outputs_from_height, get_change_output_hash_for_request, get_output_by_id,
     get_output_hashes_mined_in_block, get_output_hashes_spent_in_block, get_output_info_by_hash_for_account,
     get_output_instances_for_account, get_output_lock_request_id, get_output_spend, get_output_totals_for_account,
-    get_total_unspent_balance, get_unconfirmed_outputs, get_unresolved_spent_unconfirmed_outputs, insert_output,
-    insert_spent_output_if_not_exists, insert_unconfirmed_change_output, is_lock_holder_live, lock_output,
-    mark_change_output_rejected, mark_output_confirmed, record_spender_of_inputs, relock_inputs_for_revived_send,
-    resolve_spent_unconfirmed_with_inputs, resolve_spent_unconfirmed_with_newer_copy, restore_change_of_rejected_send,
-    revert_change_outputs_from_height, revert_rejected_change_output, soft_delete_outputs_from_height,
-    soft_delete_unconfirmed_change_output, unlock_outputs_for_request,
+    get_total_unspent_balance, get_unconfirmed_outputs, get_unresolved_spent_unconfirmed_outputs,
+    get_unspent_copy_block, insert_output, insert_spent_output_if_not_exists, insert_unconfirmed_change_output,
+    is_lock_holder_live, lock_output, mark_change_output_rejected, mark_output_confirmed, record_spender_of_inputs,
+    relock_inputs_for_revived_send, resolve_spent_unconfirmed_with_inputs, resolve_spent_unconfirmed_with_newer_copy,
+    restore_change_of_rejected_send, revert_change_outputs_from_height, revert_rejected_change_output,
+    soft_delete_outputs_from_height, soft_delete_unconfirmed_change_output, unlock_outputs_for_request,
     unlock_outputs_for_request as unlock_outputs_for_pending_transaction, update_output_status,
 };
 

@@ -22,6 +22,7 @@ use tari_transaction_components::MicroMinotari;
 use tari_transaction_components::transaction_components::WalletOutput;
 use tari_transaction_components::utxo_selection::UtxoValue;
 use tari_utilities::ByteArray;
+use zeroize::Zeroizing;
 
 /// `outputs.tx_id` for a new instance of `output_hash` in the account, mined at `block_height`.
 ///
@@ -58,10 +59,8 @@ pub fn derive_output_tx_id(
         let tx_id = if counter == 0 {
             TxId::new_deterministic(account_view_key.as_bytes(), output_hash)
         } else {
-            TxId::new_deterministic(
-                &[account_view_key.as_bytes(), &counter.to_le_bytes()].concat(),
-                output_hash,
-            )
+            let key = Zeroizing::new([account_view_key.as_bytes(), &counter.to_le_bytes()].concat());
+            TxId::new_deterministic(&key, output_hash)
         }
         .as_i64_wrapped();
         let taken: bool = conn.query_row(
@@ -1124,6 +1123,47 @@ pub fn get_output_instances_for_account(
     Ok(instances)
 }
 
+/// The block of an active copy of `output_hash` in the account, mined at or below `block_height` in another block
+/// than `block_hash`, that is still unspent: no active input, and not a backfill copy whose spend is unverified
+/// (`SpentUnconfirmed`) or an unmined change row. `None` once the output is stored for `block_hash`, so a re-read of
+/// that block stays a silent no-op.
+pub fn get_unspent_copy_block(
+    conn: &Connection,
+    account_id: i64,
+    output_hash: &FixedHash,
+    block_height: u64,
+    block_hash: &FixedHash,
+) -> WalletDbResult<Option<Vec<u8>>> {
+    Ok(conn
+        .query_row(
+            r#"
+            SELECT o.mined_in_block_hash FROM outputs o
+            WHERE o.account_id = :account_id AND o.output_hash = :hash AND o.deleted_at IS NULL
+              AND o.mined_in_block_height <= :height
+              AND o.mined_in_block_hash != :block_hash
+              AND o.status NOT IN (:spent_unconfirmed, :unconfirmed, :rejected)
+              AND NOT EXISTS (SELECT 1 FROM inputs i WHERE i.output_id = o.id AND i.deleted_at IS NULL)
+              AND NOT EXISTS (
+                  SELECT 1 FROM outputs t
+                  WHERE t.account_id = o.account_id AND t.output_hash = o.output_hash
+                    AND t.mined_in_block_hash = :block_hash AND t.deleted_at IS NULL
+              )
+            LIMIT 1
+            "#,
+            named_params! {
+                ":account_id": account_id,
+                ":hash": output_hash.as_slice(),
+                ":height": i64::try_from(block_height).unwrap_or(i64::MAX),
+                ":block_hash": block_hash.as_slice(),
+                ":spent_unconfirmed": OutputStatus::SpentUnconfirmed.to_string(),
+                ":unconfirmed": OutputStatus::Unconfirmed.to_string(),
+                ":rejected": OutputStatus::Rejected.to_string(),
+            },
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
 /// The newest active instance of `output_hash` in the account: the one a send can spend.
 pub fn get_output_info_by_hash_for_account(
     conn: &Connection,
@@ -1391,7 +1431,8 @@ pub fn resolve_spent_unconfirmed_with_newer_copy(conn: &Connection, account_id: 
 
     for (output_id, value, height, block_hash) in &superseded {
         // The block it was spent in is unknown. Recording the spend at the copy's own block means only a reorg that
-        // also removes the copy can undo it.
+        // also removes the copy can undo it: a fork between the two copies then under-reports the balance, where
+        // dating it at the newer copy's block would over-report it when the fork is above the real spend.
         let input_id = insert_input(conn, account_id, *output_id, height.cast_unsigned(), block_hash, 0)?;
         let change = BalanceChange {
             account_id,

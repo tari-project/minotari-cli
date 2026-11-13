@@ -392,6 +392,16 @@ impl<E: EventSender> BlockProcessor<E> {
             if mapped_account_id != account_id {
                 continue;
             }
+            // The row key and tx_id are built from `hash`, so it must be the output's own.
+            if *hash != output.output_hash() {
+                warn!(
+                    target: "audit",
+                    account_id = account_id,
+                    block_height = block.height;
+                    "Wallet output listed under a hash that is not its own; ignoring it"
+                );
+                continue;
+            }
 
             let memo = MemoInfo::from_output(output);
 
@@ -476,6 +486,24 @@ impl<E: EventSender> BlockProcessor<E> {
                     None => continue, // Output already exists, skip events and balance changes
                 }
             } else {
+                // Two unspent copies of one hash cannot be on chain: a copy still unspent in another block means the
+                // scan crossed a reorg it has not rolled back. Not checked without inputs (no spend is ever recorded)
+                // or when this block spends the hash itself.
+                if !self.inputs_excluded
+                    && !block.inputs.contains(hash)
+                    && let Some(copy_block) =
+                        db::get_unspent_copy_block(tx, account_id, hash, block.height, &block.block_hash)?
+                {
+                    warn!(
+                        target: "audit",
+                        account_id = account_id,
+                        block_height = block.height,
+                        block_hash = &*hex::encode(block.block_hash),
+                        unspent_in_block = &*hex::encode(copy_block);
+                        "Output already unspent in another block; ignoring this copy"
+                    );
+                    continue;
+                }
                 let (output_id, newly_inserted) = db::insert_output(
                     tx,
                     account_id,
@@ -824,8 +852,10 @@ impl<E: EventSender> BlockProcessor<E> {
             request_ids: Vec::new(),
         });
         send_block.inputs.extend(block.inputs.iter().copied());
-        for (hash, _output, wallet_idx) in &block.wallet_outputs {
-            if self.wallet_index_to_account_id.get(*wallet_idx).copied() == Some(account_id) {
+        for (hash, output, wallet_idx) in &block.wallet_outputs {
+            if self.wallet_index_to_account_id.get(*wallet_idx).copied() == Some(account_id)
+                && *hash == output.output_hash()
+            {
                 send_block.wallet_outputs.insert(*hash);
             }
         }
@@ -3820,5 +3850,89 @@ mod tests {
 
         let rows = instances(&conn, wallet.account_id, &a);
         assert_eq!((rows[0].tx_id, rows[1].tx_id), (older, newer));
+    }
+
+    #[test]
+    fn an_output_still_unspent_in_another_block_is_not_stored_again() {
+        // The scan crossed a reorg it has not rolled back: the output shows up again in another block.
+        let wallet = test_wallet();
+        let conn = wallet.pool.get().expect("conn");
+        let a = test_wallet_output(10_000, 1);
+        let blocks = [
+            block(10, vec![a.clone()], Vec::new()),
+            block(12, vec![a.clone()], Vec::new()),
+        ];
+        let mut processor = processor(&wallet, false);
+        process(&mut processor, &conn, wallet.account_id, &blocks);
+        process(&mut processor, &conn, wallet.account_id, &blocks);
+
+        assert_eq!(instances(&conn, wallet.account_id, &a).len(), 1);
+        assert_eq!(ledger_counts(&conn, wallet.account_id), (1, 0));
+        assert_eq!(total(&conn, wallet.account_id), 10_000);
+    }
+
+    #[test]
+    fn an_output_spent_and_re_created_in_one_block_is_stored_again() {
+        let wallet = test_wallet();
+        let conn = wallet.pool.get().expect("conn");
+        let a = test_wallet_output(10_000, 1);
+        let blocks = [
+            block(10, vec![a.clone()], Vec::new()),
+            block(20, vec![a.clone()], vec![a.output_hash()]),
+        ];
+        process(&mut processor(&wallet, false), &conn, wallet.account_id, &blocks);
+
+        let rows = instances(&conn, wallet.account_id, &a);
+        assert_eq!(rows.len(), 2);
+        assert_eq!(
+            rows[0].spent_in_block_hash.as_deref(),
+            Some(blocks[1].block_hash.as_slice())
+        );
+        assert_eq!(rows[1].spent_in_block_hash, None);
+        assert_eq!(ledger_counts(&conn, wallet.account_id), (2, 1));
+        assert_eq!(total(&conn, wallet.account_id), 10_000);
+    }
+
+    #[test]
+    fn a_scan_without_inputs_stores_a_re_created_output() {
+        // Without inputs the earlier copy's spend is never seen, so it still looks unspent.
+        let wallet = test_wallet();
+        let conn = wallet.pool.get().expect("conn");
+        let a = test_wallet_output(10_000, 1);
+        let mut processor = processor(&wallet, false);
+        processor.set_inputs_excluded(true);
+        process(
+            &mut processor,
+            &conn,
+            wallet.account_id,
+            &[
+                block(10, vec![a.clone()], Vec::new()),
+                block(30, vec![a.clone()], Vec::new()),
+            ],
+        );
+
+        assert_eq!(instances(&conn, wallet.account_id, &a).len(), 2);
+        assert_eq!(ledger_counts(&conn, wallet.account_id), (2, 0));
+    }
+
+    #[test]
+    fn a_wallet_output_listed_under_another_hash_is_ignored() {
+        let wallet = test_wallet();
+        let conn = wallet.pool.get().expect("conn");
+        let a = test_wallet_output(10_000, 1);
+        let mut listed = block(10, Vec::new(), Vec::new());
+        listed.wallet_outputs = vec![(a.output_hash(), a.clone(), 0), (hash(77), a.clone(), 0)];
+        process(&mut processor(&wallet, false), &conn, wallet.account_id, &[listed]);
+
+        let rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM outputs WHERE account_id = :account_id",
+                named_params! { ":account_id": wallet.account_id },
+                |row| row.get(0),
+            )
+            .expect("rows");
+        assert_eq!(rows, 1);
+        assert_eq!(instances(&conn, wallet.account_id, &a).len(), 1);
+        assert_eq!(ledger_counts(&conn, wallet.account_id), (1, 0));
     }
 }
