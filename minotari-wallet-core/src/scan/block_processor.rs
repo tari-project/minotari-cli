@@ -387,6 +387,8 @@ impl<E: EventSender> BlockProcessor<E> {
                 continue;
             };
 
+            // The scanner gives an output to the first account of the scan that can read it, so accounts scanned
+            // together never both store a shared output; accounts scanned separately each do.
             if mapped_account_id != account_id {
                 continue;
             }
@@ -3743,5 +3745,80 @@ mod tests {
         // The rescan finds the spend again.
         process(&mut processor, &conn, wallet.account_id, &[spend]);
         assert_eq!(total(&conn, wallet.account_id), 5_000);
+    }
+
+    /// Fast sync stores the newer copy of `a` (at 30) first; backfill then stores the older one (at 10).
+    fn store_newer_copy_then_older(wallet: &TestWallet, conn: &Connection, a: &WalletOutput) {
+        process(
+            &mut processor(wallet, false),
+            conn,
+            wallet.account_id,
+            &[block(30, vec![a.clone()], Vec::new())],
+        );
+        let mut backfill = processor(wallet, false);
+        backfill.set_backfill_mode(true);
+        process(
+            &mut backfill,
+            conn,
+            wallet.account_id,
+            &[block(10, vec![a.clone()], Vec::new())],
+        );
+    }
+
+    #[test]
+    fn an_older_copy_found_in_backfill_is_resolved_spent_by_its_newer_copy() {
+        let wallet = test_wallet();
+        let conn = wallet.pool.get().expect("conn");
+        let a = test_wallet_output(10_000, 1);
+        store_newer_copy_then_older(&wallet, &conn, &a);
+        assert_eq!(total(&conn, wallet.account_id), 20_000);
+
+        for _ in 0..2 {
+            db::resolve_spent_unconfirmed_with_newer_copy(&conn, wallet.account_id).expect("resolve");
+        }
+
+        let rows = instances(&conn, wallet.account_id, &a);
+        let statuses: Vec<String> = rows
+            .iter()
+            .map(|row| {
+                db::get_output_by_id(&conn, row.id)
+                    .expect("row")
+                    .expect("exists")
+                    .status
+            })
+            .collect();
+        assert_eq!(statuses, ["SPENT", "UNSPENT"]);
+        assert_eq!(ledger_counts(&conn, wallet.account_id), (2, 1));
+        assert_eq!(total(&conn, wallet.account_id), 10_000);
+        // The node is asked about the newer copy only.
+        assert!(
+            db::get_unresolved_spent_unconfirmed_outputs(&conn, wallet.account_id)
+                .expect("unresolved")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn a_copy_stored_before_an_older_one_keeps_its_tx_id_when_re_mined_after_a_reorg() {
+        let wallet = test_wallet();
+        let mut conn = wallet.pool.get().expect("conn");
+        let a = test_wallet_output(10_000, 1);
+        store_newer_copy_then_older(&wallet, &conn, &a);
+        let rows = instances(&conn, wallet.account_id, &a);
+        let (older, newer) = (rows[0].tx_id, rows[1].tx_id);
+        // Found out of chain order, the newer copy has the first-instance id.
+        assert_eq!(
+            newer,
+            TxId::new_deterministic(wallet.view_key.as_bytes(), &a.output_hash())
+        );
+
+        let tx = conn.transaction().expect("tx");
+        crate::scan::reorg::rollback_from_height(&tx, wallet.account_id, 30, None).expect("rollback");
+        tx.commit().expect("commit");
+        let re_mined = block_with_hash(31, hash(99), vec![a.clone()], Vec::new());
+        process(&mut processor(&wallet, false), &conn, wallet.account_id, &[re_mined]);
+
+        let rows = instances(&conn, wallet.account_id, &a);
+        assert_eq!((rows[0].tx_id, rows[1].tx_id), (older, newer));
     }
 }

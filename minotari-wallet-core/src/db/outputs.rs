@@ -1,8 +1,10 @@
 use crate::db::balance_changes::{
-    get_balance_change_id_by_output, insert_balance_change, mark_balance_change_as_reversed,
+    get_balance_change_id_by_output, insert_balance_change, insert_balance_change_if_not_exists,
+    mark_balance_change_as_reversed,
 };
 use crate::db::completed_transactions::CompletedTransactionStatus;
 use crate::db::error::{WalletDbError, WalletDbResult};
+use crate::db::inputs::insert_input;
 use crate::log::mask_amount;
 use crate::models::BalanceChange;
 use crate::models::OutputStatus;
@@ -27,6 +29,11 @@ use tari_utilities::ByteArray;
 /// re-created after it was spent gets `H(view key, output_hash, n)`, `n` being the number of active instances mined in
 /// earlier blocks, so a re-mine after a reorg derives the same id again. Derive it only when inserting a row and never
 /// recompute it: a reorg of an earlier instance lowers `n` for a later one.
+///
+/// When that id is held by an active row, the instances were stored out of chain order (a backfill below a copy fast
+/// sync already stored). The id of a soft-deleted instance of the hash that no active row holds is then reused, so a
+/// copy re-mined after a reorg keeps the id it had; failing that, `n` is raised until the id is free. The id therefore
+/// depends on the order the copies were found in: a wallet that found them in chain order derives different ids.
 pub fn derive_output_tx_id(
     conn: &Connection,
     account_id: i64,
@@ -57,13 +64,31 @@ pub fn derive_output_tx_id(
             )
         }
         .as_i64_wrapped();
-        // An instance stored out of order (a backfill below a later instance) can count the same as one already stored.
         let taken: bool = conn.query_row(
             "SELECT EXISTS(SELECT 1 FROM outputs WHERE account_id = :account_id AND tx_id = :tx_id AND deleted_at IS NULL)",
             named_params! { ":account_id": account_id, ":tx_id": tx_id },
             |row| row.get(0),
         )?;
         if !taken {
+            return Ok(tx_id);
+        }
+        let freed: Option<i64> = conn
+            .query_row(
+                r#"
+                SELECT d.tx_id FROM outputs d
+                WHERE d.account_id = :account_id AND d.output_hash = :hash AND d.deleted_at IS NOT NULL
+                  AND NOT EXISTS (
+                      SELECT 1 FROM outputs a
+                      WHERE a.account_id = d.account_id AND a.tx_id = d.tx_id AND a.deleted_at IS NULL
+                  )
+                ORDER BY d.id DESC
+                LIMIT 1
+                "#,
+                named_params! { ":account_id": account_id, ":hash": output_hash.as_slice() },
+                |row| row.get(0),
+            )
+            .optional()?;
+        if let Some(tx_id) = freed {
             return Ok(tx_id);
         }
         counter = counter.saturating_add(1);
@@ -1329,6 +1354,69 @@ pub fn resolve_spent_unconfirmed_with_inputs(conn: &Connection, account_id: i64)
     );
 
     Ok(marked_spent)
+}
+
+/// Marks as `Spent` the `SpentUnconfirmed` outputs that have a newer active copy of the same hash in the account,
+/// with an input and its debit. A hash is only on chain again once its earlier copy was spent; the node, asked about
+/// the hash, answers for the newer copy, so it is never asked about these. Returns the number resolved.
+pub fn resolve_spent_unconfirmed_with_newer_copy(conn: &Connection, account_id: i64) -> WalletDbResult<u64> {
+    let superseded: Vec<(i64, i64, i64, Vec<u8>)> = {
+        let mut stmt = conn.prepare_cached(
+            r#"
+            SELECT o.id, o.value, o.mined_in_block_height, o.mined_in_block_hash
+            FROM outputs o
+            WHERE o.account_id = :account_id
+              AND o.status = :spent_unconfirmed
+              AND o.deleted_at IS NULL
+              AND o.is_burn = 0
+              AND EXISTS (
+                  SELECT 1 FROM outputs n
+                  WHERE n.account_id = o.account_id
+                    AND n.output_hash = o.output_hash
+                    AND n.deleted_at IS NULL
+                    AND (n.mined_in_block_height > o.mined_in_block_height
+                         OR (n.mined_in_block_height = o.mined_in_block_height AND n.id > o.id))
+              )
+            "#,
+        )?;
+        let rows = stmt.query_map(
+            named_params! {
+                ":account_id": account_id,
+                ":spent_unconfirmed": OutputStatus::SpentUnconfirmed.to_string(),
+            },
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )?;
+        rows.collect::<Result<_, _>>()?
+    };
+
+    for (output_id, value, height, block_hash) in &superseded {
+        // The block it was spent in is unknown. Recording the spend at the copy's own block means only a reorg that
+        // also removes the copy can undo it.
+        let input_id = insert_input(conn, account_id, *output_id, height.cast_unsigned(), block_hash, 0)?;
+        let change = BalanceChange {
+            account_id,
+            caused_by_output_id: None,
+            caused_by_input_id: Some(input_id),
+            description: "Output spent (a newer copy is on chain)".to_string(),
+            balance_credit: 0.into(),
+            balance_debit: value.cast_unsigned().into(),
+            effective_date: Utc::now().naive_utc(),
+            effective_height: height.cast_unsigned(),
+            claimed_recipient_address: None,
+            claimed_sender_address: None,
+            memo_parsed: None,
+            memo_hex: None,
+            claimed_fee: None,
+            claimed_amount: None,
+            is_reversal: false,
+            reversal_of_balance_change_id: None,
+            is_reversed: false,
+        };
+        insert_balance_change_if_not_exists(conn, &change)?;
+        update_output_status(conn, *output_id, OutputStatus::Spent)?;
+    }
+
+    Ok(superseded.len() as u64)
 }
 
 /// Returned data for an unresolved SpentUnconfirmed output.

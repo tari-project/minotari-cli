@@ -79,6 +79,8 @@ pub fn insert_displayed_transaction(conn: &Connection, transaction: &DisplayedTr
     let transaction_json = serialize_tx(transaction)?;
     let now = current_db_timestamp();
     let payref = Some(payrefs_to_column_json(transaction)?);
+    // Known follow-up: `id` is unique across accounts, so two accounts sharing a view key (only accounts without a
+    // fingerprint, or Ledger accounts) derive the same id for a shared output and overwrite each other's entry here.
     #[allow(clippy::cast_possible_wrap)]
     conn.execute(
         r#"

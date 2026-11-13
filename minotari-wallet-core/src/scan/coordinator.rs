@@ -1187,13 +1187,26 @@ impl ScanCoordinator {
         // 2. Verify remaining outputs against the base node
         for target in &targets {
             let unresolved = {
-                let conn = self.pool.get().map_err(|e| ScanError::DbError(e.into()))?;
+                let mut conn = self.pool.get().map_err(|e| ScanError::DbError(e.into()))?;
                 let marked_spent = crate::db::resolve_spent_unconfirmed_with_inputs(&conn, target.account.id)
                     .map_err(ScanError::DbError)?;
                 info!(
                     account_id = target.account.id,
                     marked_spent = marked_spent;
                     "Resolved SpentUnconfirmed outputs with matching inputs"
+                );
+                // Before asking the node: it answers per hash, for the copy on chain now. In one transaction so an
+                // input is never left without its debit.
+                let tx = conn
+                    .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                    .map_err(|e| ScanError::DbError(WalletDbError::from(e)))?;
+                let superseded = crate::db::resolve_spent_unconfirmed_with_newer_copy(&tx, target.account.id)
+                    .map_err(ScanError::DbError)?;
+                tx.commit().map_err(|e| ScanError::DbError(WalletDbError::from(e)))?;
+                info!(
+                    account_id = target.account.id,
+                    marked_spent = superseded;
+                    "Resolved SpentUnconfirmed outputs re-created later on chain"
                 );
                 crate::db::get_unresolved_spent_unconfirmed_outputs(&conn, target.account.id)
                     .map_err(ScanError::DbError)?
@@ -1586,8 +1599,7 @@ impl ScanCoordinator {
     ) -> Result<(), ScanError> {
         use std::collections::HashMap;
 
-        // The node answers for the instance of a hash on chain now: the newest. `unresolved` is oldest first, so a
-        // newer instance replaces an older one; older ones stay `SpentUnconfirmed`.
+        // One per hash: an older copy with a newer active one was resolved without the node.
         let hash_to_output: HashMap<Vec<u8>, &crate::db::UnresolvedSpentOutput> =
             unresolved.iter().map(|o| (o.output_hash.clone(), o)).collect();
 
