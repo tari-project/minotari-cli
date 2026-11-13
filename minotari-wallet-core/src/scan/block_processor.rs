@@ -621,7 +621,8 @@ impl<E: EventSender> BlockProcessor<E> {
             // The block the earliest of its inputs was spent in.
             let mut spend: Option<(u64, Vec<u8>)> = None;
             for input in transaction.body().inputs() {
-                if let Some((height, block_hash)) = db::get_output_spend(tx, account_id, &input.output_hash())?
+                if let Some((height, block_hash)) =
+                    db::get_output_spend(tx, account_id, &send.pending_tx_id, &input.output_hash())?
                     && spend.as_ref().is_none_or(|(earliest, _)| height < *earliest)
                 {
                     spend = Some((height, block_hash));
@@ -3990,5 +3991,38 @@ mod tests {
         assert_eq!(ledger_counts(&conn, wallet.account_id), (0, 0));
         let (_, status, ..) = output_row(&conn, &change.output_hash());
         assert_eq!(status, "UNCONFIRMED");
+    }
+
+    #[test]
+    fn a_sends_input_is_the_copy_it_locked_even_after_the_hash_is_re_created() {
+        let wallet = test_wallet();
+        let conn = wallet.pool.get().expect("conn");
+        let a = test_wallet_output(10_000, 1);
+        let mut processor = processor(&wallet, false);
+        process(
+            &mut processor,
+            &conn,
+            wallet.account_id,
+            &[block(10, vec![a.clone()], Vec::new())],
+        );
+        let locked = instances(&conn, wallet.account_id, &a)[0].id;
+        db::lock_output(&conn, locked, "send-1", Utc::now()).expect("lock");
+        let spend = block(20, Vec::new(), vec![a.output_hash()]);
+        process(
+            &mut processor,
+            &conn,
+            wallet.account_id,
+            &[spend.clone(), block(30, vec![a.clone()], Vec::new())],
+        );
+
+        assert_eq!(
+            db::get_output_spend(&conn, wallet.account_id, "send-1", &a.output_hash()).expect("spend"),
+            Some((20, spend.block_hash.to_vec()))
+        );
+        // Without a send that locked it, the newest copy (unspent) counts.
+        assert_eq!(
+            db::get_output_spend(&conn, wallet.account_id, "other", &a.output_hash()).expect("spend"),
+            None
+        );
     }
 }

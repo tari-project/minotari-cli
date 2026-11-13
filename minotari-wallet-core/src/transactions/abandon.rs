@@ -156,7 +156,7 @@ pub fn abandon_send(
     // landed or lost to another transaction, and the scan decides which.
     if let Ok(transaction) = serde_json::from_slice::<Transaction>(&send.serialized_transaction) {
         for input in transaction.body().inputs() {
-            if db::get_output_spend(&db_tx, account_id, &input.output_hash())?.is_some() {
+            if db::get_output_spend(&db_tx, account_id, &send.pending_tx_id, &input.output_hash())?.is_some() {
                 return Err(AbandonSendError::InputSpent { tx_id });
             }
         }
