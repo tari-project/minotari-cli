@@ -504,15 +504,17 @@ where
         let next_header_to_scan = sync_response.next_header_to_scan.clone();
         let blocks_to_process = sync_response.blocks.into_iter();
 
-        // Add all blocks from this response
+        // Add all blocks from this response up to end_height
+        let end_height = self.current_in_progress.get_config().and_then(|c| c.end_height);
         for block in blocks_to_process {
-            if let Some(end_height) = self.current_in_progress.get_config().and_then(|c| c.end_height)
+            if let Some(end_height) = end_height
                 && block.height > end_height
             {
                 debug!("Reached end height {}, stopping fetch", end_height);
                 self.current_in_progress.clear();
                 more_blocks = false;
                 has_next_page = false;
+                continue;
             }
             all_blocks.push(block);
         }
@@ -831,7 +833,7 @@ where
                                 if let Some(index) = block_response
                                     .outputs
                                     .iter()
-                                    .position(|o| *o.encrypted_data() == output.encrypted_data)
+                                    .position(|o| output.matches_transaction_output(o))
                                 {
                                     let tx_output =
                                         block_response.outputs.get(index).expect("should exist").clone();
@@ -1009,6 +1011,17 @@ fn processing_pool(thread_count: usize) -> WalletResult<rayon::ThreadPool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::KeyManagerBuilder;
+    use tari_script::script;
+    use tari_transaction_components::{
+        MicroMinotari,
+        rpc::models::MinimalUtxoSyncInfo,
+        test_helpers::{TestParams, create_wallet_output_with_data},
+        transaction_components::{MemoField, OutputFeatures},
+    };
+    use tari_utilities::ByteArray;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
 
     #[test]
     fn one_processing_thread_gives_a_pool_of_one_thread() {
@@ -1022,5 +1035,123 @@ mod tests {
         let clean = sanitize_node_text(&forged);
         assert!(!clean.chars().any(char::is_control));
         assert_eq!(clean.chars().count(), MAX_NODE_TEXT_CHARS);
+    }
+
+    #[test]
+    fn incomplete_scanned_output_matches_full_output_by_commitment_and_sender_offset() {
+        let key_manager = KeyManagerBuilder::default().try_build().expect("key manager");
+        let first_output = create_wallet_output_with_data(
+            script!(Nop).expect("script"),
+            OutputFeatures::default(),
+            &TestParams::new(&key_manager),
+            MicroMinotari(1_000),
+            &key_manager,
+        )
+        .expect("wallet output")
+        .to_transaction_output()
+        .expect("tx output");
+        let mut second_output = create_wallet_output_with_data(
+            script!(Nop).expect("script"),
+            OutputFeatures::default(),
+            &TestParams::new(&key_manager),
+            MicroMinotari(2_000),
+            &key_manager,
+        )
+        .expect("wallet output")
+        .to_transaction_output()
+        .expect("tx output");
+        // Collide encrypted_data while keeping distinct commitment and sender_offset_public_key.
+        second_output.encrypted_data = first_output.encrypted_data.clone();
+
+        let scanning_info = ScanningOutputStruct::try_from(MinimalUtxoSyncInfo {
+            output_hash: second_output.hash().to_vec(),
+            commitment: second_output.commitment.as_bytes().to_vec(),
+            encrypted_data: second_output.encrypted_data.as_bytes().to_vec(),
+            sender_offset_public_key: second_output.sender_offset_public_key.as_bytes().to_vec(),
+        })
+        .expect("scanning info");
+        let incomplete = IncompleteScannedOutput::new(
+            &scanning_info,
+            MicroMinotari(2_000),
+            tari_transaction_components::key_manager::TariKeyId::Zero,
+            MemoField::new_empty(),
+            0,
+        )
+        .expect("incomplete output");
+
+        assert!(!incomplete.matches_transaction_output(&first_output));
+        assert!(incomplete.matches_transaction_output(&second_output));
+    }
+
+    #[tokio::test]
+    async fn fetch_block_range_excludes_blocks_above_configured_end_height() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("addr");
+        tokio::spawn(async move {
+            loop {
+                let Ok((mut stream, _)) = listener.accept().await else {
+                    break;
+                };
+                tokio::spawn(async move {
+                    let mut buf = vec![0u8; 4096];
+                    let n = stream.read(&mut buf).await.unwrap_or(0);
+                    let req = String::from_utf8_lossy(&buf[..n]);
+                    let body = if req.contains("GET /get_tip_info") {
+                        serde_json::json!({
+                            "metadata": {
+                                "best_block_height": 20,
+                                "best_block_hash": vec![9u8; 32],
+                                "accumulated_difficulty": "1",
+                                "pruned_height": 0,
+                                "timestamp": 1_700_000_000u64
+                            }
+                        })
+                        .to_string()
+                    } else if req.contains("GET /get_header_by_height") {
+                        serde_json::json!({
+                            "height": 10,
+                            "hash": vec![1u8; 32],
+                            "timestamp": 1_700_000_000u64
+                        })
+                        .to_string()
+                    } else {
+                        let response = SyncUtxosByBlockResponseV1::from(SyncUtxosByBlockResponseV0 {
+                            blocks: (10..=15)
+                                .map(|height| BlockUtxoInfo {
+                                    header_hash: vec![height as u8; 32],
+                                    height,
+                                    outputs: Vec::new(),
+                                    inputs: Vec::new(),
+                                    mined_timestamp: 1_700_000_000,
+                                })
+                                .collect(),
+                            has_next_page: false,
+                            next_header_to_scan: vec![16u8; 32],
+                        });
+                        serde_json::to_string(&response).expect("json")
+                    };
+                    let reply = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                        body.len(),
+                        body
+                    );
+                    let _ = stream.write_all(reply.as_bytes()).await;
+                });
+            }
+        });
+
+        let key_manager = KeyManagerBuilder::default().try_build().expect("key manager");
+        let mut scanner = HttpBlockchainScanner::new(format!("http://{addr}"), vec![key_manager], 1)
+            .await
+            .expect("scanner");
+        let config = scanner
+            .create_scan_config_with_wallet_keys(10, Some(12))
+            .expect("config");
+        scanner.update_scan_config(&config).expect("update config");
+
+        let (blocks, more_blocks) = scanner.fetch_block_range().await.expect("fetch_block_range");
+        let heights: Vec<u64> = blocks.iter().map(|b| b.height).collect();
+        assert_eq!(heights, vec![10, 11, 12]);
+        assert!(!more_blocks);
     }
 }
