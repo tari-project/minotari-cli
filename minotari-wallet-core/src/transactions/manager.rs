@@ -994,8 +994,10 @@ impl TransactionSender {
             })?;
 
         // Extract transaction info from the signed result for building DisplayedTransaction
-        let tx_info = &signed_transaction_result.request.info;
-        let actual_fee = tx_info.fee;
+        let actual_fee = signed_transaction_fee(
+            &signed_transaction_result.signed_transaction,
+            signed_transaction_result.request.info.fee,
+        );
         let kernel_excess = signed_transaction_result
             .signed_transaction
             .transaction
@@ -1179,6 +1181,7 @@ impl TransactionSender {
 
         // Record the bytes the output carries, which an address's embedded id may have replaced,
         // not what was typed. The scan keeps this row, so it is what the history shows for good.
+        let fee = signed_transaction_fee(signed_transaction, fee);
         let sent_memo = recipient.payment_id_bytes().filter(|bytes| !bytes.is_empty());
         let message = sent_memo.clone().and_then(|bytes| String::from_utf8(bytes).ok());
         let memo_hex = sent_memo.map(hex::encode);
@@ -1278,6 +1281,36 @@ impl TransactionSender {
             },
         }
     }
+}
+
+/// The fee the signer committed to `signed_transaction`.
+///
+/// `OneSidedTransactionInfo::fee` comes from `TransactionBuilder::fee()` when the
+/// unsigned payload is prepared, and that is `0` whenever the builder uses
+/// `with_fee_per_gram(...)` rather than a flat `with_fee(...)`. The actual fee is
+/// only settled during signing and written to the transaction kernel and output memos.
+fn signed_transaction_fee(signed_transaction: &SignedTransaction, fallback_fee: MicroMinotari) -> MicroMinotari {
+    signed_transaction
+        .transaction
+        .body()
+        .get_total_fee()
+        .ok()
+        .filter(|&fee| fee > MicroMinotari::zero())
+        .or_else(|| {
+            signed_transaction
+                .change_output
+                .as_ref()
+                .and_then(|change| change.payment_id().get_fee())
+                .filter(|&fee| fee > MicroMinotari::zero())
+        })
+        .or_else(|| {
+            signed_transaction
+                .outputs
+                .iter()
+                .find_map(|output| output.payment_id().get_fee())
+                .filter(|&fee| fee > MicroMinotari::zero())
+        })
+        .unwrap_or(fallback_fee)
 }
 
 /// Saves the initial history row without reviving a send that settled while
@@ -3364,5 +3397,211 @@ mod tests {
             .expect_err("the estimate refuses it too");
         assert_eq!(pending_transaction_count(&pool), 0);
         assert_eq!(locked_output_count(&pool), 0);
+    }
+
+    fn sign_prepared(
+        sender: &TransactionSender,
+        prepared: PrepareOneSidedTransactionForSigningResult,
+    ) -> SignedOneSidedTransactionResult {
+        use tari_transaction_components::offline_signing::{
+            ConfirmationMode, PayloadSummary, present_payload_summary, sign_locked_transaction,
+        };
+
+        let summary = PayloadSummary::from_one_sided(prepared);
+        let confirmation = present_payload_summary(
+            &summary,
+            ConfirmationMode::NonInteractive,
+            &mut std::io::sink(),
+            &mut std::io::empty(),
+        )
+        .expect("summary");
+        let key_manager = sender.account.get_key_manager(&sender.password).expect("key manager");
+        sign_locked_transaction(
+            &key_manager,
+            ConsensusConstantsBuilder::new(Network::LocalNet).build(),
+            Network::LocalNet,
+            summary.confirm(confirmation).expect("confirm"),
+        )
+        .map_err(map_change_required_error)
+        .expect("sign")
+    }
+
+    /// `prepare_transaction_builder` configures `with_fee_per_gram`, so the unsigned
+    /// `OneSidedTransactionInfo::fee` stays `0` inside `SignedOneSidedTransactionResult`.
+    /// The history row written at send time must record the fee the signer actually
+    /// settled on and committed to the transaction kernel and output memos, matching
+    /// what a rescan rebuilds from the chain.
+    #[tokio::test]
+    async fn the_pending_record_shows_the_fee_the_signer_charged() {
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "result": { "accepted": true, "rejection_reason": "None", "is_synced": true },
+                "error": null,
+                "id": "1",
+            })))
+            .mount(&server)
+            .await;
+
+        for kind in ["single", "multi", "send_all"] {
+            let (pool, _account, _temp) = crate::transactions::burn::tests::setup_funded_account(5_000_000);
+            let mut sender = sender_for(&pool);
+            let prepared = match kind {
+                "single" => sender
+                    .start_new_transaction(
+                        "fee-single".to_string(),
+                        Recipient {
+                            address: other_address(1),
+                            amount: MicroMinotari(1_000_000),
+                            payment_id: Some("invoice-169".to_string()),
+                        },
+                        300,
+                    )
+                    .expect("prepare single"),
+                "multi" => sender
+                    .start_new_transaction_multi("fee-multi".to_string(), recipients(2), 300)
+                    .expect("prepare multi"),
+                "send_all" => sender
+                    .start_new_send_all_transaction(
+                        "fee-send-all".to_string(),
+                        other_address(1),
+                        Some("sweep-169".to_string()),
+                        300,
+                    )
+                    .expect("prepare send-all"),
+                _ => unreachable!(),
+            };
+
+            assert_eq!(prepared.info.fee, MicroMinotari::zero(), "{kind}");
+            let (expected_fee, expected_change) = signer_fee_and_change(&prepared);
+            assert!(expected_fee > MicroMinotari::zero(), "{kind}");
+            assert!(expected_change.is_some(), "{kind}");
+            let recipient_total: MicroMinotari = prepared
+                .info
+                .recipients
+                .iter()
+                .fold(MicroMinotari::zero(), |acc, r| acc + r.amount);
+
+            let signed = sign_prepared(&sender, prepared);
+            assert_eq!(signed.request.info.fee, MicroMinotari::zero(), "{kind}");
+            assert_eq!(
+                signed
+                    .signed_transaction
+                    .transaction
+                    .body()
+                    .get_total_fee()
+                    .expect("kernel fee"),
+                expected_fee,
+                "{kind}"
+            );
+            assert_eq!(
+                signed
+                    .signed_transaction
+                    .change_output
+                    .as_ref()
+                    .and_then(|c| c.payment_id().get_fee()),
+                Some(expected_fee),
+                "{kind}"
+            );
+
+            let sent = sender
+                .finalize_transaction_and_broadcast(signed, server.uri())
+                .await
+                .expect("finalize");
+            assert_eq!(
+                sent.displayed_transaction.fee.as_ref().map(|f| f.amount),
+                Some(expected_fee),
+                "{kind}: send-time DisplayedTransaction fee"
+            );
+            assert_eq!(
+                sent.displayed_transaction.amount,
+                recipient_total + expected_fee,
+                "{kind}: send-time DisplayedTransaction total debit"
+            );
+
+            let conn = pool.get().expect("conn");
+            let stored = db::get_displayed_transaction_by_id(&conn, &sent.displayed_transaction.id.to_string())
+                .expect("query displayed_transactions")
+                .expect("stored row exists");
+            assert_eq!(
+                stored.fee.as_ref().map(|f| f.amount),
+                Some(expected_fee),
+                "{kind}: persisted DisplayedTransaction fee"
+            );
+            assert_eq!(
+                stored.amount,
+                recipient_total + expected_fee,
+                "{kind}: persisted DisplayedTransaction total debit"
+            );
+        }
+    }
+
+    #[test]
+    fn signed_transaction_fee_falls_back_through_kernel_memo_and_request_info() {
+        let mut empty = SignedTransaction {
+            transaction: tari_transaction_components::transaction_components::Transaction::new(
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                tari_common_types::types::PrivateKey::default(),
+                tari_common_types::types::PrivateKey::default(),
+            ),
+            sent_hashes: Vec::new(),
+            outputs: Vec::new(),
+            change_hashes: Vec::new(),
+            change_output: None,
+            tx_id: TxId::new_random(),
+        };
+        assert_eq!(
+            signed_transaction_fee(&empty, MicroMinotari(42)),
+            MicroMinotari(42),
+            "empty transaction falls back to fallback_fee"
+        );
+
+        let output_with_memo_fee = |value: u64, hash_seed: u8, fee: u64| {
+            let mut hash = FixedHash::default();
+            hash[0] = hash_seed;
+            let mut memo = Recipient {
+                address: other_address(1),
+                amount: MicroMinotari(value),
+                payment_id: Some("memo".to_string()),
+            }
+            .output_memo(&other_address(2))
+            .expect("memo");
+            memo.set_fee(MicroMinotari(fee));
+            WalletOutput::new_from_parts(
+                TransactionOutputVersion::default(),
+                MicroMinotari::from(value),
+                TariKeyId::default(),
+                OutputFeatures::default(),
+                TariScript::default(),
+                ExecutionStack::default(),
+                TariKeyId::default(),
+                CompressedPublicKey::default(),
+                ComAndPubSignature::default(),
+                0,
+                Covenant::default(),
+                EncryptedData::default(),
+                MicroMinotari::from(0),
+                None,
+                memo,
+                hash,
+                Default::default(),
+            )
+        };
+
+        empty.outputs = vec![output_with_memo_fee(1_000, 1, 310)];
+        assert_eq!(
+            signed_transaction_fee(&empty, MicroMinotari(0)),
+            MicroMinotari(310),
+            "recipient output memo fee is used when kernel and change are absent"
+        );
+
+        empty.change_output = Some(output_with_memo_fee(2_000, 2, 740));
+        assert_eq!(
+            signed_transaction_fee(&empty, MicroMinotari(0)),
+            MicroMinotari(740),
+            "change output memo fee takes precedence over recipient output memo"
+        );
     }
 }
