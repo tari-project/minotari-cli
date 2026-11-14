@@ -238,6 +238,11 @@ pub async fn api_burn_funds(
     // Reject an out-of-range duration as a client error before doing any work.
     validate_seconds_to_lock(seconds_to_lock)?;
     validate_fee_per_gram(fee_per_gram)?;
+    if body.amount.as_u64() == 0 {
+        return Err(ApiError::BadRequest(
+            "Burn amount must be greater than zero".to_string(),
+        ));
+    }
     let confirmation_window = app_state.required_confirmations;
     let idempotency_key = body.idempotency_key.clone();
     let amount = body.amount;
