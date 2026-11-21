@@ -471,7 +471,7 @@ where
             }
             let adjusted_config = ScanConfig {
                 start_height: config.start_height,
-                end_height: None,
+                end_height: Some(end_height.min(tip_info.best_block_height)),
                 batch_size: config.batch_size,
                 request_timeout: config.request_timeout,
                 exclude_spent: config.exclude_spent,
@@ -620,6 +620,17 @@ where
                         }
                     });
                 });
+                if let Some(e) = errors
+                    .into_inner()
+                    .expect("wallet_outputs lock poisoned")
+                    .into_iter()
+                    .next()
+                {
+                    let _unused = send_scan_result.send(Err(e)).await.inspect_err(|err| {
+                        error!("Failed to send scan error with error: {}", err);
+                    });
+                    return;
+                }
 
                 let inputs = if config.exclude_inputs {
                     Vec::new()

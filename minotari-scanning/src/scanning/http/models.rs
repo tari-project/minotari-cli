@@ -67,6 +67,7 @@ pub struct IncompleteScannedOutput {
     pub output_hash: FixedHash,
     pub value: MicroMinotari,
     pub commitment_mask_key_id: TariKeyId,
+    pub commitment: CompressedCommitment,
     pub sender_offset_public_key: CompressedPublicKey,
     pub encrypted_data: EncryptedData,
     pub memo: MemoField,
@@ -87,11 +88,19 @@ impl IncompleteScannedOutput {
             output_hash,
             value,
             commitment_mask_key_id,
+            commitment: scanning_info.commitment.clone(),
             sender_offset_public_key: scanning_info.sender_offset_public_key.clone(),
             encrypted_data: scanning_info.encrypted_data.clone(),
             memo,
             key_manager_index: index,
         })
+    }
+
+    #[must_use]
+    pub fn matches_transaction_output(&self, output: &TransactionOutput) -> bool {
+        output.commitment() == &self.commitment
+            && output.sender_offset_public_key == self.sender_offset_public_key
+            && output.encrypted_data() == &self.encrypted_data
     }
 
     pub fn to_wallet_output<KM: TransactionKeyManagerInterface>(
