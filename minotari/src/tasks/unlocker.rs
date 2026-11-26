@@ -62,9 +62,15 @@ impl TransactionUnlocker {
             loop {
                 tokio::select! {
                     _ = interval.tick() => {
-                        let conn = self.db_pool.get()?;
-                        if let Err(e) = Self::unlock_expired_transactions(&conn) {
-                            error!(error:% = e; "Error unlocking expired transactions");
+                        let pool = self.db_pool.clone();
+                        let res = tokio::task::spawn_blocking(move || {
+                            let conn = pool.get()?;
+                            Self::unlock_expired_transactions(&conn)
+                        }).await;
+                        match res {
+                            Ok(Ok(())) => {},
+                            Ok(Err(e)) => error!(error:% = e; "Error unlocking expired transactions"),
+                            Err(e) => error!(error:% = e; "Transaction unlocker blocking task failed"),
                         }
                     }
                     _ = shutdown_rx.recv() => {

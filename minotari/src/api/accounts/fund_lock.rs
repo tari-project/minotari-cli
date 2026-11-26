@@ -321,6 +321,16 @@ pub async fn api_lock_funds(
     // client error before doing any work.
     validate_seconds_to_lock(seconds_to_lock_utxos)?;
     validate_fee_per_gram(fee_per_gram)?;
+    if body.amount.as_u64() == 0 {
+        return Err(ApiError::BadRequest(
+            "Lock amount must be greater than zero".to_string(),
+        ));
+    }
+    if num_outputs == 0 {
+        return Err(ApiError::BadRequest(
+            "num_outputs must be greater than zero".to_string(),
+        ));
+    }
 
     let response = tokio::task::spawn_blocking(move || {
         // One connection for the whole request: the account lookup and the lock share it,

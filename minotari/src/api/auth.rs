@@ -187,7 +187,13 @@ fn resolve_from_sources(
     env_token: Option<&str>,
     config_token: Option<&str>,
 ) -> Result<(ApiToken, Option<Zeroizing<String>>), ApiTokenError> {
-    match cli_token.or(env_token).or(config_token) {
+    fn non_empty(opt: Option<&str>) -> Option<&str> {
+        opt.filter(|s| !s.trim().is_empty())
+    }
+    match non_empty(cli_token)
+        .or_else(|| non_empty(env_token))
+        .or_else(|| non_empty(config_token))
+    {
         Some(token) => Ok((ApiToken::new(token)?, None)),
         None => {
             let (token, plaintext) = ApiToken::generate();
@@ -336,6 +342,9 @@ mod tests {
         assert!(token.matches(env_token));
 
         let (token, _) = resolve_from_sources(None, None, Some(config_token)).unwrap();
+        assert!(token.matches(config_token));
+
+        let (token, _) = resolve_from_sources(None, Some("   "), Some(config_token)).unwrap();
         assert!(token.matches(config_token));
     }
 
