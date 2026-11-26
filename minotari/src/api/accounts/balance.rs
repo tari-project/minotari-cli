@@ -285,6 +285,13 @@ pub async fn api_create_address_with_payment_id(
     // Decode the hex payment ID
     let payment_id_bytes = hex::decode(&body.payment_id_hex)
         .map_err(|e| ApiError::BadRequest(format!("Invalid hex in payment_id_hex: {}", e)))?;
+    if payment_id_bytes.len() > tari_common_types::tari_address::MAX_PAYMENT_ID_SIZE {
+        return Err(ApiError::BadRequest(format!(
+            "payment_id_hex exceeds maximum length of {} bytes, got {}",
+            tari_common_types::tari_address::MAX_PAYMENT_ID_SIZE,
+            payment_id_bytes.len()
+        )));
+    }
 
     info!(target: "audit", "API: Create address with payment ID request");
     trace!(
